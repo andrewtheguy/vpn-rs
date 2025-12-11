@@ -6,15 +6,15 @@ UDP port forwarding through iroh P2P connections.
 
 ```
 +-----------------+        +-----------------+        +-----------------+        +-----------------+
-| WireGuard       |  UDP   | udp-receiver    |  iroh  | udp-sender      |  UDP   | WireGuard       |
-| Client          |<------>| (local:51820)   |<======>| (local:51821)   |<------>| Server          |
+| WireGuard       |  UDP   | receiver        |  iroh  | sender          |  UDP   | WireGuard       |
+| Client          |<------>| (local:51820)   |<======>|                 |<------>| Server          |
 |                 |        |                 |  QUIC  |                 |        | (local:51820)   |
 +-----------------+        +-----------------+        +-----------------+        +-----------------+
      Client Side                                            Server Side
 ```
 
-- **udp-sender**: Runs on the machine with the UDP service (e.g., WireGuard server)
-- **udp-receiver**: Runs on the machine that wants to access the UDP service
+- **sender**: Runs on the machine with the UDP service (e.g., WireGuard server). Accepts iroh connections and forwards traffic to the target service.
+- **receiver**: Runs on the machine that wants to access the UDP service. Exposes a local UDP port and forwards traffic through the iroh tunnel.
 
 The connection is established via iroh's P2P network, which handles NAT traversal using relay servers and direct connections where possible.
 
@@ -36,13 +36,13 @@ cargo run -- receiver
 ### On the server (with WireGuard running on port 51820):
 
 ```bash
-udp-tunnel sender --listen-port 51821 --target 127.0.0.1:51820
+udp-tunnel sender --target 127.0.0.1:51820
 ```
 
 Or with cargo:
 
 ```bash
-cargo run -- sender --listen-port 51821 --target 127.0.0.1:51820
+cargo run -- sender --target 127.0.0.1:51820
 ```
 
 This will print an EndpointId like:
@@ -71,8 +71,7 @@ Then configure your WireGuard client to connect to `127.0.0.1:51820`.
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--listen-port`, `-l` | 51821 | Local UDP port to listen on for incoming packets to forward |
-| `--target`, `-t` | 127.0.0.1:51820 | Target UDP address to forward traffic to |
+| `--target`, `-t` | 127.0.0.1:51820 | Target UDP address to forward traffic to (e.g., WireGuard server) |
 
 ### receiver
 
@@ -93,7 +92,7 @@ nc -u -l 51820
 
 ### Terminal 2 (Server side - start the forwarder):
 ```bash
-cargo run -- sender --listen-port 51821 --target 127.0.0.1:51820
+cargo run -- sender --target 127.0.0.1:51820
 # Note the EndpointId printed
 ```
 

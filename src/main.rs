@@ -3,7 +3,7 @@
 //! Forwards UDP traffic through iroh P2P connections.
 //!
 //! Usage:
-//!   Sender mode:  cargo run -- sender --listen-port 51821 --target 127.0.0.1:51820
+//!   Sender mode:   cargo run -- sender --target 127.0.0.1:51820
 //!   Receiver mode: cargo run -- receiver --node-id <NODE_ID> --listen-port 51820
 
 use anyhow::{Context, Result};
@@ -29,12 +29,8 @@ struct Args {
 
 #[derive(Subcommand)]
 enum Mode {
-    /// Run as sender (accepts connections and forwards local UDP port)
+    /// Run as sender (accepts connections and forwards to target)
     Sender {
-        /// Local UDP port to listen on (receives traffic to forward)
-        #[arg(short, long, default_value = "51821")]
-        listen_port: u16,
-
         /// Target UDP address to forward traffic to (e.g., WireGuard server)
         #[arg(short, long, default_value = "127.0.0.1:51820")]
         target: String,
@@ -56,10 +52,7 @@ async fn main() -> Result<()> {
     let args = Args::parse();
 
     match args.mode {
-        Mode::Sender {
-            listen_port,
-            target,
-        } => run_sender(listen_port, target).await,
+        Mode::Sender { target } => run_sender(target).await,
         Mode::Receiver {
             node_id,
             listen_port,
@@ -67,7 +60,7 @@ async fn main() -> Result<()> {
     }
 }
 
-async fn run_sender(listen_port: u16, target: String) -> Result<()> {
+async fn run_sender(target: String) -> Result<()> {
     let target_addr: SocketAddr = target
         .parse()
         .context("Invalid target address format")?;
@@ -115,36 +108,17 @@ async fn run_sender(listen_port: u16, target: String) -> Result<()> {
         .await
         .context("Failed to accept stream from receiver")?;
 
-    // Bind local UDP socket
+    println!("Forwarding UDP traffic to {}", target_addr);
+
+    // Create a UDP socket for sending to target
     let udp_socket = Arc::new(
-        UdpSocket::bind(format!("0.0.0.0:{}", listen_port))
+        UdpSocket::bind("0.0.0.0:0")
             .await
             .context("Failed to bind UDP socket")?,
     );
-    println!(
-        "Listening for UDP on port {}, forwarding to {}",
-        listen_port, target_addr
-    );
 
-    // Track the last peer address for responses from the target
-    let peer_addr: Arc<Mutex<Option<SocketAddr>>> = Arc::new(Mutex::new(None));
-
-    // Run bidirectional forwarding
-    let udp_clone = udp_socket.clone();
-    let peer_clone = peer_addr.clone();
-
-    tokio::select! {
-        result = forward_udp_to_stream(udp_clone, send_stream, peer_clone) => {
-            if let Err(e) = result {
-                eprintln!("UDP to stream error: {}", e);
-            }
-        }
-        result = forward_stream_to_udp(recv_stream, udp_socket, target_addr, peer_addr) => {
-            if let Err(e) = result {
-                eprintln!("Stream to UDP error: {}", e);
-            }
-        }
-    }
+    // Forward stream to UDP target
+    forward_stream_to_udp_sender(recv_stream, send_stream, udp_socket, target_addr).await?;
 
     // Cleanup
     conn.close(0u32.into(), b"done");
@@ -258,18 +232,41 @@ async fn forward_udp_to_stream(
     }
 }
 
-/// Read from iroh stream and forward to local UDP target (sender mode)
-async fn forward_stream_to_udp(
+/// Read from iroh stream, forward to UDP target, and send responses back (sender mode)
+async fn forward_stream_to_udp_sender(
     mut recv_stream: iroh::endpoint::RecvStream,
+    mut send_stream: iroh::endpoint::SendStream,
     udp_socket: Arc<UdpSocket>,
     target_addr: SocketAddr,
-    _peer_addr: Arc<Mutex<Option<SocketAddr>>>,
 ) -> Result<()> {
+    let udp_clone = udp_socket.clone();
+
+    // Spawn task to read responses from target and send back through tunnel
+    let response_task = tokio::spawn(async move {
+        let mut buf = vec![0u8; 65535];
+        loop {
+            match udp_clone.recv_from(&mut buf).await {
+                Ok((len, _addr)) => {
+                    // Frame: [length: u16 BE][payload]
+                    let frame_len = (len as u16).to_be_bytes();
+                    if send_stream.write_all(&frame_len).await.is_err() {
+                        break;
+                    }
+                    if send_stream.write_all(&buf[..len]).await.is_err() {
+                        break;
+                    }
+                    println!("-> Sent {} bytes back to receiver", len);
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    // Read from tunnel and forward to target
     loop {
         // Read frame length (2 bytes, big-endian)
         let mut len_buf = [0u8; 2];
         if recv_stream.read_exact(&mut len_buf).await.is_err() {
-            // Stream closed
             break;
         }
         let len = u16::from_be_bytes(len_buf) as usize;
@@ -290,6 +287,7 @@ async fn forward_stream_to_udp(
         println!("<- Forwarded {} bytes to {}", len, target_addr);
     }
 
+    response_task.abort();
     Ok(())
 }
 
