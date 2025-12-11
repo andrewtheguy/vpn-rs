@@ -53,6 +53,16 @@ enum Mode {
         #[arg(short, long, default_value = "51820")]
         listen_port: u16,
     },
+    /// Generate a new secret key file (for automation/setup)
+    GenerateSecret {
+        /// Path where to save the secret key file
+        #[arg(short, long)]
+        output: PathBuf,
+
+        /// Overwrite existing file if it exists
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 #[tokio::main]
@@ -68,6 +78,7 @@ async fn main() -> Result<()> {
             node_id,
             listen_port,
         } => run_receiver(node_id, listen_port).await,
+        Mode::GenerateSecret { output, force } => generate_secret_command(output, force),
     }
 }
 
@@ -400,6 +411,49 @@ async fn forward_stream_to_udp_receiver(
         } else {
             println!("<- Received {} bytes but no client connected yet", len);
         }
+    }
+
+    Ok(())
+}
+
+/// Generate a new secret key file and output the EndpointId to stdout
+fn generate_secret_command(output: PathBuf, force: bool) -> Result<()> {
+    // Generate secret key
+    let secret = SecretKey::generate(&mut rand::rng());
+
+    // Check if output is stdout (-)
+    if output.to_str() == Some("-") {
+        // Only output the EndpointId to stdout, don't save to file
+        let endpoint_id = secret_to_endpoint_id(&secret);
+        println!("{}", endpoint_id);
+    } else {
+        // Check if file exists
+        if output.exists() && !force {
+            anyhow::bail!(
+                "File already exists: {}. Use --force to overwrite.",
+                output.display()
+            );
+        }
+
+        // Save to file with proper permissions
+        if let Some(parent) = output.parent() {
+            std::fs::create_dir_all(parent)
+                .context("Failed to create parent directory")?;
+        }
+        std::fs::write(&output, secret.to_bytes())
+            .context("Failed to write secret key file")?;
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&output)?.permissions();
+            perms.set_mode(0o600);
+            std::fs::set_permissions(&output, perms)?;
+        }
+
+        // Output EndpointId to stdout for automation (like wg pubkey)
+        let endpoint_id = secret_to_endpoint_id(&secret);
+        println!("{}", endpoint_id);
     }
 
     Ok(())

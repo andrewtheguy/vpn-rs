@@ -107,6 +107,34 @@ Fixed EndpointId: b5435df733f521751f7b916e801695ec02d1ec3c0b1333ccfd4821f4669647
 
 Now you can configure your receiver once with this fixed EndpointId, and it will work across sender restarts.
 
+### Pre-generating Secret Keys for Automation
+
+For automation workflows (e.g., deployment scripts, CI/CD), you can pre-generate secret keys:
+
+```bash
+# Generate a secret key and output the EndpointId to stdout
+udp-tunnel generate-secret --output ./sender.key
+# Output: b5435df733f521751f7b916e801695ec02d1ec3c0b1333ccfd4821f46696470d
+
+# Output EndpointId only to stdout without saving to file
+udp-tunnel generate-secret --output -
+# Output: e48e9a70da7bf8a081322bb2ae6afc13afc6851fdbf723f4763d2dbbc637b99b
+
+# Pipe to other commands (similar to WireGuard workflow)
+ENDPOINT_ID=$(udp-tunnel generate-secret --output ./sender.key)
+echo "Sender EndpointId: $ENDPOINT_ID"
+
+# Use --force to overwrite existing files
+udp-tunnel generate-secret --output ./sender.key --force
+```
+
+This is useful for:
+- Generating keys during deployment
+- Scripted VPN setup
+- Capturing the EndpointId for configuration management
+- Pre-provisioning infrastructure
+- Ephemeral key generation for testing (using `-` for stdout only)
+
 ### Security Considerations
 
 - The secret key file is automatically created with `0600` permissions (owner read/write only) on Unix systems
