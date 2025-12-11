@@ -1,0 +1,18 @@
+# Build stage - buildx handles platform selection automatically
+FROM rust:1.91 AS builder
+
+WORKDIR /build
+
+# Copy manifests
+COPY Cargo.toml Cargo.lock ./
+
+# Copy source code
+COPY src ./src
+
+# Build for the target platform (native build via buildx)
+RUN cargo build --release
+
+# Export stage - only contains the binary
+FROM scratch AS export
+
+COPY --from=builder /build/target/release/udp-tunnel /udp-tunnel
