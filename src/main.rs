@@ -84,11 +84,12 @@ async fn run_sender(target: String) -> Result<()> {
 
     // Print connection info
     let endpoint_id = endpoint.id();
+    let target_port = target_addr.port();
     println!("\nEndpointId: {}", endpoint_id);
     println!("\nOn the receiver side, run:");
     println!(
-        "  cargo run -- receiver --node-id {} --listen-port 51820\n",
-        endpoint_id
+        "  udp-tunnel receiver --node-id {} --listen-port {}\n",
+        endpoint_id, target_port
     );
     println!("Waiting for receiver to connect...");
 
