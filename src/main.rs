@@ -109,8 +109,11 @@ async fn run_sender(listen_port: u16, target: String) -> Result<()> {
 
     println!("Receiver connected from: {}", conn.remote_id());
 
-    // Open bidirectional stream
-    let (send_stream, recv_stream) = conn.open_bi().await.context("Failed to open stream")?;
+    // Accept bidirectional stream (receiver will open it)
+    let (send_stream, recv_stream) = conn
+        .accept_bi()
+        .await
+        .context("Failed to accept stream from receiver")?;
 
     // Bind local UDP socket
     let udp_socket = Arc::new(
@@ -180,11 +183,8 @@ async fn run_receiver(node_id: String, listen_port: u16) -> Result<()> {
 
     println!("Connected to sender!");
 
-    // Accept bidirectional stream (sender opens it)
-    let (send_stream, recv_stream) = conn
-        .accept_bi()
-        .await
-        .context("Failed to accept stream from sender")?;
+    // Open bidirectional stream
+    let (send_stream, recv_stream) = conn.open_bi().await.context("Failed to open stream")?;
 
     // Bind local UDP socket for clients to connect to
     let bind_addr = format!("127.0.0.1:{}", listen_port);
