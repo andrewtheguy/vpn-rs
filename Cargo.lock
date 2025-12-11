@@ -3303,6 +3303,7 @@ dependencies = [
  "anyhow",
  "clap",
  "iroh",
+ "rand 0.9.2",
  "tokio",
 ]
 

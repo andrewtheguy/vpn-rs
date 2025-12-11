@@ -72,6 +72,7 @@ Then configure your WireGuard client to connect to `127.0.0.1:51820`.
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--target`, `-t` | 127.0.0.1:51820 | Target UDP address to forward traffic to (e.g., WireGuard server) |
+| `--secret-file` | (optional) | Path to secret key file for persistent identity. If file doesn't exist, generates and saves new key. If exists, loads existing key. |
 
 ### receiver
 
@@ -79,6 +80,39 @@ Then configure your WireGuard client to connect to `127.0.0.1:51820`.
 |--------|---------|-------------|
 | `--node-id`, `-n` | (required) | EndpointId of the sender to connect to |
 | `--listen-port`, `-l` | 51820 | Local UDP port to expose for clients |
+
+## Persistent Identity for VPN Use
+
+By default, the sender generates a new random EndpointId each time it starts. For production VPN setups, you'll want a persistent identity so the receiver can reconnect without needing to update the node ID.
+
+### Using Persistent Identity
+
+Start the sender with the `--secret-file` flag:
+
+```bash
+udp-tunnel sender --target 127.0.0.1:51820 --secret-file ./sender.key
+```
+
+**First run**: Generates a new secret key and saves it to `sender.key`
+```
+Generated new persistent identity, saved to: ./sender.key
+Fixed EndpointId: b5435df733f521751f7b916e801695ec02d1ec3c0b1333ccfd4821f46696470d
+```
+
+**Subsequent runs**: Loads the existing key
+```
+Loaded persistent identity from: ./sender.key
+Fixed EndpointId: b5435df733f521751f7b916e801695ec02d1ec3c0b1333ccfd4821f46696470d
+```
+
+Now you can configure your receiver once with this fixed EndpointId, and it will work across sender restarts.
+
+### Security Considerations
+
+- The secret key file is automatically created with `0600` permissions (owner read/write only) on Unix systems
+- **Back up your secret key file** - losing it means changing the EndpointId on all receivers
+- The key file contains the sender's private key - treat it like an SSH private key
+- For VPN use cases, the iroh encryption provides transport security; the secret key just maintains identity
 
 ## Testing with netcat
 

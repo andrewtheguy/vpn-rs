@@ -3,16 +3,18 @@
 //! Forwards UDP traffic through iroh P2P connections.
 //!
 //! Usage:
-//!   Sender mode:   cargo run -- sender --target 127.0.0.1:51820
-//!   Receiver mode: cargo run -- receiver --node-id <NODE_ID> --listen-port 51820
+//!   Sender mode (ephemeral):  cargo run -- sender --target 127.0.0.1:51820
+//!   Sender mode (persistent): cargo run -- sender --target 127.0.0.1:51820 --secret-file ./sender.key
+//!   Receiver mode:            cargo run -- receiver --node-id <NODE_ID> --listen-port 51820
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use iroh::{
     discovery::{dns::DnsDiscovery, mdns::MdnsDiscovery, pkarr::PkarrPublisher},
-    Endpoint, EndpointAddr, EndpointId,
+    Endpoint, EndpointAddr, EndpointId, SecretKey,
 };
 use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
@@ -34,6 +36,12 @@ enum Mode {
         /// Target UDP address to forward traffic to (e.g., WireGuard server)
         #[arg(short, long, default_value = "127.0.0.1:51820")]
         target: String,
+
+        /// Path to secret key file for persistent identity (optional)
+        /// If provided and file doesn't exist, a new key will be generated and saved
+        /// If provided and file exists, the existing key will be loaded
+        #[arg(long)]
+        secret_file: Option<PathBuf>,
     },
     /// Run as receiver (connects to sender and exposes local UDP port)
     Receiver {
@@ -52,7 +60,10 @@ async fn main() -> Result<()> {
     let args = Args::parse();
 
     match args.mode {
-        Mode::Sender { target } => run_sender(target).await,
+        Mode::Sender {
+            target,
+            secret_file,
+        } => run_sender(target, secret_file).await,
         Mode::Receiver {
             node_id,
             listen_port,
@@ -60,7 +71,41 @@ async fn main() -> Result<()> {
     }
 }
 
-async fn run_sender(target: String) -> Result<()> {
+/// Load secret key from file, or generate new one if file doesn't exist
+fn load_or_generate_secret(path: &Path) -> Result<SecretKey> {
+    if path.exists() {
+        // Load existing key
+        let bytes = std::fs::read(path).context("Failed to read secret key file")?;
+        SecretKey::try_from(&bytes[..]).context("Invalid secret key file")
+    } else {
+        // Generate new key
+        let secret = SecretKey::generate(&mut rand::rng());
+
+        // Save to file
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).context("Failed to create parent directory")?;
+        }
+        std::fs::write(path, secret.to_bytes()).context("Failed to write secret key file")?;
+
+        // Set file permissions to 0600 (Unix only)
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(path)?.permissions();
+            perms.set_mode(0o600);
+            std::fs::set_permissions(path, perms)?;
+        }
+
+        Ok(secret)
+    }
+}
+
+/// Get public key (EndpointId) from secret key
+fn secret_to_endpoint_id(secret: &SecretKey) -> EndpointId {
+    secret.public()
+}
+
+async fn run_sender(target: String, secret_file: Option<PathBuf>) -> Result<()> {
     let target_addr: SocketAddr = target
         .parse()
         .context("Invalid target address format")?;
@@ -74,12 +119,33 @@ async fn run_sender(target: String) -> Result<()> {
     // Disable idle timeout - UDP traffic can be sporadic
     transport_config.max_idle_timeout(None);
 
-    let endpoint = Endpoint::builder()
+    let mut endpoint_builder = Endpoint::builder()
         .alpns(vec![ALPN.to_vec()])
         .discovery(PkarrPublisher::n0_dns())
         .discovery(DnsDiscovery::n0_dns())
         .discovery(MdnsDiscovery::builder())
-        .transport_config(transport_config)
+        .transport_config(transport_config);
+
+    // If secret file is provided, use persistent identity
+    if let Some(secret_path) = &secret_file {
+        let key_existed = secret_path.exists();
+        let secret = load_or_generate_secret(secret_path)?;
+        let endpoint_id = secret_to_endpoint_id(&secret);
+
+        if key_existed {
+            println!("Loaded persistent identity from: {}", secret_path.display());
+        } else {
+            println!(
+                "Generated new persistent identity, saved to: {}",
+                secret_path.display()
+            );
+        }
+        println!("Fixed EndpointId: {}", endpoint_id);
+
+        endpoint_builder = endpoint_builder.secret_key(secret);
+    }
+
+    let endpoint = endpoint_builder
         .bind()
         .await
         .context("Failed to create iroh endpoint")?;
