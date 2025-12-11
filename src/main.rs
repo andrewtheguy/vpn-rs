@@ -70,11 +70,16 @@ async fn run_sender(target: String) -> Result<()> {
 
     // Create iroh endpoint with discovery
     println!("Creating iroh endpoint...");
+    let mut transport_config = iroh::endpoint::TransportConfig::default();
+    // Disable idle timeout - UDP traffic can be sporadic
+    transport_config.max_idle_timeout(None);
+
     let endpoint = Endpoint::builder()
         .alpns(vec![ALPN.to_vec()])
         .discovery(PkarrPublisher::n0_dns())
         .discovery(DnsDiscovery::n0_dns())
         .discovery(MdnsDiscovery::builder())
+        .transport_config(transport_config)
         .bind()
         .await
         .context("Failed to create iroh endpoint")?;
@@ -140,10 +145,15 @@ async fn run_receiver(node_id: String, listen_port: u16) -> Result<()> {
 
     // Create iroh endpoint with discovery
     println!("Creating iroh endpoint...");
+    let mut transport_config = iroh::endpoint::TransportConfig::default();
+    // Disable idle timeout - UDP traffic can be sporadic
+    transport_config.max_idle_timeout(None);
+
     let endpoint = Endpoint::builder()
         .discovery(PkarrPublisher::n0_dns())
         .discovery(DnsDiscovery::n0_dns())
         .discovery(MdnsDiscovery::builder())
+        .transport_config(transport_config)
         .bind()
         .await
         .context("Failed to create iroh endpoint")?;
