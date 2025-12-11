@@ -28,7 +28,8 @@ if ! command -v wg &> /dev/null; then
     exit 1
 fi
 
-# Create directory for configs
+# Create directory for configs (remove old files first)
+rm -rf wg-test
 mkdir -p wg-test
 cd wg-test
 
@@ -62,7 +63,6 @@ Address = $WG_CLIENT_IP/24
 PublicKey = $SERVER_PUBLIC_KEY
 Endpoint = 127.0.0.1:$WG_SERVER_PORT
 AllowedIPs = $ALLOWED_IPS
-PersistentKeepalive = 25
 EOF
 
 # Client configuration (for tunneled connection)
@@ -75,7 +75,6 @@ Address = $WG_CLIENT_IP/24
 PublicKey = $SERVER_PUBLIC_KEY
 Endpoint = 127.0.0.1:$WG_TUNNEL_PORT
 AllowedIPs = $ALLOWED_IPS
-PersistentKeepalive = 25
 EOF
 
 echo ""
@@ -102,11 +101,11 @@ echo ""
 echo "3. Test with UDP tunnel:"
 echo ""
 echo "   Terminal 2 - Start sender (on server side):"
-echo "   cargo run -- sender --target 127.0.0.1:$WG_SERVER_PORT"
+echo "   udp-tunnel sender --target 127.0.0.1:$WG_SERVER_PORT"
 echo "   # Note the EndpointId"
 echo ""
 echo "   Terminal 3 - Start receiver (on client side):"
-echo "   cargo run -- receiver --node-id <ENDPOINT_ID> --listen-port $WG_TUNNEL_PORT"
+echo "   udp-tunnel receiver --node-id <ENDPOINT_ID> --listen-port $WG_TUNNEL_PORT"
 echo ""
 echo "   Terminal 4 - Start client with tunnel:"
 echo "   sudo wg-quick up ./wg-test/client-tunnel.conf"
