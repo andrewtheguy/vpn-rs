@@ -27,8 +27,8 @@ cargo install --path .
 Or run directly:
 
 ```bash
-cargo run --bin udp-sender
-cargo run --bin udp-receiver
+cargo run -- sender
+cargo run -- receiver
 ```
 
 ## Usage
@@ -36,13 +36,13 @@ cargo run --bin udp-receiver
 ### On the server (with WireGuard running on port 51820):
 
 ```bash
-udp-sender --listen-port 51821 --target 127.0.0.1:51820
+udp-tunnel sender --listen-port 51821 --target 127.0.0.1:51820
 ```
 
 Or with cargo:
 
 ```bash
-cargo run --bin udp-sender -- --listen-port 51821 --target 127.0.0.1:51820
+cargo run -- sender --listen-port 51821 --target 127.0.0.1:51820
 ```
 
 This will print an EndpointId like:
@@ -54,27 +54,27 @@ Waiting for receiver to connect...
 ### On the client:
 
 ```bash
-udp-receiver --node-id <ENDPOINT_ID> --listen-port 51820
+udp-tunnel receiver --node-id <ENDPOINT_ID> --listen-port 51820
 ```
 
 Or with cargo:
 
 ```bash
-cargo run --bin udp-receiver -- --node-id <ENDPOINT_ID> --listen-port 51820
+cargo run -- receiver --node-id <ENDPOINT_ID> --listen-port 51820
 ```
 
 Then configure your WireGuard client to connect to `127.0.0.1:51820`.
 
 ## Command Line Options
 
-### udp-sender
+### sender
 
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--listen-port`, `-l` | 51821 | Local UDP port to listen on for incoming packets to forward |
 | `--target`, `-t` | 127.0.0.1:51820 | Target UDP address to forward traffic to |
 
-### udp-receiver
+### receiver
 
 | Option | Default | Description |
 |--------|---------|-------------|
@@ -93,13 +93,13 @@ nc -u -l 51820
 
 ### Terminal 2 (Server side - start the forwarder):
 ```bash
-cargo run --bin udp-sender -- --listen-port 51821 --target 127.0.0.1:51820
+cargo run -- sender --listen-port 51821 --target 127.0.0.1:51820
 # Note the EndpointId printed
 ```
 
 ### Terminal 3 (Client side - start the receiver):
 ```bash
-cargo run --bin udp-receiver -- --node-id <ENDPOINT_ID> --listen-port 51820
+cargo run -- receiver --node-id <ENDPOINT_ID> --listen-port 51820
 ```
 
 ### Terminal 4 (Client side - send test message):

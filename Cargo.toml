@@ -4,13 +4,6 @@ version = "0.1.0"
 edition = "2021"
 description = "UDP port forwarding through iroh P2P connections"
 
-[[bin]]
-name = "udp-sender"
-path = "src/bin/sender.rs"
-
-[[bin]]
-name = "udp-receiver"
-path = "src/bin/receiver.rs"
 
 [dependencies]
 iroh = { version = "0.95.1", features = ["discovery-local-network"] }
