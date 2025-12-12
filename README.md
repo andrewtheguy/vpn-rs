@@ -1,8 +1,21 @@
-# UDP Tunnel
+# tunnel-rs
 
-UDP port forwarding through iroh P2P connections.
+TCP/UDP port forwarding through iroh P2P connections.
 
 ## Architecture
+
+### TCP Tunneling (Default)
+
+```
++-----------------+        +-----------------+        +-----------------+        +-----------------+
+| SSH Client      |  TCP   | receiver        |  iroh  | sender          |  TCP   | SSH Server      |
+|                 |<------>| (local:22)      |<======>|                 |<------>| (local:22)      |
+|                 |        |                 |  QUIC  |                 |        |                 |
++-----------------+        +-----------------+        +-----------------+        +-----------------+
+     Client Side                                            Server Side
+```
+
+### UDP Tunneling
 
 ```
 +-----------------+        +-----------------+        +-----------------+        +-----------------+
@@ -13,8 +26,8 @@ UDP port forwarding through iroh P2P connections.
      Client Side                                            Server Side
 ```
 
-- **sender**: Runs on the machine with the UDP service (e.g., WireGuard server). Accepts iroh connections and forwards traffic to the target service.
-- **receiver**: Runs on the machine that wants to access the UDP service. Exposes a local UDP port and forwards traffic through the iroh tunnel.
+- **sender**: Runs on the machine with the service (e.g., SSH or WireGuard server). Accepts iroh connections and forwards traffic to the target service.
+- **receiver**: Runs on the machine that wants to access the service. Exposes a local port and forwards traffic through the iroh tunnel.
 
 The connection is established via iroh's P2P network, which handles NAT traversal using relay servers and direct connections where possible.
 
@@ -33,16 +46,12 @@ cargo run -- receiver
 
 ## Usage
 
-### On the server (with WireGuard running on port 51820):
+### TCP Tunneling (Default)
+
+#### On the server (with SSH running on port 22):
 
 ```bash
-udp-tunnel sender --target 127.0.0.1:51820
-```
-
-Or with cargo:
-
-```bash
-cargo run -- sender --target 127.0.0.1:51820
+tunnel-rs sender --target 127.0.0.1:22
 ```
 
 This will print an EndpointId like:
@@ -51,16 +60,26 @@ EndpointId: 2xnbkpbc7izsilvewd7c62w7wnwziacmpfwvhcrya5nt76dqkpga
 Waiting for receiver to connect...
 ```
 
-### On the client:
+#### On the client:
 
 ```bash
-udp-tunnel receiver --node-id <ENDPOINT_ID> --listen-port 51820
+tunnel-rs receiver --node-id <ENDPOINT_ID> --listen-port 2222
 ```
 
-Or with cargo:
+Then connect via SSH to `127.0.0.1:2222`.
+
+### UDP Tunneling
+
+#### On the server (with WireGuard running on port 51820):
 
 ```bash
-cargo run -- receiver --node-id <ENDPOINT_ID> --listen-port 51820
+tunnel-rs sender --protocol udp --target 127.0.0.1:51820
+```
+
+#### On the client:
+
+```bash
+tunnel-rs receiver --protocol udp --node-id <ENDPOINT_ID> --listen-port 51820
 ```
 
 Then configure your WireGuard client to connect to `127.0.0.1:51820`.
@@ -71,26 +90,28 @@ Then configure your WireGuard client to connect to `127.0.0.1:51820`.
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--target`, `-t` | 127.0.0.1:51820 | Target UDP address to forward traffic to (e.g., WireGuard server) |
-| `--secret-file` | (optional) | Path to secret key file for persistent identity. If file doesn't exist, generates and saves new key. If exists, loads existing key. |
+| `--protocol`, `-p` | tcp | Protocol to tunnel (tcp or udp) |
+| `--target`, `-t` | 127.0.0.1:22 | Target address to forward traffic to |
+| `--secret-file` | (optional) | Path to secret key file for persistent identity |
 
 ### receiver
 
 | Option | Default | Description |
 |--------|---------|-------------|
+| `--protocol`, `-p` | tcp | Protocol to tunnel (tcp or udp) |
 | `--node-id`, `-n` | (required) | EndpointId of the sender to connect to |
-| `--listen-port`, `-l` | 51820 | Local UDP port to expose for clients |
+| `--listen-port`, `-l` | 22 | Local port to expose for clients |
 
 ## Persistent Identity for VPN Use
 
-By default, the sender generates a new random EndpointId each time it starts. For production VPN setups, you'll want a persistent identity so the receiver can reconnect without needing to update the node ID.
+By default, the sender generates a new random EndpointId each time it starts. For production setups, you'll want a persistent identity so the receiver can reconnect without needing to update the node ID.
 
 ### Using Persistent Identity
 
 Start the sender with the `--secret-file` flag:
 
 ```bash
-udp-tunnel sender --target 127.0.0.1:51820 --secret-file ./sender.key
+tunnel-rs sender --target 127.0.0.1:22 --secret-file ./sender.key
 ```
 
 **First run**: Generates a new secret key and saves it to `sender.key`
@@ -113,27 +134,20 @@ For automation workflows (e.g., deployment scripts, CI/CD), you can pre-generate
 
 ```bash
 # Generate a secret key and output the EndpointId to stdout
-udp-tunnel generate-secret --output ./sender.key
+tunnel-rs generate-secret --output ./sender.key
 # Output: b5435df733f521751f7b916e801695ec02d1ec3c0b1333ccfd4821f46696470d
 
 # Output EndpointId only to stdout without saving to file
-udp-tunnel generate-secret --output -
+tunnel-rs generate-secret --output -
 # Output: e48e9a70da7bf8a081322bb2ae6afc13afc6851fdbf723f4763d2dbbc637b99b
 
 # Pipe to other commands (similar to WireGuard workflow)
-ENDPOINT_ID=$(udp-tunnel generate-secret --output ./sender.key)
+ENDPOINT_ID=$(tunnel-rs generate-secret --output ./sender.key)
 echo "Sender EndpointId: $ENDPOINT_ID"
 
 # Use --force to overwrite existing files
-udp-tunnel generate-secret --output ./sender.key --force
+tunnel-rs generate-secret --output ./sender.key --force
 ```
-
-This is useful for:
-- Generating keys during deployment
-- Scripted VPN setup
-- Capturing the EndpointId for configuration management
-- Pre-provisioning infrastructure
-- Ephemeral key generation for testing (using `-` for stdout only)
 
 ### Security Considerations
 
@@ -142,46 +156,14 @@ This is useful for:
 - The key file contains the sender's private key - treat it like an SSH private key
 - For VPN use cases, the iroh encryption provides transport security; the secret key just maintains identity
 
-## Testing with netcat
-
-You can test the UDP forwarding without WireGuard using netcat:
-
-### Terminal 1 (Server side - simulate UDP server):
-```bash
-# Start a UDP listener on port 51820
-nc -u -l 51820
-```
-
-### Terminal 2 (Server side - start the forwarder):
-```bash
-cargo run -- sender --target 127.0.0.1:51820
-# Note the EndpointId printed
-```
-
-### Terminal 3 (Client side - start the receiver):
-```bash
-cargo run -- receiver --node-id <ENDPOINT_ID> --listen-port 51820
-```
-
-### Terminal 4 (Client side - send test message):
-```bash
-echo "hello from client" | nc -u 127.0.0.1 51820
-```
-
-You should see "hello from client" appear in Terminal 1 (the UDP server).
-
-### Bidirectional test:
-
-After sending from the client, type a response in Terminal 1 and press Enter. The response will be forwarded back through the tunnel to the client.
-
 ## How It Works
 
 1. **Sender** creates an iroh endpoint with discovery services (Pkarr, DNS, mDNS)
 2. **Sender** prints its EndpointId and waits for connections
 3. **Receiver** parses the EndpointId and connects via iroh's discovery system
-4. Both sides establish a bidirectional QUIC stream
-5. UDP packets are framed with a 2-byte length prefix and forwarded through the stream
-6. The framing preserves UDP datagram boundaries over the byte-oriented QUIC stream
+4. For TCP: Each local TCP connection opens a new QUIC stream
+5. For UDP: Packets are framed with a 2-byte length prefix to preserve datagram boundaries
+6. All traffic is encrypted using iroh's built-in QUIC/TLS 1.3
 
 ## Security
 
