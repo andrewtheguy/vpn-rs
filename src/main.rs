@@ -85,6 +85,12 @@ enum Mode {
         #[arg(long)]
         force: bool,
     },
+    /// Show the EndpointId (node ID) for an existing secret key file
+    ShowId {
+        /// Path to the secret key file
+        #[arg(short, long)]
+        secret_file: PathBuf,
+    },
 }
 
 #[tokio::main]
@@ -109,6 +115,7 @@ async fn main() -> Result<()> {
             Protocol::Tcp => run_tcp_receiver(node_id, listen).await,
         },
         Mode::GenerateSecret { output, force } => generate_secret_command(output, force),
+        Mode::ShowId { secret_file } => show_id_command(secret_file),
     }
 }
 
@@ -473,6 +480,14 @@ fn generate_secret_command(output: PathBuf, force: bool) -> Result<()> {
         println!("{}", endpoint_id);
     }
 
+    Ok(())
+}
+
+/// Show the EndpointId for an existing secret key file
+fn show_id_command(secret_file: PathBuf) -> Result<()> {
+    let secret = load_secret(&secret_file)?;
+    let endpoint_id = secret_to_endpoint_id(&secret);
+    println!("{}", endpoint_id);
     Ok(())
 }
 
