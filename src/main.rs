@@ -13,7 +13,7 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use clap::{Parser, Subcommand, ValueEnum};
 use iroh::{
     discovery::{dns::DnsDiscovery, mdns::MdnsDiscovery, pkarr::PkarrPublisher},
-    Endpoint, EndpointAddr, EndpointId, SecretKey,
+    Endpoint, EndpointAddr, EndpointId, RelayMode, RelayUrl, SecretKey,
 };
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -60,6 +60,11 @@ enum Mode {
         /// If provided and file exists, the existing key will be loaded
         #[arg(long)]
         secret_file: Option<PathBuf>,
+
+        /// Custom relay server URL (e.g., http://localhost:3340 for local dev relay)
+        /// If not provided, uses iroh's default public relays
+        #[arg(long)]
+        relay_url: Option<String>,
     },
     /// Run as receiver (connects to sender and exposes local port)
     Receiver {
@@ -74,6 +79,11 @@ enum Mode {
         /// Local address to listen on (e.g., 127.0.0.1:2222 or [::]:2222)
         #[arg(short, long)]
         listen: String,
+
+        /// Custom relay server URL (e.g., http://localhost:3340 for local dev relay)
+        /// If not provided, uses iroh's default public relays
+        #[arg(long)]
+        relay_url: Option<String>,
     },
     /// Generate a new secret key file (for automation/setup)
     GenerateSecret {
@@ -102,17 +112,19 @@ async fn main() -> Result<()> {
             protocol,
             target,
             secret_file,
+            relay_url,
         } => match protocol {
-            Protocol::Udp => run_udp_sender(target, secret_file).await,
-            Protocol::Tcp => run_tcp_sender(target, secret_file).await,
+            Protocol::Udp => run_udp_sender(target, secret_file, relay_url).await,
+            Protocol::Tcp => run_tcp_sender(target, secret_file, relay_url).await,
         },
         Mode::Receiver {
             protocol,
             node_id,
             listen,
+            relay_url,
         } => match protocol {
-            Protocol::Udp => run_udp_receiver(node_id, listen).await,
-            Protocol::Tcp => run_tcp_receiver(node_id, listen).await,
+            Protocol::Udp => run_udp_receiver(node_id, listen, relay_url).await,
+            Protocol::Tcp => run_tcp_receiver(node_id, listen, relay_url).await,
         },
         Mode::GenerateSecret { output, force } => generate_secret_command(output, force),
         Mode::ShowId { secret_file } => show_id_command(secret_file),
@@ -144,7 +156,18 @@ fn secret_to_endpoint_id(secret: &SecretKey) -> EndpointId {
     secret.public()
 }
 
-async fn run_udp_sender(target: String, secret_file: Option<PathBuf>) -> Result<()> {
+/// Parse relay URL and return RelayMode
+fn parse_relay_mode(relay_url: Option<String>) -> Result<Option<RelayMode>> {
+    match relay_url {
+        Some(url) => {
+            let relay_url: RelayUrl = url.parse().context("Invalid relay URL")?;
+            Ok(Some(RelayMode::Custom(relay_url.into())))
+        }
+        None => Ok(None),
+    }
+}
+
+async fn run_udp_sender(target: String, secret_file: Option<PathBuf>, relay_url: Option<String>) -> Result<()> {
     let target_addr: SocketAddr = target
         .parse()
         .context("Invalid target address format")?;
@@ -158,12 +181,20 @@ async fn run_udp_sender(target: String, secret_file: Option<PathBuf>) -> Result<
     // Disable idle timeout - UDP traffic can be sporadic
     transport_config.max_idle_timeout(None);
 
+    let relay_mode = parse_relay_mode(relay_url)?;
+
     let mut endpoint_builder = Endpoint::builder()
         .alpns(vec![UDP_ALPN.to_vec()])
         .discovery(PkarrPublisher::n0_dns())
         .discovery(DnsDiscovery::n0_dns())
         .discovery(MdnsDiscovery::builder())
         .transport_config(transport_config);
+
+    // If custom relay URL is provided, use it
+    if let Some(mode) = relay_mode {
+        println!("Using custom relay server");
+        endpoint_builder = endpoint_builder.relay_mode(mode);
+    }
 
     // If secret file is provided, use persistent identity
     if let Some(secret_path) = &secret_file {
@@ -229,7 +260,7 @@ async fn run_udp_sender(target: String, secret_file: Option<PathBuf>) -> Result<
     Ok(())
 }
 
-async fn run_udp_receiver(node_id: String, listen: String) -> Result<()> {
+async fn run_udp_receiver(node_id: String, listen: String, relay_url: Option<String>) -> Result<()> {
     // Parse listen address
     let listen_addr: SocketAddr = listen
         .parse()
@@ -249,11 +280,21 @@ async fn run_udp_receiver(node_id: String, listen: String) -> Result<()> {
     // Disable idle timeout - UDP traffic can be sporadic
     transport_config.max_idle_timeout(None);
 
-    let endpoint = Endpoint::builder()
+    let relay_mode = parse_relay_mode(relay_url)?;
+
+    let mut endpoint_builder = Endpoint::builder()
         .discovery(PkarrPublisher::n0_dns())
         .discovery(DnsDiscovery::n0_dns())
         .discovery(MdnsDiscovery::builder())
-        .transport_config(transport_config)
+        .transport_config(transport_config);
+
+    // If custom relay URL is provided, use it
+    if let Some(mode) = relay_mode {
+        println!("Using custom relay server");
+        endpoint_builder = endpoint_builder.relay_mode(mode);
+    }
+
+    let endpoint = endpoint_builder
         .bind()
         .await
         .context("Failed to create iroh endpoint")?;
@@ -495,7 +536,7 @@ fn show_id_command(secret_file: PathBuf) -> Result<()> {
 // TCP Tunnel Implementation
 // ============================================================================
 
-async fn run_tcp_sender(target: String, secret_file: Option<PathBuf>) -> Result<()> {
+async fn run_tcp_sender(target: String, secret_file: Option<PathBuf>, relay_url: Option<String>) -> Result<()> {
     let target_addr: SocketAddr = target
         .parse()
         .context("Invalid target address format")?;
@@ -509,12 +550,20 @@ async fn run_tcp_sender(target: String, secret_file: Option<PathBuf>) -> Result<
     // Disable idle timeout for long-lived connections
     transport_config.max_idle_timeout(None);
 
+    let relay_mode = parse_relay_mode(relay_url)?;
+
     let mut endpoint_builder = Endpoint::builder()
         .alpns(vec![TCP_ALPN.to_vec()])
         .discovery(PkarrPublisher::n0_dns())
         .discovery(DnsDiscovery::n0_dns())
         .discovery(MdnsDiscovery::builder())
         .transport_config(transport_config);
+
+    // If custom relay URL is provided, use it
+    if let Some(mode) = relay_mode {
+        println!("Using custom relay server");
+        endpoint_builder = endpoint_builder.relay_mode(mode);
+    }
 
     // If secret file is provided, use persistent identity
     if let Some(secret_path) = &secret_file {
@@ -603,7 +652,7 @@ async fn handle_tcp_sender_stream(
     Ok(())
 }
 
-async fn run_tcp_receiver(node_id: String, listen: String) -> Result<()> {
+async fn run_tcp_receiver(node_id: String, listen: String, relay_url: Option<String>) -> Result<()> {
     // Parse listen address
     let listen_addr: SocketAddr = listen
         .parse()
@@ -623,11 +672,21 @@ async fn run_tcp_receiver(node_id: String, listen: String) -> Result<()> {
     // Disable idle timeout for long-lived connections
     transport_config.max_idle_timeout(None);
 
-    let endpoint = Endpoint::builder()
+    let relay_mode = parse_relay_mode(relay_url)?;
+
+    let mut endpoint_builder = Endpoint::builder()
         .discovery(PkarrPublisher::n0_dns())
         .discovery(DnsDiscovery::n0_dns())
         .discovery(MdnsDiscovery::builder())
-        .transport_config(transport_config)
+        .transport_config(transport_config);
+
+    // If custom relay URL is provided, use it
+    if let Some(mode) = relay_mode {
+        println!("Using custom relay server");
+        endpoint_builder = endpoint_builder.relay_mode(mode);
+    }
+
+    let endpoint = endpoint_builder
         .bind()
         .await
         .context("Failed to create iroh endpoint")?;
