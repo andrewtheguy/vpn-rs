@@ -1,8 +1,8 @@
 [package]
-name = "udp-tunnel"
+name = "tunnel-rs"
 version = "0.1.0"
 edition = "2021"
-description = "UDP port forwarding through iroh P2P connections"
+description = "TCP/UDP port forwarding through iroh P2P connections"
 
 
 [dependencies]

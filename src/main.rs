@@ -1,12 +1,12 @@
-//! TCP/UDP Tunnel
+//! tunnel-rs
 //!
 //! Forwards TCP or UDP traffic through iroh P2P connections.
 //!
 //! Usage:
-//!   TCP sender:    cargo run -- sender --protocol tcp --target 127.0.0.1:22
-//!   TCP receiver:  cargo run -- receiver --protocol tcp --node-id <NODE_ID> --listen-port 2222
-//!   UDP sender:    cargo run -- sender --target 127.0.0.1:51820
-//!   UDP receiver:  cargo run -- receiver --node-id <NODE_ID> --listen-port 51820
+//!   TCP sender:    tunnel-rs sender --target 127.0.0.1:22
+//!   TCP receiver:  tunnel-rs receiver --node-id <NODE_ID> --listen-port 2222
+//!   UDP sender:    tunnel-rs sender --protocol udp --target 127.0.0.1:51820
+//!   UDP receiver:  tunnel-rs receiver --protocol udp --node-id <NODE_ID> --listen-port 51820
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
@@ -27,14 +27,14 @@ const TCP_ALPN: &[u8] = b"tcp-forward/1";
 #[derive(Clone, Copy, ValueEnum, Default)]
 enum Protocol {
     /// TCP tunneling
+    #[default]
     Tcp,
     /// UDP tunneling
-    #[default]
     Udp,
 }
 
 #[derive(Parser)]
-#[command(name = "tunnel")]
+#[command(name = "tunnel-rs")]
 #[command(about = "Forward TCP/UDP traffic through iroh P2P connections")]
 struct Args {
     #[command(subcommand)]
@@ -46,11 +46,11 @@ enum Mode {
     /// Run as sender (accepts connections and forwards to target)
     Sender {
         /// Protocol to tunnel (tcp or udp)
-        #[arg(short, long, default_value = "udp")]
+        #[arg(short, long, default_value = "tcp")]
         protocol: Protocol,
 
         /// Target address to forward traffic to
-        #[arg(short, long, default_value = "127.0.0.1:51820")]
+        #[arg(short, long, default_value = "127.0.0.1:22")]
         target: String,
 
         /// Path to secret key file for persistent identity (optional)
@@ -62,7 +62,7 @@ enum Mode {
     /// Run as receiver (connects to sender and exposes local port)
     Receiver {
         /// Protocol to tunnel (tcp or udp)
-        #[arg(short, long, default_value = "udp")]
+        #[arg(short, long, default_value = "tcp")]
         protocol: Protocol,
 
         /// NodeId of the sender to connect to
@@ -70,7 +70,7 @@ enum Mode {
         node_id: String,
 
         /// Local port to expose (client connects here)
-        #[arg(short, long, default_value = "51820")]
+        #[arg(short, long, default_value = "22")]
         listen_port: u16,
     },
     /// Generate a new secret key file (for automation/setup)
@@ -198,7 +198,7 @@ async fn run_udp_sender(target: String, secret_file: Option<PathBuf>) -> Result<
     println!("\nEndpointId: {}", endpoint_id);
     println!("\nOn the receiver side, run:");
     println!(
-        "  udp-tunnel receiver --node-id {} --listen-port {}\n",
+        "  tunnel-rs receiver --protocol udp --node-id {} --listen-port {}\n",
         endpoint_id, target_port
     );
     println!("Waiting for receiver to connect...");
@@ -545,7 +545,7 @@ async fn run_tcp_sender(target: String, secret_file: Option<PathBuf>) -> Result<
     println!("\nEndpointId: {}", endpoint_id);
     println!("\nOn the receiver side, run:");
     println!(
-        "  tunnel receiver --protocol tcp --node-id {} --listen-port {}\n",
+        "  tunnel-rs receiver --node-id {} --listen-port {}\n",
         endpoint_id, target_port
     );
     println!("Waiting for receiver to connect...");

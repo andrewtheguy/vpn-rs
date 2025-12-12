@@ -7,11 +7,11 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUILD_DIR="${SCRIPT_DIR}/build"
 DOCKERFILE="${SCRIPT_DIR}/Dockerfile.cross"
-IMAGE_NAME="udp-tunnel-builder"
+IMAGE_NAME="tunnel-rs-builder"
 VERSION="${VERSION:-latest}"
 
-echo "UDP Tunnel Cross-Compilation Build Script"
-echo "=========================================="
+echo "tunnel-rs Cross-Compilation Build Script"
+echo "========================================="
 echo ""
 echo "Build directory: $BUILD_DIR"
 echo "Dockerfile: $DOCKERFILE"
@@ -36,7 +36,7 @@ fi
 mkdir -p "$BUILD_DIR"
 
 # Create or use existing buildx builder
-BUILDER_NAME="udp-tunnel-builder"
+BUILDER_NAME="tunnel-rs-builder"
 if ! docker buildx inspect "$BUILDER_NAME" &> /dev/null; then
     echo "Creating buildx builder: $BUILDER_NAME"
     docker buildx create --name "$BUILDER_NAME" --use --driver docker-container
@@ -63,17 +63,17 @@ echo "----------------------"
 # The output structure will have platform-specific subdirectories
 # Move and rename binaries
 if [ -d "$BUILD_DIR/linux_amd64" ]; then
-    if [ -f "$BUILD_DIR/linux_amd64/udp-tunnel" ]; then
-        mv "$BUILD_DIR/linux_amd64/udp-tunnel" "$BUILD_DIR/udp-tunnel-linux-amd64"
-        echo "✓ AMD64 binary saved to: $BUILD_DIR/udp-tunnel-linux-amd64"
+    if [ -f "$BUILD_DIR/linux_amd64/tunnel-rs" ]; then
+        mv "$BUILD_DIR/linux_amd64/tunnel-rs" "$BUILD_DIR/tunnel-rs-linux-amd64"
+        echo "✓ AMD64 binary saved to: $BUILD_DIR/tunnel-rs-linux-amd64"
     fi
     rm -rf "$BUILD_DIR/linux_amd64"
 fi
 
 if [ -d "$BUILD_DIR/linux_arm64" ]; then
-    if [ -f "$BUILD_DIR/linux_arm64/udp-tunnel" ]; then
-        mv "$BUILD_DIR/linux_arm64/udp-tunnel" "$BUILD_DIR/udp-tunnel-linux-arm64"
-        echo "✓ ARM64 binary saved to: $BUILD_DIR/udp-tunnel-linux-arm64"
+    if [ -f "$BUILD_DIR/linux_arm64/tunnel-rs" ]; then
+        mv "$BUILD_DIR/linux_arm64/tunnel-rs" "$BUILD_DIR/tunnel-rs-linux-arm64"
+        echo "✓ ARM64 binary saved to: $BUILD_DIR/tunnel-rs-linux-arm64"
     fi
     rm -rf "$BUILD_DIR/linux_arm64"
 fi
@@ -83,14 +83,14 @@ echo ""
 echo "Build complete!"
 echo "==============="
 echo ""
-ls -lh "$BUILD_DIR"/udp-tunnel-*
+ls -lh "$BUILD_DIR"/tunnel-rs-*
 echo ""
 
 # Verify binaries
 echo "Verifying binaries..."
 echo "---------------------"
 if command -v file &> /dev/null; then
-    file "$BUILD_DIR"/udp-tunnel-*
+    file "$BUILD_DIR"/tunnel-rs-*
 else
     echo "Note: 'file' command not available, skipping binary verification"
 fi
@@ -100,9 +100,9 @@ echo "Binaries are ready in: $BUILD_DIR/"
 echo ""
 echo "To test on Linux:"
 echo "  # AMD64:"
-echo "  scp $BUILD_DIR/udp-tunnel-linux-amd64 user@host:/tmp/udp-tunnel"
-echo "  ssh user@host '/tmp/udp-tunnel --help'"
+echo "  scp $BUILD_DIR/tunnel-rs-linux-amd64 user@host:/tmp/tunnel-rs"
+echo "  ssh user@host '/tmp/tunnel-rs --help'"
 echo ""
 echo "  # ARM64:"
-echo "  scp $BUILD_DIR/udp-tunnel-linux-arm64 user@host:/tmp/udp-tunnel"
-echo "  ssh user@host '/tmp/udp-tunnel --help'"
+echo "  scp $BUILD_DIR/tunnel-rs-linux-arm64 user@host:/tmp/tunnel-rs"
+echo "  ssh user@host '/tmp/tunnel-rs --help'"

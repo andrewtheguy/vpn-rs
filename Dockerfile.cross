@@ -16,9 +16,9 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,id=cargo-registry-${TARG
     --mount=type=cache,target=/usr/local/cargo/git,id=cargo-git-${TARGETPLATFORM} \
     --mount=type=cache,target=/build/target,id=cargo-target-${TARGETPLATFORM} \
     cargo build --release && \
-    cp target/release/udp-tunnel /udp-tunnel
+    cp target/release/tunnel-rs /tunnel-rs
 
 # Export stage - only contains the binary
 FROM scratch AS export
 
-COPY --from=builder /udp-tunnel /udp-tunnel
+COPY --from=builder /tunnel-rs /tunnel-rs
