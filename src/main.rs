@@ -4,9 +4,9 @@
 //!
 //! Usage:
 //!   TCP sender:    tunnel-rs sender --target 127.0.0.1:22
-//!   TCP receiver:  tunnel-rs receiver --node-id <NODE_ID> --listen-port 2222
+//!   TCP receiver:  tunnel-rs receiver --node-id <NODE_ID> --listen 127.0.0.1:2222
 //!   UDP sender:    tunnel-rs sender --protocol udp --target 127.0.0.1:51820
-//!   UDP receiver:  tunnel-rs receiver --protocol udp --node-id <NODE_ID> --listen-port 51820
+//!   UDP receiver:  tunnel-rs receiver --protocol udp --node-id <NODE_ID> --listen 0.0.0.0:51820
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
@@ -69,9 +69,9 @@ enum Mode {
         #[arg(short, long)]
         node_id: String,
 
-        /// Local port to expose (client connects here)
-        #[arg(short, long, default_value = "22")]
-        listen_port: u16,
+        /// Local address to listen on (e.g., 127.0.0.1:2222 or [::]:2222)
+        #[arg(short, long)]
+        listen: String,
     },
     /// Generate a new secret key file (for automation/setup)
     GenerateSecret {
@@ -101,10 +101,10 @@ async fn main() -> Result<()> {
         Mode::Receiver {
             protocol,
             node_id,
-            listen_port,
+            listen,
         } => match protocol {
-            Protocol::Udp => run_udp_receiver(node_id, listen_port).await,
-            Protocol::Tcp => run_tcp_receiver(node_id, listen_port).await,
+            Protocol::Udp => run_udp_receiver(node_id, listen).await,
+            Protocol::Tcp => run_tcp_receiver(node_id, listen).await,
         },
         Mode::GenerateSecret { output, force } => generate_secret_command(output, force),
     }
@@ -198,7 +198,7 @@ async fn run_udp_sender(target: String, secret_file: Option<PathBuf>) -> Result<
     println!("\nEndpointId: {}", endpoint_id);
     println!("\nOn the receiver side, run:");
     println!(
-        "  tunnel-rs receiver --protocol udp --node-id {} --listen-port {}\n",
+        "  tunnel-rs receiver --protocol udp --node-id {} --listen 0.0.0.0:{}\n",
         endpoint_id, target_port
     );
     println!("Waiting for receiver to connect...");
@@ -239,7 +239,12 @@ async fn run_udp_sender(target: String, secret_file: Option<PathBuf>) -> Result<
     Ok(())
 }
 
-async fn run_udp_receiver(node_id: String, listen_port: u16) -> Result<()> {
+async fn run_udp_receiver(node_id: String, listen: String) -> Result<()> {
+    // Parse listen address
+    let listen_addr: SocketAddr = listen
+        .parse()
+        .context("Invalid listen address format. Use format like 127.0.0.1:51820 or [::]:51820")?;
+
     // Parse EndpointId
     let endpoint_id: EndpointId = node_id
         .parse()
@@ -277,15 +282,14 @@ async fn run_udp_receiver(node_id: String, listen_port: u16) -> Result<()> {
     let (send_stream, recv_stream) = conn.open_bi().await.context("Failed to open stream")?;
 
     // Bind local UDP socket for clients to connect to
-    let bind_addr = format!("127.0.0.1:{}", listen_port);
     let udp_socket = Arc::new(
-        UdpSocket::bind(&bind_addr)
+        UdpSocket::bind(listen_addr)
             .await
             .context("Failed to bind UDP socket")?,
     );
     println!(
         "Listening on UDP {} - configure your client to connect here",
-        bind_addr
+        listen_addr
     );
 
     // Track the client address for sending responses back
@@ -545,7 +549,7 @@ async fn run_tcp_sender(target: String, secret_file: Option<PathBuf>) -> Result<
     println!("\nEndpointId: {}", endpoint_id);
     println!("\nOn the receiver side, run:");
     println!(
-        "  tunnel-rs receiver --node-id {} --listen-port {}\n",
+        "  tunnel-rs receiver --node-id {} --listen 127.0.0.1:{}\n",
         endpoint_id, target_port
     );
     println!("Waiting for receiver to connect...");
@@ -609,7 +613,12 @@ async fn handle_tcp_sender_stream(
     Ok(())
 }
 
-async fn run_tcp_receiver(node_id: String, listen_port: u16) -> Result<()> {
+async fn run_tcp_receiver(node_id: String, listen: String) -> Result<()> {
+    // Parse listen address
+    let listen_addr: SocketAddr = listen
+        .parse()
+        .context("Invalid listen address format. Use format like 127.0.0.1:2222 or [::]:2222")?;
+
     // Parse EndpointId
     let endpoint_id: EndpointId = node_id
         .parse()
@@ -647,13 +656,12 @@ async fn run_tcp_receiver(node_id: String, listen_port: u16) -> Result<()> {
     let conn = Arc::new(conn);
 
     // Bind local TCP listener
-    let bind_addr = format!("127.0.0.1:{}", listen_port);
-    let listener = TcpListener::bind(&bind_addr)
+    let listener = TcpListener::bind(listen_addr)
         .await
         .context("Failed to bind TCP listener")?;
     println!(
         "Listening on TCP {} - configure your client to connect here",
-        bind_addr
+        listen_addr
     );
 
     // Accept local TCP connections and tunnel them
