@@ -1,6 +1,8 @@
 # Build stage - buildx handles platform selection automatically
 FROM rust:1.91 AS builder
 
+ARG TARGETPLATFORM
+
 WORKDIR /build
 
 # Copy manifests
@@ -9,10 +11,14 @@ COPY Cargo.toml Cargo.lock ./
 # Copy source code
 COPY src ./src
 
-# Build for the target platform (native build via buildx)
-RUN cargo build --release
+# Build for the target platform with per-platform cargo cache mounts
+RUN --mount=type=cache,target=/usr/local/cargo/registry,id=cargo-registry-${TARGETPLATFORM} \
+    --mount=type=cache,target=/usr/local/cargo/git,id=cargo-git-${TARGETPLATFORM} \
+    --mount=type=cache,target=/build/target,id=cargo-target-${TARGETPLATFORM} \
+    cargo build --release && \
+    cp target/release/udp-tunnel /udp-tunnel
 
 # Export stage - only contains the binary
 FROM scratch AS export
 
-COPY --from=builder /build/target/release/udp-tunnel /udp-tunnel
+COPY --from=builder /udp-tunnel /udp-tunnel
