@@ -104,7 +104,7 @@ Then configure your WireGuard client to connect to `127.0.0.1:51820`.
 | `--config`, `-c` | (optional) | Path to TOML config file |
 | `--protocol`, `-p` | tcp | Protocol to tunnel (tcp or udp) |
 | `--node-id`, `-n` | (required) | EndpointId of the sender to connect to |
-| `--listen`, `-l` | (required) | Local address to listen on (CLI only, not in config) |
+| `--listen`, `-l` | (required) | Local address to listen on |
 | `--relay-url` | (optional) | Custom relay server URL(s). Can be specified multiple times for failover |
 | `--relay-only` | false | Force all traffic through relay (requires `--relay-url`) |
 
@@ -136,6 +136,7 @@ tunnel-rs sender --config sender.toml
 # receiver.toml
 protocol = "tcp"
 node_id = "2xnbkpbc7izsilvewd7c62w7wnwziacmpfwvhcrya5nt76dqkpga"
+listen = "127.0.0.1:2222"
 relay_urls = [
     "https://relay1.example.com",
     "https://relay2.example.com",
@@ -144,8 +145,7 @@ relay_only = false
 ```
 
 ```bash
-# --listen is required on CLI (not configurable in file)
-tunnel-rs receiver --config receiver.toml --listen 127.0.0.1:2222
+tunnel-rs receiver --config receiver.toml
 ```
 
 ### Config Options
@@ -154,12 +154,11 @@ tunnel-rs receiver --config receiver.toml --listen 127.0.0.1:2222
 |--------|--------|----------|-------------|
 | `protocol` | ✓ | ✓ | Protocol to tunnel ("tcp" or "udp") |
 | `target` | ✓ | - | Target address to forward traffic to |
-| `node_id` | - | ✓ | EndpointId of the sender |
+| `node_id` | - | ✓ | EndpointId of the sender (required) |
+| `listen` | - | ✓ | Local address to listen on (required) |
 | `secret_file` | ✓ | - | Path to secret key file |
 | `relay_urls` | ✓ | ✓ | Array of relay server URLs |
 | `relay_only` | ✓ | ✓ | Force relay-only mode |
-
-**Note**: The `--listen` option for receiver is intentionally CLI-only to avoid accidentally exposing ports via config file changes.
 
 ## Persistent Identity for VPN Use
 

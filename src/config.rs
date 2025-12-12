@@ -19,9 +19,9 @@ pub struct SenderConfig {
 pub struct ReceiverConfig {
     pub protocol: Option<String>,
     pub node_id: Option<String>,
+    pub listen: Option<String>,
     pub relay_urls: Option<Vec<String>>,
     pub relay_only: Option<bool>,
-    // listen is intentionally omitted - CLI only
 }
 
 /// Load configuration from a TOML file.

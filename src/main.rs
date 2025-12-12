@@ -92,7 +92,7 @@ enum Mode {
 
         /// Local address to listen on (e.g., 127.0.0.1:2222 or [::]:2222)
         #[arg(short, long)]
-        listen: String,
+        listen: Option<String>,
 
         /// Custom relay server URL(s) (e.g., http://localhost:3340 for local dev relay)
         /// Can be specified multiple times for failover. If not provided, uses iroh's default public relays
@@ -187,6 +187,9 @@ async fn main() -> Result<()> {
                 .unwrap_or_default();
             let node_id = node_id.or(cfg.node_id).context(
                 "node_id is required. Provide via --node-id or in config file.",
+            )?;
+            let listen = listen.or(cfg.listen).context(
+                "listen is required. Provide via --listen or in config file.",
             )?;
             let relay_urls = if relay_urls.is_empty() {
                 cfg.relay_urls.unwrap_or_default()
