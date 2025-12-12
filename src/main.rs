@@ -157,13 +157,13 @@ fn secret_to_endpoint_id(secret: &SecretKey) -> EndpointId {
 }
 
 /// Parse relay URL and return RelayMode
-fn parse_relay_mode(relay_url: Option<String>) -> Result<Option<RelayMode>> {
+fn parse_relay_mode(relay_url: Option<String>) -> Result<RelayMode> {
     match relay_url {
         Some(url) => {
             let relay_url: RelayUrl = url.parse().context("Invalid relay URL")?;
-            Ok(Some(RelayMode::Custom(relay_url.into())))
+            Ok(RelayMode::Custom(relay_url.into()))
         }
-        None => Ok(None),
+        None => Ok(RelayMode::Default),
     }
 }
 
@@ -182,19 +182,17 @@ async fn run_udp_sender(target: String, secret_file: Option<PathBuf>, relay_url:
     transport_config.max_idle_timeout(None);
 
     let relay_mode = parse_relay_mode(relay_url)?;
+    let using_custom_relay = !matches!(relay_mode, RelayMode::Default);
+    if using_custom_relay {
+        println!("Using custom relay server");
+    }
 
-    let mut endpoint_builder = Endpoint::builder()
+    let mut endpoint_builder = Endpoint::empty_builder(relay_mode)
         .alpns(vec![UDP_ALPN.to_vec()])
         .discovery(PkarrPublisher::n0_dns())
         .discovery(DnsDiscovery::n0_dns())
         .discovery(MdnsDiscovery::builder())
         .transport_config(transport_config);
-
-    // If custom relay URL is provided, use it
-    if let Some(mode) = relay_mode {
-        println!("Using custom relay server");
-        endpoint_builder = endpoint_builder.relay_mode(mode);
-    }
 
     // If secret file is provided, use persistent identity
     if let Some(secret_path) = &secret_file {
@@ -281,20 +279,16 @@ async fn run_udp_receiver(node_id: String, listen: String, relay_url: Option<Str
     transport_config.max_idle_timeout(None);
 
     let relay_mode = parse_relay_mode(relay_url)?;
+    let using_custom_relay = !matches!(relay_mode, RelayMode::Default);
+    if using_custom_relay {
+        println!("Using custom relay server");
+    }
 
-    let mut endpoint_builder = Endpoint::builder()
+    let endpoint = Endpoint::empty_builder(relay_mode)
         .discovery(PkarrPublisher::n0_dns())
         .discovery(DnsDiscovery::n0_dns())
         .discovery(MdnsDiscovery::builder())
-        .transport_config(transport_config);
-
-    // If custom relay URL is provided, use it
-    if let Some(mode) = relay_mode {
-        println!("Using custom relay server");
-        endpoint_builder = endpoint_builder.relay_mode(mode);
-    }
-
-    let endpoint = endpoint_builder
+        .transport_config(transport_config)
         .bind()
         .await
         .context("Failed to create iroh endpoint")?;
@@ -551,19 +545,17 @@ async fn run_tcp_sender(target: String, secret_file: Option<PathBuf>, relay_url:
     transport_config.max_idle_timeout(None);
 
     let relay_mode = parse_relay_mode(relay_url)?;
+    let using_custom_relay = !matches!(relay_mode, RelayMode::Default);
+    if using_custom_relay {
+        println!("Using custom relay server");
+    }
 
-    let mut endpoint_builder = Endpoint::builder()
+    let mut endpoint_builder = Endpoint::empty_builder(relay_mode)
         .alpns(vec![TCP_ALPN.to_vec()])
         .discovery(PkarrPublisher::n0_dns())
         .discovery(DnsDiscovery::n0_dns())
         .discovery(MdnsDiscovery::builder())
         .transport_config(transport_config);
-
-    // If custom relay URL is provided, use it
-    if let Some(mode) = relay_mode {
-        println!("Using custom relay server");
-        endpoint_builder = endpoint_builder.relay_mode(mode);
-    }
 
     // If secret file is provided, use persistent identity
     if let Some(secret_path) = &secret_file {
@@ -673,20 +665,16 @@ async fn run_tcp_receiver(node_id: String, listen: String, relay_url: Option<Str
     transport_config.max_idle_timeout(None);
 
     let relay_mode = parse_relay_mode(relay_url)?;
+    let using_custom_relay = !matches!(relay_mode, RelayMode::Default);
+    if using_custom_relay {
+        println!("Using custom relay server");
+    }
 
-    let mut endpoint_builder = Endpoint::builder()
+    let endpoint = Endpoint::empty_builder(relay_mode)
         .discovery(PkarrPublisher::n0_dns())
         .discovery(DnsDiscovery::n0_dns())
         .discovery(MdnsDiscovery::builder())
-        .transport_config(transport_config);
-
-    // If custom relay URL is provided, use it
-    if let Some(mode) = relay_mode {
-        println!("Using custom relay server");
-        endpoint_builder = endpoint_builder.relay_mode(mode);
-    }
-
-    let endpoint = endpoint_builder
+        .transport_config(transport_config)
         .bind()
         .await
         .context("Failed to create iroh endpoint")?;
