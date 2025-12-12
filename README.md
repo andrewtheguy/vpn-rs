@@ -94,6 +94,7 @@ Then configure your WireGuard client to connect to `127.0.0.1:51820`.
 | `--target`, `-t` | 127.0.0.1:22 | Target address to forward traffic to |
 | `--secret-file` | (optional) | Path to secret key file for persistent identity |
 | `--relay-url` | (optional) | Custom relay server URL(s). Can be specified multiple times for failover |
+| `--relay-only` | false | Force all traffic through relay (requires `--relay-url`) |
 
 ### receiver
 
@@ -103,6 +104,7 @@ Then configure your WireGuard client to connect to `127.0.0.1:51820`.
 | `--node-id`, `-n` | (required) | EndpointId of the sender to connect to |
 | `--listen-port`, `-l` | 22 | Local port to expose for clients |
 | `--relay-url` | (optional) | Custom relay server URL(s). Can be specified multiple times for failover |
+| `--relay-only` | false | Force all traffic through relay (requires `--relay-url`) |
 
 ## Persistent Identity for VPN Use
 
@@ -196,6 +198,29 @@ tunnel-rs receiver --node-id <ENDPOINT_ID> --listen 127.0.0.1:2222 \
 ```
 
 Both sender and receiver must use the same `--relay-url` option(s) to connect through your private relay(s).
+
+### Relay-Only Mode
+
+By default, iroh attempts direct P2P connections and uses relay servers as fallback. With `--relay-only`, all traffic is forced through the relay server, disabling direct connections entirely.
+
+```bash
+# Sender with relay-only mode
+tunnel-rs sender --target 127.0.0.1:22 \
+  --relay-url https://your-relay.example.com \
+  --relay-only
+
+# Receiver with relay-only mode
+tunnel-rs receiver --node-id <ENDPOINT_ID> --listen 127.0.0.1:2222 \
+  --relay-url https://your-relay.example.com \
+  --relay-only
+```
+
+**Important**: `--relay-only` requires `--relay-url` to be specified. The default public relays are rate-limited and cannot be used for relay-only mode.
+
+**When to use relay-only mode**:
+- When you need guaranteed relay routing (e.g., for consistent latency or compliance)
+- When direct P2P connections are blocked or unreliable
+- When using a private relay with access control
 
 ### Running iroh-relay
 

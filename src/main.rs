@@ -367,17 +367,40 @@ async fn run_udp_receiver(node_id: String, listen: String, relay_urls: Vec<Strin
 
     // Connect to sender
     println!("Connecting to sender {}...", endpoint_id);
-    let mut endpoint_addr = EndpointAddr::new(endpoint_id);
-    // In relay-only mode, we need to provide the relay URL for addressing
-    // since discovery is disabled
-    if relay_only {
-        let relay_url: RelayUrl = relay_urls[0].parse().context("Invalid relay URL")?;
-        endpoint_addr = endpoint_addr.with_relay_url(relay_url);
-    }
-    let conn = endpoint
-        .connect(endpoint_addr, UDP_ALPN)
-        .await
-        .context("Failed to connect to sender")?;
+    let conn = if relay_only {
+        // In relay-only mode, try each relay URL until one works
+        let mut last_error = None;
+        let mut connected = None;
+        for relay_url_str in &relay_urls {
+            let relay_url: RelayUrl = relay_url_str.parse().context("Invalid relay URL")?;
+            let endpoint_addr = EndpointAddr::new(endpoint_id).with_relay_url(relay_url.clone());
+            println!("Trying relay: {} (timeout: 10s)", relay_url);
+            let connect_future = endpoint.connect(endpoint_addr, UDP_ALPN);
+            match tokio::time::timeout(std::time::Duration::from_secs(10), connect_future).await {
+                Ok(Ok(conn)) => {
+                    println!("Connected via relay: {}", relay_url);
+                    connected = Some(conn);
+                    break;
+                }
+                Ok(Err(e)) => {
+                    eprintln!("Failed to connect via {}: {}", relay_url, e);
+                    last_error = Some(e.to_string());
+                }
+                Err(_) => {
+                    eprintln!("Connection to {} timed out", relay_url);
+                    last_error = Some(format!("Connection to {} timed out", relay_url));
+                }
+            }
+        }
+        match connected {
+            Some(conn) => conn,
+            None => anyhow::bail!("Failed to connect via any relay: {}",
+                last_error.unwrap_or_else(|| "No relay URLs provided".to_string())),
+        }
+    } else {
+        let endpoint_addr = EndpointAddr::new(endpoint_id);
+        endpoint.connect(endpoint_addr, UDP_ALPN).await.context("Failed to connect to sender")?
+    };
 
     println!("Connected to sender!");
 
@@ -822,17 +845,40 @@ async fn run_tcp_receiver(node_id: String, listen: String, relay_urls: Vec<Strin
 
     // Connect to sender
     println!("Connecting to sender {}...", endpoint_id);
-    let mut endpoint_addr = EndpointAddr::new(endpoint_id);
-    // In relay-only mode, we need to provide the relay URL for addressing
-    // since discovery is disabled
-    if relay_only {
-        let relay_url: RelayUrl = relay_urls[0].parse().context("Invalid relay URL")?;
-        endpoint_addr = endpoint_addr.with_relay_url(relay_url);
-    }
-    let conn = endpoint
-        .connect(endpoint_addr, TCP_ALPN)
-        .await
-        .context("Failed to connect to sender")?;
+    let conn = if relay_only {
+        // In relay-only mode, try each relay URL until one works
+        let mut last_error = None;
+        let mut connected = None;
+        for relay_url_str in &relay_urls {
+            let relay_url: RelayUrl = relay_url_str.parse().context("Invalid relay URL")?;
+            let endpoint_addr = EndpointAddr::new(endpoint_id).with_relay_url(relay_url.clone());
+            println!("Trying relay: {} (timeout: 10s)", relay_url);
+            let connect_future = endpoint.connect(endpoint_addr, TCP_ALPN);
+            match tokio::time::timeout(std::time::Duration::from_secs(10), connect_future).await {
+                Ok(Ok(conn)) => {
+                    println!("Connected via relay: {}", relay_url);
+                    connected = Some(conn);
+                    break;
+                }
+                Ok(Err(e)) => {
+                    eprintln!("Failed to connect via {}: {}", relay_url, e);
+                    last_error = Some(e.to_string());
+                }
+                Err(_) => {
+                    eprintln!("Connection to {} timed out", relay_url);
+                    last_error = Some(format!("Connection to {} timed out", relay_url));
+                }
+            }
+        }
+        match connected {
+            Some(conn) => conn,
+            None => anyhow::bail!("Failed to connect via any relay: {}",
+                last_error.unwrap_or_else(|| "No relay URLs provided".to_string())),
+        }
+    } else {
+        let endpoint_addr = EndpointAddr::new(endpoint_id);
+        endpoint.connect(endpoint_addr, TCP_ALPN).await.context("Failed to connect to sender")?
+    };
 
     println!("Connected to sender!");
 
