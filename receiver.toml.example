@@ -1,0 +1,24 @@
+# tunnel-rs receiver configuration example
+#
+# Usage: tunnel-rs receiver --config receiver.toml --listen 127.0.0.1:2222
+#
+# All options can be overridden by CLI arguments.
+# CLI arguments take precedence over config file values.
+# Note: --listen is CLI-only and must always be provided.
+
+# Protocol to tunnel: "tcp" or "udp"
+protocol = "tcp"
+
+# NodeId of the sender to connect to (required)
+node_id = "2xnbkpbc7izsilvewd7c62w7wnwziacmpfwvhcrya5nt76dqkpga"
+
+# Custom relay server URL(s) for failover
+# Must match the sender's relay configuration
+relay_urls = [
+    "https://relay1.example.com",
+    "https://relay2.example.com",
+]
+
+# Force all connections through relay (disables direct P2P)
+# Requires relay_urls to be specified
+relay_only = false
