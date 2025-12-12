@@ -65,6 +65,11 @@ enum Mode {
         /// Can be specified multiple times for failover. If not provided, uses iroh's default public relays
         #[arg(long = "relay-url")]
         relay_urls: Vec<String>,
+
+        /// Force all connections through the relay server (disables direct P2P)
+        /// Requires --relay-url to be specified (default relay is rate-limited)
+        #[arg(long)]
+        relay_only: bool,
     },
     /// Run as receiver (connects to sender and exposes local port)
     Receiver {
@@ -84,6 +89,11 @@ enum Mode {
         /// Can be specified multiple times for failover. If not provided, uses iroh's default public relays
         #[arg(long = "relay-url")]
         relay_urls: Vec<String>,
+
+        /// Force all connections through the relay server (disables direct P2P)
+        /// Requires --relay-url to be specified (default relay is rate-limited)
+        #[arg(long)]
+        relay_only: bool,
     },
     /// Generate a new secret key file (for automation/setup)
     GenerateSecret {
@@ -113,18 +123,20 @@ async fn main() -> Result<()> {
             target,
             secret_file,
             relay_urls,
+            relay_only,
         } => match protocol {
-            Protocol::Udp => run_udp_sender(target, secret_file, relay_urls).await,
-            Protocol::Tcp => run_tcp_sender(target, secret_file, relay_urls).await,
+            Protocol::Udp => run_udp_sender(target, secret_file, relay_urls, relay_only).await,
+            Protocol::Tcp => run_tcp_sender(target, secret_file, relay_urls, relay_only).await,
         },
         Mode::Receiver {
             protocol,
             node_id,
             listen,
             relay_urls,
+            relay_only,
         } => match protocol {
-            Protocol::Udp => run_udp_receiver(node_id, listen, relay_urls).await,
-            Protocol::Tcp => run_tcp_receiver(node_id, listen, relay_urls).await,
+            Protocol::Udp => run_udp_receiver(node_id, listen, relay_urls, relay_only).await,
+            Protocol::Tcp => run_tcp_receiver(node_id, listen, relay_urls, relay_only).await,
         },
         Mode::GenerateSecret { output, force } => generate_secret_command(output, force),
         Mode::ShowId { secret_file } => show_id_command(secret_file),
@@ -174,7 +186,23 @@ fn parse_relay_mode(relay_urls: &[String]) -> Result<RelayMode> {
     }
 }
 
-async fn run_udp_sender(target: String, secret_file: Option<PathBuf>, relay_urls: Vec<String>) -> Result<()> {
+/// Validate that relay-only mode is used correctly.
+///
+/// Relay-only mode requires custom relay URL(s) to be specified because
+/// the default public relay is rate-limited and not suitable for all traffic.
+fn validate_relay_only(relay_only: bool, relay_urls: &[String]) -> Result<()> {
+    if relay_only && relay_urls.is_empty() {
+        anyhow::bail!(
+            "--relay-only requires at least one --relay-url to be specified.\n\
+            The default public relay is rate-limited and cannot be used for relay-only mode."
+        );
+    }
+    Ok(())
+}
+
+async fn run_udp_sender(target: String, secret_file: Option<PathBuf>, relay_urls: Vec<String>, relay_only: bool) -> Result<()> {
+    validate_relay_only(relay_only, &relay_urls)?;
+
     let target_addr: SocketAddr = target
         .parse()
         .context("Invalid target address format")?;
@@ -197,13 +225,22 @@ async fn run_udp_sender(target: String, secret_file: Option<PathBuf>, relay_urls
             println!("Using {} custom relay servers (with failover)", relay_urls.len());
         }
     }
+    if relay_only {
+        println!("Relay-only mode: all traffic will go through the relay server");
+    }
 
     let mut endpoint_builder = Endpoint::empty_builder(relay_mode)
         .alpns(vec![UDP_ALPN.to_vec()])
-        .discovery(PkarrPublisher::n0_dns())
-        .discovery(DnsDiscovery::n0_dns())
-        .discovery(MdnsDiscovery::builder())
         .transport_config(transport_config);
+
+    // Only add discovery if not relay-only mode
+    // Discovery enables direct P2P connections
+    if !relay_only {
+        endpoint_builder = endpoint_builder
+            .discovery(PkarrPublisher::n0_dns())
+            .discovery(DnsDiscovery::n0_dns())
+            .discovery(MdnsDiscovery::builder());
+    }
 
     // If secret file is provided, use persistent identity
     if let Some(secret_path) = &secret_file {
@@ -269,7 +306,9 @@ async fn run_udp_sender(target: String, secret_file: Option<PathBuf>, relay_urls
     Ok(())
 }
 
-async fn run_udp_receiver(node_id: String, listen: String, relay_urls: Vec<String>) -> Result<()> {
+async fn run_udp_receiver(node_id: String, listen: String, relay_urls: Vec<String>, relay_only: bool) -> Result<()> {
+    validate_relay_only(relay_only, &relay_urls)?;
+
     // Parse listen address
     let listen_addr: SocketAddr = listen
         .parse()
@@ -298,19 +337,36 @@ async fn run_udp_receiver(node_id: String, listen: String, relay_urls: Vec<Strin
             println!("Using {} custom relay servers (with failover)", relay_urls.len());
         }
     }
+    if relay_only {
+        println!("Relay-only mode: all traffic will go through the relay server");
+    }
 
-    let endpoint = Endpoint::empty_builder(relay_mode)
-        .discovery(PkarrPublisher::n0_dns())
-        .discovery(DnsDiscovery::n0_dns())
-        .discovery(MdnsDiscovery::builder())
-        .transport_config(transport_config)
+    let mut endpoint_builder = Endpoint::empty_builder(relay_mode)
+        .transport_config(transport_config);
+
+    // Only add discovery if not relay-only mode
+    // Discovery enables direct P2P connections
+    if !relay_only {
+        endpoint_builder = endpoint_builder
+            .discovery(PkarrPublisher::n0_dns())
+            .discovery(DnsDiscovery::n0_dns())
+            .discovery(MdnsDiscovery::builder());
+    }
+
+    let endpoint = endpoint_builder
         .bind()
         .await
         .context("Failed to create iroh endpoint")?;
 
     // Connect to sender
     println!("Connecting to sender {}...", endpoint_id);
-    let endpoint_addr = EndpointAddr::new(endpoint_id);
+    let mut endpoint_addr = EndpointAddr::new(endpoint_id);
+    // In relay-only mode, we need to provide the relay URL for addressing
+    // since discovery is disabled
+    if relay_only {
+        let relay_url: RelayUrl = relay_urls[0].parse().context("Invalid relay URL")?;
+        endpoint_addr = endpoint_addr.with_relay_url(relay_url);
+    }
     let conn = endpoint
         .connect(endpoint_addr, UDP_ALPN)
         .await
@@ -552,7 +608,9 @@ fn show_id_command(secret_file: PathBuf) -> Result<()> {
 // TCP Tunnel Implementation
 // ============================================================================
 
-async fn run_tcp_sender(target: String, secret_file: Option<PathBuf>, relay_urls: Vec<String>) -> Result<()> {
+async fn run_tcp_sender(target: String, secret_file: Option<PathBuf>, relay_urls: Vec<String>, relay_only: bool) -> Result<()> {
+    validate_relay_only(relay_only, &relay_urls)?;
+
     let target_addr: SocketAddr = target
         .parse()
         .context("Invalid target address format")?;
@@ -575,13 +633,22 @@ async fn run_tcp_sender(target: String, secret_file: Option<PathBuf>, relay_urls
             println!("Using {} custom relay servers (with failover)", relay_urls.len());
         }
     }
+    if relay_only {
+        println!("Relay-only mode: all traffic will go through the relay server");
+    }
 
     let mut endpoint_builder = Endpoint::empty_builder(relay_mode)
         .alpns(vec![TCP_ALPN.to_vec()])
-        .discovery(PkarrPublisher::n0_dns())
-        .discovery(DnsDiscovery::n0_dns())
-        .discovery(MdnsDiscovery::builder())
         .transport_config(transport_config);
+
+    // Only add discovery if not relay-only mode
+    // Discovery enables direct P2P connections
+    if !relay_only {
+        endpoint_builder = endpoint_builder
+            .discovery(PkarrPublisher::n0_dns())
+            .discovery(DnsDiscovery::n0_dns())
+            .discovery(MdnsDiscovery::builder());
+    }
 
     // If secret file is provided, use persistent identity
     if let Some(secret_path) = &secret_file {
@@ -670,7 +737,9 @@ async fn handle_tcp_sender_stream(
     Ok(())
 }
 
-async fn run_tcp_receiver(node_id: String, listen: String, relay_urls: Vec<String>) -> Result<()> {
+async fn run_tcp_receiver(node_id: String, listen: String, relay_urls: Vec<String>, relay_only: bool) -> Result<()> {
+    validate_relay_only(relay_only, &relay_urls)?;
+
     // Parse listen address
     let listen_addr: SocketAddr = listen
         .parse()
@@ -699,19 +768,36 @@ async fn run_tcp_receiver(node_id: String, listen: String, relay_urls: Vec<Strin
             println!("Using {} custom relay servers (with failover)", relay_urls.len());
         }
     }
+    if relay_only {
+        println!("Relay-only mode: all traffic will go through the relay server");
+    }
 
-    let endpoint = Endpoint::empty_builder(relay_mode)
-        .discovery(PkarrPublisher::n0_dns())
-        .discovery(DnsDiscovery::n0_dns())
-        .discovery(MdnsDiscovery::builder())
-        .transport_config(transport_config)
+    let mut endpoint_builder = Endpoint::empty_builder(relay_mode)
+        .transport_config(transport_config);
+
+    // Only add discovery if not relay-only mode
+    // Discovery enables direct P2P connections
+    if !relay_only {
+        endpoint_builder = endpoint_builder
+            .discovery(PkarrPublisher::n0_dns())
+            .discovery(DnsDiscovery::n0_dns())
+            .discovery(MdnsDiscovery::builder());
+    }
+
+    let endpoint = endpoint_builder
         .bind()
         .await
         .context("Failed to create iroh endpoint")?;
 
     // Connect to sender
     println!("Connecting to sender {}...", endpoint_id);
-    let endpoint_addr = EndpointAddr::new(endpoint_id);
+    let mut endpoint_addr = EndpointAddr::new(endpoint_id);
+    // In relay-only mode, we need to provide the relay URL for addressing
+    // since discovery is disabled
+    if relay_only {
+        let relay_url: RelayUrl = relay_urls[0].parse().context("Invalid relay URL")?;
+        endpoint_addr = endpoint_addr.with_relay_url(relay_url);
+    }
     let conn = endpoint
         .connect(endpoint_addr, TCP_ALPN)
         .await
