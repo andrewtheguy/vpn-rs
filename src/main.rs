@@ -310,20 +310,15 @@ async fn forward_stream_to_udp_sender(
 
     let response_task = tokio::spawn(async move {
         let mut buf = vec![0u8; 65535];
-        loop {
-            match udp_clone.recv_from(&mut buf).await {
-                Ok((len, _addr)) => {
-                    let frame_len = (len as u16).to_be_bytes();
-                    if send_stream.write_all(&frame_len).await.is_err() {
-                        break;
-                    }
-                    if send_stream.write_all(&buf[..len]).await.is_err() {
-                        break;
-                    }
-                    println!("-> Sent {} bytes back to receiver", len);
-                }
-                Err(_) => break,
+        while let Ok((len, _addr)) = udp_clone.recv_from(&mut buf).await {
+            let frame_len = (len as u16).to_be_bytes();
+            if send_stream.write_all(&frame_len).await.is_err() {
+                break;
             }
+            if send_stream.write_all(&buf[..len]).await.is_err() {
+                break;
+            }
+            println!("-> Sent {} bytes back to receiver", len);
         }
     });
 
