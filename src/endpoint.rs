@@ -1,0 +1,190 @@
+//! Common endpoint helpers for iroh tunnel connections.
+
+use anyhow::{Context, Result};
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+use iroh::{
+    discovery::{dns::DnsDiscovery, mdns::MdnsDiscovery, pkarr::PkarrPublisher},
+    endpoint::{Builder as EndpointBuilder, PathSelection},
+    Endpoint, EndpointAddr, EndpointId, RelayMap, RelayMode, RelayUrl, SecretKey, Watcher,
+};
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+pub const UDP_ALPN: &[u8] = b"udp-forward/1";
+pub const TCP_ALPN: &[u8] = b"tcp-forward/1";
+pub const RELAY_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Load secret key from file (base64 encoded).
+pub fn load_secret(path: &Path) -> Result<SecretKey> {
+    if !path.exists() {
+        anyhow::bail!(
+            "Secret key file not found: {}\nGenerate one with: tunnel-rs generate-secret --output {}",
+            path.display(),
+            path.display()
+        );
+    }
+
+    let content = std::fs::read_to_string(path).context("Failed to read secret key file")?;
+    let content = content.trim();
+
+    let bytes = BASE64
+        .decode(content)
+        .context("Invalid base64 in secret key file")?;
+
+    SecretKey::try_from(&bytes[..]).context("Invalid secret key (must be 32 bytes)")
+}
+
+/// Get public key (EndpointId) from secret key.
+pub fn secret_to_endpoint_id(secret: &SecretKey) -> EndpointId {
+    secret.public()
+}
+
+/// Parse relay URL strings into a RelayMode.
+pub fn parse_relay_mode(relay_urls: &[String]) -> Result<RelayMode> {
+    if relay_urls.is_empty() {
+        Ok(RelayMode::Default)
+    } else {
+        let parsed_urls: Vec<RelayUrl> = relay_urls
+            .iter()
+            .map(|url| url.parse().context(format!("Invalid relay URL: {}", url)))
+            .collect::<Result<Vec<_>>>()?;
+        let relay_map = RelayMap::from_iter(parsed_urls);
+        Ok(RelayMode::Custom(relay_map))
+    }
+}
+
+/// Validate that relay-only mode is used correctly.
+pub fn validate_relay_only(relay_only: bool, relay_urls: &[String]) -> Result<()> {
+    if relay_only && relay_urls.is_empty() {
+        anyhow::bail!(
+            "--relay-only requires at least one --relay-url to be specified.\n\
+            The default public relay is rate-limited and cannot be used for relay-only mode."
+        );
+    }
+    Ok(())
+}
+
+/// Print relay configuration status messages.
+pub fn print_relay_status(relay_urls: &[String], relay_only: bool, using_custom_relay: bool) {
+    if using_custom_relay {
+        if relay_urls.len() == 1 {
+            println!("Using custom relay server");
+        } else {
+            println!("Using {} custom relay servers (with failover)", relay_urls.len());
+        }
+    }
+    if relay_only {
+        println!("Relay-only mode: all traffic will go through the relay server");
+    }
+}
+
+/// Create a base endpoint builder with common configuration.
+pub fn create_endpoint_builder(relay_mode: RelayMode, relay_only: bool) -> EndpointBuilder {
+    let mut transport_config = iroh::endpoint::TransportConfig::default();
+    transport_config.max_idle_timeout(None);
+
+    let mut builder = Endpoint::empty_builder(relay_mode)
+        .transport_config(transport_config);
+
+    if relay_only {
+        builder = builder.path_selection(PathSelection::RelayOnly);
+    } else {
+        builder = builder
+            .discovery(PkarrPublisher::n0_dns())
+            .discovery(DnsDiscovery::n0_dns())
+            .discovery(MdnsDiscovery::builder());
+    }
+
+    builder
+}
+
+/// Create a sender endpoint with optional persistent identity.
+pub async fn create_sender_endpoint(
+    relay_urls: &[String],
+    relay_only: bool,
+    secret_file: Option<&PathBuf>,
+    alpn: &[u8],
+) -> Result<Endpoint> {
+    let relay_mode = parse_relay_mode(relay_urls)?;
+    let using_custom_relay = !matches!(relay_mode, RelayMode::Default);
+    print_relay_status(relay_urls, relay_only, using_custom_relay);
+
+    let mut builder = create_endpoint_builder(relay_mode, relay_only)
+        .alpns(vec![alpn.to_vec()]);
+
+    if let Some(secret_path) = secret_file {
+        let secret = load_secret(secret_path)?;
+        let endpoint_id = secret_to_endpoint_id(&secret);
+        println!("Loaded identity from: {}", secret_path.display());
+        println!("EndpointId: {}", endpoint_id);
+        builder = builder.secret_key(secret);
+    }
+
+    let endpoint = builder.bind().await.context("Failed to create iroh endpoint")?;
+    endpoint.online().await;
+    Ok(endpoint)
+}
+
+/// Create a receiver endpoint.
+pub async fn create_receiver_endpoint(relay_urls: &[String], relay_only: bool) -> Result<Endpoint> {
+    let relay_mode = parse_relay_mode(relay_urls)?;
+    let using_custom_relay = !matches!(relay_mode, RelayMode::Default);
+    print_relay_status(relay_urls, relay_only, using_custom_relay);
+
+    let builder = create_endpoint_builder(relay_mode, relay_only);
+    builder.bind().await.context("Failed to create iroh endpoint")
+}
+
+/// Connect to a sender endpoint with relay failover support.
+pub async fn connect_to_sender(
+    endpoint: &Endpoint,
+    sender_id: EndpointId,
+    relay_urls: &[String],
+    relay_only: bool,
+    alpn: &[u8],
+) -> Result<iroh::endpoint::Connection> {
+    println!("Connecting to sender {}...", sender_id);
+
+    if relay_only {
+        // Try each relay URL until one works
+        let mut last_error = None;
+        for relay_url_str in relay_urls {
+            let relay_url: RelayUrl = relay_url_str.parse().context("Invalid relay URL")?;
+            let endpoint_addr = EndpointAddr::new(sender_id).with_relay_url(relay_url.clone());
+            println!("Trying relay: {} (timeout: {}s)", relay_url, RELAY_CONNECT_TIMEOUT.as_secs());
+
+            match tokio::time::timeout(
+                RELAY_CONNECT_TIMEOUT,
+                endpoint.connect(endpoint_addr, alpn),
+            ).await {
+                Ok(Ok(conn)) => {
+                    println!("Connected via relay: {}", relay_url);
+                    return Ok(conn);
+                }
+                Ok(Err(e)) => {
+                    eprintln!("Failed to connect via {}: {}", relay_url, e);
+                    last_error = Some(e.to_string());
+                }
+                Err(_) => {
+                    eprintln!("Connection to {} timed out", relay_url);
+                    last_error = Some(format!("Connection to {} timed out", relay_url));
+                }
+            }
+        }
+        anyhow::bail!(
+            "Failed to connect via any relay: {}",
+            last_error.unwrap_or_else(|| "No relay URLs provided".to_string())
+        )
+    } else {
+        let endpoint_addr = EndpointAddr::new(sender_id);
+        endpoint.connect(endpoint_addr, alpn).await.context("Failed to connect to sender")
+    }
+}
+
+/// Print connection type information.
+pub fn print_connection_type(endpoint: &Endpoint, remote_id: EndpointId) {
+    if let Some(mut conn_type_watcher) = endpoint.conn_type(remote_id) {
+        let conn_type = conn_type_watcher.get();
+        println!("Connection type: {:?}", conn_type);
+    }
+}

@@ -8,23 +8,23 @@
 //!   UDP sender:    tunnel-rs sender --protocol udp --target 127.0.0.1:51820
 //!   UDP receiver:  tunnel-rs receiver --protocol udp --node-id <NODE_ID> --listen 0.0.0.0:51820
 
+mod endpoint;
+
 use anyhow::{Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use clap::{Parser, Subcommand, ValueEnum};
-use iroh::{
-    discovery::{dns::DnsDiscovery, mdns::MdnsDiscovery, pkarr::PkarrPublisher},
-    endpoint::PathSelection,
-    Endpoint, EndpointAddr, EndpointId, RelayMap, RelayMode, RelayUrl, SecretKey, Watcher,
-};
+use iroh::{EndpointId, SecretKey};
 use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::sync::Mutex;
 
-const UDP_ALPN: &[u8] = b"udp-forward/1";
-const TCP_ALPN: &[u8] = b"tcp-forward/1";
+use endpoint::{
+    connect_to_sender, create_receiver_endpoint, create_sender_endpoint, load_secret,
+    print_connection_type, secret_to_endpoint_id, validate_relay_only, TCP_ALPN, UDP_ALPN,
+};
 
 #[derive(Clone, Copy, ValueEnum, Default)]
 enum Protocol {
@@ -144,126 +144,26 @@ async fn main() -> Result<()> {
     }
 }
 
-/// Load secret key from file (base64 encoded)
-fn load_secret(path: &Path) -> Result<SecretKey> {
-    if !path.exists() {
-        anyhow::bail!(
-            "Secret key file not found: {}\nGenerate one with: tunnel-rs generate-secret --output {}",
-            path.display(),
-            path.display()
-        );
-    }
+// ============================================================================
+// UDP Tunnel Implementation
+// ============================================================================
 
-    let content = std::fs::read_to_string(path).context("Failed to read secret key file")?;
-    let content = content.trim();
-
-    let bytes = BASE64
-        .decode(content)
-        .context("Invalid base64 in secret key file")?;
-
-    SecretKey::try_from(&bytes[..]).context("Invalid secret key (must be 32 bytes)")
-}
-
-/// Get public key (EndpointId) from secret key
-fn secret_to_endpoint_id(secret: &SecretKey) -> EndpointId {
-    secret.public()
-}
-
-/// Parse relay URL strings into a RelayMode.
-///
-/// If URLs are provided, returns `RelayMode::Custom` with a RelayMap containing all URLs.
-/// If no URLs are provided, returns `RelayMode::Default` to use iroh's public relays.
-/// Multiple relays provide automatic failover - iroh selects the best one based on latency.
-fn parse_relay_mode(relay_urls: &[String]) -> Result<RelayMode> {
-    if relay_urls.is_empty() {
-        Ok(RelayMode::Default)
-    } else {
-        let parsed_urls: Vec<RelayUrl> = relay_urls
-            .iter()
-            .map(|url| url.parse().context(format!("Invalid relay URL: {}", url)))
-            .collect::<Result<Vec<_>>>()?;
-        let relay_map = RelayMap::from_iter(parsed_urls);
-        Ok(RelayMode::Custom(relay_map))
-    }
-}
-
-/// Validate that relay-only mode is used correctly.
-///
-/// Relay-only mode requires custom relay URL(s) to be specified because
-/// the default public relay is rate-limited and not suitable for all traffic.
-fn validate_relay_only(relay_only: bool, relay_urls: &[String]) -> Result<()> {
-    if relay_only && relay_urls.is_empty() {
-        anyhow::bail!(
-            "--relay-only requires at least one --relay-url to be specified.\n\
-            The default public relay is rate-limited and cannot be used for relay-only mode."
-        );
-    }
-    Ok(())
-}
-
-async fn run_udp_sender(target: String, secret_file: Option<PathBuf>, relay_urls: Vec<String>, relay_only: bool) -> Result<()> {
+async fn run_udp_sender(
+    target: String,
+    secret_file: Option<PathBuf>,
+    relay_urls: Vec<String>,
+    relay_only: bool,
+) -> Result<()> {
     validate_relay_only(relay_only, &relay_urls)?;
 
-    let target_addr: SocketAddr = target
-        .parse()
-        .context("Invalid target address format")?;
+    let target_addr: SocketAddr = target.parse().context("Invalid target address format")?;
 
     println!("UDP Tunnel - Sender Mode");
     println!("========================");
-
-    // Create iroh endpoint with discovery
     println!("Creating iroh endpoint...");
-    let mut transport_config = iroh::endpoint::TransportConfig::default();
-    // Disable idle timeout - UDP traffic can be sporadic
-    transport_config.max_idle_timeout(None);
 
-    let relay_mode = parse_relay_mode(&relay_urls)?;
-    let using_custom_relay = !matches!(relay_mode, RelayMode::Default);
-    if using_custom_relay {
-        if relay_urls.len() == 1 {
-            println!("Using custom relay server");
-        } else {
-            println!("Using {} custom relay servers (with failover)", relay_urls.len());
-        }
-    }
-    if relay_only {
-        println!("Relay-only mode: all traffic will go through the relay server");
-    }
+    let endpoint = create_sender_endpoint(&relay_urls, relay_only, secret_file.as_ref(), UDP_ALPN).await?;
 
-    let mut endpoint_builder = Endpoint::empty_builder(relay_mode)
-        .alpns(vec![UDP_ALPN.to_vec()])
-        .transport_config(transport_config);
-
-    // Force relay-only path selection if enabled
-    if relay_only {
-        endpoint_builder = endpoint_builder.path_selection(PathSelection::RelayOnly);
-    } else {
-        // Only add discovery if not relay-only mode
-        // Discovery enables direct P2P connections
-        endpoint_builder = endpoint_builder
-            .discovery(PkarrPublisher::n0_dns())
-            .discovery(DnsDiscovery::n0_dns())
-            .discovery(MdnsDiscovery::builder());
-    }
-
-    // If secret file is provided, use persistent identity
-    if let Some(secret_path) = &secret_file {
-        let secret = load_secret(secret_path)?;
-        let endpoint_id = secret_to_endpoint_id(&secret);
-        println!("Loaded identity from: {}", secret_path.display());
-        println!("EndpointId: {}", endpoint_id);
-        endpoint_builder = endpoint_builder.secret_key(secret);
-    }
-
-    let endpoint = endpoint_builder
-        .bind()
-        .await
-        .context("Failed to create iroh endpoint")?;
-
-    // Wait for endpoint to be online
-    endpoint.online().await;
-
-    // Print connection info
     let endpoint_id = endpoint.id();
     let target_port = target_addr.port();
     println!("\nEndpointId: {}", endpoint_id);
@@ -274,7 +174,6 @@ async fn run_udp_sender(target: String, secret_file: Option<PathBuf>, relay_urls
     );
     println!("Waiting for receiver to connect...");
 
-    // Accept incoming connection
     let conn = endpoint
         .accept()
         .await
@@ -284,7 +183,6 @@ async fn run_udp_sender(target: String, secret_file: Option<PathBuf>, relay_urls
 
     println!("Receiver connected from: {}", conn.remote_id());
 
-    // Accept bidirectional stream (receiver will open it)
     let (send_stream, recv_stream) = conn
         .accept_bi()
         .await
@@ -292,17 +190,14 @@ async fn run_udp_sender(target: String, secret_file: Option<PathBuf>, relay_urls
 
     println!("Forwarding UDP traffic to {}", target_addr);
 
-    // Create a UDP socket for sending to target
     let udp_socket = Arc::new(
         UdpSocket::bind("0.0.0.0:0")
             .await
             .context("Failed to bind UDP socket")?,
     );
 
-    // Forward stream to UDP target
     forward_stream_to_udp_sender(recv_stream, send_stream, udp_socket, target_addr).await?;
 
-    // Cleanup
     conn.close(0u32.into(), b"done");
     endpoint.close().await;
     println!("Connection closed.");
@@ -310,111 +205,35 @@ async fn run_udp_sender(target: String, secret_file: Option<PathBuf>, relay_urls
     Ok(())
 }
 
-async fn run_udp_receiver(node_id: String, listen: String, relay_urls: Vec<String>, relay_only: bool) -> Result<()> {
+async fn run_udp_receiver(
+    node_id: String,
+    listen: String,
+    relay_urls: Vec<String>,
+    relay_only: bool,
+) -> Result<()> {
     validate_relay_only(relay_only, &relay_urls)?;
 
-    // Parse listen address
     let listen_addr: SocketAddr = listen
         .parse()
         .context("Invalid listen address format. Use format like 127.0.0.1:51820 or [::]:51820")?;
 
-    // Parse EndpointId
-    let endpoint_id: EndpointId = node_id
+    let sender_id: EndpointId = node_id
         .parse()
         .context("Invalid EndpointId format. Should be a 52-character base32 string.")?;
 
     println!("UDP Tunnel - Receiver Mode");
     println!("==========================");
-
-    // Create iroh endpoint with discovery
     println!("Creating iroh endpoint...");
-    let mut transport_config = iroh::endpoint::TransportConfig::default();
-    // Disable idle timeout - UDP traffic can be sporadic
-    transport_config.max_idle_timeout(None);
 
-    let relay_mode = parse_relay_mode(&relay_urls)?;
-    let using_custom_relay = !matches!(relay_mode, RelayMode::Default);
-    if using_custom_relay {
-        if relay_urls.len() == 1 {
-            println!("Using custom relay server");
-        } else {
-            println!("Using {} custom relay servers (with failover)", relay_urls.len());
-        }
-    }
-    if relay_only {
-        println!("Relay-only mode: all traffic will go through the relay server");
-    }
+    let endpoint = create_receiver_endpoint(&relay_urls, relay_only).await?;
 
-    let mut endpoint_builder = Endpoint::empty_builder(relay_mode)
-        .transport_config(transport_config);
-
-    // Force relay-only path selection if enabled
-    if relay_only {
-        endpoint_builder = endpoint_builder.path_selection(PathSelection::RelayOnly);
-    } else {
-        // Only add discovery if not relay-only mode
-        // Discovery enables direct P2P connections
-        endpoint_builder = endpoint_builder
-            .discovery(PkarrPublisher::n0_dns())
-            .discovery(DnsDiscovery::n0_dns())
-            .discovery(MdnsDiscovery::builder());
-    }
-
-    let endpoint = endpoint_builder
-        .bind()
-        .await
-        .context("Failed to create iroh endpoint")?;
-
-    // Connect to sender
-    println!("Connecting to sender {}...", endpoint_id);
-    let conn = if relay_only {
-        // In relay-only mode, try each relay URL until one works
-        let mut last_error = None;
-        let mut connected = None;
-        for relay_url_str in &relay_urls {
-            let relay_url: RelayUrl = relay_url_str.parse().context("Invalid relay URL")?;
-            let endpoint_addr = EndpointAddr::new(endpoint_id).with_relay_url(relay_url.clone());
-            println!("Trying relay: {} (timeout: 10s)", relay_url);
-            let connect_future = endpoint.connect(endpoint_addr, UDP_ALPN);
-            match tokio::time::timeout(std::time::Duration::from_secs(10), connect_future).await {
-                Ok(Ok(conn)) => {
-                    println!("Connected via relay: {}", relay_url);
-                    connected = Some(conn);
-                    break;
-                }
-                Ok(Err(e)) => {
-                    eprintln!("Failed to connect via {}: {}", relay_url, e);
-                    last_error = Some(e.to_string());
-                }
-                Err(_) => {
-                    eprintln!("Connection to {} timed out", relay_url);
-                    last_error = Some(format!("Connection to {} timed out", relay_url));
-                }
-            }
-        }
-        match connected {
-            Some(conn) => conn,
-            None => anyhow::bail!("Failed to connect via any relay: {}",
-                last_error.unwrap_or_else(|| "No relay URLs provided".to_string())),
-        }
-    } else {
-        let endpoint_addr = EndpointAddr::new(endpoint_id);
-        endpoint.connect(endpoint_addr, UDP_ALPN).await.context("Failed to connect to sender")?
-    };
+    let conn = connect_to_sender(&endpoint, sender_id, &relay_urls, relay_only, UDP_ALPN).await?;
 
     println!("Connected to sender!");
+    print_connection_type(&endpoint, conn.remote_id());
 
-    // Print connection type (Direct, Relay, Mixed, None)
-    let remote_id = conn.remote_id();
-    if let Some(mut conn_type_watcher) = endpoint.conn_type(remote_id) {
-        let conn_type = conn_type_watcher.get();
-        println!("Connection type: {:?}", conn_type);
-    }
-
-    // Open bidirectional stream
     let (send_stream, recv_stream) = conn.open_bi().await.context("Failed to open stream")?;
 
-    // Bind local UDP socket for clients to connect to
     let udp_socket = Arc::new(
         UdpSocket::bind(listen_addr)
             .await
@@ -425,10 +244,8 @@ async fn run_udp_receiver(node_id: String, listen: String, relay_urls: Vec<Strin
         listen_addr
     );
 
-    // Track the client address for sending responses back
     let client_addr: Arc<Mutex<Option<SocketAddr>>> = Arc::new(Mutex::new(None));
 
-    // Run bidirectional forwarding
     let udp_clone = udp_socket.clone();
     let client_clone = client_addr.clone();
 
@@ -445,7 +262,6 @@ async fn run_udp_receiver(node_id: String, listen: String, relay_urls: Vec<Strin
         }
     }
 
-    // Cleanup
     conn.close(0u32.into(), b"done");
     endpoint.close().await;
     println!("Connection closed.");
@@ -467,10 +283,8 @@ async fn forward_udp_to_stream(
             .await
             .context("Failed to receive UDP packet")?;
 
-        // Remember peer address for responses
         *peer_addr.lock().await = Some(addr);
 
-        // Frame: [length: u16 BE][payload]
         let frame_len = (len as u16).to_be_bytes();
         send_stream
             .write_all(&frame_len)
@@ -494,13 +308,11 @@ async fn forward_stream_to_udp_sender(
 ) -> Result<()> {
     let udp_clone = udp_socket.clone();
 
-    // Spawn task to read responses from target and send back through tunnel
     let response_task = tokio::spawn(async move {
         let mut buf = vec![0u8; 65535];
         loop {
             match udp_clone.recv_from(&mut buf).await {
                 Ok((len, _addr)) => {
-                    // Frame: [length: u16 BE][payload]
                     let frame_len = (len as u16).to_be_bytes();
                     if send_stream.write_all(&frame_len).await.is_err() {
                         break;
@@ -515,23 +327,19 @@ async fn forward_stream_to_udp_sender(
         }
     });
 
-    // Read from tunnel and forward to target
     loop {
-        // Read frame length (2 bytes, big-endian)
         let mut len_buf = [0u8; 2];
         if recv_stream.read_exact(&mut len_buf).await.is_err() {
             break;
         }
         let len = u16::from_be_bytes(len_buf) as usize;
 
-        // Read payload
         let mut buf = vec![0u8; len];
         recv_stream
             .read_exact(&mut buf)
             .await
             .context("Failed to read frame payload")?;
 
-        // Forward to target
         udp_socket
             .send_to(&buf, target_addr)
             .await
@@ -551,22 +359,18 @@ async fn forward_stream_to_udp_receiver(
     client_addr: Arc<Mutex<Option<SocketAddr>>>,
 ) -> Result<()> {
     loop {
-        // Read frame length (2 bytes, big-endian)
         let mut len_buf = [0u8; 2];
         if recv_stream.read_exact(&mut len_buf).await.is_err() {
-            // Stream closed
             break;
         }
         let len = u16::from_be_bytes(len_buf) as usize;
 
-        // Read payload
         let mut buf = vec![0u8; len];
         recv_stream
             .read_exact(&mut buf)
             .await
             .context("Failed to read frame payload")?;
 
-        // Forward to the last known client address
         if let Some(addr) = *client_addr.lock().await {
             udp_socket
                 .send_to(&buf, addr)
@@ -581,126 +385,26 @@ async fn forward_stream_to_udp_receiver(
     Ok(())
 }
 
-/// Generate a new secret key file (base64 encoded) and output the EndpointId to stdout
-fn generate_secret_command(output: PathBuf, force: bool) -> Result<()> {
-    // Generate secret key
-    let secret = SecretKey::generate(&mut rand::rng());
-    let secret_base64 = BASE64.encode(secret.to_bytes());
-    let endpoint_id = secret_to_endpoint_id(&secret);
-
-    // Check if output is stdout (-)
-    if output.to_str() == Some("-") {
-        // Output both secret (base64) and EndpointId to stdout
-        println!("{}", secret_base64);
-        eprintln!("EndpointId: {}", endpoint_id);
-    } else {
-        // Check if file exists
-        if output.exists() && !force {
-            anyhow::bail!(
-                "File already exists: {}. Use --force to overwrite.",
-                output.display()
-            );
-        }
-
-        // Save to file with proper permissions (base64 encoded)
-        if let Some(parent) = output.parent() {
-            std::fs::create_dir_all(parent)
-                .context("Failed to create parent directory")?;
-        }
-        std::fs::write(&output, &secret_base64)
-            .context("Failed to write secret key file")?;
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = std::fs::metadata(&output)?.permissions();
-            perms.set_mode(0o600);
-            std::fs::set_permissions(&output, perms)?;
-        }
-
-        eprintln!("Secret key saved to: {}", output.display());
-        // Output EndpointId to stdout for automation (like wg pubkey)
-        println!("{}", endpoint_id);
-    }
-
-    Ok(())
-}
-
-/// Show the EndpointId for an existing secret key file
-fn show_id_command(secret_file: PathBuf) -> Result<()> {
-    let secret = load_secret(&secret_file)?;
-    let endpoint_id = secret_to_endpoint_id(&secret);
-    println!("{}", endpoint_id);
-    Ok(())
-}
-
 // ============================================================================
 // TCP Tunnel Implementation
 // ============================================================================
 
-async fn run_tcp_sender(target: String, secret_file: Option<PathBuf>, relay_urls: Vec<String>, relay_only: bool) -> Result<()> {
+async fn run_tcp_sender(
+    target: String,
+    secret_file: Option<PathBuf>,
+    relay_urls: Vec<String>,
+    relay_only: bool,
+) -> Result<()> {
     validate_relay_only(relay_only, &relay_urls)?;
 
-    let target_addr: SocketAddr = target
-        .parse()
-        .context("Invalid target address format")?;
+    let target_addr: SocketAddr = target.parse().context("Invalid target address format")?;
 
     println!("TCP Tunnel - Sender Mode");
     println!("========================");
-
-    // Create iroh endpoint with discovery
     println!("Creating iroh endpoint...");
-    let mut transport_config = iroh::endpoint::TransportConfig::default();
-    // Disable idle timeout for long-lived connections
-    transport_config.max_idle_timeout(None);
 
-    let relay_mode = parse_relay_mode(&relay_urls)?;
-    let using_custom_relay = !matches!(relay_mode, RelayMode::Default);
-    if using_custom_relay {
-        if relay_urls.len() == 1 {
-            println!("Using custom relay server");
-        } else {
-            println!("Using {} custom relay servers (with failover)", relay_urls.len());
-        }
-    }
-    if relay_only {
-        println!("Relay-only mode: all traffic will go through the relay server");
-    }
+    let endpoint = create_sender_endpoint(&relay_urls, relay_only, secret_file.as_ref(), TCP_ALPN).await?;
 
-    let mut endpoint_builder = Endpoint::empty_builder(relay_mode)
-        .alpns(vec![TCP_ALPN.to_vec()])
-        .transport_config(transport_config);
-
-    // Force relay-only path selection if enabled
-    if relay_only {
-        endpoint_builder = endpoint_builder.path_selection(PathSelection::RelayOnly);
-    } else {
-        // Only add discovery if not relay-only mode
-        // Discovery enables direct P2P connections
-        endpoint_builder = endpoint_builder
-            .discovery(PkarrPublisher::n0_dns())
-            .discovery(DnsDiscovery::n0_dns())
-            .discovery(MdnsDiscovery::builder());
-    }
-
-    // If secret file is provided, use persistent identity
-    if let Some(secret_path) = &secret_file {
-        let secret = load_secret(secret_path)?;
-        let endpoint_id = secret_to_endpoint_id(&secret);
-        println!("Loaded identity from: {}", secret_path.display());
-        println!("EndpointId: {}", endpoint_id);
-        endpoint_builder = endpoint_builder.secret_key(secret);
-    }
-
-    let endpoint = endpoint_builder
-        .bind()
-        .await
-        .context("Failed to create iroh endpoint")?;
-
-    // Wait for endpoint to be online
-    endpoint.online().await;
-
-    // Print connection info
     let endpoint_id = endpoint.id();
     let target_port = target_addr.port();
     println!("\nEndpointId: {}", endpoint_id);
@@ -711,9 +415,7 @@ async fn run_tcp_sender(target: String, secret_file: Option<PathBuf>, relay_urls
     );
     println!("Waiting for receiver to connect...");
 
-    // Keep accepting new receiver connections
     loop {
-        // Accept incoming connection from receiver
         let conn = match endpoint.accept().await {
             Some(incoming) => match incoming.await {
                 Ok(conn) => conn,
@@ -731,10 +433,8 @@ async fn run_tcp_sender(target: String, secret_file: Option<PathBuf>, relay_urls
         println!("Receiver connected from: {}", conn.remote_id());
         println!("Forwarding TCP connections to {}", target_addr);
 
-        // Spawn a task to handle this receiver connection
         let target = target_addr;
         tokio::spawn(async move {
-            // Accept bidirectional streams (each stream = one TCP connection)
             loop {
                 let (send_stream, recv_stream) = match conn.accept_bi().await {
                     Ok(streams) => streams,
@@ -746,8 +446,6 @@ async fn run_tcp_sender(target: String, secret_file: Option<PathBuf>, relay_urls
 
                 println!("New TCP connection request received");
 
-                // Spawn a task to handle this TCP connection
-                let target = target;
                 tokio::spawn(async move {
                     if let Err(e) = handle_tcp_sender_stream(send_stream, recv_stream, target).await {
                         eprintln!("TCP connection error: {}", e);
@@ -755,7 +453,6 @@ async fn run_tcp_sender(target: String, secret_file: Option<PathBuf>, relay_urls
                 });
             }
 
-            // Cleanup this connection
             conn.close(0u32.into(), b"done");
             println!("Receiver connection closed.");
         });
@@ -763,9 +460,7 @@ async fn run_tcp_sender(target: String, secret_file: Option<PathBuf>, relay_urls
         println!("Waiting for next receiver to connect...");
     }
 
-    // Cleanup
     endpoint.close().await;
-
     Ok(())
 }
 
@@ -774,125 +469,47 @@ async fn handle_tcp_sender_stream(
     recv_stream: iroh::endpoint::RecvStream,
     target_addr: SocketAddr,
 ) -> Result<()> {
-    // Connect to target TCP service
     let tcp_stream = TcpStream::connect(target_addr)
         .await
         .context("Failed to connect to target TCP service")?;
 
     println!("-> Connected to target {}", target_addr);
 
-    // Bridge the QUIC stream with the TCP connection
     bridge_streams(recv_stream, send_stream, tcp_stream).await?;
 
     println!("<- TCP connection to {} closed", target_addr);
     Ok(())
 }
 
-async fn run_tcp_receiver(node_id: String, listen: String, relay_urls: Vec<String>, relay_only: bool) -> Result<()> {
+async fn run_tcp_receiver(
+    node_id: String,
+    listen: String,
+    relay_urls: Vec<String>,
+    relay_only: bool,
+) -> Result<()> {
     validate_relay_only(relay_only, &relay_urls)?;
 
-    // Parse listen address
     let listen_addr: SocketAddr = listen
         .parse()
         .context("Invalid listen address format. Use format like 127.0.0.1:2222 or [::]:2222")?;
 
-    // Parse EndpointId
-    let endpoint_id: EndpointId = node_id
+    let sender_id: EndpointId = node_id
         .parse()
         .context("Invalid EndpointId format. Should be a 52-character base32 string.")?;
 
     println!("TCP Tunnel - Receiver Mode");
     println!("==========================");
-
-    // Create iroh endpoint with discovery
     println!("Creating iroh endpoint...");
-    let mut transport_config = iroh::endpoint::TransportConfig::default();
-    // Disable idle timeout for long-lived connections
-    transport_config.max_idle_timeout(None);
 
-    let relay_mode = parse_relay_mode(&relay_urls)?;
-    let using_custom_relay = !matches!(relay_mode, RelayMode::Default);
-    if using_custom_relay {
-        if relay_urls.len() == 1 {
-            println!("Using custom relay server");
-        } else {
-            println!("Using {} custom relay servers (with failover)", relay_urls.len());
-        }
-    }
-    if relay_only {
-        println!("Relay-only mode: all traffic will go through the relay server");
-    }
+    let endpoint = create_receiver_endpoint(&relay_urls, relay_only).await?;
 
-    let mut endpoint_builder = Endpoint::empty_builder(relay_mode)
-        .transport_config(transport_config);
-
-    // Force relay-only path selection if enabled
-    if relay_only {
-        endpoint_builder = endpoint_builder.path_selection(PathSelection::RelayOnly);
-    } else {
-        // Only add discovery if not relay-only mode
-        // Discovery enables direct P2P connections
-        endpoint_builder = endpoint_builder
-            .discovery(PkarrPublisher::n0_dns())
-            .discovery(DnsDiscovery::n0_dns())
-            .discovery(MdnsDiscovery::builder());
-    }
-
-    let endpoint = endpoint_builder
-        .bind()
-        .await
-        .context("Failed to create iroh endpoint")?;
-
-    // Connect to sender
-    println!("Connecting to sender {}...", endpoint_id);
-    let conn = if relay_only {
-        // In relay-only mode, try each relay URL until one works
-        let mut last_error = None;
-        let mut connected = None;
-        for relay_url_str in &relay_urls {
-            let relay_url: RelayUrl = relay_url_str.parse().context("Invalid relay URL")?;
-            let endpoint_addr = EndpointAddr::new(endpoint_id).with_relay_url(relay_url.clone());
-            println!("Trying relay: {} (timeout: 10s)", relay_url);
-            let connect_future = endpoint.connect(endpoint_addr, TCP_ALPN);
-            match tokio::time::timeout(std::time::Duration::from_secs(10), connect_future).await {
-                Ok(Ok(conn)) => {
-                    println!("Connected via relay: {}", relay_url);
-                    connected = Some(conn);
-                    break;
-                }
-                Ok(Err(e)) => {
-                    eprintln!("Failed to connect via {}: {}", relay_url, e);
-                    last_error = Some(e.to_string());
-                }
-                Err(_) => {
-                    eprintln!("Connection to {} timed out", relay_url);
-                    last_error = Some(format!("Connection to {} timed out", relay_url));
-                }
-            }
-        }
-        match connected {
-            Some(conn) => conn,
-            None => anyhow::bail!("Failed to connect via any relay: {}",
-                last_error.unwrap_or_else(|| "No relay URLs provided".to_string())),
-        }
-    } else {
-        let endpoint_addr = EndpointAddr::new(endpoint_id);
-        endpoint.connect(endpoint_addr, TCP_ALPN).await.context("Failed to connect to sender")?
-    };
+    let conn = connect_to_sender(&endpoint, sender_id, &relay_urls, relay_only, TCP_ALPN).await?;
 
     println!("Connected to sender!");
+    print_connection_type(&endpoint, conn.remote_id());
 
-    // Print connection type (Direct, Relay, Mixed, None)
-    let remote_id = conn.remote_id();
-    if let Some(mut conn_type_watcher) = endpoint.conn_type(remote_id) {
-        let conn_type = conn_type_watcher.get();
-        println!("Connection type: {:?}", conn_type);
-    }
-
-    // Use Arc to share the connection between tasks
     let conn = Arc::new(conn);
 
-    // Bind local TCP listener
     let listener = TcpListener::bind(listen_addr)
         .await
         .context("Failed to bind TCP listener")?;
@@ -901,7 +518,6 @@ async fn run_tcp_receiver(node_id: String, listen: String, relay_urls: Vec<Strin
         listen_addr
     );
 
-    // Accept local TCP connections and tunnel them
     loop {
         let (tcp_stream, peer_addr) = match listener.accept().await {
             Ok(result) => result,
@@ -913,11 +529,9 @@ async fn run_tcp_receiver(node_id: String, listen: String, relay_urls: Vec<Strin
 
         println!("New local connection from {}", peer_addr);
 
-        // Open a new QUIC stream for this TCP connection
         let conn_clone = conn.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle_tcp_receiver_connection(conn_clone, tcp_stream, peer_addr).await
-            {
+            if let Err(e) = handle_tcp_receiver_connection(conn_clone, tcp_stream, peer_addr).await {
                 eprintln!("TCP tunnel error for {}: {}", peer_addr, e);
             }
         });
@@ -929,12 +543,10 @@ async fn handle_tcp_receiver_connection(
     tcp_stream: TcpStream,
     peer_addr: SocketAddr,
 ) -> Result<()> {
-    // Open bidirectional QUIC stream
     let (send_stream, recv_stream) = conn.open_bi().await.context("Failed to open QUIC stream")?;
 
     println!("-> Opened tunnel for {}", peer_addr);
 
-    // Bridge the local TCP connection with the QUIC stream
     bridge_streams(recv_stream, send_stream, tcp_stream).await?;
 
     println!("<- Connection from {} closed", peer_addr);
@@ -949,20 +561,12 @@ async fn bridge_streams(
 ) -> Result<()> {
     let (mut tcp_read, mut tcp_write) = tcp_stream.into_split();
 
-    // Copy data bidirectionally
-    let quic_to_tcp = async {
-        copy_stream(&mut quic_recv, &mut tcp_write).await
-    };
+    let quic_to_tcp = async { copy_stream(&mut quic_recv, &mut tcp_write).await };
+    let tcp_to_quic = async { copy_stream(&mut tcp_read, &mut quic_send).await };
 
-    let tcp_to_quic = async {
-        copy_stream(&mut tcp_read, &mut quic_send).await
-    };
-
-    // Run both directions concurrently, finish when either completes
     tokio::select! {
         result = quic_to_tcp => {
             if let Err(e) = result {
-                // Ignore "reset by peer" errors as they're normal for TCP close
                 if !e.to_string().contains("reset") {
                     eprintln!("QUIC->TCP error: {}", e);
                 }
@@ -989,5 +593,54 @@ where
     tokio::io::copy(reader, writer)
         .await
         .context("Stream copy failed")?;
+    Ok(())
+}
+
+// ============================================================================
+// Secret Key Commands
+// ============================================================================
+
+/// Generate a new secret key file (base64 encoded) and output the EndpointId to stdout
+fn generate_secret_command(output: PathBuf, force: bool) -> Result<()> {
+    let secret = SecretKey::generate(&mut rand::rng());
+    let secret_base64 = BASE64.encode(secret.to_bytes());
+    let endpoint_id = secret_to_endpoint_id(&secret);
+
+    if output.to_str() == Some("-") {
+        println!("{}", secret_base64);
+        eprintln!("EndpointId: {}", endpoint_id);
+    } else {
+        if output.exists() && !force {
+            anyhow::bail!(
+                "File already exists: {}. Use --force to overwrite.",
+                output.display()
+            );
+        }
+
+        if let Some(parent) = output.parent() {
+            std::fs::create_dir_all(parent).context("Failed to create parent directory")?;
+        }
+        std::fs::write(&output, &secret_base64).context("Failed to write secret key file")?;
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&output)?.permissions();
+            perms.set_mode(0o600);
+            std::fs::set_permissions(&output, perms)?;
+        }
+
+        eprintln!("Secret key saved to: {}", output.display());
+        println!("{}", endpoint_id);
+    }
+
+    Ok(())
+}
+
+/// Show the EndpointId for an existing secret key file
+fn show_id_command(secret_file: PathBuf) -> Result<()> {
+    let secret = load_secret(&secret_file)?;
+    let endpoint_id = secret_to_endpoint_id(&secret);
+    println!("{}", endpoint_id);
     Ok(())
 }
