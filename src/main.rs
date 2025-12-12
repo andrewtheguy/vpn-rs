@@ -13,7 +13,7 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use clap::{Parser, Subcommand, ValueEnum};
 use iroh::{
     discovery::{dns::DnsDiscovery, mdns::MdnsDiscovery, pkarr::PkarrPublisher},
-    Endpoint, EndpointAddr, EndpointId, RelayMode, RelayUrl, SecretKey,
+    Endpoint, EndpointAddr, EndpointId, RelayMode, RelayUrl, SecretKey, Watcher,
 };
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -302,6 +302,13 @@ async fn run_udp_receiver(node_id: String, listen: String, relay_url: Option<Str
         .context("Failed to connect to sender")?;
 
     println!("Connected to sender!");
+
+    // Print connection type (Direct, Relay, Mixed, None)
+    let remote_id = conn.remote_id();
+    if let Some(mut conn_type_watcher) = endpoint.conn_type(remote_id) {
+        let conn_type = conn_type_watcher.get();
+        println!("Connection type: {:?}", conn_type);
+    }
 
     // Open bidirectional stream
     let (send_stream, recv_stream) = conn.open_bi().await.context("Failed to open stream")?;
@@ -688,6 +695,13 @@ async fn run_tcp_receiver(node_id: String, listen: String, relay_url: Option<Str
         .context("Failed to connect to sender")?;
 
     println!("Connected to sender!");
+
+    // Print connection type (Direct, Relay, Mixed, None)
+    let remote_id = conn.remote_id();
+    if let Some(mut conn_type_watcher) = endpoint.conn_type(remote_id) {
+        let conn_type = conn_type_watcher.get();
+        println!("Connection type: {:?}", conn_type);
+    }
 
     // Use Arc to share the connection between tasks
     let conn = Arc::new(conn);
