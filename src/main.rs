@@ -36,6 +36,7 @@ enum Protocol {
 
 #[derive(Parser)]
 #[command(name = "tunnel-rs")]
+#[command(version)]
 #[command(about = "Forward TCP/UDP traffic through iroh P2P connections")]
 struct Args {
     #[command(subcommand)]
