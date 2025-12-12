@@ -90,6 +90,7 @@ Then configure your WireGuard client to connect to `127.0.0.1:51820`.
 
 | Option | Default | Description |
 |--------|---------|-------------|
+| `--config`, `-c` | (optional) | Path to TOML config file |
 | `--protocol`, `-p` | tcp | Protocol to tunnel (tcp or udp) |
 | `--target`, `-t` | 127.0.0.1:22 | Target address to forward traffic to |
 | `--secret-file` | (optional) | Path to secret key file for persistent identity |
@@ -100,11 +101,65 @@ Then configure your WireGuard client to connect to `127.0.0.1:51820`.
 
 | Option | Default | Description |
 |--------|---------|-------------|
+| `--config`, `-c` | (optional) | Path to TOML config file |
 | `--protocol`, `-p` | tcp | Protocol to tunnel (tcp or udp) |
 | `--node-id`, `-n` | (required) | EndpointId of the sender to connect to |
-| `--listen-port`, `-l` | 22 | Local port to expose for clients |
+| `--listen`, `-l` | (required) | Local address to listen on (CLI only, not in config) |
 | `--relay-url` | (optional) | Custom relay server URL(s). Can be specified multiple times for failover |
 | `--relay-only` | false | Force all traffic through relay (requires `--relay-url`) |
+
+## Configuration File
+
+You can use a TOML config file instead of (or in addition to) command line arguments. CLI arguments take precedence over config file values.
+
+### Sender Config Example
+
+```toml
+# sender.toml
+protocol = "tcp"
+target = "127.0.0.1:22"
+secret_file = "./sender.key"
+relay_urls = [
+    "https://relay1.example.com",
+    "https://relay2.example.com",
+]
+relay_only = false
+```
+
+```bash
+tunnel-rs sender --config sender.toml
+```
+
+### Receiver Config Example
+
+```toml
+# receiver.toml
+protocol = "tcp"
+node_id = "2xnbkpbc7izsilvewd7c62w7wnwziacmpfwvhcrya5nt76dqkpga"
+relay_urls = [
+    "https://relay1.example.com",
+    "https://relay2.example.com",
+]
+relay_only = false
+```
+
+```bash
+# --listen is required on CLI (not configurable in file)
+tunnel-rs receiver --config receiver.toml --listen 127.0.0.1:2222
+```
+
+### Config Options
+
+| Option | Sender | Receiver | Description |
+|--------|--------|----------|-------------|
+| `protocol` | ✓ | ✓ | Protocol to tunnel ("tcp" or "udp") |
+| `target` | ✓ | - | Target address to forward traffic to |
+| `node_id` | - | ✓ | EndpointId of the sender |
+| `secret_file` | ✓ | - | Path to secret key file |
+| `relay_urls` | ✓ | ✓ | Array of relay server URLs |
+| `relay_only` | ✓ | ✓ | Force relay-only mode |
+
+**Note**: The `--listen` option for receiver is intentionally CLI-only to avoid accidentally exposing ports via config file changes.
 
 ## Persistent Identity for VPN Use
 
