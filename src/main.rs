@@ -13,6 +13,7 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use clap::{Parser, Subcommand, ValueEnum};
 use iroh::{
     discovery::{dns::DnsDiscovery, mdns::MdnsDiscovery, pkarr::PkarrPublisher},
+    endpoint::PathSelection,
     Endpoint, EndpointAddr, EndpointId, RelayMap, RelayMode, RelayUrl, SecretKey, Watcher,
 };
 use std::net::SocketAddr;
@@ -233,9 +234,12 @@ async fn run_udp_sender(target: String, secret_file: Option<PathBuf>, relay_urls
         .alpns(vec![UDP_ALPN.to_vec()])
         .transport_config(transport_config);
 
-    // Only add discovery if not relay-only mode
-    // Discovery enables direct P2P connections
-    if !relay_only {
+    // Force relay-only path selection if enabled
+    if relay_only {
+        endpoint_builder = endpoint_builder.path_selection(PathSelection::RelayOnly);
+    } else {
+        // Only add discovery if not relay-only mode
+        // Discovery enables direct P2P connections
         endpoint_builder = endpoint_builder
             .discovery(PkarrPublisher::n0_dns())
             .discovery(DnsDiscovery::n0_dns())
@@ -344,9 +348,12 @@ async fn run_udp_receiver(node_id: String, listen: String, relay_urls: Vec<Strin
     let mut endpoint_builder = Endpoint::empty_builder(relay_mode)
         .transport_config(transport_config);
 
-    // Only add discovery if not relay-only mode
-    // Discovery enables direct P2P connections
-    if !relay_only {
+    // Force relay-only path selection if enabled
+    if relay_only {
+        endpoint_builder = endpoint_builder.path_selection(PathSelection::RelayOnly);
+    } else {
+        // Only add discovery if not relay-only mode
+        // Discovery enables direct P2P connections
         endpoint_builder = endpoint_builder
             .discovery(PkarrPublisher::n0_dns())
             .discovery(DnsDiscovery::n0_dns())
@@ -641,9 +648,12 @@ async fn run_tcp_sender(target: String, secret_file: Option<PathBuf>, relay_urls
         .alpns(vec![TCP_ALPN.to_vec()])
         .transport_config(transport_config);
 
-    // Only add discovery if not relay-only mode
-    // Discovery enables direct P2P connections
-    if !relay_only {
+    // Force relay-only path selection if enabled
+    if relay_only {
+        endpoint_builder = endpoint_builder.path_selection(PathSelection::RelayOnly);
+    } else {
+        // Only add discovery if not relay-only mode
+        // Discovery enables direct P2P connections
         endpoint_builder = endpoint_builder
             .discovery(PkarrPublisher::n0_dns())
             .discovery(DnsDiscovery::n0_dns())
@@ -775,9 +785,12 @@ async fn run_tcp_receiver(node_id: String, listen: String, relay_urls: Vec<Strin
     let mut endpoint_builder = Endpoint::empty_builder(relay_mode)
         .transport_config(transport_config);
 
-    // Only add discovery if not relay-only mode
-    // Discovery enables direct P2P connections
-    if !relay_only {
+    // Force relay-only path selection if enabled
+    if relay_only {
+        endpoint_builder = endpoint_builder.path_selection(PathSelection::RelayOnly);
+    } else {
+        // Only add discovery if not relay-only mode
+        // Discovery enables direct P2P connections
         endpoint_builder = endpoint_builder
             .discovery(PkarrPublisher::n0_dns())
             .discovery(DnsDiscovery::n0_dns())
