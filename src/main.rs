@@ -688,42 +688,60 @@ async fn run_tcp_sender(target: String, secret_file: Option<PathBuf>, relay_urls
     );
     println!("Waiting for receiver to connect...");
 
-    // Accept incoming connection from receiver
-    let conn = endpoint
-        .accept()
-        .await
-        .context("No incoming connection")?
-        .await
-        .context("Failed to accept connection")?;
-
-    println!("Receiver connected from: {}", conn.remote_id());
-    println!("Forwarding TCP connections to {}", target_addr);
-
-    // Accept bidirectional streams (each stream = one TCP connection)
+    // Keep accepting new receiver connections
     loop {
-        let (send_stream, recv_stream) = match conn.accept_bi().await {
-            Ok(streams) => streams,
-            Err(e) => {
-                println!("Connection closed: {}", e);
+        // Accept incoming connection from receiver
+        let conn = match endpoint.accept().await {
+            Some(incoming) => match incoming.await {
+                Ok(conn) => conn,
+                Err(e) => {
+                    eprintln!("Failed to accept connection: {}", e);
+                    continue;
+                }
+            },
+            None => {
+                println!("Endpoint closed");
                 break;
             }
         };
 
-        println!("New TCP connection request received");
+        println!("Receiver connected from: {}", conn.remote_id());
+        println!("Forwarding TCP connections to {}", target_addr);
 
-        // Spawn a task to handle this TCP connection
+        // Spawn a task to handle this receiver connection
         let target = target_addr;
         tokio::spawn(async move {
-            if let Err(e) = handle_tcp_sender_stream(send_stream, recv_stream, target).await {
-                eprintln!("TCP connection error: {}", e);
+            // Accept bidirectional streams (each stream = one TCP connection)
+            loop {
+                let (send_stream, recv_stream) = match conn.accept_bi().await {
+                    Ok(streams) => streams,
+                    Err(e) => {
+                        println!("Receiver disconnected: {}", e);
+                        break;
+                    }
+                };
+
+                println!("New TCP connection request received");
+
+                // Spawn a task to handle this TCP connection
+                let target = target;
+                tokio::spawn(async move {
+                    if let Err(e) = handle_tcp_sender_stream(send_stream, recv_stream, target).await {
+                        eprintln!("TCP connection error: {}", e);
+                    }
+                });
             }
+
+            // Cleanup this connection
+            conn.close(0u32.into(), b"done");
+            println!("Receiver connection closed.");
         });
+
+        println!("Waiting for next receiver to connect...");
     }
 
     // Cleanup
-    conn.close(0u32.into(), b"done");
     endpoint.close().await;
-    println!("Connection closed.");
 
     Ok(())
 }
