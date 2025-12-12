@@ -13,7 +13,7 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use clap::{Parser, Subcommand, ValueEnum};
 use iroh::{
     discovery::{dns::DnsDiscovery, mdns::MdnsDiscovery, pkarr::PkarrPublisher},
-    Endpoint, EndpointAddr, EndpointId, RelayMode, RelayUrl, SecretKey, Watcher,
+    Endpoint, EndpointAddr, EndpointId, RelayMap, RelayMode, RelayUrl, SecretKey, Watcher,
 };
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -61,10 +61,10 @@ enum Mode {
         #[arg(long)]
         secret_file: Option<PathBuf>,
 
-        /// Custom relay server URL (e.g., http://localhost:3340 for local dev relay)
-        /// If not provided, uses iroh's default public relays
-        #[arg(long)]
-        relay_url: Option<String>,
+        /// Custom relay server URL(s) (e.g., http://localhost:3340 for local dev relay)
+        /// Can be specified multiple times for failover. If not provided, uses iroh's default public relays
+        #[arg(long = "relay-url")]
+        relay_urls: Vec<String>,
     },
     /// Run as receiver (connects to sender and exposes local port)
     Receiver {
@@ -80,10 +80,10 @@ enum Mode {
         #[arg(short, long)]
         listen: String,
 
-        /// Custom relay server URL (e.g., http://localhost:3340 for local dev relay)
-        /// If not provided, uses iroh's default public relays
-        #[arg(long)]
-        relay_url: Option<String>,
+        /// Custom relay server URL(s) (e.g., http://localhost:3340 for local dev relay)
+        /// Can be specified multiple times for failover. If not provided, uses iroh's default public relays
+        #[arg(long = "relay-url")]
+        relay_urls: Vec<String>,
     },
     /// Generate a new secret key file (for automation/setup)
     GenerateSecret {
@@ -112,19 +112,19 @@ async fn main() -> Result<()> {
             protocol,
             target,
             secret_file,
-            relay_url,
+            relay_urls,
         } => match protocol {
-            Protocol::Udp => run_udp_sender(target, secret_file, relay_url).await,
-            Protocol::Tcp => run_tcp_sender(target, secret_file, relay_url).await,
+            Protocol::Udp => run_udp_sender(target, secret_file, relay_urls).await,
+            Protocol::Tcp => run_tcp_sender(target, secret_file, relay_urls).await,
         },
         Mode::Receiver {
             protocol,
             node_id,
             listen,
-            relay_url,
+            relay_urls,
         } => match protocol {
-            Protocol::Udp => run_udp_receiver(node_id, listen, relay_url).await,
-            Protocol::Tcp => run_tcp_receiver(node_id, listen, relay_url).await,
+            Protocol::Udp => run_udp_receiver(node_id, listen, relay_urls).await,
+            Protocol::Tcp => run_tcp_receiver(node_id, listen, relay_urls).await,
         },
         Mode::GenerateSecret { output, force } => generate_secret_command(output, force),
         Mode::ShowId { secret_file } => show_id_command(secret_file),
@@ -156,18 +156,25 @@ fn secret_to_endpoint_id(secret: &SecretKey) -> EndpointId {
     secret.public()
 }
 
-/// Parse relay URL and return RelayMode
-fn parse_relay_mode(relay_url: Option<String>) -> Result<RelayMode> {
-    match relay_url {
-        Some(url) => {
-            let relay_url: RelayUrl = url.parse().context("Invalid relay URL")?;
-            Ok(RelayMode::Custom(relay_url.into()))
-        }
-        None => Ok(RelayMode::Default),
+/// Parse relay URL strings into a RelayMode.
+///
+/// If URLs are provided, returns `RelayMode::Custom` with a RelayMap containing all URLs.
+/// If no URLs are provided, returns `RelayMode::Default` to use iroh's public relays.
+/// Multiple relays provide automatic failover - iroh selects the best one based on latency.
+fn parse_relay_mode(relay_urls: &[String]) -> Result<RelayMode> {
+    if relay_urls.is_empty() {
+        Ok(RelayMode::Default)
+    } else {
+        let parsed_urls: Vec<RelayUrl> = relay_urls
+            .iter()
+            .map(|url| url.parse().context(format!("Invalid relay URL: {}", url)))
+            .collect::<Result<Vec<_>>>()?;
+        let relay_map = RelayMap::from_iter(parsed_urls);
+        Ok(RelayMode::Custom(relay_map))
     }
 }
 
-async fn run_udp_sender(target: String, secret_file: Option<PathBuf>, relay_url: Option<String>) -> Result<()> {
+async fn run_udp_sender(target: String, secret_file: Option<PathBuf>, relay_urls: Vec<String>) -> Result<()> {
     let target_addr: SocketAddr = target
         .parse()
         .context("Invalid target address format")?;
@@ -181,10 +188,14 @@ async fn run_udp_sender(target: String, secret_file: Option<PathBuf>, relay_url:
     // Disable idle timeout - UDP traffic can be sporadic
     transport_config.max_idle_timeout(None);
 
-    let relay_mode = parse_relay_mode(relay_url)?;
+    let relay_mode = parse_relay_mode(&relay_urls)?;
     let using_custom_relay = !matches!(relay_mode, RelayMode::Default);
     if using_custom_relay {
-        println!("Using custom relay server");
+        if relay_urls.len() == 1 {
+            println!("Using custom relay server");
+        } else {
+            println!("Using {} custom relay servers (with failover)", relay_urls.len());
+        }
     }
 
     let mut endpoint_builder = Endpoint::empty_builder(relay_mode)
@@ -258,7 +269,7 @@ async fn run_udp_sender(target: String, secret_file: Option<PathBuf>, relay_url:
     Ok(())
 }
 
-async fn run_udp_receiver(node_id: String, listen: String, relay_url: Option<String>) -> Result<()> {
+async fn run_udp_receiver(node_id: String, listen: String, relay_urls: Vec<String>) -> Result<()> {
     // Parse listen address
     let listen_addr: SocketAddr = listen
         .parse()
@@ -278,10 +289,14 @@ async fn run_udp_receiver(node_id: String, listen: String, relay_url: Option<Str
     // Disable idle timeout - UDP traffic can be sporadic
     transport_config.max_idle_timeout(None);
 
-    let relay_mode = parse_relay_mode(relay_url)?;
+    let relay_mode = parse_relay_mode(&relay_urls)?;
     let using_custom_relay = !matches!(relay_mode, RelayMode::Default);
     if using_custom_relay {
-        println!("Using custom relay server");
+        if relay_urls.len() == 1 {
+            println!("Using custom relay server");
+        } else {
+            println!("Using {} custom relay servers (with failover)", relay_urls.len());
+        }
     }
 
     let endpoint = Endpoint::empty_builder(relay_mode)
@@ -537,7 +552,7 @@ fn show_id_command(secret_file: PathBuf) -> Result<()> {
 // TCP Tunnel Implementation
 // ============================================================================
 
-async fn run_tcp_sender(target: String, secret_file: Option<PathBuf>, relay_url: Option<String>) -> Result<()> {
+async fn run_tcp_sender(target: String, secret_file: Option<PathBuf>, relay_urls: Vec<String>) -> Result<()> {
     let target_addr: SocketAddr = target
         .parse()
         .context("Invalid target address format")?;
@@ -551,10 +566,14 @@ async fn run_tcp_sender(target: String, secret_file: Option<PathBuf>, relay_url:
     // Disable idle timeout for long-lived connections
     transport_config.max_idle_timeout(None);
 
-    let relay_mode = parse_relay_mode(relay_url)?;
+    let relay_mode = parse_relay_mode(&relay_urls)?;
     let using_custom_relay = !matches!(relay_mode, RelayMode::Default);
     if using_custom_relay {
-        println!("Using custom relay server");
+        if relay_urls.len() == 1 {
+            println!("Using custom relay server");
+        } else {
+            println!("Using {} custom relay servers (with failover)", relay_urls.len());
+        }
     }
 
     let mut endpoint_builder = Endpoint::empty_builder(relay_mode)
@@ -651,7 +670,7 @@ async fn handle_tcp_sender_stream(
     Ok(())
 }
 
-async fn run_tcp_receiver(node_id: String, listen: String, relay_url: Option<String>) -> Result<()> {
+async fn run_tcp_receiver(node_id: String, listen: String, relay_urls: Vec<String>) -> Result<()> {
     // Parse listen address
     let listen_addr: SocketAddr = listen
         .parse()
@@ -671,10 +690,14 @@ async fn run_tcp_receiver(node_id: String, listen: String, relay_url: Option<Str
     // Disable idle timeout for long-lived connections
     transport_config.max_idle_timeout(None);
 
-    let relay_mode = parse_relay_mode(relay_url)?;
+    let relay_mode = parse_relay_mode(&relay_urls)?;
     let using_custom_relay = !matches!(relay_mode, RelayMode::Default);
     if using_custom_relay {
-        println!("Using custom relay server");
+        if relay_urls.len() == 1 {
+            println!("Using custom relay server");
+        } else {
+            println!("Using {} custom relay servers (with failover)", relay_urls.len());
+        }
     }
 
     let endpoint = Endpoint::empty_builder(relay_mode)

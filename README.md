@@ -93,6 +93,7 @@ Then configure your WireGuard client to connect to `127.0.0.1:51820`.
 | `--protocol`, `-p` | tcp | Protocol to tunnel (tcp or udp) |
 | `--target`, `-t` | 127.0.0.1:22 | Target address to forward traffic to |
 | `--secret-file` | (optional) | Path to secret key file for persistent identity |
+| `--relay-url` | (optional) | Custom relay server URL(s). Can be specified multiple times for failover |
 
 ### receiver
 
@@ -101,6 +102,7 @@ Then configure your WireGuard client to connect to `127.0.0.1:51820`.
 | `--protocol`, `-p` | tcp | Protocol to tunnel (tcp or udp) |
 | `--node-id`, `-n` | (required) | EndpointId of the sender to connect to |
 | `--listen-port`, `-l` | 22 | Local port to expose for clients |
+| `--relay-url` | (optional) | Custom relay server URL(s). Can be specified multiple times for failover |
 
 ## Persistent Identity for VPN Use
 
@@ -182,9 +184,18 @@ tunnel-rs sender --target 127.0.0.1:22 --relay-url https://your-relay.example.co
 
 # Receiver with custom relay
 tunnel-rs receiver --node-id <ENDPOINT_ID> --listen 127.0.0.1:2222 --relay-url https://your-relay.example.com
+
+# Multiple relays for failover (iroh selects best one based on latency)
+tunnel-rs sender --target 127.0.0.1:22 \
+  --relay-url https://relay1.example.com \
+  --relay-url https://relay2.example.com
+
+tunnel-rs receiver --node-id <ENDPOINT_ID> --listen 127.0.0.1:2222 \
+  --relay-url https://relay1.example.com \
+  --relay-url https://relay2.example.com
 ```
 
-Both sender and receiver must use the same `--relay-url` to connect through your private relay.
+Both sender and receiver must use the same `--relay-url` option(s) to connect through your private relay(s).
 
 ### Running iroh-relay
 
