@@ -9,6 +9,7 @@
 //!   UDP receiver:  tunnel-rs receiver --protocol udp --node-id <NODE_ID> --listen 0.0.0.0:51820
 
 use anyhow::{Context, Result};
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use clap::{Parser, Subcommand, ValueEnum};
 use iroh::{
     discovery::{dns::DnsDiscovery, mdns::MdnsDiscovery, pkarr::PkarrPublisher},
@@ -110,33 +111,24 @@ async fn main() -> Result<()> {
     }
 }
 
-/// Load secret key from file, or generate new one if file doesn't exist
-fn load_or_generate_secret(path: &Path) -> Result<SecretKey> {
-    if path.exists() {
-        // Load existing key
-        let bytes = std::fs::read(path).context("Failed to read secret key file")?;
-        SecretKey::try_from(&bytes[..]).context("Invalid secret key file")
-    } else {
-        // Generate new key
-        let secret = SecretKey::generate(&mut rand::rng());
-
-        // Save to file
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).context("Failed to create parent directory")?;
-        }
-        std::fs::write(path, secret.to_bytes()).context("Failed to write secret key file")?;
-
-        // Set file permissions to 0600 (Unix only)
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = std::fs::metadata(path)?.permissions();
-            perms.set_mode(0o600);
-            std::fs::set_permissions(path, perms)?;
-        }
-
-        Ok(secret)
+/// Load secret key from file (base64 encoded)
+fn load_secret(path: &Path) -> Result<SecretKey> {
+    if !path.exists() {
+        anyhow::bail!(
+            "Secret key file not found: {}\nGenerate one with: tunnel-rs generate-secret --output {}",
+            path.display(),
+            path.display()
+        );
     }
+
+    let content = std::fs::read_to_string(path).context("Failed to read secret key file")?;
+    let content = content.trim();
+
+    let bytes = BASE64
+        .decode(content)
+        .context("Invalid base64 in secret key file")?;
+
+    SecretKey::try_from(&bytes[..]).context("Invalid secret key (must be 32 bytes)")
 }
 
 /// Get public key (EndpointId) from secret key
@@ -167,20 +159,10 @@ async fn run_udp_sender(target: String, secret_file: Option<PathBuf>) -> Result<
 
     // If secret file is provided, use persistent identity
     if let Some(secret_path) = &secret_file {
-        let key_existed = secret_path.exists();
-        let secret = load_or_generate_secret(secret_path)?;
+        let secret = load_secret(secret_path)?;
         let endpoint_id = secret_to_endpoint_id(&secret);
-
-        if key_existed {
-            println!("Loaded persistent identity from: {}", secret_path.display());
-        } else {
-            println!(
-                "Generated new persistent identity, saved to: {}",
-                secret_path.display()
-            );
-        }
-        println!("Fixed EndpointId: {}", endpoint_id);
-
+        println!("Loaded identity from: {}", secret_path.display());
+        println!("EndpointId: {}", endpoint_id);
         endpoint_builder = endpoint_builder.secret_key(secret);
     }
 
@@ -448,16 +430,18 @@ async fn forward_stream_to_udp_receiver(
     Ok(())
 }
 
-/// Generate a new secret key file and output the EndpointId to stdout
+/// Generate a new secret key file (base64 encoded) and output the EndpointId to stdout
 fn generate_secret_command(output: PathBuf, force: bool) -> Result<()> {
     // Generate secret key
     let secret = SecretKey::generate(&mut rand::rng());
+    let secret_base64 = BASE64.encode(secret.to_bytes());
+    let endpoint_id = secret_to_endpoint_id(&secret);
 
     // Check if output is stdout (-)
     if output.to_str() == Some("-") {
-        // Only output the EndpointId to stdout, don't save to file
-        let endpoint_id = secret_to_endpoint_id(&secret);
-        println!("{}", endpoint_id);
+        // Output both secret (base64) and EndpointId to stdout
+        println!("{}", secret_base64);
+        eprintln!("EndpointId: {}", endpoint_id);
     } else {
         // Check if file exists
         if output.exists() && !force {
@@ -467,12 +451,12 @@ fn generate_secret_command(output: PathBuf, force: bool) -> Result<()> {
             );
         }
 
-        // Save to file with proper permissions
+        // Save to file with proper permissions (base64 encoded)
         if let Some(parent) = output.parent() {
             std::fs::create_dir_all(parent)
                 .context("Failed to create parent directory")?;
         }
-        std::fs::write(&output, secret.to_bytes())
+        std::fs::write(&output, &secret_base64)
             .context("Failed to write secret key file")?;
 
         #[cfg(unix)]
@@ -483,8 +467,8 @@ fn generate_secret_command(output: PathBuf, force: bool) -> Result<()> {
             std::fs::set_permissions(&output, perms)?;
         }
 
+        eprintln!("Secret key saved to: {}", output.display());
         // Output EndpointId to stdout for automation (like wg pubkey)
-        let endpoint_id = secret_to_endpoint_id(&secret);
         println!("{}", endpoint_id);
     }
 
@@ -518,20 +502,10 @@ async fn run_tcp_sender(target: String, secret_file: Option<PathBuf>) -> Result<
 
     // If secret file is provided, use persistent identity
     if let Some(secret_path) = &secret_file {
-        let key_existed = secret_path.exists();
-        let secret = load_or_generate_secret(secret_path)?;
+        let secret = load_secret(secret_path)?;
         let endpoint_id = secret_to_endpoint_id(&secret);
-
-        if key_existed {
-            println!("Loaded persistent identity from: {}", secret_path.display());
-        } else {
-            println!(
-                "Generated new persistent identity, saved to: {}",
-                secret_path.display()
-            );
-        }
-        println!("Fixed EndpointId: {}", endpoint_id);
-
+        println!("Loaded identity from: {}", secret_path.display());
+        println!("EndpointId: {}", endpoint_id);
         endpoint_builder = endpoint_builder.secret_key(secret);
     }
 

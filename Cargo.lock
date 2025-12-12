@@ -3295,6 +3295,7 @@ name = "tunnel-rs"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64",
  "clap",
  "iroh",
  "rand 0.9.2",
