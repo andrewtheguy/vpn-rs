@@ -170,11 +170,32 @@ tunnel-rs generate-secret --output ./sender.key --force
 - All traffic is encrypted using iroh's built-in QUIC/TLS 1.3
 - The EndpointId is a public key that identifies the sender
 
-## Future Improvements
+## Private Relay Server
 
-### Private Relay Server
+By default, tunnel-rs uses iroh's public relay servers. For production use, you can run your own private relay server with access control.
 
-Currently tunnel-rs uses iroh's default public relay servers. For production use, you may want to run your own private relay server with access control.
+### Using a Custom Relay
+
+```bash
+# Sender with custom relay
+tunnel-rs sender --target 127.0.0.1:22 --relay-url https://your-relay.example.com
+
+# Receiver with custom relay
+tunnel-rs receiver --node-id <ENDPOINT_ID> --listen 127.0.0.1:2222 --relay-url https://your-relay.example.com
+```
+
+Both sender and receiver must use the same `--relay-url` to connect through your private relay.
+
+### Running iroh-relay
+
+Install and run your own relay server:
+
+```bash
+cargo install iroh-relay
+iroh-relay --dev  # For local testing (http://localhost:3340)
+```
+
+### Access Control
 
 iroh-relay supports built-in authorization via config:
 
@@ -191,9 +212,15 @@ url = "https://your-auth-server.com/check-relay-access"
 bearer_token = "secret"  # or set IROH_RELAY_HTTP_BEARER_TOKEN env var
 ```
 
-To integrate with tunnel-rs:
-1. Run your own iroh-relay server with access control configured
-2. Configure tunnel-rs endpoints to use your private relay instead of the default public relays
-3. Add your tunnel endpoints' EndpointIds to the relay's allowlist
+### Required Ports
+
+| Port | Protocol | Required | Description |
+|------|----------|----------|-------------|
+| 443 | TCP | Yes | HTTPS relay (core functionality) |
+| 3478 | UDP | Recommended | STUN for NAT traversal |
+| 7842 | UDP | Optional | QUIC address discovery |
+| 9090 | TCP | Optional | Metrics endpoint |
+
+Minimum setup: Only port 443/TCP is required. STUN (3478/UDP) improves direct P2P connection success rates.
 
 See: https://github.com/n0-computer/iroh/discussions/3168
