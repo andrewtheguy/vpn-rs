@@ -25,11 +25,14 @@ pub fn load_secret(path: &Path) -> Result<SecretKey> {
     }
 
     let content = std::fs::read_to_string(path).context("Failed to read secret key file")?;
-    let content = content.trim();
+    load_secret_from_string(content.trim())
+}
 
+/// Load secret key from a base64-encoded string.
+pub fn load_secret_from_string(base64_key: &str) -> Result<SecretKey> {
     let bytes = BASE64
-        .decode(content)
-        .context("Invalid base64 in secret key file")?;
+        .decode(base64_key)
+        .context("Invalid base64 in secret key")?;
 
     SecretKey::try_from(&bytes[..]).context("Invalid secret key (must be 32 bytes)")
 }
@@ -99,9 +102,12 @@ pub fn create_endpoint_builder(relay_mode: RelayMode, relay_only: bool) -> Endpo
 }
 
 /// Create a sender endpoint with optional persistent identity.
+/// Identity can be provided via `secret_key` (inline base64) or `secret_file` (path to file).
+/// If both are provided, `secret_file` takes precedence (CLI over config).
 pub async fn create_sender_endpoint(
     relay_urls: &[String],
     relay_only: bool,
+    secret_key: Option<&str>,
     secret_file: Option<&PathBuf>,
     alpn: &[u8],
 ) -> Result<Endpoint> {
@@ -112,10 +118,17 @@ pub async fn create_sender_endpoint(
     let mut builder = create_endpoint_builder(relay_mode, relay_only)
         .alpns(vec![alpn.to_vec()]);
 
+    // secret_file (CLI) takes precedence over secret_key (config)
     if let Some(secret_path) = secret_file {
         let secret = load_secret(secret_path)?;
         let endpoint_id = secret_to_endpoint_id(&secret);
         println!("Loaded identity from: {}", secret_path.display());
+        println!("EndpointId: {}", endpoint_id);
+        builder = builder.secret_key(secret);
+    } else if let Some(key_str) = secret_key {
+        let secret = load_secret_from_string(key_str)?;
+        let endpoint_id = secret_to_endpoint_id(&secret);
+        println!("Loaded identity from config");
         println!("EndpointId: {}", endpoint_id);
         builder = builder.secret_key(secret);
     }
