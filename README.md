@@ -169,3 +169,31 @@ tunnel-rs generate-secret --output ./sender.key --force
 
 - All traffic is encrypted using iroh's built-in QUIC/TLS 1.3
 - The EndpointId is a public key that identifies the sender
+
+## Future Improvements
+
+### Private Relay Server
+
+Currently tunnel-rs uses iroh's default public relay servers. For production use, you may want to run your own private relay server with access control.
+
+iroh-relay supports built-in authorization via config:
+
+```toml
+# Only allow specific EndpointIds to use the relay
+access.allowlist = [
+  "your-sender-endpoint-id",
+  "your-receiver-endpoint-id",
+]
+
+# Or use HTTP-based authorization
+[access.http]
+url = "https://your-auth-server.com/check-relay-access"
+bearer_token = "secret"  # or set IROH_RELAY_HTTP_BEARER_TOKEN env var
+```
+
+To integrate with tunnel-rs:
+1. Run your own iroh-relay server with access control configured
+2. Configure tunnel-rs endpoints to use your private relay instead of the default public relays
+3. Add your tunnel endpoints' EndpointIds to the relay's allowlist
+
+See: https://github.com/n0-computer/iroh/discussions/3168
