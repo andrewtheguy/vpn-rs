@@ -61,8 +61,14 @@ pub async fn run_udp_sender(
 
     println!("Forwarding UDP traffic to {}", target_addr);
 
+    // Bind to the same address family as the target
+    let bind_addr: SocketAddr = if target_addr.is_ipv6() {
+        "[::]:0".parse().unwrap()
+    } else {
+        "0.0.0.0:0".parse().unwrap()
+    };
     let udp_socket = Arc::new(
-        UdpSocket::bind("0.0.0.0:0")
+        UdpSocket::bind(bind_addr)
             .await
             .context("Failed to bind UDP socket")?,
     );
