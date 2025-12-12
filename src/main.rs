@@ -149,7 +149,7 @@ async fn main() -> Result<()> {
             let target = target
                 .or(cfg.target)
                 .unwrap_or_else(|| "127.0.0.1:22".to_string());
-            let secret_key = cfg.secret_key;
+            let secret_file = secret_file.or(cfg.secret_file);
             let relay_urls = if relay_urls.is_empty() {
                 cfg.relay_urls.unwrap_or_default()
             } else {
@@ -159,12 +159,10 @@ async fn main() -> Result<()> {
 
             match protocol {
                 Protocol::Udp => {
-                    tunnel::run_udp_sender(target, secret_key, secret_file, relay_urls, relay_only)
-                        .await
+                    tunnel::run_udp_sender(target, secret_file, relay_urls, relay_only).await
                 }
                 Protocol::Tcp => {
-                    tunnel::run_tcp_sender(target, secret_key, secret_file, relay_urls, relay_only)
-                        .await
+                    tunnel::run_tcp_sender(target, secret_file, relay_urls, relay_only).await
                 }
             }
         }

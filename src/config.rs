@@ -9,7 +9,7 @@ use std::path::Path;
 pub struct SenderConfig {
     pub protocol: Option<String>,
     pub target: Option<String>,
-    pub secret_key: Option<String>, // inline base64 secret
+    pub secret_file: Option<std::path::PathBuf>, // path to secret key file
     pub relay_urls: Option<Vec<String>>,
     pub relay_only: Option<bool>,
 }

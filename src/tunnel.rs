@@ -20,7 +20,6 @@ use crate::endpoint::{
 
 pub async fn run_udp_sender(
     target: String,
-    secret_key: Option<String>,
     secret_file: Option<PathBuf>,
     relay_urls: Vec<String>,
     relay_only: bool,
@@ -33,14 +32,8 @@ pub async fn run_udp_sender(
     println!("========================");
     println!("Creating iroh endpoint...");
 
-    let endpoint = create_sender_endpoint(
-        &relay_urls,
-        relay_only,
-        secret_key.as_deref(),
-        secret_file.as_ref(),
-        UDP_ALPN,
-    )
-    .await?;
+    let endpoint =
+        create_sender_endpoint(&relay_urls, relay_only, secret_file.as_ref(), UDP_ALPN).await?;
 
     let endpoint_id = endpoint.id();
     let target_port = target_addr.port();
@@ -270,7 +263,6 @@ async fn forward_stream_to_udp_receiver(
 
 pub async fn run_tcp_sender(
     target: String,
-    secret_key: Option<String>,
     secret_file: Option<PathBuf>,
     relay_urls: Vec<String>,
     relay_only: bool,
@@ -283,14 +275,8 @@ pub async fn run_tcp_sender(
     println!("========================");
     println!("Creating iroh endpoint...");
 
-    let endpoint = create_sender_endpoint(
-        &relay_urls,
-        relay_only,
-        secret_key.as_deref(),
-        secret_file.as_ref(),
-        TCP_ALPN,
-    )
-    .await?;
+    let endpoint =
+        create_sender_endpoint(&relay_urls, relay_only, secret_file.as_ref(), TCP_ALPN).await?;
 
     let endpoint_id = endpoint.id();
     let target_port = target_addr.port();
