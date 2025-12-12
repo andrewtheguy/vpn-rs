@@ -1,14 +1,15 @@
-//! UDP Tunnel
+//! TCP/UDP Tunnel
 //!
-//! Forwards UDP traffic through iroh P2P connections.
+//! Forwards TCP or UDP traffic through iroh P2P connections.
 //!
 //! Usage:
-//!   Sender mode (ephemeral):  cargo run -- sender --target 127.0.0.1:51820
-//!   Sender mode (persistent): cargo run -- sender --target 127.0.0.1:51820 --secret-file ./sender.key
-//!   Receiver mode:            cargo run -- receiver --node-id <NODE_ID> --listen-port 51820
+//!   TCP sender:    cargo run -- sender --protocol tcp --target 127.0.0.1:22
+//!   TCP receiver:  cargo run -- receiver --protocol tcp --node-id <NODE_ID> --listen-port 2222
+//!   UDP sender:    cargo run -- sender --target 127.0.0.1:51820
+//!   UDP receiver:  cargo run -- receiver --node-id <NODE_ID> --listen-port 51820
 
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use iroh::{
     discovery::{dns::DnsDiscovery, mdns::MdnsDiscovery, pkarr::PkarrPublisher},
     Endpoint, EndpointAddr, EndpointId, SecretKey,
@@ -16,14 +17,25 @@ use iroh::{
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tokio::net::UdpSocket;
+use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::sync::Mutex;
 
-const ALPN: &[u8] = b"udp-forward/1";
+const UDP_ALPN: &[u8] = b"udp-forward/1";
+const TCP_ALPN: &[u8] = b"tcp-forward/1";
+
+#[derive(Clone, Copy, ValueEnum, Default)]
+enum Protocol {
+    /// TCP tunneling
+    Tcp,
+    /// UDP tunneling
+    #[default]
+    Udp,
+}
 
 #[derive(Parser)]
-#[command(name = "udp-tunnel")]
-#[command(about = "Forward UDP traffic through iroh P2P connections")]
+#[command(name = "tunnel")]
+#[command(about = "Forward TCP/UDP traffic through iroh P2P connections")]
 struct Args {
     #[command(subcommand)]
     mode: Mode,
@@ -33,7 +45,11 @@ struct Args {
 enum Mode {
     /// Run as sender (accepts connections and forwards to target)
     Sender {
-        /// Target UDP address to forward traffic to (e.g., WireGuard server)
+        /// Protocol to tunnel (tcp or udp)
+        #[arg(short, long, default_value = "udp")]
+        protocol: Protocol,
+
+        /// Target address to forward traffic to
         #[arg(short, long, default_value = "127.0.0.1:51820")]
         target: String,
 
@@ -43,13 +59,17 @@ enum Mode {
         #[arg(long)]
         secret_file: Option<PathBuf>,
     },
-    /// Run as receiver (connects to sender and exposes local UDP port)
+    /// Run as receiver (connects to sender and exposes local port)
     Receiver {
+        /// Protocol to tunnel (tcp or udp)
+        #[arg(short, long, default_value = "udp")]
+        protocol: Protocol,
+
         /// NodeId of the sender to connect to
         #[arg(short, long)]
         node_id: String,
 
-        /// Local UDP port to expose (client connects here)
+        /// Local port to expose (client connects here)
         #[arg(short, long, default_value = "51820")]
         listen_port: u16,
     },
@@ -71,13 +91,21 @@ async fn main() -> Result<()> {
 
     match args.mode {
         Mode::Sender {
+            protocol,
             target,
             secret_file,
-        } => run_sender(target, secret_file).await,
+        } => match protocol {
+            Protocol::Udp => run_udp_sender(target, secret_file).await,
+            Protocol::Tcp => run_tcp_sender(target, secret_file).await,
+        },
         Mode::Receiver {
+            protocol,
             node_id,
             listen_port,
-        } => run_receiver(node_id, listen_port).await,
+        } => match protocol {
+            Protocol::Udp => run_udp_receiver(node_id, listen_port).await,
+            Protocol::Tcp => run_tcp_receiver(node_id, listen_port).await,
+        },
         Mode::GenerateSecret { output, force } => generate_secret_command(output, force),
     }
 }
@@ -116,7 +144,7 @@ fn secret_to_endpoint_id(secret: &SecretKey) -> EndpointId {
     secret.public()
 }
 
-async fn run_sender(target: String, secret_file: Option<PathBuf>) -> Result<()> {
+async fn run_udp_sender(target: String, secret_file: Option<PathBuf>) -> Result<()> {
     let target_addr: SocketAddr = target
         .parse()
         .context("Invalid target address format")?;
@@ -131,7 +159,7 @@ async fn run_sender(target: String, secret_file: Option<PathBuf>) -> Result<()> 
     transport_config.max_idle_timeout(None);
 
     let mut endpoint_builder = Endpoint::builder()
-        .alpns(vec![ALPN.to_vec()])
+        .alpns(vec![UDP_ALPN.to_vec()])
         .discovery(PkarrPublisher::n0_dns())
         .discovery(DnsDiscovery::n0_dns())
         .discovery(MdnsDiscovery::builder())
@@ -211,7 +239,7 @@ async fn run_sender(target: String, secret_file: Option<PathBuf>) -> Result<()> 
     Ok(())
 }
 
-async fn run_receiver(node_id: String, listen_port: u16) -> Result<()> {
+async fn run_udp_receiver(node_id: String, listen_port: u16) -> Result<()> {
     // Parse EndpointId
     let endpoint_id: EndpointId = node_id
         .parse()
@@ -239,7 +267,7 @@ async fn run_receiver(node_id: String, listen_port: u16) -> Result<()> {
     println!("Connecting to sender {}...", endpoint_id);
     let endpoint_addr = EndpointAddr::new(endpoint_id);
     let conn = endpoint
-        .connect(endpoint_addr, ALPN)
+        .connect(endpoint_addr, UDP_ALPN)
         .await
         .context("Failed to connect to sender")?;
 
@@ -456,5 +484,265 @@ fn generate_secret_command(output: PathBuf, force: bool) -> Result<()> {
         println!("{}", endpoint_id);
     }
 
+    Ok(())
+}
+
+// ============================================================================
+// TCP Tunnel Implementation
+// ============================================================================
+
+async fn run_tcp_sender(target: String, secret_file: Option<PathBuf>) -> Result<()> {
+    let target_addr: SocketAddr = target
+        .parse()
+        .context("Invalid target address format")?;
+
+    println!("TCP Tunnel - Sender Mode");
+    println!("========================");
+
+    // Create iroh endpoint with discovery
+    println!("Creating iroh endpoint...");
+    let mut transport_config = iroh::endpoint::TransportConfig::default();
+    // Disable idle timeout for long-lived connections
+    transport_config.max_idle_timeout(None);
+
+    let mut endpoint_builder = Endpoint::builder()
+        .alpns(vec![TCP_ALPN.to_vec()])
+        .discovery(PkarrPublisher::n0_dns())
+        .discovery(DnsDiscovery::n0_dns())
+        .discovery(MdnsDiscovery::builder())
+        .transport_config(transport_config);
+
+    // If secret file is provided, use persistent identity
+    if let Some(secret_path) = &secret_file {
+        let key_existed = secret_path.exists();
+        let secret = load_or_generate_secret(secret_path)?;
+        let endpoint_id = secret_to_endpoint_id(&secret);
+
+        if key_existed {
+            println!("Loaded persistent identity from: {}", secret_path.display());
+        } else {
+            println!(
+                "Generated new persistent identity, saved to: {}",
+                secret_path.display()
+            );
+        }
+        println!("Fixed EndpointId: {}", endpoint_id);
+
+        endpoint_builder = endpoint_builder.secret_key(secret);
+    }
+
+    let endpoint = endpoint_builder
+        .bind()
+        .await
+        .context("Failed to create iroh endpoint")?;
+
+    // Wait for endpoint to be online
+    endpoint.online().await;
+
+    // Print connection info
+    let endpoint_id = endpoint.id();
+    let target_port = target_addr.port();
+    println!("\nEndpointId: {}", endpoint_id);
+    println!("\nOn the receiver side, run:");
+    println!(
+        "  tunnel receiver --protocol tcp --node-id {} --listen-port {}\n",
+        endpoint_id, target_port
+    );
+    println!("Waiting for receiver to connect...");
+
+    // Accept incoming connection from receiver
+    let conn = endpoint
+        .accept()
+        .await
+        .context("No incoming connection")?
+        .await
+        .context("Failed to accept connection")?;
+
+    println!("Receiver connected from: {}", conn.remote_id());
+    println!("Forwarding TCP connections to {}", target_addr);
+
+    // Accept bidirectional streams (each stream = one TCP connection)
+    loop {
+        let (send_stream, recv_stream) = match conn.accept_bi().await {
+            Ok(streams) => streams,
+            Err(e) => {
+                println!("Connection closed: {}", e);
+                break;
+            }
+        };
+
+        println!("New TCP connection request received");
+
+        // Spawn a task to handle this TCP connection
+        let target = target_addr;
+        tokio::spawn(async move {
+            if let Err(e) = handle_tcp_sender_stream(send_stream, recv_stream, target).await {
+                eprintln!("TCP connection error: {}", e);
+            }
+        });
+    }
+
+    // Cleanup
+    conn.close(0u32.into(), b"done");
+    endpoint.close().await;
+    println!("Connection closed.");
+
+    Ok(())
+}
+
+async fn handle_tcp_sender_stream(
+    send_stream: iroh::endpoint::SendStream,
+    recv_stream: iroh::endpoint::RecvStream,
+    target_addr: SocketAddr,
+) -> Result<()> {
+    // Connect to target TCP service
+    let tcp_stream = TcpStream::connect(target_addr)
+        .await
+        .context("Failed to connect to target TCP service")?;
+
+    println!("-> Connected to target {}", target_addr);
+
+    // Bridge the QUIC stream with the TCP connection
+    bridge_streams(recv_stream, send_stream, tcp_stream).await?;
+
+    println!("<- TCP connection to {} closed", target_addr);
+    Ok(())
+}
+
+async fn run_tcp_receiver(node_id: String, listen_port: u16) -> Result<()> {
+    // Parse EndpointId
+    let endpoint_id: EndpointId = node_id
+        .parse()
+        .context("Invalid EndpointId format. Should be a 52-character base32 string.")?;
+
+    println!("TCP Tunnel - Receiver Mode");
+    println!("==========================");
+
+    // Create iroh endpoint with discovery
+    println!("Creating iroh endpoint...");
+    let mut transport_config = iroh::endpoint::TransportConfig::default();
+    // Disable idle timeout for long-lived connections
+    transport_config.max_idle_timeout(None);
+
+    let endpoint = Endpoint::builder()
+        .discovery(PkarrPublisher::n0_dns())
+        .discovery(DnsDiscovery::n0_dns())
+        .discovery(MdnsDiscovery::builder())
+        .transport_config(transport_config)
+        .bind()
+        .await
+        .context("Failed to create iroh endpoint")?;
+
+    // Connect to sender
+    println!("Connecting to sender {}...", endpoint_id);
+    let endpoint_addr = EndpointAddr::new(endpoint_id);
+    let conn = endpoint
+        .connect(endpoint_addr, TCP_ALPN)
+        .await
+        .context("Failed to connect to sender")?;
+
+    println!("Connected to sender!");
+
+    // Use Arc to share the connection between tasks
+    let conn = Arc::new(conn);
+
+    // Bind local TCP listener
+    let bind_addr = format!("127.0.0.1:{}", listen_port);
+    let listener = TcpListener::bind(&bind_addr)
+        .await
+        .context("Failed to bind TCP listener")?;
+    println!(
+        "Listening on TCP {} - configure your client to connect here",
+        bind_addr
+    );
+
+    // Accept local TCP connections and tunnel them
+    loop {
+        let (tcp_stream, peer_addr) = match listener.accept().await {
+            Ok(result) => result,
+            Err(e) => {
+                eprintln!("Failed to accept TCP connection: {}", e);
+                continue;
+            }
+        };
+
+        println!("New local connection from {}", peer_addr);
+
+        // Open a new QUIC stream for this TCP connection
+        let conn_clone = conn.clone();
+        tokio::spawn(async move {
+            if let Err(e) = handle_tcp_receiver_connection(conn_clone, tcp_stream, peer_addr).await
+            {
+                eprintln!("TCP tunnel error for {}: {}", peer_addr, e);
+            }
+        });
+    }
+}
+
+async fn handle_tcp_receiver_connection(
+    conn: Arc<iroh::endpoint::Connection>,
+    tcp_stream: TcpStream,
+    peer_addr: SocketAddr,
+) -> Result<()> {
+    // Open bidirectional QUIC stream
+    let (send_stream, recv_stream) = conn.open_bi().await.context("Failed to open QUIC stream")?;
+
+    println!("-> Opened tunnel for {}", peer_addr);
+
+    // Bridge the local TCP connection with the QUIC stream
+    bridge_streams(recv_stream, send_stream, tcp_stream).await?;
+
+    println!("<- Connection from {} closed", peer_addr);
+    Ok(())
+}
+
+/// Bridge a QUIC stream bidirectionally with a TCP stream
+async fn bridge_streams(
+    mut quic_recv: iroh::endpoint::RecvStream,
+    mut quic_send: iroh::endpoint::SendStream,
+    tcp_stream: TcpStream,
+) -> Result<()> {
+    let (mut tcp_read, mut tcp_write) = tcp_stream.into_split();
+
+    // Copy data bidirectionally
+    let quic_to_tcp = async {
+        copy_stream(&mut quic_recv, &mut tcp_write).await
+    };
+
+    let tcp_to_quic = async {
+        copy_stream(&mut tcp_read, &mut quic_send).await
+    };
+
+    // Run both directions concurrently, finish when either completes
+    tokio::select! {
+        result = quic_to_tcp => {
+            if let Err(e) = result {
+                // Ignore "reset by peer" errors as they're normal for TCP close
+                if !e.to_string().contains("reset") {
+                    eprintln!("QUIC->TCP error: {}", e);
+                }
+            }
+        }
+        result = tcp_to_quic => {
+            if let Err(e) = result {
+                if !e.to_string().contains("reset") {
+                    eprintln!("TCP->QUIC error: {}", e);
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Copy data from reader to writer
+async fn copy_stream<R, W>(reader: &mut R, writer: &mut W) -> Result<()>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    tokio::io::copy(reader, writer)
+        .await
+        .context("Stream copy failed")?;
     Ok(())
 }
