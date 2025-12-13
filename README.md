@@ -332,13 +332,17 @@ By default, tunnel-rs uses n0's (iroh's creator) public DNS infrastructure for p
 ### Running iroh-dns-server
 
 ```bash
-# Build from the iroh repository
+# Download precompiled binary from GitHub releases
+# https://github.com/n0-computer/iroh/releases
+# Look for iroh-dns-server-<version>-<platform>.tar.gz
+
+# Or build from source
 git clone https://github.com/n0-computer/iroh
 cd iroh/iroh-dns-server
 cargo build --release
 
 # Run with dev config (local testing)
-./target/release/iroh-dns-server --config config.dev.toml
+./iroh-dns-server --config config.dev.toml
 ```
 
 The server listens on:

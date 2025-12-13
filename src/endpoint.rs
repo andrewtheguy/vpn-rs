@@ -3,7 +3,7 @@
 use anyhow::{Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use iroh::{
-    discovery::{dns::DnsDiscovery, mdns::MdnsDiscovery, pkarr::PkarrPublisher},
+    discovery::{dns::DnsDiscovery, mdns::MdnsDiscovery, pkarr::{PkarrPublisher, PkarrResolver}},
     endpoint::{Builder as EndpointBuilder, ConnectionType, PathSelection},
     Endpoint, EndpointAddr, EndpointId, RelayMap, RelayMode, RelayUrl, SecretKey, Watcher,
 };
@@ -82,15 +82,6 @@ pub fn print_relay_status(relay_urls: &[String], relay_only: bool, using_custom_
     }
 }
 
-/// Extract DNS origin from a URL (e.g., "https://dns.example.com" -> "dns.example.com.")
-fn url_to_origin(url: &str) -> Result<String> {
-    let parsed: Url = url.parse().context("Invalid DNS server URL")?;
-    parsed
-        .host_str()
-        .map(|h| format!("{}.", h))
-        .context("Invalid DNS server URL: no host")
-}
-
 /// Create a base endpoint builder with common configuration.
 ///
 /// # Arguments
@@ -115,19 +106,18 @@ pub fn create_endpoint_builder(
     } else {
         match (dns_server, secret_key) {
             (Some(dns_url), Some(secret)) => {
-                // Custom DNS server with publishing capability
-                let origin = url_to_origin(dns_url)?;
+                // Custom DNS server with publishing and resolving via HTTP (pkarr)
                 let pkarr_url: Url = dns_url.parse().context("Invalid DNS server URL")?;
                 println!("Using custom DNS server: {}", dns_url);
                 builder = builder
-                    .discovery(PkarrPublisher::builder(pkarr_url).build(secret.clone()))
-                    .discovery(DnsDiscovery::builder(origin.parse()?).build());
+                    .discovery(PkarrPublisher::builder(pkarr_url.clone()).build(secret.clone()))
+                    .discovery(PkarrResolver::builder(pkarr_url));
             }
             (Some(dns_url), None) => {
-                // Custom DNS server, resolve only (no secret = can't publish)
-                let origin = url_to_origin(dns_url)?;
+                // Custom DNS server, resolve only via HTTP (no secret = can't publish)
+                let pkarr_url: Url = dns_url.parse().context("Invalid DNS server URL")?;
                 println!("Using custom DNS server (resolve only): {}", dns_url);
-                builder = builder.discovery(DnsDiscovery::builder(origin.parse()?).build());
+                builder = builder.discovery(PkarrResolver::builder(pkarr_url));
             }
             (None, _) => {
                 // Default n0 DNS

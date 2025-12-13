@@ -24,3 +24,8 @@ relay_urls = [
 # Force all connections through relay (disables direct P2P)
 # Requires relay_urls to be specified
 relay_only = false
+
+# Custom DNS server URL for peer discovery (optional)
+# Used with self-hosted iroh-dns-server for fully independent operation
+# Must match the sender's dns_server configuration
+# dns_server = "https://dns.example.com"
