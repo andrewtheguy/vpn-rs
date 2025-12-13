@@ -11,8 +11,8 @@ use tokio::sync::Mutex;
 
 use crate::endpoint::{
     connect_to_sender, create_receiver_endpoint, create_sender_endpoint, print_connection_type,
-    validate_direct_only, validate_relay_only, wait_and_check_relay, DIRECT_WAIT_TIMEOUT,
-    TCP_ALPN, UDP_ALPN,
+    validate_direct_only, validate_relay_only, wait_for_direct_connection, DirectConnectionResult,
+    DIRECT_WAIT_TIMEOUT, TCP_ALPN, UDP_ALPN,
 };
 
 // ============================================================================
@@ -67,7 +67,7 @@ pub async fn run_udp_sender(
             "Waiting up to {}s for direct connection...",
             DIRECT_WAIT_TIMEOUT.as_secs()
         );
-        if wait_and_check_relay(&endpoint, remote_id).await {
+        if wait_for_direct_connection(&endpoint, remote_id).await == DirectConnectionResult::StillRelay {
             conn.close(1u32.into(), b"relay connections not allowed");
             anyhow::bail!(
                 "Connection rejected: relay connection not allowed (direct-only mode enabled)"
@@ -339,7 +339,7 @@ pub async fn run_tcp_sender(
                 "Waiting up to {}s for direct connection...",
                 DIRECT_WAIT_TIMEOUT.as_secs()
             );
-            if wait_and_check_relay(&endpoint, remote_id).await {
+            if wait_for_direct_connection(&endpoint, remote_id).await == DirectConnectionResult::StillRelay {
                 println!("Connection rejected: relay connection not allowed (direct-only mode)");
                 conn.close(1u32.into(), b"relay connections not allowed");
                 println!("Waiting for next receiver to connect...");

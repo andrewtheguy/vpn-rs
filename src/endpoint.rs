@@ -202,19 +202,31 @@ pub fn validate_direct_only(direct_only: bool, relay_only: bool) -> Result<()> {
     Ok(())
 }
 
-/// Wait for connection type to stabilize, return true if still relay.
+/// Result of waiting for a direct connection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DirectConnectionResult {
+    /// Direct P2P connection was established
+    Direct,
+    /// Connection is still using relay (hole-punching failed or timed out)
+    StillRelay,
+}
+
+/// Wait for connection type to stabilize.
 /// Gives time for hole-punching to establish direct connection.
 /// Uses async notifications from the Watcher to react immediately to changes.
-pub async fn wait_and_check_relay(endpoint: &Endpoint, remote_id: EndpointId) -> bool {
+pub async fn wait_for_direct_connection(
+    endpoint: &Endpoint,
+    remote_id: EndpointId,
+) -> DirectConnectionResult {
     use iroh::Watcher;
 
     let Some(mut watcher) = endpoint.conn_type(remote_id) else {
-        return true; // Unknown = treat as relay
+        return DirectConnectionResult::StillRelay; // Unknown = treat as relay
     };
 
     // Check initial state - if already direct, accept immediately
     if !matches!(watcher.get(), ConnectionType::Relay { .. }) {
-        return false;
+        return DirectConnectionResult::Direct;
     }
 
     // Wait for connection type updates with timeout
@@ -223,12 +235,12 @@ pub async fn wait_and_check_relay(endpoint: &Endpoint, remote_id: EndpointId) ->
             match watcher.updated().await {
                 Ok(conn_type) => {
                     if !matches!(conn_type, ConnectionType::Relay { .. }) {
-                        return false; // Upgraded to direct
+                        return DirectConnectionResult::Direct;
                     }
                     // Still relay, continue waiting for next update
                 }
                 Err(_disconnected) => {
-                    return true; // Watcher disconnected, treat as relay
+                    return DirectConnectionResult::StillRelay;
                 }
             }
         }
@@ -236,7 +248,7 @@ pub async fn wait_and_check_relay(endpoint: &Endpoint, remote_id: EndpointId) ->
     .await;
 
     match result {
-        Ok(is_relay) => is_relay,
-        Err(_timeout) => true, // Timeout = still relay
+        Ok(conn_result) => conn_result,
+        Err(_timeout) => DirectConnectionResult::StillRelay,
     }
 }
