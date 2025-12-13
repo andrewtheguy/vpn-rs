@@ -12,6 +12,7 @@ pub struct SenderConfig {
     pub secret_file: Option<std::path::PathBuf>, // path to secret key file
     pub relay_urls: Option<Vec<String>>,
     pub relay_only: Option<bool>,
+    pub direct_only: Option<bool>,
 }
 
 /// Receiver configuration from TOML file.

@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use iroh::{
     discovery::{dns::DnsDiscovery, mdns::MdnsDiscovery, pkarr::PkarrPublisher},
-    endpoint::{Builder as EndpointBuilder, PathSelection},
+    endpoint::{Builder as EndpointBuilder, ConnectionType, PathSelection},
     Endpoint, EndpointAddr, EndpointId, RelayMap, RelayMode, RelayUrl, SecretKey, Watcher,
 };
 use std::path::{Path, PathBuf};
@@ -189,5 +189,42 @@ pub fn print_connection_type(endpoint: &Endpoint, remote_id: EndpointId) {
     if let Some(mut conn_type_watcher) = endpoint.conn_type(remote_id) {
         let conn_type = conn_type_watcher.get();
         println!("Connection type: {:?}", conn_type);
+    }
+}
+
+pub const DIRECT_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Validate that direct-only and relay-only are mutually exclusive.
+pub fn validate_direct_only(direct_only: bool, relay_only: bool) -> Result<()> {
+    if direct_only && relay_only {
+        anyhow::bail!("--direct-only and --relay-only are mutually exclusive");
+    }
+    Ok(())
+}
+
+const POLL_INTERVAL: Duration = Duration::from_millis(500);
+
+/// Wait for connection type to stabilize, return true if still relay.
+/// Gives time for hole-punching to establish direct connection.
+pub async fn wait_and_check_relay(endpoint: &Endpoint, remote_id: EndpointId) -> bool {
+    let start = std::time::Instant::now();
+
+    loop {
+        if let Some(mut watcher) = endpoint.conn_type(remote_id) {
+            let conn_type = watcher.get();
+            if !matches!(conn_type, ConnectionType::Relay { .. }) {
+                return false; // Direct connection established
+            }
+        } else {
+            return true; // Unknown = treat as relay
+        }
+
+        // Check if we've exceeded the timeout
+        if start.elapsed() >= DIRECT_WAIT_TIMEOUT {
+            return true; // Timeout = still relay
+        }
+
+        // Wait before polling again
+        tokio::time::sleep(POLL_INTERVAL).await;
     }
 }
