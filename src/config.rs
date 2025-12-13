@@ -13,6 +13,7 @@ pub struct SenderConfig {
     pub relay_urls: Option<Vec<String>>,
     pub relay_only: Option<bool>,
     pub direct_only: Option<bool>,
+    pub dns_server: Option<String>, // custom iroh-dns-server URL
 }
 
 /// Receiver configuration from TOML file.
@@ -23,6 +24,7 @@ pub struct ReceiverConfig {
     pub listen: Option<String>,
     pub relay_urls: Option<Vec<String>>,
     pub relay_only: Option<bool>,
+    pub dns_server: Option<String>, // custom iroh-dns-server URL
 }
 
 /// Load configuration from a TOML file.
