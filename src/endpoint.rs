@@ -5,7 +5,7 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use iroh::{
     discovery::{dns::DnsDiscovery, mdns::MdnsDiscovery, pkarr::PkarrPublisher},
     endpoint::{Builder as EndpointBuilder, ConnectionType, PathSelection},
-    Endpoint, EndpointAddr, EndpointId, RelayMap, RelayMode, RelayUrl, SecretKey, Watcher,
+    Endpoint, EndpointAddr, EndpointId, RelayMap, RelayMode, RelayUrl, SecretKey, Watcher as _,
 };
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -202,29 +202,41 @@ pub fn validate_direct_only(direct_only: bool, relay_only: bool) -> Result<()> {
     Ok(())
 }
 
-const POLL_INTERVAL: Duration = Duration::from_millis(500);
-
 /// Wait for connection type to stabilize, return true if still relay.
 /// Gives time for hole-punching to establish direct connection.
+/// Uses async notifications from the Watcher to react immediately to changes.
 pub async fn wait_and_check_relay(endpoint: &Endpoint, remote_id: EndpointId) -> bool {
-    let start = std::time::Instant::now();
+    use iroh::Watcher;
 
-    loop {
-        if let Some(mut watcher) = endpoint.conn_type(remote_id) {
-            let conn_type = watcher.get();
-            if !matches!(conn_type, ConnectionType::Relay { .. }) {
-                return false; // Direct connection established
+    let Some(mut watcher) = endpoint.conn_type(remote_id) else {
+        return true; // Unknown = treat as relay
+    };
+
+    // Check initial state - if already direct, accept immediately
+    if !matches!(watcher.get(), ConnectionType::Relay { .. }) {
+        return false;
+    }
+
+    // Wait for connection type updates with timeout
+    let result = tokio::time::timeout(DIRECT_WAIT_TIMEOUT, async {
+        loop {
+            match watcher.updated().await {
+                Ok(conn_type) => {
+                    if !matches!(conn_type, ConnectionType::Relay { .. }) {
+                        return false; // Upgraded to direct
+                    }
+                    // Still relay, continue waiting for next update
+                }
+                Err(_disconnected) => {
+                    return true; // Watcher disconnected, treat as relay
+                }
             }
-        } else {
-            return true; // Unknown = treat as relay
         }
+    })
+    .await;
 
-        // Check if we've exceeded the timeout
-        if start.elapsed() >= DIRECT_WAIT_TIMEOUT {
-            return true; // Timeout = still relay
-        }
-
-        // Wait before polling again
-        tokio::time::sleep(POLL_INTERVAL).await;
+    match result {
+        Ok(is_relay) => is_relay,
+        Err(_timeout) => true, // Timeout = still relay
     }
 }
