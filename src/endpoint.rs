@@ -5,7 +5,7 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use iroh::{
     discovery::{dns::DnsDiscovery, mdns::MdnsDiscovery, pkarr::PkarrPublisher},
     endpoint::{Builder as EndpointBuilder, ConnectionType, PathSelection},
-    Endpoint, EndpointAddr, EndpointId, RelayMap, RelayMode, RelayUrl, SecretKey, Watcher as _,
+    Endpoint, EndpointAddr, EndpointId, RelayMap, RelayMode, RelayUrl, SecretKey, Watcher,
 };
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -218,8 +218,6 @@ pub async fn wait_for_direct_connection(
     endpoint: &Endpoint,
     remote_id: EndpointId,
 ) -> DirectConnectionResult {
-    use iroh::Watcher;
-
     let Some(mut watcher) = endpoint.conn_type(remote_id) else {
         return DirectConnectionResult::StillRelay; // Unknown = treat as non-direct
     };
@@ -239,7 +237,7 @@ pub async fn wait_for_direct_connection(
                 Ok(_) => {
                     // Still Relay or Mixed, continue waiting for next update
                 }
-                Err(_disconnected) => {
+                Err(_) => {
                     return DirectConnectionResult::StillRelay;
                 }
             }
