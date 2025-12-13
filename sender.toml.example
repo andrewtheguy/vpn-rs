@@ -34,4 +34,5 @@ direct_only = false
 # Custom DNS server URL for peer discovery (optional)
 # Used with self-hosted iroh-dns-server for fully independent operation
 # Requires secret_file for publishing peer addresses
-# dns_server = "https://dns.example.com"
+# NOTE: URL must include the /pkarr path
+# dns_server = "https://dns.example.com/pkarr"

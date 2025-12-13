@@ -351,16 +351,18 @@ The server listens on:
 
 ### Using Custom DNS Server
 
+**Important**: The `dns_server` URL must include the `/pkarr` path:
+
 ```bash
 # Sender with custom DNS server
 tunnel-rs sender --target 127.0.0.1:22 \
   --secret-file ./sender.key \
-  --dns-server https://dns.example.com \
+  --dns-server https://dns.example.com/pkarr \
   --relay-url https://relay.example.com
 
 # Receiver with custom DNS server
 tunnel-rs receiver --node-id <ENDPOINT_ID> --listen 127.0.0.1:2222 \
-  --dns-server https://dns.example.com \
+  --dns-server https://dns.example.com/pkarr \
   --relay-url https://relay.example.com
 ```
 
@@ -371,7 +373,7 @@ Or via config file:
 protocol = "tcp"
 target = "127.0.0.1:22"
 secret_file = "./sender.key"
-dns_server = "https://dns.example.com"
+dns_server = "https://dns.example.com/pkarr"
 relay_urls = ["https://relay.example.com"]
 ```
 
