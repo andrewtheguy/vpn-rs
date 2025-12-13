@@ -96,6 +96,7 @@ Then configure your WireGuard client to connect to `127.0.0.1:51820`.
 | `--secret-file` | (optional) | Path to secret key file for persistent identity |
 | `--relay-url` | (optional) | Custom relay server URL(s). Can be specified multiple times for failover |
 | `--relay-only` | false | Force all traffic through relay (requires `--relay-url`) |
+| `--dns-server` | (optional) | Custom DNS server URL for peer discovery (for self-hosted iroh-dns-server) |
 
 ### receiver
 
@@ -107,6 +108,7 @@ Then configure your WireGuard client to connect to `127.0.0.1:51820`.
 | `--listen`, `-l` | (required) | Local address to listen on |
 | `--relay-url` | (optional) | Custom relay server URL(s). Can be specified multiple times for failover |
 | `--relay-only` | false | Force all traffic through relay (requires `--relay-url`) |
+| `--dns-server` | (optional) | Custom DNS server URL for peer discovery (for self-hosted iroh-dns-server) |
 
 ## Configuration File
 
@@ -159,6 +161,7 @@ tunnel-rs receiver --config receiver.toml
 | `secret_file` | ✓ | - | Path to secret key file |
 | `relay_urls` | ✓ | ✓ | Array of relay server URLs |
 | `relay_only` | ✓ | ✓ | Force relay-only mode |
+| `dns_server` | ✓ | ✓ | Custom DNS server URL for peer discovery |
 
 ## Persistent Identity for VPN Use
 
@@ -314,3 +317,83 @@ bearer_token = "secret"  # or set IROH_RELAY_HTTP_BEARER_TOKEN env var
 Minimum setup: Only port 443/TCP is required. STUN (3478/UDP) improves direct P2P connection success rates.
 
 See: https://github.com/n0-computer/iroh/discussions/3168
+
+## Self-Hosted DNS Discovery
+
+By default, tunnel-rs uses n0's (iroh's creator) public DNS infrastructure for peer discovery. This enables direct P2P connections through NAT traversal. For fully self-hosted operation with no external dependencies, you can run your own `iroh-dns-server`.
+
+### What iroh-dns-server Provides
+
+- **Pkarr relay**: HTTP endpoint for publishing/resolving signed peer addresses
+- **DNS server**: Traditional DNS queries for peer resolution
+- **DNS-over-HTTPS**: `/dns-query` endpoint
+- **Mainline DHT**: Optional connection to BitTorrent DHT for decentralized discovery
+
+### Running iroh-dns-server
+
+```bash
+# Download precompiled binary from GitHub releases
+# https://github.com/n0-computer/iroh/releases
+# Look for iroh-dns-server-<version>-<platform>.tar.gz
+
+# Or build from source
+git clone https://github.com/n0-computer/iroh
+cd iroh/iroh-dns-server
+cargo build --release
+
+# Run with dev config (local testing)
+./iroh-dns-server --config config.dev.toml
+```
+
+The server listens on:
+- HTTP: port 8080 (pkarr and DNS-over-HTTPS)
+- DNS: port 5300 (UDP/TCP)
+
+### Using Custom DNS Server
+
+**Important**: The `dns_server` URL must include the `/pkarr` path:
+
+```bash
+# Sender with custom DNS server
+tunnel-rs sender --target 127.0.0.1:22 \
+  --secret-file ./sender.key \
+  --dns-server https://dns.example.com/pkarr \
+  --relay-url https://relay.example.com
+
+# Receiver with custom DNS server
+tunnel-rs receiver --node-id <ENDPOINT_ID> --listen 127.0.0.1:2222 \
+  --dns-server https://dns.example.com/pkarr \
+  --relay-url https://relay.example.com
+```
+
+Or via config file:
+
+```toml
+# Fully self-hosted sender config
+protocol = "tcp"
+target = "127.0.0.1:22"
+secret_file = "./sender.key"
+dns_server = "https://dns.example.com/pkarr"
+relay_urls = ["https://relay.example.com"]
+```
+
+### How It Works
+
+1. **Sender** publishes its address info to your DNS server via pkarr (requires `--secret-file`)
+2. **Receiver** resolves the sender's address via DNS queries to your server
+3. Direct P2P hole-punching proceeds as normal
+4. Relay is used as fallback if direct connection fails
+
+### Benefits of Self-Hosted DNS
+
+- **Zero dependency on n0's infrastructure**
+- **Direct P2P connections** (not relay-only)
+- **Full control over peer discovery**
+- **Better privacy** - peer addresses not published to public DNS
+
+### Notes
+
+- The sender requires `--secret-file` to publish to the DNS server
+- The receiver can resolve without a secret key (read-only)
+- mDNS is always enabled for local network discovery regardless of DNS settings
+- Both sender and receiver must use the same `--dns-server` URL

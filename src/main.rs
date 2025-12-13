@@ -80,6 +80,11 @@ enum Mode {
         /// Waits a few seconds for hole-punching before rejecting
         #[arg(long)]
         direct_only: bool,
+
+        /// Custom DNS server URL for peer discovery (e.g., https://dns.example.com)
+        /// Used with self-hosted iroh-dns-server for fully independent operation
+        #[arg(long)]
+        dns_server: Option<String>,
     },
     /// Run as receiver (connects to sender and exposes local port)
     Receiver {
@@ -108,6 +113,11 @@ enum Mode {
         /// Requires --relay-url to be specified (default relay is rate-limited)
         #[arg(long)]
         relay_only: bool,
+
+        /// Custom DNS server URL for peer discovery (e.g., https://dns.example.com)
+        /// Used with self-hosted iroh-dns-server for fully independent operation
+        #[arg(long)]
+        dns_server: Option<String>,
     },
     /// Generate a new secret key file (for automation/setup)
     GenerateSecret {
@@ -140,6 +150,7 @@ async fn main() -> Result<()> {
             relay_urls,
             relay_only,
             direct_only,
+            dns_server,
         } => {
             // Load config if provided
             let cfg: SenderConfig = if let Some(config_path) = &config {
@@ -163,13 +174,14 @@ async fn main() -> Result<()> {
             };
             let relay_only = if relay_only { true } else { cfg.relay_only.unwrap_or(false) };
             let direct_only = if direct_only { true } else { cfg.direct_only.unwrap_or(false) };
+            let dns_server = dns_server.or(cfg.dns_server);
 
             match protocol {
                 Protocol::Udp => {
-                    tunnel::run_udp_sender(target, secret_file, relay_urls, relay_only, direct_only).await
+                    tunnel::run_udp_sender(target, secret_file, relay_urls, relay_only, direct_only, dns_server).await
                 }
                 Protocol::Tcp => {
-                    tunnel::run_tcp_sender(target, secret_file, relay_urls, relay_only, direct_only).await
+                    tunnel::run_tcp_sender(target, secret_file, relay_urls, relay_only, direct_only, dns_server).await
                 }
             }
         }
@@ -180,6 +192,7 @@ async fn main() -> Result<()> {
             listen,
             relay_urls,
             relay_only,
+            dns_server,
         } => {
             // Load config if provided
             let cfg: ReceiverConfig = if let Some(config_path) = &config {
@@ -204,10 +217,11 @@ async fn main() -> Result<()> {
                 relay_urls
             };
             let relay_only = if relay_only { true } else { cfg.relay_only.unwrap_or(false) };
+            let dns_server = dns_server.or(cfg.dns_server);
 
             match protocol {
-                Protocol::Udp => tunnel::run_udp_receiver(node_id, listen, relay_urls, relay_only).await,
-                Protocol::Tcp => tunnel::run_tcp_receiver(node_id, listen, relay_urls, relay_only).await,
+                Protocol::Udp => tunnel::run_udp_receiver(node_id, listen, relay_urls, relay_only, dns_server).await,
+                Protocol::Tcp => tunnel::run_tcp_receiver(node_id, listen, relay_urls, relay_only, dns_server).await,
             }
         }
         Mode::GenerateSecret { output, force } => secret::generate_secret(output, force),

@@ -27,6 +27,7 @@ pub async fn run_udp_sender(
     relay_urls: Vec<String>,
     relay_only: bool,
     direct_only: bool,
+    dns_server: Option<String>,
 ) -> Result<()> {
     validate_relay_only(relay_only, &relay_urls)?;
     validate_direct_only(direct_only, relay_only)?;
@@ -41,7 +42,7 @@ pub async fn run_udp_sender(
     println!("Creating iroh endpoint...");
 
     let endpoint =
-        create_sender_endpoint(&relay_urls, relay_only, secret_file.as_ref(), UDP_ALPN).await?;
+        create_sender_endpoint(&relay_urls, relay_only, secret_file.as_ref(), dns_server.as_deref(), UDP_ALPN).await?;
 
     let endpoint_id = endpoint.id();
     let target_port = target_addr.port();
@@ -111,6 +112,7 @@ pub async fn run_udp_receiver(
     listen: String,
     relay_urls: Vec<String>,
     relay_only: bool,
+    dns_server: Option<String>,
 ) -> Result<()> {
     validate_relay_only(relay_only, &relay_urls)?;
 
@@ -126,7 +128,7 @@ pub async fn run_udp_receiver(
     println!("==========================");
     println!("Creating iroh endpoint...");
 
-    let endpoint = create_receiver_endpoint(&relay_urls, relay_only).await?;
+    let endpoint = create_receiver_endpoint(&relay_urls, relay_only, dns_server.as_deref()).await?;
 
     let conn = connect_to_sender(&endpoint, sender_id, &relay_urls, relay_only, UDP_ALPN).await?;
 
@@ -291,6 +293,7 @@ pub async fn run_tcp_sender(
     relay_urls: Vec<String>,
     relay_only: bool,
     direct_only: bool,
+    dns_server: Option<String>,
 ) -> Result<()> {
     validate_relay_only(relay_only, &relay_urls)?;
     validate_direct_only(direct_only, relay_only)?;
@@ -305,7 +308,7 @@ pub async fn run_tcp_sender(
     println!("Creating iroh endpoint...");
 
     let endpoint =
-        create_sender_endpoint(&relay_urls, relay_only, secret_file.as_ref(), TCP_ALPN).await?;
+        create_sender_endpoint(&relay_urls, relay_only, secret_file.as_ref(), dns_server.as_deref(), TCP_ALPN).await?;
 
     let endpoint_id = endpoint.id();
     let target_port = target_addr.port();
@@ -406,6 +409,7 @@ pub async fn run_tcp_receiver(
     listen: String,
     relay_urls: Vec<String>,
     relay_only: bool,
+    dns_server: Option<String>,
 ) -> Result<()> {
     validate_relay_only(relay_only, &relay_urls)?;
 
@@ -421,7 +425,7 @@ pub async fn run_tcp_receiver(
     println!("==========================");
     println!("Creating iroh endpoint...");
 
-    let endpoint = create_receiver_endpoint(&relay_urls, relay_only).await?;
+    let endpoint = create_receiver_endpoint(&relay_urls, relay_only, dns_server.as_deref()).await?;
 
     let conn = connect_to_sender(&endpoint, sender_id, &relay_urls, relay_only, TCP_ALPN).await?;
 

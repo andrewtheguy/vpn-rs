@@ -3,12 +3,13 @@
 use anyhow::{Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use iroh::{
-    discovery::{dns::DnsDiscovery, mdns::MdnsDiscovery, pkarr::PkarrPublisher},
+    discovery::{dns::DnsDiscovery, mdns::MdnsDiscovery, pkarr::{PkarrPublisher, PkarrResolver}},
     endpoint::{Builder as EndpointBuilder, ConnectionType, PathSelection},
     Endpoint, EndpointAddr, EndpointId, RelayMap, RelayMode, RelayUrl, SecretKey, Watcher,
 };
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+use url::Url;
 
 pub const UDP_ALPN: &[u8] = b"udp-forward/1";
 pub const TCP_ALPN: &[u8] = b"tcp-forward/1";
@@ -82,7 +83,18 @@ pub fn print_relay_status(relay_urls: &[String], relay_only: bool, using_custom_
 }
 
 /// Create a base endpoint builder with common configuration.
-pub fn create_endpoint_builder(relay_mode: RelayMode, relay_only: bool) -> EndpointBuilder {
+///
+/// # Arguments
+/// * `relay_mode` - The relay mode to use
+/// * `relay_only` - If true, only use relay connections (no direct P2P)
+/// * `dns_server` - Optional custom DNS server URL (e.g., "https://dns.example.com")
+/// * `secret_key` - Optional secret key (required for publishing to custom DNS server)
+pub fn create_endpoint_builder(
+    relay_mode: RelayMode,
+    relay_only: bool,
+    dns_server: Option<&str>,
+    secret_key: Option<&SecretKey>,
+) -> Result<EndpointBuilder> {
     let mut transport_config = iroh::endpoint::TransportConfig::default();
     transport_config.max_idle_timeout(None);
 
@@ -92,13 +104,33 @@ pub fn create_endpoint_builder(relay_mode: RelayMode, relay_only: bool) -> Endpo
     if relay_only {
         builder = builder.path_selection(PathSelection::RelayOnly);
     } else {
-        builder = builder
-            .discovery(PkarrPublisher::n0_dns())
-            .discovery(DnsDiscovery::n0_dns())
-            .discovery(MdnsDiscovery::builder());
+        match (dns_server, secret_key) {
+            (Some(dns_url), Some(secret)) => {
+                // Custom DNS server with publishing and resolving via HTTP (pkarr)
+                let pkarr_url: Url = dns_url.parse().context("Invalid DNS server URL")?;
+                println!("Using custom DNS server: {}", dns_url);
+                builder = builder
+                    .discovery(PkarrPublisher::builder(pkarr_url.clone()).build(secret.clone()))
+                    .discovery(PkarrResolver::builder(pkarr_url));
+            }
+            (Some(dns_url), None) => {
+                // Custom DNS server, resolve only via HTTP (no secret = can't publish)
+                let pkarr_url: Url = dns_url.parse().context("Invalid DNS server URL")?;
+                println!("Using custom DNS server (resolve only): {}", dns_url);
+                builder = builder.discovery(PkarrResolver::builder(pkarr_url));
+            }
+            (None, _) => {
+                // Default n0 DNS
+                builder = builder
+                    .discovery(PkarrPublisher::n0_dns())
+                    .discovery(DnsDiscovery::n0_dns());
+            }
+        }
+        // mDNS always enabled for local network discovery
+        builder = builder.discovery(MdnsDiscovery::builder());
     }
 
-    builder
+    Ok(builder)
 }
 
 /// Create a sender endpoint with optional persistent identity.
@@ -106,20 +138,33 @@ pub async fn create_sender_endpoint(
     relay_urls: &[String],
     relay_only: bool,
     secret_file: Option<&PathBuf>,
+    dns_server: Option<&str>,
     alpn: &[u8],
 ) -> Result<Endpoint> {
     let relay_mode = parse_relay_mode(relay_urls)?;
     let using_custom_relay = !matches!(relay_mode, RelayMode::Default);
     print_relay_status(relay_urls, relay_only, using_custom_relay);
 
-    let mut builder = create_endpoint_builder(relay_mode, relay_only)
-        .alpns(vec![alpn.to_vec()]);
-
-    if let Some(secret_path) = secret_file {
+    // Load secret key first (needed for both identity and DNS publishing)
+    let secret = if let Some(secret_path) = secret_file {
         let secret = load_secret(secret_path)?;
         let endpoint_id = secret_to_endpoint_id(&secret);
         println!("Loaded identity from: {}", secret_path.display());
         println!("EndpointId: {}", endpoint_id);
+        Some(secret)
+    } else {
+        None
+    };
+
+    let mut builder = create_endpoint_builder(
+        relay_mode,
+        relay_only,
+        dns_server,
+        secret.as_ref(),
+    )?
+    .alpns(vec![alpn.to_vec()]);
+
+    if let Some(secret) = secret {
         builder = builder.secret_key(secret);
     }
 
@@ -129,12 +174,17 @@ pub async fn create_sender_endpoint(
 }
 
 /// Create a receiver endpoint.
-pub async fn create_receiver_endpoint(relay_urls: &[String], relay_only: bool) -> Result<Endpoint> {
+pub async fn create_receiver_endpoint(
+    relay_urls: &[String],
+    relay_only: bool,
+    dns_server: Option<&str>,
+) -> Result<Endpoint> {
     let relay_mode = parse_relay_mode(relay_urls)?;
     let using_custom_relay = !matches!(relay_mode, RelayMode::Default);
     print_relay_status(relay_urls, relay_only, using_custom_relay);
 
-    let builder = create_endpoint_builder(relay_mode, relay_only);
+    // Receiver doesn't have a secret key, so can only resolve (not publish) from custom DNS
+    let builder = create_endpoint_builder(relay_mode, relay_only, dns_server, None)?;
     builder.bind().await.context("Failed to create iroh endpoint")
 }
 
