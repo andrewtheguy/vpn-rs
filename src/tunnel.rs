@@ -11,7 +11,8 @@ use tokio::sync::Mutex;
 
 use crate::endpoint::{
     connect_to_sender, create_receiver_endpoint, create_sender_endpoint, print_connection_type,
-    validate_relay_only, TCP_ALPN, UDP_ALPN,
+    validate_direct_only, validate_relay_only, wait_for_direct_connection, DirectConnectionResult,
+    DIRECT_WAIT_TIMEOUT, TCP_ALPN, UDP_ALPN,
 };
 
 // ============================================================================
@@ -23,13 +24,18 @@ pub async fn run_udp_sender(
     secret_file: Option<PathBuf>,
     relay_urls: Vec<String>,
     relay_only: bool,
+    direct_only: bool,
 ) -> Result<()> {
     validate_relay_only(relay_only, &relay_urls)?;
+    validate_direct_only(direct_only, relay_only)?;
 
     let target_addr: SocketAddr = target.parse().context("Invalid target address format")?;
 
     println!("UDP Tunnel - Sender Mode");
     println!("========================");
+    if direct_only {
+        println!("Direct-only mode: relay connections will be rejected");
+    }
     println!("Creating iroh endpoint...");
 
     let endpoint =
@@ -52,7 +58,23 @@ pub async fn run_udp_sender(
         .await
         .context("Failed to accept connection")?;
 
-    println!("Receiver connected from: {}", conn.remote_id());
+    let remote_id = conn.remote_id();
+    println!("Receiver connected from: {}", remote_id);
+
+    // Check direct-only requirement
+    if direct_only {
+        println!(
+            "Waiting up to {}s for direct connection...",
+            DIRECT_WAIT_TIMEOUT.as_secs()
+        );
+        if wait_for_direct_connection(&endpoint, remote_id).await == DirectConnectionResult::StillRelay {
+            conn.close(1u32.into(), b"relay connections not allowed");
+            anyhow::bail!(
+                "Connection rejected: relay connection not allowed (direct-only mode enabled)"
+            );
+        }
+        println!("Direct connection established!");
+    }
 
     let (send_stream, recv_stream) = conn
         .accept_bi()
@@ -266,13 +288,18 @@ pub async fn run_tcp_sender(
     secret_file: Option<PathBuf>,
     relay_urls: Vec<String>,
     relay_only: bool,
+    direct_only: bool,
 ) -> Result<()> {
     validate_relay_only(relay_only, &relay_urls)?;
+    validate_direct_only(direct_only, relay_only)?;
 
     let target_addr: SocketAddr = target.parse().context("Invalid target address format")?;
 
     println!("TCP Tunnel - Sender Mode");
     println!("========================");
+    if direct_only {
+        println!("Direct-only mode: relay connections will be rejected");
+    }
     println!("Creating iroh endpoint...");
 
     let endpoint =
@@ -303,7 +330,24 @@ pub async fn run_tcp_sender(
             }
         };
 
-        println!("Receiver connected from: {}", conn.remote_id());
+        let remote_id = conn.remote_id();
+        println!("Receiver connected from: {}", remote_id);
+
+        // Check direct-only requirement
+        if direct_only {
+            println!(
+                "Waiting up to {}s for direct connection...",
+                DIRECT_WAIT_TIMEOUT.as_secs()
+            );
+            if wait_for_direct_connection(&endpoint, remote_id).await == DirectConnectionResult::StillRelay {
+                println!("Connection rejected: relay connection not allowed (direct-only mode)");
+                conn.close(1u32.into(), b"relay connections not allowed");
+                println!("Waiting for next receiver to connect...");
+                continue;
+            }
+            println!("Direct connection established!");
+        }
+
         println!("Forwarding TCP connections to {}", target_addr);
 
         let target = target_addr;
