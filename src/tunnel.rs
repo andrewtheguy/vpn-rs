@@ -9,6 +9,8 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::sync::Mutex;
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use crate::endpoint::{
     connect_to_sender, create_receiver_endpoint, create_sender_endpoint, print_connection_type,
     validate_direct_only, validate_relay_only, wait_for_direct_connection, DirectConnectionResult,
@@ -423,10 +425,10 @@ pub async fn run_tcp_receiver(
 
     let conn = connect_to_sender(&endpoint, sender_id, &relay_urls, relay_only, TCP_ALPN).await?;
 
-    println!("Connected to sender!");
     print_connection_type(&endpoint, conn.remote_id());
 
     let conn = Arc::new(conn);
+    let tunnel_established = Arc::new(AtomicBool::new(false));
 
     let listener = TcpListener::bind(listen_addr)
         .await
@@ -448,10 +450,14 @@ pub async fn run_tcp_receiver(
         println!("New local connection from {}", peer_addr);
 
         let conn_clone = conn.clone();
+        let established = tunnel_established.clone();
+
         tokio::spawn(async move {
-            if let Err(e) = handle_tcp_receiver_connection(conn_clone, tcp_stream, peer_addr).await
-            {
-                eprintln!("TCP tunnel error for {}: {}", peer_addr, e);
+            match handle_tcp_receiver_connection(conn_clone, tcp_stream, peer_addr, established).await {
+                Ok(()) => {}
+                Err(e) => {
+                    eprintln!("TCP tunnel error for {}: {}", peer_addr, e);
+                }
             }
         });
     }
@@ -461,9 +467,14 @@ async fn handle_tcp_receiver_connection(
     conn: Arc<iroh::endpoint::Connection>,
     tcp_stream: TcpStream,
     peer_addr: SocketAddr,
+    tunnel_established: Arc<AtomicBool>,
 ) -> Result<()> {
     let (send_stream, recv_stream) = conn.open_bi().await.context("Failed to open QUIC stream")?;
 
+    // Print success message only on first successful stream
+    if !tunnel_established.swap(true, Ordering::Relaxed) {
+        println!("Tunnel to sender established!");
+    }
     println!("-> Opened tunnel for {}", peer_addr);
 
     bridge_streams(recv_stream, send_stream, tcp_stream).await?;

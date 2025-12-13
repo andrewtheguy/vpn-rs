@@ -25,3 +25,8 @@ relay_urls = [
 # Force all connections through relay (disables direct P2P)
 # Requires relay_urls to be specified
 relay_only = false
+
+# Require direct P2P connections only (reject relay connections)
+# Waits a few seconds for hole-punching before rejecting
+# Mutually exclusive with relay_only
+direct_only = false
