@@ -221,11 +221,11 @@ pub async fn wait_for_direct_connection(
     use iroh::Watcher;
 
     let Some(mut watcher) = endpoint.conn_type(remote_id) else {
-        return DirectConnectionResult::StillRelay; // Unknown = treat as relay
+        return DirectConnectionResult::StillRelay; // Unknown = treat as non-direct
     };
 
     // Check initial state - if already direct, accept immediately
-    if !matches!(watcher.get(), ConnectionType::Relay { .. }) {
+    if matches!(watcher.get(), ConnectionType::Direct(_)) {
         return DirectConnectionResult::Direct;
     }
 
@@ -233,11 +233,11 @@ pub async fn wait_for_direct_connection(
     let result = tokio::time::timeout(DIRECT_WAIT_TIMEOUT, async {
         loop {
             match watcher.updated().await {
-                Ok(conn_type) => {
-                    if !matches!(conn_type, ConnectionType::Relay { .. }) {
-                        return DirectConnectionResult::Direct;
-                    }
-                    // Still relay, continue waiting for next update
+                Ok(ConnectionType::Direct(_)) => {
+                    return DirectConnectionResult::Direct;
+                }
+                Ok(_) => {
+                    // Still Relay or Mixed, continue waiting for next update
                 }
                 Err(_disconnected) => {
                     return DirectConnectionResult::StillRelay;
