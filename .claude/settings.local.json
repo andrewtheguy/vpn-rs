@@ -3,7 +3,8 @@
     "allow": [
       "Bash(rm:*)",
       "Bash(cargo doc:*)",
-      "Bash(cargo build:*)"
+      "Bash(cargo build:*)",
+      "Bash(cargo tree:*)"
     ]
   }
 }

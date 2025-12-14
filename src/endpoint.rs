@@ -169,7 +169,14 @@ pub async fn create_sender_endpoint(
     }
 
     let endpoint = builder.bind().await.context("Failed to create iroh endpoint")?;
-    endpoint.online().await;
+
+    // Wait for endpoint to come online with timeout
+    println!("Waiting for endpoint to come online (timeout: {}s)...", RELAY_CONNECT_TIMEOUT.as_secs());
+    match tokio::time::timeout(RELAY_CONNECT_TIMEOUT, endpoint.online()).await {
+        Ok(()) => {}
+        Err(_) => anyhow::bail!("Endpoint failed to come online after {}s - check relay server connectivity", RELAY_CONNECT_TIMEOUT.as_secs()),
+    }
+
     Ok(endpoint)
 }
 
@@ -185,7 +192,16 @@ pub async fn create_receiver_endpoint(
 
     // Receiver doesn't have a secret key, so can only resolve (not publish) from custom DNS
     let builder = create_endpoint_builder(relay_mode, relay_only, dns_server, None)?;
-    builder.bind().await.context("Failed to create iroh endpoint")
+    let endpoint = builder.bind().await.context("Failed to create iroh endpoint")?;
+
+    // Wait for endpoint to come online with timeout
+    println!("Waiting for endpoint to come online (timeout: {}s)...", RELAY_CONNECT_TIMEOUT.as_secs());
+    match tokio::time::timeout(RELAY_CONNECT_TIMEOUT, endpoint.online()).await {
+        Ok(()) => {}
+        Err(_) => anyhow::bail!("Endpoint failed to come online after {}s - check relay server connectivity", RELAY_CONNECT_TIMEOUT.as_secs()),
+    }
+
+    Ok(endpoint)
 }
 
 /// Connect to a sender endpoint with relay failover support.
@@ -230,7 +246,15 @@ pub async fn connect_to_sender(
         )
     } else {
         let endpoint_addr = EndpointAddr::new(sender_id);
-        endpoint.connect(endpoint_addr, alpn).await.context("Failed to connect to sender")
+        println!("Connecting (timeout: {}s)...", RELAY_CONNECT_TIMEOUT.as_secs());
+        match tokio::time::timeout(
+            RELAY_CONNECT_TIMEOUT,
+            endpoint.connect(endpoint_addr, alpn),
+        ).await {
+            Ok(Ok(conn)) => Ok(conn),
+            Ok(Err(e)) => Err(e).context("Failed to connect to sender"),
+            Err(_) => anyhow::bail!("Connection timed out after {}s", RELAY_CONNECT_TIMEOUT.as_secs()),
+        }
     }
 }
 
