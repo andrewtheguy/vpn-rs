@@ -84,11 +84,17 @@ tunnel-rs receiver iroh default --protocol udp --node-id <ENDPOINT_ID> --listen 
 
 ## CLI Options
 
-### sender iroh default
+### sender
 
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--config`, `-c` | - | Path to TOML config file |
+| `--default-config` | false | Load config from `~/.config/tunnel-rs/sender.toml` |
+
+### sender iroh default
+
+| Option | Default | Description |
+|--------|---------|-------------|
 | `--protocol`, `-p` | tcp | Protocol to tunnel (tcp or udp) |
 | `--target`, `-t` | 127.0.0.1:22 | Target address to forward traffic to |
 | `--secret-file` | - | Path to secret key file for persistent identity |
@@ -96,11 +102,17 @@ tunnel-rs receiver iroh default --protocol udp --node-id <ENDPOINT_ID> --listen 
 | `--relay-only` | false | Force all traffic through relay |
 | `--dns-server` | public | Custom DNS server URL for peer discovery |
 
-### receiver iroh default
+### receiver
 
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--config`, `-c` | - | Path to TOML config file |
+| `--default-config` | false | Load config from `~/.config/tunnel-rs/receiver.toml` |
+
+### receiver iroh default
+
+| Option | Default | Description |
+|--------|---------|-------------|
 | `--protocol`, `-p` | tcp | Protocol to tunnel (tcp or udp) |
 | `--node-id`, `-n` | required | EndpointId of the sender |
 | `--listen`, `-l` | required | Local address to listen on |
@@ -110,36 +122,60 @@ tunnel-rs receiver iroh default --protocol udp --node-id <ENDPOINT_ID> --listen 
 
 ## Configuration Files
 
+Config files are shared across all modes. Use `--default-config` to load from the default location, or `-c <path>` for a custom path.
+
+**Default locations:**
+- Sender: `~/.config/tunnel-rs/sender.toml`
+- Receiver: `~/.config/tunnel-rs/receiver.toml`
+
 ### Sender Config
 
 ```toml
-# iroh-sender.toml
+# ~/.config/tunnel-rs/sender.toml
 protocol = "tcp"
 target = "127.0.0.1:22"
+
+# Iroh default mode options
 secret_file = "./sender.key"
 relay_urls = ["https://relay.example.com"]
 relay_only = false
 dns_server = "https://dns.example.com/pkarr"
+
+# Custom mode options
+stun_servers = ["stun.l.google.com:19302"]
 ```
 
 ```bash
-tunnel-rs sender iroh default --config iroh-sender.toml
+# Load from default location
+tunnel-rs sender --default-config iroh default
+
+# Load from custom path
+tunnel-rs sender -c ./my-sender.toml iroh default
 ```
 
 ### Receiver Config
 
 ```toml
-# iroh-receiver.toml
+# ~/.config/tunnel-rs/receiver.toml
 protocol = "tcp"
-node_id = "2xnbkpbc7izsilvewd7c62w7wnwziacmpfwvhcrya5nt76dqkpga"
 listen = "127.0.0.1:2222"
+
+# Iroh default mode options
+node_id = "2xnbkpbc7izsilvewd7c62w7wnwziacmpfwvhcrya5nt76dqkpga"
 relay_urls = ["https://relay.example.com"]
 relay_only = false
 dns_server = "https://dns.example.com/pkarr"
+
+# Custom mode options
+stun_servers = ["stun.l.google.com:19302"]
 ```
 
 ```bash
-tunnel-rs receiver iroh default --config iroh-receiver.toml
+# Load from default location
+tunnel-rs receiver --default-config iroh default
+
+# Load from custom path
+tunnel-rs receiver -c ./my-receiver.toml iroh default
 ```
 
 ## Persistent Identity
@@ -229,7 +265,6 @@ Uses iroh's QUIC transport with manual copy-paste signaling. No discovery server
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--config`, `-c` | - | Path to TOML config file |
 | `--protocol`, `-p` | tcp | Protocol to tunnel (tcp or udp) |
 | `--target`, `-t` | 127.0.0.1:22 | Target address to forward traffic to |
 
@@ -237,9 +272,10 @@ Uses iroh's QUIC transport with manual copy-paste signaling. No discovery server
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--config`, `-c` | - | Path to TOML config file |
 | `--protocol`, `-p` | tcp | Protocol to tunnel (tcp or udp) |
 | `--listen`, `-l` | required | Local address to listen on |
+
+Note: Config file options (`-c`, `--default-config`) are at the `sender`/`receiver` command level. See [Configuration Files](#configuration-files) above.
 
 ## UDP Support
 
@@ -301,7 +337,6 @@ Uses manual ICE signaling with str0m + quinn QUIC. TCP tunneling only.
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--config`, `-c` | - | Path to TOML config file |
 | `--target`, `-t` | 127.0.0.1:22 | Target address to forward traffic to |
 | `--stun-server` | public | STUN server(s), repeatable |
 
@@ -309,33 +344,10 @@ Uses manual ICE signaling with str0m + quinn QUIC. TCP tunneling only.
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--config`, `-c` | - | Path to TOML config file |
 | `--listen`, `-l` | required | Local address to listen on |
 | `--stun-server` | public | STUN server(s), repeatable |
 
-## Configuration Files
-
-### Sender Config
-
-```toml
-# custom-sender.toml
-target = "127.0.0.1:22"
-stun_servers = [
-    "stun.l.google.com:19302",
-    "stun1.l.google.com:19302",
-]
-```
-
-### Receiver Config
-
-```toml
-# custom-receiver.toml
-listen = "127.0.0.1:2222"
-stun_servers = [
-    "stun.l.google.com:19302",
-    "stun1.l.google.com:19302",
-]
-```
+Note: Config file options (`-c`, `--default-config`) are at the `sender`/`receiver` command level. See [Configuration Files](#configuration-files) above.
 
 ## Connection Types
 

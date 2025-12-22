@@ -20,10 +20,7 @@ mod tunnel;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
-use config::{
-    default_stun_servers, load_ice_receiver_config, load_ice_sender_config,
-    load_iroh_receiver_config, load_iroh_sender_config,
-};
+use config::{default_stun_servers, load_receiver_config, load_sender_config, ReceiverConfig, SenderConfig};
 use std::path::PathBuf;
 
 #[derive(Clone, Copy, ValueEnum, Default, Debug, PartialEq)]
@@ -58,11 +55,27 @@ struct Args {
 enum Command {
     /// Run as sender (accepts connections and forwards to target)
     Sender {
+        /// Path to config file
+        #[arg(short, long)]
+        config: Option<PathBuf>,
+
+        /// Load config from default location (~/.config/tunnel-rs/sender.toml)
+        #[arg(long)]
+        default_config: bool,
+
         #[command(subcommand)]
         mode: SenderMode,
     },
     /// Run as receiver (connects to sender and exposes local port)
     Receiver {
+        /// Path to config file
+        #[arg(short, long)]
+        config: Option<PathBuf>,
+
+        /// Load config from default location (~/.config/tunnel-rs/receiver.toml)
+        #[arg(long)]
+        default_config: bool,
+
         #[command(subcommand)]
         mode: ReceiverMode,
     },
@@ -93,10 +106,6 @@ enum SenderMode {
     },
     /// Use custom QUIC with manual signaling (TCP only, str0m+quinn)
     Custom {
-        /// Path to TOML config file
-        #[arg(short, long)]
-        config: Option<PathBuf>,
-
         /// Target address to forward traffic to
         #[arg(short, long)]
         target: Option<String>,
@@ -111,10 +120,6 @@ enum SenderMode {
 enum IrohSenderMode {
     /// Use iroh discovery servers (Pkarr/DNS/mDNS) with relay fallback
     Default {
-        /// Path to TOML config file
-        #[arg(short, long)]
-        config: Option<PathBuf>,
-
         /// Protocol to tunnel (tcp or udp)
         #[arg(short, long)]
         protocol: Option<Protocol>,
@@ -141,10 +146,6 @@ enum IrohSenderMode {
     },
     /// Use manual signaling (copy-paste), no servers, direct-only
     Manual {
-        /// Path to TOML config file
-        #[arg(short, long)]
-        config: Option<PathBuf>,
-
         /// Protocol to tunnel (tcp or udp)
         #[arg(short, long)]
         protocol: Option<Protocol>,
@@ -164,10 +165,6 @@ enum ReceiverMode {
     },
     /// Use custom QUIC with manual signaling (TCP only, str0m+quinn)
     Custom {
-        /// Path to TOML config file
-        #[arg(short, long)]
-        config: Option<PathBuf>,
-
         /// Local address to listen on (e.g., 127.0.0.1:2222)
         #[arg(short, long)]
         listen: Option<String>,
@@ -182,10 +179,6 @@ enum ReceiverMode {
 enum IrohReceiverMode {
     /// Use iroh discovery servers (Pkarr/DNS/mDNS) with relay fallback
     Default {
-        /// Path to TOML config file
-        #[arg(short, long)]
-        config: Option<PathBuf>,
-
         /// Protocol to tunnel (tcp or udp)
         #[arg(short, long)]
         protocol: Option<Protocol>,
@@ -212,10 +205,6 @@ enum IrohReceiverMode {
     },
     /// Use manual signaling (copy-paste), no servers, direct-only
     Manual {
-        /// Path to TOML config file
-        #[arg(short, long)]
-        config: Option<PathBuf>,
-
         /// Protocol to tunnel (tcp or udp)
         #[arg(short, long)]
         protocol: Option<Protocol>,
@@ -226,191 +215,215 @@ enum IrohReceiverMode {
     },
 }
 
+/// Load sender config based on flags.
+fn resolve_sender_config(
+    config: Option<PathBuf>,
+    default_config: bool,
+) -> Result<SenderConfig> {
+    if config.is_some() && default_config {
+        anyhow::bail!("Cannot use both -c/--config and --default-config");
+    }
+
+    if let Some(path) = config {
+        load_sender_config(Some(&path))
+    } else if default_config {
+        load_sender_config(None)
+    } else {
+        Ok(SenderConfig::default())
+    }
+}
+
+/// Load receiver config based on flags.
+fn resolve_receiver_config(
+    config: Option<PathBuf>,
+    default_config: bool,
+) -> Result<ReceiverConfig> {
+    if config.is_some() && default_config {
+        anyhow::bail!("Cannot use both -c/--config and --default-config");
+    }
+
+    if let Some(path) = config {
+        load_receiver_config(Some(&path))
+    } else if default_config {
+        load_receiver_config(None)
+    } else {
+        Ok(ReceiverConfig::default())
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
 
     match args.command {
-        Command::Sender { mode } => match mode {
-            SenderMode::Iroh { mode: iroh_mode } => match iroh_mode {
-                IrohSenderMode::Default {
-                    config,
-                    protocol,
-                    target,
-                    secret_file,
-                    relay_urls,
-                    relay_only,
-                    dns_server,
-                } => {
-                    let cfg = load_iroh_sender_config(config.as_deref())?;
+        Command::Sender {
+            config,
+            default_config,
+            mode,
+        } => {
+            let cfg = resolve_sender_config(config, default_config)?;
 
-                    // Merge: CLI > Config > Default
-                    let protocol = protocol
-                        .or_else(|| cfg.protocol.as_deref().and_then(Protocol::from_str_opt))
-                        .unwrap_or_default();
+            match mode {
+                SenderMode::Iroh { mode: iroh_mode } => match iroh_mode {
+                    IrohSenderMode::Default {
+                        protocol,
+                        target,
+                        secret_file,
+                        relay_urls,
+                        relay_only,
+                        dns_server,
+                    } => {
+                        // Merge: CLI > Config > Default
+                        let protocol = protocol
+                            .or_else(|| cfg.protocol.as_deref().and_then(Protocol::from_str_opt))
+                            .unwrap_or_default();
+                        let target = target
+                            .or(cfg.target)
+                            .unwrap_or_else(|| "127.0.0.1:22".to_string());
+                        let secret_file = secret_file.or(cfg.secret_file);
+                        let relay_urls = if relay_urls.is_empty() {
+                            cfg.relay_urls.unwrap_or_default()
+                        } else {
+                            relay_urls
+                        };
+                        let relay_only = relay_only || cfg.relay_only.unwrap_or(false);
+                        let dns_server = dns_server.or(cfg.dns_server);
+
+                        match protocol {
+                            Protocol::Udp => {
+                                tunnel::run_udp_sender(
+                                    target,
+                                    secret_file,
+                                    relay_urls,
+                                    relay_only,
+                                    dns_server,
+                                )
+                                .await
+                            }
+                            Protocol::Tcp => {
+                                tunnel::run_tcp_sender(
+                                    target,
+                                    secret_file,
+                                    relay_urls,
+                                    relay_only,
+                                    dns_server,
+                                )
+                                .await
+                            }
+                        }
+                    }
+                    IrohSenderMode::Manual { protocol, target } => {
+                        let protocol = protocol
+                            .or_else(|| cfg.protocol.as_deref().and_then(Protocol::from_str_opt))
+                            .unwrap_or_default();
+                        let target = target
+                            .or(cfg.target)
+                            .unwrap_or_else(|| "127.0.0.1:22".to_string());
+
+                        match protocol {
+                            Protocol::Udp => tunnel::run_iroh_manual_udp_sender(target).await,
+                            Protocol::Tcp => tunnel::run_iroh_manual_tcp_sender(target).await,
+                        }
+                    }
+                },
+                SenderMode::Custom {
+                    target,
+                    stun_servers,
+                } => {
                     let target = target
                         .or(cfg.target)
                         .unwrap_or_else(|| "127.0.0.1:22".to_string());
-                    let secret_file = secret_file.or(cfg.secret_file);
-                    let relay_urls = if relay_urls.is_empty() {
-                        cfg.relay_urls.unwrap_or_default()
+                    let stun_servers = if stun_servers.is_empty() {
+                        cfg.stun_servers.unwrap_or_else(default_stun_servers)
                     } else {
-                        relay_urls
+                        stun_servers
                     };
-                    let relay_only = relay_only || cfg.relay_only.unwrap_or(false);
-                    let dns_server = dns_server.or(cfg.dns_server);
 
-                    match protocol {
-                        Protocol::Udp => {
-                            tunnel::run_udp_sender(
-                                target,
-                                secret_file,
-                                relay_urls,
-                                relay_only,
-                                dns_server,
-                            )
-                            .await
-                        }
-                        Protocol::Tcp => {
-                            tunnel::run_tcp_sender(
-                                target,
-                                secret_file,
-                                relay_urls,
-                                relay_only,
-                                dns_server,
-                            )
-                            .await
-                        }
-                    }
+                    tunnel::run_manual_tcp_sender(target, stun_servers).await
                 }
-                IrohSenderMode::Manual {
-                    config,
-                    protocol,
-                    target,
-                } => {
-                    let cfg = load_iroh_sender_config(config.as_deref())?;
-
-                    let protocol = protocol
-                        .or_else(|| cfg.protocol.as_deref().and_then(Protocol::from_str_opt))
-                        .unwrap_or_default();
-                    let target = target
-                        .or(cfg.target)
-                        .unwrap_or_else(|| "127.0.0.1:22".to_string());
-
-                    match protocol {
-                        Protocol::Udp => {
-                            tunnel::run_iroh_manual_udp_sender(target).await
-                        }
-                        Protocol::Tcp => {
-                            tunnel::run_iroh_manual_tcp_sender(target).await
-                        }
-                    }
-                }
-            },
-            SenderMode::Custom {
-                config,
-                target,
-                stun_servers,
-            } => {
-                let cfg = load_ice_sender_config(config.as_deref())?;
-
-                let target = target
-                    .or(cfg.target)
-                    .unwrap_or_else(|| "127.0.0.1:22".to_string());
-                let stun_servers = if stun_servers.is_empty() {
-                    cfg.stun_servers.unwrap_or_else(default_stun_servers)
-                } else {
-                    stun_servers
-                };
-
-                tunnel::run_manual_tcp_sender(target, stun_servers).await
             }
-        },
-        Command::Receiver { mode } => match mode {
-            ReceiverMode::Iroh { mode: iroh_mode } => match iroh_mode {
-                IrohReceiverMode::Default {
-                    config,
-                    protocol,
-                    node_id,
-                    listen,
-                    relay_urls,
-                    relay_only,
-                    dns_server,
-                } => {
-                    let cfg = load_iroh_receiver_config(config.as_deref())?;
+        }
+        Command::Receiver {
+            config,
+            default_config,
+            mode,
+        } => {
+            let cfg = resolve_receiver_config(config, default_config)?;
 
-                    // Merge: CLI > Config > Default
-                    let protocol = protocol
-                        .or_else(|| cfg.protocol.as_deref().and_then(Protocol::from_str_opt))
-                        .unwrap_or_default();
-                    let node_id = node_id.or(cfg.node_id).context(
-                        "node_id is required. Provide via --node-id or in config file.",
-                    )?;
+            match mode {
+                ReceiverMode::Iroh { mode: iroh_mode } => match iroh_mode {
+                    IrohReceiverMode::Default {
+                        protocol,
+                        node_id,
+                        listen,
+                        relay_urls,
+                        relay_only,
+                        dns_server,
+                    } => {
+                        // Merge: CLI > Config > Default
+                        let protocol = protocol
+                            .or_else(|| cfg.protocol.as_deref().and_then(Protocol::from_str_opt))
+                            .unwrap_or_default();
+                        let node_id = node_id.or(cfg.node_id).context(
+                            "node_id is required. Provide via --node-id or in config file.",
+                        )?;
+                        let listen = listen.or(cfg.listen).context(
+                            "listen is required. Provide via --listen or in config file.",
+                        )?;
+                        let relay_urls = if relay_urls.is_empty() {
+                            cfg.relay_urls.unwrap_or_default()
+                        } else {
+                            relay_urls
+                        };
+                        let relay_only = relay_only || cfg.relay_only.unwrap_or(false);
+                        let dns_server = dns_server.or(cfg.dns_server);
+
+                        match protocol {
+                            Protocol::Udp => {
+                                tunnel::run_udp_receiver(
+                                    node_id, listen, relay_urls, relay_only, dns_server,
+                                )
+                                .await
+                            }
+                            Protocol::Tcp => {
+                                tunnel::run_tcp_receiver(
+                                    node_id, listen, relay_urls, relay_only, dns_server,
+                                )
+                                .await
+                            }
+                        }
+                    }
+                    IrohReceiverMode::Manual { protocol, listen } => {
+                        let protocol = protocol
+                            .or_else(|| cfg.protocol.as_deref().and_then(Protocol::from_str_opt))
+                            .unwrap_or_default();
+                        let listen = listen.or(cfg.listen).context(
+                            "listen is required. Provide via --listen or in config file.",
+                        )?;
+
+                        match protocol {
+                            Protocol::Udp => tunnel::run_iroh_manual_udp_receiver(listen).await,
+                            Protocol::Tcp => tunnel::run_iroh_manual_tcp_receiver(listen).await,
+                        }
+                    }
+                },
+                ReceiverMode::Custom {
+                    listen,
+                    stun_servers,
+                } => {
                     let listen = listen.or(cfg.listen).context(
                         "listen is required. Provide via --listen or in config file.",
                     )?;
-                    let relay_urls = if relay_urls.is_empty() {
-                        cfg.relay_urls.unwrap_or_default()
+                    let stun_servers = if stun_servers.is_empty() {
+                        cfg.stun_servers.unwrap_or_else(default_stun_servers)
                     } else {
-                        relay_urls
+                        stun_servers
                     };
-                    let relay_only = relay_only || cfg.relay_only.unwrap_or(false);
-                    let dns_server = dns_server.or(cfg.dns_server);
 
-                    match protocol {
-                        Protocol::Udp => {
-                            tunnel::run_udp_receiver(node_id, listen, relay_urls, relay_only, dns_server)
-                                .await
-                        }
-                        Protocol::Tcp => {
-                            tunnel::run_tcp_receiver(node_id, listen, relay_urls, relay_only, dns_server)
-                                .await
-                        }
-                    }
+                    tunnel::run_manual_tcp_receiver(listen, stun_servers).await
                 }
-                IrohReceiverMode::Manual {
-                    config,
-                    protocol,
-                    listen,
-                } => {
-                    let cfg = load_iroh_receiver_config(config.as_deref())?;
-
-                    let protocol = protocol
-                        .or_else(|| cfg.protocol.as_deref().and_then(Protocol::from_str_opt))
-                        .unwrap_or_default();
-                    let listen = listen.or(cfg.listen).context(
-                        "listen is required. Provide via --listen or in config file.",
-                    )?;
-
-                    match protocol {
-                        Protocol::Udp => {
-                            tunnel::run_iroh_manual_udp_receiver(listen).await
-                        }
-                        Protocol::Tcp => {
-                            tunnel::run_iroh_manual_tcp_receiver(listen).await
-                        }
-                    }
-                }
-            },
-            ReceiverMode::Custom {
-                config,
-                listen,
-                stun_servers,
-            } => {
-                let cfg = load_ice_receiver_config(config.as_deref())?;
-
-                let listen = listen.or(cfg.listen).context(
-                    "listen is required. Provide via --listen or in config file.",
-                )?;
-                let stun_servers = if stun_servers.is_empty() {
-                    cfg.stun_servers.unwrap_or_else(default_stun_servers)
-                } else {
-                    stun_servers
-                };
-
-                tunnel::run_manual_tcp_receiver(listen, stun_servers).await
             }
-        },
+        }
         Command::GenerateSecret { output, force } => secret::generate_secret(output, force),
         Command::ShowId { secret_file } => secret::show_id(secret_file),
     }
