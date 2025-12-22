@@ -10,7 +10,7 @@
 
 # Required: validates config matches CLI command
 role = "receiver"
-mode = "iroh-default"  # or "iroh-manual" or "custom"
+mode = "iroh-default"  # or "iroh-manual", "custom", or "nostr"
 
 # Shared options
 # target is optional here, but required at runtime (via config or CLI)
@@ -44,6 +44,30 @@ relay_only = false
 # ]
 
 # [custom]
+# # Set to [] to disable STUN entirely
+# stun_servers = [
+#     "stun.l.google.com:19302",
+#     "stun1.l.google.com:19302",
+#     "stun.services.mozilla.com:3478",
+# ]
+
+# [nostr]
+# # Your Nostr private key (generate with: tunnel-rs generate-nostr-key)
+# nsec = "nsec1..."
+#
+# # Peer's Nostr public key
+# peer_npub = "npub1..."
+#
+# # Nostr relay URLs (defaults to public relays if not specified)
+# relays = [
+#     "wss://relay.damus.io",
+#     "wss://nos.lol",
+#     "wss://relay.nostr.band",
+#     "wss://relay.primal.net",
+#     "wss://nostr.mom",
+#     "wss://relay.snort.social",
+# ]
+#
 # # Set to [] to disable STUN entirely
 # stun_servers = [
 #     "stun.l.google.com:19302",

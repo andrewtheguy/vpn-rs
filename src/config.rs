@@ -37,6 +37,15 @@ pub struct CustomConfig {
     pub stun_servers: Option<Vec<String>>,
 }
 
+/// nostr mode configuration.
+#[derive(Deserialize, Default, Clone)]
+pub struct NostrConfig {
+    pub relays: Option<Vec<String>>,
+    pub nsec: Option<String>,
+    pub peer_npub: Option<String>,
+    pub stun_servers: Option<Vec<String>>,
+}
+
 /// Unified sender configuration.
 #[derive(Deserialize, Default)]
 pub struct SenderConfig {
@@ -53,6 +62,7 @@ pub struct SenderConfig {
     #[serde(rename = "iroh-manual")]
     pub iroh_manual: Option<IrohManualConfig>,
     pub custom: Option<CustomConfig>,
+    pub nostr: Option<NostrConfig>,
 }
 
 /// Unified receiver configuration.
@@ -71,6 +81,7 @@ pub struct ReceiverConfig {
     #[serde(rename = "iroh-manual")]
     pub iroh_manual: Option<IrohManualConfig>,
     pub custom: Option<CustomConfig>,
+    pub nostr: Option<NostrConfig>,
 }
 
 // ============================================================================
@@ -93,7 +104,12 @@ impl SenderConfig {
         self.custom.as_ref()
     }
 
-    /// Validate that config matches expected role and mode, and has no unexpected sections.
+    /// Get nostr config section.
+    pub fn nostr(&self) -> Option<&NostrConfig> {
+        self.nostr.as_ref()
+    }
+
+    /// Validate that config matches expected role and mode.
     pub fn validate(&self, expected_mode: &str) -> Result<()> {
         let role = self.role.as_deref().context(
             "Config file missing required 'role' field. Add: role = \"sender\"",
@@ -106,7 +122,7 @@ impl SenderConfig {
         }
 
         let mode = self.mode.as_deref().context(
-            "Config file missing required 'mode' field. Add: mode = \"iroh-default\" (or iroh-manual, custom)",
+            "Config file missing required 'mode' field. Add: mode = \"iroh-default\" (or iroh-manual, custom, nostr)",
         )?;
         if mode != expected_mode {
             anyhow::bail!(
@@ -116,33 +132,10 @@ impl SenderConfig {
             );
         }
 
-        // Validate no unexpected sections for the current mode
+        // Validate mode is known
         match expected_mode {
-            "iroh-default" => {
-                if self.iroh_manual.is_some() {
-                    anyhow::bail!("Config has [iroh-manual] section but mode = \"iroh-default\"");
-                }
-                if self.custom.is_some() {
-                    anyhow::bail!("Config has [custom] section but mode = \"iroh-default\"");
-                }
-            }
-            "iroh-manual" => {
-                if self.iroh_default.is_some() {
-                    anyhow::bail!("Config has [iroh-default] section but mode = \"iroh-manual\"");
-                }
-                if self.custom.is_some() {
-                    anyhow::bail!("Config has [custom] section but mode = \"iroh-manual\"");
-                }
-            }
-            "custom" => {
-                if self.iroh_default.is_some() {
-                    anyhow::bail!("Config has [iroh-default] section but mode = \"custom\"");
-                }
-                if self.iroh_manual.is_some() {
-                    anyhow::bail!("Config has [iroh-manual] section but mode = \"custom\"");
-                }
-            }
-            _ => anyhow::bail!("Unknown mode '{}'. Valid modes: iroh-default, iroh-manual, custom", expected_mode),
+            "iroh-default" | "iroh-manual" | "custom" | "nostr" => {}
+            _ => anyhow::bail!("Unknown mode '{}'. Valid modes: iroh-default, iroh-manual, custom, nostr", expected_mode),
         }
 
         Ok(())
@@ -165,7 +158,12 @@ impl ReceiverConfig {
         self.custom.as_ref()
     }
 
-    /// Validate that config matches expected role and mode, and has no unexpected sections.
+    /// Get nostr config section.
+    pub fn nostr(&self) -> Option<&NostrConfig> {
+        self.nostr.as_ref()
+    }
+
+    /// Validate that config matches expected role and mode.
     pub fn validate(&self, expected_mode: &str) -> Result<()> {
         let role = self.role.as_deref().context(
             "Config file missing required 'role' field. Add: role = \"receiver\"",
@@ -178,7 +176,7 @@ impl ReceiverConfig {
         }
 
         let mode = self.mode.as_deref().context(
-            "Config file missing required 'mode' field. Add: mode = \"iroh-default\" (or iroh-manual, custom)",
+            "Config file missing required 'mode' field. Add: mode = \"iroh-default\" (or iroh-manual, custom, nostr)",
         )?;
         if mode != expected_mode {
             anyhow::bail!(
@@ -188,33 +186,10 @@ impl ReceiverConfig {
             );
         }
 
-        // Validate no unexpected sections for the current mode
+        // Validate mode is known
         match expected_mode {
-            "iroh-default" => {
-                if self.iroh_manual.is_some() {
-                    anyhow::bail!("Config has [iroh-manual] section but mode = \"iroh-default\"");
-                }
-                if self.custom.is_some() {
-                    anyhow::bail!("Config has [custom] section but mode = \"iroh-default\"");
-                }
-            }
-            "iroh-manual" => {
-                if self.iroh_default.is_some() {
-                    anyhow::bail!("Config has [iroh-default] section but mode = \"iroh-manual\"");
-                }
-                if self.custom.is_some() {
-                    anyhow::bail!("Config has [custom] section but mode = \"iroh-manual\"");
-                }
-            }
-            "custom" => {
-                if self.iroh_default.is_some() {
-                    anyhow::bail!("Config has [iroh-default] section but mode = \"custom\"");
-                }
-                if self.iroh_manual.is_some() {
-                    anyhow::bail!("Config has [iroh-manual] section but mode = \"custom\"");
-                }
-            }
-            _ => anyhow::bail!("Unknown mode '{}'. Valid modes: iroh-default, iroh-manual, custom", expected_mode),
+            "iroh-default" | "iroh-manual" | "custom" | "nostr" => {}
+            _ => anyhow::bail!("Unknown mode '{}'. Valid modes: iroh-default, iroh-manual, custom, nostr", expected_mode),
         }
 
         Ok(())
@@ -279,5 +254,17 @@ pub fn default_stun_servers() -> Vec<String> {
         "stun.l.google.com:19302".to_string(),
         "stun1.l.google.com:19302".to_string(),
         "stun.services.mozilla.com:3478".to_string(),
+    ]
+}
+
+/// Default public Nostr relays for signaling.
+pub fn default_nostr_relays() -> Vec<String> {
+    vec![
+        "wss://relay.damus.io".to_string(),
+        "wss://nos.lol".to_string(),
+        "wss://relay.nostr.band".to_string(),
+        "wss://relay.primal.net".to_string(),
+        "wss://nostr.mom".to_string(),
+        "wss://relay.snort.social".to_string(),
     ]
 }

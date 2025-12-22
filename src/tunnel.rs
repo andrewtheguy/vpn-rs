@@ -18,22 +18,136 @@ use crate::endpoint::{
     validate_relay_only, TCP_ALPN, UDP_ALPN,
 };
 use crate::manual::ice::{IceEndpoint, IceRole};
+use crate::manual::nostr_signaling::NostrSignaling;
 use crate::manual::quic;
 use crate::manual::signaling::{
     display_answer, display_iroh_answer, display_iroh_offer, display_offer,
     read_answer_from_stdin, read_iroh_answer_from_stdin, read_iroh_offer_from_stdin,
     read_offer_from_stdin, IrohManualAnswer, IrohManualOffer, ManualAnswer, ManualOffer,
-    IROH_SIGNAL_VERSION, MANUAL_SIGNAL_VERSION,
+    ManualRequest, IROH_SIGNAL_VERSION, MANUAL_SIGNAL_VERSION,
 };
 
 /// Timeout for QUIC connection (matches webrtc crate's 180 second connection timeout)
 const QUIC_CONNECTION_TIMEOUT: Duration = Duration::from_secs(180);
+
+/// Maximum age for accepting incoming requests (seconds).
+/// Requests older than this are considered stale and ignored.
+const MAX_REQUEST_AGE_SECS: u64 = 60;
 
 async fn resolve_target_addr(target: &str) -> Result<SocketAddr> {
     let mut addrs = lookup_host(target)
         .await
         .with_context(|| format!("Failed to resolve '{}'", target))?;
     addrs.next().context("No addresses found for host")
+}
+
+/// Generate a random session ID for nostr signaling.
+fn generate_session_id() -> String {
+    use rand::Rng;
+    let random_bytes: [u8; 8] = rand::rng().random();
+    hex::encode(random_bytes)
+}
+
+/// Get current Unix timestamp in seconds.
+fn current_timestamp() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+}
+
+/// Publish offer and wait for answer with periodic re-publishing.
+///
+/// This helper implements the nostr signaling offer/answer exchange with:
+/// - Periodic re-publishing of the offer at `republish_interval_secs`
+/// - Overall timeout of `max_wait_secs`
+/// - Session ID validation to filter stale answers
+async fn publish_offer_and_wait_for_answer(
+    signaling: &NostrSignaling,
+    offer: &ManualOffer,
+    session_id: &str,
+    republish_interval_secs: u64,
+    max_wait_secs: u64,
+) -> Result<ManualAnswer> {
+    let start_time = std::time::Instant::now();
+
+    signaling.publish_offer(offer).await?;
+    println!(
+        "Waiting for answer (re-publishing every {}s, max {}s)...",
+        republish_interval_secs, max_wait_secs
+    );
+
+    loop {
+        if let Some(ans) = signaling
+            .try_wait_for_answer_timeout(republish_interval_secs)
+            .await
+        {
+            // Verify session ID matches
+            if ans.session_id.as_ref() == Some(&session_id.to_string()) {
+                return Ok(ans);
+            }
+            println!("Ignoring answer with mismatched session ID (stale event)");
+        }
+
+        // Check overall timeout
+        if start_time.elapsed().as_secs() >= max_wait_secs {
+            anyhow::bail!(
+                "Timeout waiting for answer from peer ({}s)",
+                max_wait_secs
+            );
+        }
+
+        // Re-publish offer
+        println!("Re-publishing offer...");
+        signaling.publish_offer(offer).await?;
+    }
+}
+
+/// Publish request and wait for offer with periodic re-publishing.
+///
+/// This helper implements the nostr signaling request/offer exchange with:
+/// - Periodic re-publishing of the request at `republish_interval_secs`
+/// - Overall timeout of `max_wait_secs`
+/// - Session ID validation to filter stale offers
+async fn publish_request_and_wait_for_offer(
+    signaling: &NostrSignaling,
+    request: &ManualRequest,
+    republish_interval_secs: u64,
+    max_wait_secs: u64,
+) -> Result<ManualOffer> {
+    let start_time = std::time::Instant::now();
+    let session_id = &request.session_id;
+
+    signaling.publish_request(request).await?;
+    println!(
+        "Waiting for offer (re-publishing request every {}s, max {}s)...",
+        republish_interval_secs, max_wait_secs
+    );
+
+    loop {
+        if let Some(offer) = signaling
+            .try_wait_for_offer_timeout(republish_interval_secs)
+            .await
+        {
+            // Verify session ID matches
+            if offer.session_id.as_ref() == Some(session_id) {
+                return Ok(offer);
+            }
+            println!("Ignoring offer with mismatched session ID (stale event)");
+        }
+
+        // Check overall timeout
+        if start_time.elapsed().as_secs() >= max_wait_secs {
+            anyhow::bail!(
+                "Timeout waiting for offer from peer ({}s)",
+                max_wait_secs
+            );
+        }
+
+        // Re-publish request
+        println!("Re-publishing request...");
+        signaling.publish_request(request).await?;
+    }
 }
 
 // ============================================================================
@@ -473,6 +587,7 @@ pub async fn run_manual_tcp_sender(target: String, stun_servers: Vec<String>) ->
         ice_pwd: local_creds.pass.clone(),
         candidates: local_candidates,
         quic_fingerprint: quic_identity.fingerprint.clone(),
+        session_id: None,
     };
 
     println!("\nManual Offer (copy to receiver):");
@@ -561,6 +676,7 @@ pub async fn run_manual_tcp_receiver(listen: String, stun_servers: Vec<String>) 
         ice_ufrag: local_creds.ufrag.clone(),
         ice_pwd: local_creds.pass.clone(),
         candidates: local_candidates,
+        session_id: None,
     };
 
     println!("\nManual Answer (copy to sender):");
@@ -648,6 +764,7 @@ pub async fn run_manual_udp_sender(target: String, stun_servers: Vec<String>) ->
         ice_pwd: local_creds.pass.clone(),
         candidates: local_candidates,
         quic_fingerprint: quic_identity.fingerprint.clone(),
+        session_id: None,
     };
 
     println!("\nManual Offer (copy to receiver):");
@@ -742,6 +859,7 @@ pub async fn run_manual_udp_receiver(listen: String, stun_servers: Vec<String>) 
         ice_ufrag: local_creds.ufrag.clone(),
         ice_pwd: local_creds.pass.clone(),
         candidates: local_candidates,
+        session_id: None,
     };
 
     println!("\nManual Answer (copy to sender):");
@@ -761,6 +879,583 @@ pub async fn run_manual_udp_receiver(listen: String, stun_servers: Vec<String>) 
 
     let endpoint = quic::make_client_endpoint(ice_conn.socket, &offer.quic_fingerprint)?;
     println!("Connecting to sender via QUIC (timeout: {:?})...", QUIC_CONNECTION_TIMEOUT);
+    let connecting = endpoint
+        .connect(ice_conn.remote_addr, "manual")
+        .context("Failed to start QUIC connection")?;
+    let conn = tokio::time::timeout(QUIC_CONNECTION_TIMEOUT, connecting)
+        .await
+        .context("Timeout during QUIC connection")?
+        .context("Failed to connect to sender")?;
+    println!("Connected to sender over QUIC.");
+
+    let (send_stream, recv_stream) = conn.open_bi().await.context("Failed to open stream")?;
+
+    let udp_socket = Arc::new(
+        UdpSocket::bind(listen_addr)
+            .await
+            .context("Failed to bind UDP socket")?,
+    );
+    println!(
+        "Listening on UDP {} - configure your client to connect here",
+        listen_addr
+    );
+
+    let client_addr: Arc<Mutex<Option<SocketAddr>>> = Arc::new(Mutex::new(None));
+
+    let udp_clone = udp_socket.clone();
+    let client_clone = client_addr.clone();
+
+    tokio::select! {
+        result = forward_udp_to_stream_quic(udp_clone, send_stream, client_clone) => {
+            if let Err(e) = result {
+                eprintln!("UDP to stream error: {}", e);
+            }
+        }
+        result = forward_stream_to_udp_receiver_quic(recv_stream, udp_socket, client_addr) => {
+            if let Err(e) = result {
+                eprintln!("Stream to UDP error: {}", e);
+            }
+        }
+    }
+
+    conn.close(0u32.into(), b"done");
+    println!("Connection closed.");
+
+    Ok(())
+}
+
+// ============================================================================
+// Nostr TCP Tunnel Implementation (ICE + QUIC with Nostr signaling)
+// ============================================================================
+
+pub async fn run_nostr_tcp_sender(
+    target: String,
+    stun_servers: Vec<String>,
+    nsec: String,
+    peer_npub: String,
+    relays: Vec<String>,
+    republish_interval_secs: u64,
+    max_wait_secs: u64,
+) -> Result<()> {
+    // Ensure crypto provider is installed before nostr-sdk uses rustls
+    quic::ensure_crypto_provider();
+
+    let target_addr = resolve_target_addr(&target)
+        .await
+        .with_context(|| format!("Invalid target address or hostname '{}'", target))?;
+
+    println!("Nostr TCP Tunnel - Sender Mode");
+    println!("==============================");
+
+    // Create Nostr signaling client
+    let relay_list = if relays.is_empty() { None } else { Some(relays) };
+    let signaling = NostrSignaling::new(&nsec, &peer_npub, relay_list).await?;
+
+    println!("Your pubkey: {}", signaling.public_key_bech32());
+    println!("Transfer ID: {}", signaling.transfer_id());
+    println!("Relays: {:?}", signaling.relay_urls());
+
+    // Subscribe to incoming events
+    signaling.subscribe().await?;
+
+    // Wait for fresh request from receiver (reject stale requests)
+    println!("Waiting for request from receiver...");
+    let request = signaling.wait_for_fresh_request(MAX_REQUEST_AGE_SECS).await?;
+
+    if request.version != MANUAL_SIGNAL_VERSION {
+        anyhow::bail!(
+            "Manual signaling version mismatch (expected {}, got {})",
+            MANUAL_SIGNAL_VERSION,
+            request.version
+        );
+    }
+
+    // Use session ID from the request (generated by receiver)
+    let session_id = request.session_id.clone();
+    println!("Session ID: {} (from receiver)", session_id);
+
+    // Now gather our ICE candidates
+    let ice = IceEndpoint::gather(&stun_servers).await?;
+    let local_creds = ice.local_credentials();
+    let local_candidates = ice.local_candidates();
+
+    let quic_identity = quic::generate_server_identity()?;
+
+    let offer = ManualOffer {
+        version: MANUAL_SIGNAL_VERSION,
+        ice_ufrag: local_creds.ufrag.clone(),
+        ice_pwd: local_creds.pass.clone(),
+        candidates: local_candidates,
+        quic_fingerprint: quic_identity.fingerprint.clone(),
+        session_id: Some(session_id.clone()),
+    };
+
+    // Publish offer via Nostr and wait for answer (re-publish periodically)
+    let answer = publish_offer_and_wait_for_answer(
+        &signaling,
+        &offer,
+        &session_id,
+        republish_interval_secs,
+        max_wait_secs,
+    )
+    .await?;
+
+    if answer.version != MANUAL_SIGNAL_VERSION {
+        anyhow::bail!(
+            "Manual signaling version mismatch (expected {}, got {})",
+            MANUAL_SIGNAL_VERSION,
+            answer.version
+        );
+    }
+
+    // Disconnect from Nostr (signaling complete)
+    signaling.disconnect().await;
+
+    // Use receiver's ICE credentials from the REQUEST (not answer)
+    let remote_creds = str0m::IceCreds {
+        ufrag: request.ice_ufrag,
+        pass: request.ice_pwd,
+    };
+
+    let ice_conn = ice
+        .connect(IceRole::Controlling, remote_creds, request.candidates)
+        .await?;
+
+    // Spawn the ICE keeper to handle STUN packets in the background
+    tokio::spawn(ice_conn.ice_keeper.run());
+
+    let endpoint = quic::make_server_endpoint(ice_conn.socket, quic_identity.server_config)?;
+    println!(
+        "Waiting for receiver QUIC connection (timeout: {:?})...",
+        QUIC_CONNECTION_TIMEOUT
+    );
+
+    let connecting = tokio::time::timeout(QUIC_CONNECTION_TIMEOUT, endpoint.accept())
+        .await
+        .context("Timeout waiting for QUIC connection")?
+        .context("No incoming QUIC connection")?;
+    let conn = tokio::time::timeout(QUIC_CONNECTION_TIMEOUT, connecting)
+        .await
+        .context("Timeout during QUIC handshake")?
+        .context("Failed to accept QUIC connection")?;
+    println!("Receiver connected over QUIC.");
+
+    loop {
+        let (send_stream, recv_stream) = match conn.accept_bi().await {
+            Ok(streams) => streams,
+            Err(e) => {
+                println!("Receiver disconnected: {}", e);
+                break;
+            }
+        };
+
+        println!("New TCP connection request received");
+        let target = target_addr;
+        tokio::spawn(async move {
+            if let Err(e) = handle_tcp_sender_stream_quic(send_stream, recv_stream, target).await {
+                eprintln!("TCP connection error: {}", e);
+            }
+        });
+    }
+
+    Ok(())
+}
+
+pub async fn run_nostr_tcp_receiver(
+    listen: String,
+    stun_servers: Vec<String>,
+    nsec: String,
+    peer_npub: String,
+    relays: Vec<String>,
+    republish_interval_secs: u64,
+    max_wait_secs: u64,
+) -> Result<()> {
+    // Ensure crypto provider is installed before nostr-sdk uses rustls
+    quic::ensure_crypto_provider();
+
+    let listen_addr: SocketAddr = listen
+        .parse()
+        .context("Invalid listen address format. Use format like 127.0.0.1:2222 or [::]:2222")?;
+
+    println!("Nostr TCP Tunnel - Receiver Mode");
+    println!("================================");
+
+    // Create Nostr signaling client
+    let relay_list = if relays.is_empty() { None } else { Some(relays) };
+    let signaling = NostrSignaling::new(&nsec, &peer_npub, relay_list).await?;
+
+    println!("Your pubkey: {}", signaling.public_key_bech32());
+    println!("Transfer ID: {}", signaling.transfer_id());
+    println!("Relays: {:?}", signaling.relay_urls());
+
+    // Subscribe to incoming events
+    signaling.subscribe().await?;
+
+    // Generate session ID to filter stale events
+    let session_id = generate_session_id();
+    println!("Session ID: {}", session_id);
+
+    // Gather ICE candidates first (before sending request)
+    let ice = IceEndpoint::gather(&stun_servers).await?;
+    let local_creds = ice.local_credentials();
+    let local_candidates = ice.local_candidates();
+
+    // Create and publish request to initiate session
+    let request = ManualRequest {
+        version: MANUAL_SIGNAL_VERSION,
+        ice_ufrag: local_creds.ufrag.clone(),
+        ice_pwd: local_creds.pass.clone(),
+        candidates: local_candidates.clone(),
+        session_id: session_id.clone(),
+        timestamp: current_timestamp(),
+    };
+
+    // Publish request and wait for offer (re-publish periodically)
+    let offer = publish_request_and_wait_for_offer(
+        &signaling,
+        &request,
+        republish_interval_secs,
+        max_wait_secs,
+    )
+    .await?;
+
+    if offer.version != MANUAL_SIGNAL_VERSION {
+        anyhow::bail!(
+            "Manual signaling version mismatch (expected {}, got {})",
+            MANUAL_SIGNAL_VERSION,
+            offer.version
+        );
+    }
+
+    // Create and publish answer (echo session_id)
+    let answer = ManualAnswer {
+        version: MANUAL_SIGNAL_VERSION,
+        ice_ufrag: local_creds.ufrag.clone(),
+        ice_pwd: local_creds.pass.clone(),
+        candidates: local_candidates,
+        session_id: Some(session_id),
+    };
+
+    // Publish answer once - sender already has our ICE credentials from the request,
+    // so we can proceed to ICE immediately after publishing
+    signaling.publish_answer(&answer).await?;
+
+    // Brief delay to allow answer to propagate to relays
+    println!("Waiting briefly for answer to propagate...");
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    // Disconnect from Nostr (signaling complete)
+    signaling.disconnect().await;
+
+    let remote_creds = str0m::IceCreds {
+        ufrag: offer.ice_ufrag,
+        pass: offer.ice_pwd,
+    };
+
+    let ice_conn = ice
+        .connect(IceRole::Controlled, remote_creds, offer.candidates)
+        .await?;
+
+    // Spawn the ICE keeper to handle STUN packets in the background
+    tokio::spawn(ice_conn.ice_keeper.run());
+
+    let endpoint = quic::make_client_endpoint(ice_conn.socket, &offer.quic_fingerprint)?;
+    println!(
+        "Connecting to sender via QUIC (timeout: {:?})...",
+        QUIC_CONNECTION_TIMEOUT
+    );
+    let connecting = endpoint
+        .connect(ice_conn.remote_addr, "manual")
+        .context("Failed to start QUIC connection")?;
+    let conn = tokio::time::timeout(QUIC_CONNECTION_TIMEOUT, connecting)
+        .await
+        .context("Timeout during QUIC connection")?
+        .context("Failed to connect to sender")?;
+    println!("Connected to sender over QUIC.");
+
+    let conn = Arc::new(conn);
+    let tunnel_established = Arc::new(AtomicBool::new(false));
+
+    let listener = TcpListener::bind(listen_addr)
+        .await
+        .context("Failed to bind TCP listener")?;
+    println!(
+        "Listening on TCP {} - configure your client to connect here",
+        listen_addr
+    );
+
+    loop {
+        let (tcp_stream, peer_addr) = match listener.accept().await {
+            Ok(result) => result,
+            Err(e) => {
+                eprintln!("Failed to accept TCP connection: {}", e);
+                continue;
+            }
+        };
+
+        println!("New local connection from {}", peer_addr);
+        let conn_clone = conn.clone();
+        let established = tunnel_established.clone();
+
+        tokio::spawn(async move {
+            match handle_tcp_receiver_connection_quic(conn_clone, tcp_stream, peer_addr, established)
+                .await
+            {
+                Ok(()) => {}
+                Err(e) => {
+                    eprintln!("TCP tunnel error for {}: {}", peer_addr, e);
+                }
+            }
+        });
+    }
+}
+
+// ============================================================================
+// Nostr UDP Tunnel Implementation (ICE + QUIC with Nostr signaling)
+// ============================================================================
+
+pub async fn run_nostr_udp_sender(
+    target: String,
+    stun_servers: Vec<String>,
+    nsec: String,
+    peer_npub: String,
+    relays: Vec<String>,
+    republish_interval_secs: u64,
+    max_wait_secs: u64,
+) -> Result<()> {
+    // Ensure crypto provider is installed before nostr-sdk uses rustls
+    quic::ensure_crypto_provider();
+
+    let target_addr = resolve_target_addr(&target)
+        .await
+        .with_context(|| format!("Invalid target address or hostname '{}'", target))?;
+
+    println!("Nostr UDP Tunnel - Sender Mode");
+    println!("==============================");
+
+    // Create Nostr signaling client
+    let relay_list = if relays.is_empty() { None } else { Some(relays) };
+    let signaling = NostrSignaling::new(&nsec, &peer_npub, relay_list).await?;
+
+    println!("Your pubkey: {}", signaling.public_key_bech32());
+    println!("Transfer ID: {}", signaling.transfer_id());
+    println!("Relays: {:?}", signaling.relay_urls());
+
+    // Subscribe to incoming events
+    signaling.subscribe().await?;
+
+    // Wait for fresh request from receiver (reject stale requests)
+    println!("Waiting for request from receiver...");
+    let request = signaling.wait_for_fresh_request(MAX_REQUEST_AGE_SECS).await?;
+
+    if request.version != MANUAL_SIGNAL_VERSION {
+        anyhow::bail!(
+            "Manual signaling version mismatch (expected {}, got {})",
+            MANUAL_SIGNAL_VERSION,
+            request.version
+        );
+    }
+
+    // Use session ID from the request (generated by receiver)
+    let session_id = request.session_id.clone();
+    println!("Session ID: {} (from receiver)", session_id);
+
+    // Now gather our ICE candidates
+    let ice = IceEndpoint::gather(&stun_servers).await?;
+    let local_creds = ice.local_credentials();
+    let local_candidates = ice.local_candidates();
+
+    let quic_identity = quic::generate_server_identity()?;
+
+    let offer = ManualOffer {
+        version: MANUAL_SIGNAL_VERSION,
+        ice_ufrag: local_creds.ufrag.clone(),
+        ice_pwd: local_creds.pass.clone(),
+        candidates: local_candidates,
+        quic_fingerprint: quic_identity.fingerprint.clone(),
+        session_id: Some(session_id.clone()),
+    };
+
+    // Publish offer via Nostr and wait for answer (re-publish periodically)
+    let answer = publish_offer_and_wait_for_answer(
+        &signaling,
+        &offer,
+        &session_id,
+        republish_interval_secs,
+        max_wait_secs,
+    )
+    .await?;
+
+    if answer.version != MANUAL_SIGNAL_VERSION {
+        anyhow::bail!(
+            "Manual signaling version mismatch (expected {}, got {})",
+            MANUAL_SIGNAL_VERSION,
+            answer.version
+        );
+    }
+
+    // Disconnect from Nostr (signaling complete)
+    signaling.disconnect().await;
+
+    // Use receiver's ICE credentials from the REQUEST (not answer)
+    let remote_creds = str0m::IceCreds {
+        ufrag: request.ice_ufrag,
+        pass: request.ice_pwd,
+    };
+
+    let ice_conn = ice
+        .connect(IceRole::Controlling, remote_creds, request.candidates)
+        .await?;
+
+    // Spawn the ICE keeper to handle STUN packets in the background
+    tokio::spawn(ice_conn.ice_keeper.run());
+
+    let endpoint = quic::make_server_endpoint(ice_conn.socket, quic_identity.server_config)?;
+    println!(
+        "Waiting for receiver QUIC connection (timeout: {:?})...",
+        QUIC_CONNECTION_TIMEOUT
+    );
+
+    let connecting = tokio::time::timeout(QUIC_CONNECTION_TIMEOUT, endpoint.accept())
+        .await
+        .context("Timeout waiting for QUIC connection")?
+        .context("No incoming QUIC connection")?;
+    let conn = tokio::time::timeout(QUIC_CONNECTION_TIMEOUT, connecting)
+        .await
+        .context("Timeout during QUIC handshake")?
+        .context("Failed to accept QUIC connection")?;
+    println!("Receiver connected over QUIC.");
+
+    let (send_stream, recv_stream) = conn
+        .accept_bi()
+        .await
+        .context("Failed to accept stream from receiver")?;
+
+    println!("Forwarding UDP traffic to {}", target_addr);
+
+    // Bind to the same address family as the target
+    let bind_addr: SocketAddr = if target_addr.is_ipv6() {
+        "[::]:0".parse().unwrap()
+    } else {
+        "0.0.0.0:0".parse().unwrap()
+    };
+    let udp_socket = Arc::new(
+        UdpSocket::bind(bind_addr)
+            .await
+            .context("Failed to bind UDP socket")?,
+    );
+
+    forward_stream_to_udp_sender_quic(recv_stream, send_stream, udp_socket, target_addr).await?;
+
+    conn.close(0u32.into(), b"done");
+    println!("Connection closed.");
+
+    Ok(())
+}
+
+pub async fn run_nostr_udp_receiver(
+    listen: String,
+    stun_servers: Vec<String>,
+    nsec: String,
+    peer_npub: String,
+    relays: Vec<String>,
+    republish_interval_secs: u64,
+    max_wait_secs: u64,
+) -> Result<()> {
+    // Ensure crypto provider is installed before nostr-sdk uses rustls
+    quic::ensure_crypto_provider();
+
+    let listen_addr: SocketAddr = listen
+        .parse()
+        .context("Invalid listen address format. Use format like 127.0.0.1:51820 or [::]:51820")?;
+
+    println!("Nostr UDP Tunnel - Receiver Mode");
+    println!("================================");
+
+    // Create Nostr signaling client
+    let relay_list = if relays.is_empty() { None } else { Some(relays) };
+    let signaling = NostrSignaling::new(&nsec, &peer_npub, relay_list).await?;
+
+    println!("Your pubkey: {}", signaling.public_key_bech32());
+    println!("Transfer ID: {}", signaling.transfer_id());
+    println!("Relays: {:?}", signaling.relay_urls());
+
+    // Subscribe to incoming events
+    signaling.subscribe().await?;
+
+    // Generate session ID to filter stale events
+    let session_id = generate_session_id();
+    println!("Session ID: {}", session_id);
+
+    // Gather ICE candidates first (before sending request)
+    let ice = IceEndpoint::gather(&stun_servers).await?;
+    let local_creds = ice.local_credentials();
+    let local_candidates = ice.local_candidates();
+
+    // Create and publish request to initiate session
+    let request = ManualRequest {
+        version: MANUAL_SIGNAL_VERSION,
+        ice_ufrag: local_creds.ufrag.clone(),
+        ice_pwd: local_creds.pass.clone(),
+        candidates: local_candidates.clone(),
+        session_id: session_id.clone(),
+        timestamp: current_timestamp(),
+    };
+
+    // Publish request and wait for offer (re-publish periodically)
+    let offer = publish_request_and_wait_for_offer(
+        &signaling,
+        &request,
+        republish_interval_secs,
+        max_wait_secs,
+    )
+    .await?;
+
+    if offer.version != MANUAL_SIGNAL_VERSION {
+        anyhow::bail!(
+            "Manual signaling version mismatch (expected {}, got {})",
+            MANUAL_SIGNAL_VERSION,
+            offer.version
+        );
+    }
+
+    // Create and publish answer (echo session_id)
+    let answer = ManualAnswer {
+        version: MANUAL_SIGNAL_VERSION,
+        ice_ufrag: local_creds.ufrag.clone(),
+        ice_pwd: local_creds.pass.clone(),
+        candidates: local_candidates,
+        session_id: Some(session_id),
+    };
+
+    // Publish answer once - sender already has our ICE credentials from the request,
+    // so we can proceed to ICE immediately after publishing
+    signaling.publish_answer(&answer).await?;
+
+    // Brief delay to allow answer to propagate to relays
+    println!("Waiting briefly for answer to propagate...");
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    // Disconnect from Nostr (signaling complete)
+    signaling.disconnect().await;
+
+    let remote_creds = str0m::IceCreds {
+        ufrag: offer.ice_ufrag,
+        pass: offer.ice_pwd,
+    };
+
+    let ice_conn = ice
+        .connect(IceRole::Controlled, remote_creds, offer.candidates)
+        .await?;
+
+    // Spawn the ICE keeper to handle STUN packets in the background
+    tokio::spawn(ice_conn.ice_keeper.run());
+
+    let endpoint = quic::make_client_endpoint(ice_conn.socket, &offer.quic_fingerprint)?;
+    println!(
+        "Connecting to sender via QUIC (timeout: {:?})...",
+        QUIC_CONNECTION_TIMEOUT
+    );
     let connecting = endpoint
         .connect(ice_conn.remote_addr, "manual")
         .context("Failed to start QUIC connection")?;

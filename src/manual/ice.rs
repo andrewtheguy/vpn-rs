@@ -106,6 +106,7 @@ impl IceEndpoint {
         for sock in &sockets {
             if let Ok(candidate) = str0m::Candidate::host(sock.local_addr, "udp") {
                 if let Some(added) = ice.add_local_candidate(candidate) {
+                    println!("Host candidate: {}", sock.local_addr);
                     local_candidates.push(added.to_sdp_string());
                     candidate_types.insert(sock.local_addr, CandidateType::Host);
                 }
@@ -230,7 +231,9 @@ impl IceEndpoint {
         self.ice.set_controlling(matches!(role, IceRole::Controlling));
         self.ice.set_remote_credentials(remote_creds);
 
+        println!("Adding {} remote candidates:", remote_candidates.len());
         for candidate in remote_candidates {
+            println!("  Remote: {}", candidate);
             let parsed = str0m::Candidate::from_sdp_string(&candidate)
                 .with_context(|| format!("Invalid ICE candidate: {}", candidate))?;
             self.ice.add_remote_candidate(parsed);

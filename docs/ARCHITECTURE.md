@@ -9,15 +9,17 @@ This document provides a comprehensive overview of the tunnel-rs architecture, i
 - [iroh-default Mode](#iroh-default-mode)
 - [iroh-manual Mode](#iroh-manual-mode)
 - [Custom Mode](#custom-mode)
+- [Nostr Mode](#nostr-mode)
 - [Configuration System](#configuration-system)
 - [Security Model](#security-model)
 - [Protocol Support](#protocol-support)
+- [Current Limitations](#current-limitations)
 
 ---
 
 ## System Overview
 
-tunnel-rs is a P2P TCP/UDP port forwarding tool that supports three distinct operational modes, each optimized for different use cases and network environments.
+tunnel-rs is a P2P TCP/UDP port forwarding tool that supports four distinct operational modes, each optimized for different use cases and network environments.
 
 ```mermaid
 graph TB
@@ -25,31 +27,37 @@ graph TB
         A[iroh-default]
         B[iroh-manual]
         C[custom]
+        D2[nostr]
     end
-    
+
     subgraph "Use Cases"
         D[Production<br/>Always-on tunnels]
         E[Serverless<br/>Simple NATs]
         F[Best NAT Traversal<br/>Symmetric NATs]
+        F2[Automated Signaling<br/>Static Keys]
     end
-    
+
     subgraph "Infrastructure"
         G[Pkarr/DNS<br/>Relay Servers]
         H[STUN Only]
         I[STUN Only]
+        I2[STUN + Nostr Relays]
     end
-    
+
     A --> D
     B --> E
     C --> F
-    
+    D2 --> F2
+
     A --> G
     B --> H
     C --> I
-    
+    D2 --> I2
+
     style A fill:#4CAF50
     style B fill:#2196F3
     style C fill:#FF9800
+    style D2 fill:#9C27B0
 ```
 
 ### Core Components
@@ -63,14 +71,18 @@ graph LR
         D[endpoint.rs<br/>iroh Endpoint]
         E[secret.rs<br/>Identity Management]
     end
-    
-    subgraph "Manual Mode"
+
+    subgraph "Manual/Custom Mode"
         F[manual/ice.rs<br/>ICE with str0m]
         G[manual/quic.rs<br/>QUIC with quinn]
         H[manual/signaling.rs<br/>Offer/Answer]
         I[manual/mux.rs<br/>Stream Multiplexing]
     end
-    
+
+    subgraph "Nostr Mode"
+        J[manual/nostr_signaling.rs<br/>Nostr Relay Signaling]
+    end
+
     A --> B
     A --> C
     A --> D
@@ -78,15 +90,18 @@ graph LR
     A --> F
     A --> G
     A --> H
-    
+    A --> J
+
     F --> G
     H --> F
+    J --> H
     G --> I
-    
+
     style A fill:#E3F2FD
     style C fill:#E8F5E9
     style F fill:#FFF3E0
     style G fill:#FFF3E0
+    style J fill:#E1BEE7
 ```
 
 ---
@@ -851,6 +866,220 @@ graph TB
 
 ---
 
+## Nostr Mode
+
+Nostr mode combines the full ICE implementation from custom mode with automated signaling via Nostr relays. Instead of manual copy-paste, ICE credentials are exchanged through Nostr events using static keypairs.
+
+### Architecture Overview
+
+```mermaid
+graph TB
+    subgraph "Sender Side"
+        A[tunnel-rs sender]
+        B[ICE Agent<br/>str0m]
+        C[QUIC Endpoint<br/>quinn]
+        D[Nostr Client]
+        E[Target Service]
+    end
+
+    subgraph "Nostr Relays"
+        F[relay.damus.io]
+        G[nos.lol]
+        H[Other Relays]
+    end
+
+    subgraph "Receiver Side"
+        I[tunnel-rs receiver]
+        J[ICE Agent<br/>str0m]
+        K[QUIC Endpoint<br/>quinn]
+        L[Nostr Client]
+        M[Local Client]
+    end
+
+    A --> B
+    B --> C
+    A --> D
+    C --> E
+
+    I --> J
+    J --> K
+    I --> L
+    K --> M
+
+    D <-.Publish/Subscribe.-> F
+    D <-.Publish/Subscribe.-> G
+    L <-.Publish/Subscribe.-> F
+    L <-.Publish/Subscribe.-> G
+
+    B <-.ICE Checks.-> J
+    C <-.QUIC/TLS.-> K
+
+    style A fill:#E8F5E9
+    style I fill:#E8F5E9
+    style B fill:#FFE0B2
+    style J fill:#FFE0B2
+    style D fill:#E1BEE7
+    style L fill:#E1BEE7
+```
+
+### Receiver-First Signaling Flow
+
+Nostr mode uses a receiver-first protocol where the receiver initiates the signaling exchange. This allows the sender to wait for receivers to come online.
+
+```mermaid
+sequenceDiagram
+    participant R as Receiver
+    participant NR as Nostr Relays
+    participant S as Sender
+    participant STUN as STUN Server
+
+    Note over S: Start sender (waits for request)
+    S->>NR: Subscribe to events
+    S->>S: Wait for fresh request
+
+    Note over R: Start receiver
+    R->>NR: Subscribe to events
+    R->>R: Generate session_id + timestamp
+    R->>STUN: Gather ICE candidates
+    STUN-->>R: Server reflexive addresses
+
+    Note over R: Create Request
+    R->>R: Encode ufrag, pwd, candidates, session_id, timestamp
+    R->>NR: Publish Request (kind 24242)
+
+    NR-->>S: Deliver Request
+    S->>S: Validate timestamp (reject stale)
+    S->>S: Extract session_id
+
+    Note over S: Gather ICE candidates
+    S->>STUN: STUN queries
+    STUN-->>S: Server reflexive addresses
+
+    Note over S: Create Offer
+    S->>S: Encode ufrag, pwd, candidates, session_id
+    S->>NR: Publish Offer (kind 24242)
+
+    NR-->>R: Deliver Offer
+    R->>R: Validate session_id matches
+
+    Note over R: Create Answer
+    R->>R: Encode session_id
+    R->>NR: Publish Answer (kind 24242)
+
+    NR-->>S: Deliver Answer
+    S->>S: Validate session_id matches
+
+    par ICE Connectivity Checks
+        S->>R: STUN Binding Requests
+        R->>S: STUN Binding Requests
+    end
+
+    Note over S,R: Best candidate pair selected
+
+    S->>R: QUIC Handshake over ICE socket
+    R-->>S: QUIC Accept
+
+    Note over S,R: Encrypted tunnel established
+```
+
+### Session ID and Stale Event Filtering
+
+Nostr events persist on relays, so tunnel-rs uses session IDs and timestamps to filter stale events from previous sessions:
+
+```mermaid
+graph TB
+    subgraph "Request Message"
+        A[session_id: random 16 hex chars]
+        B[timestamp: Unix seconds]
+        C[ICE credentials + candidates]
+    end
+
+    subgraph "Sender Validation"
+        D[Check timestamp age]
+        E{Age <= 60s?}
+        F[Accept request]
+        G[Ignore stale request]
+    end
+
+    subgraph "Offer/Answer"
+        H[Echo session_id in Offer]
+        I[Echo session_id in Answer]
+    end
+
+    subgraph "Receiver Validation"
+        J[Check offer session_id]
+        K{Matches request?}
+        L[Accept offer]
+        M[Ignore stale offer]
+    end
+
+    A --> D
+    B --> D
+    D --> E
+    E -->|Yes| F
+    E -->|No| G
+
+    F --> H
+    H --> J
+    J --> K
+    K -->|Yes| L
+    K -->|No| M
+
+    style F fill:#C8E6C9
+    style L fill:#C8E6C9
+    style G fill:#FFCCBC
+    style M fill:#FFCCBC
+```
+
+### Nostr Event Structure
+
+```mermaid
+graph TB
+    subgraph "Event Kind 24242"
+        A[kind: 24242]
+        B[content: base64 encoded JSON]
+        C[tags]
+    end
+
+    subgraph "Tags"
+        D["t" tag: transfer_id]
+        E["p" tag: peer_pubkey]
+        F["type" tag: message type]
+    end
+
+    subgraph "Message Types"
+        G[tunnel-request]
+        H[tunnel-offer]
+        I[tunnel-answer]
+    end
+
+    subgraph "Transfer ID"
+        J[SHA256 of sorted pubkeys]
+        K[First 32 hex chars]
+        L[Deterministic - both peers compute same ID]
+    end
+
+    A --> B
+    A --> C
+    C --> D
+    C --> E
+    C --> F
+
+    F --> G
+    F --> H
+    F --> I
+
+    J --> K
+    K --> L
+    L --> D
+
+    style A fill:#E1BEE7
+    style D fill:#FFF9C4
+    style L fill:#C8E6C9
+```
+
+---
+
 ## Configuration System
 
 ### Configuration File Structure
@@ -1313,15 +1542,55 @@ graph TB
 
 ---
 
+## Current Limitations
+
+### Single Session (Manual Signaling Modes)
+
+The `iroh-manual`, `custom`, and `nostr` modes currently support only one tunnel session at a time per sender instance. Each signaling exchange establishes exactly one tunnel.
+
+```mermaid
+graph TB
+    subgraph "Current Behavior"
+        A[Sender starts] --> B[Wait for request/offer]
+        B --> C[Establish single tunnel]
+        C --> D[Handle streams over this tunnel]
+        D --> E[Additional receivers timeout]
+    end
+
+    subgraph "Workarounds"
+        F[Run multiple sender instances]
+        G[Use different keypairs per tunnel]
+        H[Use iroh-default mode]
+    end
+
+    style E fill:#FFCCBC
+    style H fill:#C8E6C9
+```
+
+**Why this limitation exists:**
+- Manual signaling modes perform a single offer/answer exchange
+- The sender enters a connection handling loop after establishing the tunnel
+- No mechanism to accept additional signaling while serving existing tunnel
+
+**Workarounds:**
+- Use `iroh-default` mode for multi-receiver support
+- Run separate sender instances for each tunnel
+- Use different keypairs for independent tunnels
+
+See [Roadmap](ROADMAP.md) for planned multi-session support.
+
+---
+
 ## Future Enhancements
 
 Potential areas for improvement:
 
-1. **Relay Support for Custom Mode**: Add optional relay fallback to custom mode
-2. **Connection Migration**: Support for IP address changes (QUIC feature)
-3. **Multi-path**: Utilize multiple network paths simultaneously
-4. **Performance Metrics**: Built-in latency and throughput monitoring
-5. **Web UI**: Browser-based configuration and monitoring interface
+1. **Multi-Session Support**: Accept multiple simultaneous receivers in manual signaling modes
+2. **Relay Support for Custom/Nostr Mode**: Add optional relay fallback for symmetric NAT scenarios
+3. **Connection Migration**: Support for IP address changes (QUIC feature)
+4. **Multi-path**: Utilize multiple network paths simultaneously
+5. **Performance Metrics**: Built-in latency and throughput monitoring
+6. **Web UI**: Browser-based configuration and monitoring interface
 
 ---
 
