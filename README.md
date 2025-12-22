@@ -135,15 +135,13 @@ tunnel-rs receiver iroh-default --protocol udp --node-id <ENDPOINT_ID> --listen 
 
 ## Configuration Files
 
-Config files apply to **iroh-default** and **custom** modes. **iroh-manual mode does not support config files**—use CLI flags instead. Use `--default-config` to load from the default location, or `-c <path>` for a custom path.
+Use `--default-config` to load from the default location, or `-c <path>` for a custom path. Each mode has its own section (`[iroh-default]`, `[iroh-manual]`, `[custom]`).
 
 **Default locations:**
 - Sender: `~/.config/tunnel-rs/sender.toml`
 - Receiver: `~/.config/tunnel-rs/receiver.toml`
 
 ### Sender Config
-
-**Note:** Config files apply to **iroh-default** and **custom** modes only. For **iroh-manual mode**, use CLI flags (see `sender iroh-manual` at [CLI Options](#cli-options)).
 
 ```toml
 # ~/.config/tunnel-rs/sender.toml
@@ -155,10 +153,8 @@ mode = "iroh-default"
 # Shared options
 protocol = "tcp"
 target = "127.0.0.1:22"
-stun_servers = ["stun.l.google.com:19302"]
 
-# iroh-default mode options
-[iroh.default]
+[iroh-default]
 secret_file = "./sender.key"
 relay_urls = ["https://relay.example.com"]
 relay_only = false
@@ -166,14 +162,12 @@ dns_server = "https://dns.example.com/pkarr"
 ```
 
 ```bash
-# Load from default location
-tunnel-rs sender --default-config iroh-default
+# Load from default location (mode inferred from config)
+tunnel-rs sender --default-config
 
 # Load from custom path
-tunnel-rs sender -c ./my-sender.toml iroh-default
+tunnel-rs sender -c ./my-sender.toml
 ```
-
-**Note:** Config files apply to **iroh-default** and **custom** modes only. For **iroh-manual mode**, use CLI flags (see `receiver iroh-manual` at [CLI Options](#cli-options)).
 
 ### Receiver Config
 
@@ -187,10 +181,8 @@ mode = "iroh-default"
 # Shared options
 protocol = "tcp"
 listen = "127.0.0.1:2222"
-stun_servers = ["stun.l.google.com:19302"]
 
-# iroh-default mode options
-[iroh.default]
+[iroh-default]
 node_id = "2xnbkpbc7izsilvewd7c62w7wnwziacmpfwvhcrya5nt76dqkpga"
 relay_urls = ["https://relay.example.com"]
 relay_only = false
@@ -198,11 +190,11 @@ dns_server = "https://dns.example.com/pkarr"
 ```
 
 ```bash
-# Load from default location
-tunnel-rs receiver --default-config iroh-default
+# Load from default location (mode inferred from config)
+tunnel-rs receiver --default-config
 
 # Load from custom path
-tunnel-rs receiver -c ./my-receiver.toml iroh-default
+tunnel-rs receiver -c ./my-receiver.toml
 ```
 
 ## Persistent Identity

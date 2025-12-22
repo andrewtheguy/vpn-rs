@@ -1,27 +1,22 @@
 # tunnel-rs sender configuration example
 #
-# Usage: tunnel-rs sender -c sender.toml iroh-default
-#        tunnel-rs sender --default-config iroh-default
+# Usage: tunnel-rs sender -c sender.toml
+#        tunnel-rs sender --default-config
 #
+# Mode is inferred from the 'mode' field below.
 # CLI arguments take precedence over config file values.
+#
+# This file shows iroh-default mode. See commented sections below for other modes.
 
 # Required: validates config matches CLI command
 role = "sender"
-mode = "iroh-default"  # or "iroh-manual", "custom"
+mode = "iroh-default"
 
-# Shared options (apply to all modes)
+# Shared options
 protocol = "tcp"  # "tcp" or "udp"
 target = "127.0.0.1:22"
 
-# STUN servers for iroh-manual and custom modes
-stun_servers = [
-    "stun.l.google.com:19302",
-    "stun1.l.google.com:19302",
-    "stun.services.mozilla.com:3478",
-]
-
-# iroh-default mode options
-[iroh.default]
+[iroh-default]
 # Path to secret key file for persistent identity
 # Generate with: tunnel-rs generate-secret --output sender.key
 secret_file = "./sender.key"
@@ -40,3 +35,17 @@ relay_only = false
 # Used with self-hosted iroh-dns-server for fully independent operation
 # NOTE: URL must include the /pkarr path
 # dns_server = "https://dns.example.com/pkarr"
+
+# [iroh-manual]
+# stun_servers = [
+#     "stun.l.google.com:19302",
+#     "stun1.l.google.com:19302",
+#     "stun.services.mozilla.com:3478",
+# ]
+
+# [custom]
+# stun_servers = [
+#     "stun.l.google.com:19302",
+#     "stun1.l.google.com:19302",
+#     "stun.services.mozilla.com:3478",
+# ]

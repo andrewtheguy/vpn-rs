@@ -2,8 +2,8 @@
 //!
 //! Configuration structure:
 //! - `role` and `mode` fields for validation
-//! - Shared options at top level (protocol, target/listen, stun_servers)
-//! - [iroh.default] section for iroh-default mode options
+//! - Shared options at top level (protocol, target/listen)
+//! - Mode-specific sections: [iroh-default], [iroh-manual], [custom]
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 // Configuration Structures
 // ============================================================================
 
-/// Iroh default mode configuration.
+/// iroh-default mode configuration.
 #[derive(Deserialize, Default, Clone)]
 pub struct IrohDefaultConfig {
     pub secret_file: Option<PathBuf>,
@@ -23,10 +23,16 @@ pub struct IrohDefaultConfig {
     pub node_id: Option<String>, // receiver only
 }
 
-/// Iroh section containing default subsection.
+/// iroh-manual mode configuration.
 #[derive(Deserialize, Default, Clone)]
-pub struct IrohConfig {
-    pub default: Option<IrohDefaultConfig>,
+pub struct IrohManualConfig {
+    pub stun_servers: Option<Vec<String>>,
+}
+
+/// custom mode configuration.
+#[derive(Deserialize, Default, Clone)]
+pub struct CustomConfig {
+    pub stun_servers: Option<Vec<String>>,
 }
 
 /// Unified sender configuration.
@@ -39,10 +45,13 @@ pub struct SenderConfig {
     // Shared options
     pub protocol: Option<String>,
     pub target: Option<String>,
-    pub stun_servers: Option<Vec<String>>,
 
     // Mode-specific sections
-    pub iroh: Option<IrohConfig>,
+    #[serde(rename = "iroh-default")]
+    pub iroh_default: Option<IrohDefaultConfig>,
+    #[serde(rename = "iroh-manual")]
+    pub iroh_manual: Option<IrohManualConfig>,
+    pub custom: Option<CustomConfig>,
 }
 
 /// Unified receiver configuration.
@@ -55,10 +64,13 @@ pub struct ReceiverConfig {
     // Shared options
     pub protocol: Option<String>,
     pub listen: Option<String>,
-    pub stun_servers: Option<Vec<String>>,
 
     // Mode-specific sections
-    pub iroh: Option<IrohConfig>,
+    #[serde(rename = "iroh-default")]
+    pub iroh_default: Option<IrohDefaultConfig>,
+    #[serde(rename = "iroh-manual")]
+    pub iroh_manual: Option<IrohManualConfig>,
+    pub custom: Option<CustomConfig>,
 }
 
 // ============================================================================
@@ -66,15 +78,22 @@ pub struct ReceiverConfig {
 // ============================================================================
 
 impl SenderConfig {
-    /// Get iroh default config, with defaults.
+    /// Get iroh-default config, with defaults.
     pub fn iroh_default(&self) -> IrohDefaultConfig {
-        self.iroh
-            .as_ref()
-            .and_then(|i| i.default.clone())
-            .unwrap_or_default()
+        self.iroh_default.clone().unwrap_or_default()
     }
 
-    /// Validate that config matches expected role and mode.
+    /// Get iroh-manual config, with defaults.
+    pub fn iroh_manual(&self) -> IrohManualConfig {
+        self.iroh_manual.clone().unwrap_or_default()
+    }
+
+    /// Get custom config, with defaults.
+    pub fn custom(&self) -> CustomConfig {
+        self.custom.clone().unwrap_or_default()
+    }
+
+    /// Validate that config matches expected role and mode, and has no unexpected sections.
     pub fn validate(&self, expected_mode: &str) -> Result<()> {
         let role = self.role.as_deref().context(
             "Config file missing required 'role' field. Add: role = \"sender\"",
@@ -96,20 +115,57 @@ impl SenderConfig {
                 expected_mode
             );
         }
+
+        // Validate no unexpected sections for the current mode
+        match expected_mode {
+            "iroh-default" => {
+                if self.iroh_manual.is_some() {
+                    anyhow::bail!("Config has [iroh-manual] section but mode = \"iroh-default\"");
+                }
+                if self.custom.is_some() {
+                    anyhow::bail!("Config has [custom] section but mode = \"iroh-default\"");
+                }
+            }
+            "iroh-manual" => {
+                if self.iroh_default.is_some() {
+                    anyhow::bail!("Config has [iroh-default] section but mode = \"iroh-manual\"");
+                }
+                if self.custom.is_some() {
+                    anyhow::bail!("Config has [custom] section but mode = \"iroh-manual\"");
+                }
+            }
+            "custom" => {
+                if self.iroh_default.is_some() {
+                    anyhow::bail!("Config has [iroh-default] section but mode = \"custom\"");
+                }
+                if self.iroh_manual.is_some() {
+                    anyhow::bail!("Config has [iroh-manual] section but mode = \"custom\"");
+                }
+            }
+            _ => {}
+        }
+
         Ok(())
     }
 }
 
 impl ReceiverConfig {
-    /// Get iroh default config, with defaults.
+    /// Get iroh-default config, with defaults.
     pub fn iroh_default(&self) -> IrohDefaultConfig {
-        self.iroh
-            .as_ref()
-            .and_then(|i| i.default.clone())
-            .unwrap_or_default()
+        self.iroh_default.clone().unwrap_or_default()
     }
 
-    /// Validate that config matches expected role and mode.
+    /// Get iroh-manual config, with defaults.
+    pub fn iroh_manual(&self) -> IrohManualConfig {
+        self.iroh_manual.clone().unwrap_or_default()
+    }
+
+    /// Get custom config, with defaults.
+    pub fn custom(&self) -> CustomConfig {
+        self.custom.clone().unwrap_or_default()
+    }
+
+    /// Validate that config matches expected role and mode, and has no unexpected sections.
     pub fn validate(&self, expected_mode: &str) -> Result<()> {
         let role = self.role.as_deref().context(
             "Config file missing required 'role' field. Add: role = \"receiver\"",
@@ -131,6 +187,36 @@ impl ReceiverConfig {
                 expected_mode
             );
         }
+
+        // Validate no unexpected sections for the current mode
+        match expected_mode {
+            "iroh-default" => {
+                if self.iroh_manual.is_some() {
+                    anyhow::bail!("Config has [iroh-manual] section but mode = \"iroh-default\"");
+                }
+                if self.custom.is_some() {
+                    anyhow::bail!("Config has [custom] section but mode = \"iroh-default\"");
+                }
+            }
+            "iroh-manual" => {
+                if self.iroh_default.is_some() {
+                    anyhow::bail!("Config has [iroh-default] section but mode = \"iroh-manual\"");
+                }
+                if self.custom.is_some() {
+                    anyhow::bail!("Config has [custom] section but mode = \"iroh-manual\"");
+                }
+            }
+            "custom" => {
+                if self.iroh_default.is_some() {
+                    anyhow::bail!("Config has [iroh-default] section but mode = \"custom\"");
+                }
+                if self.iroh_manual.is_some() {
+                    anyhow::bail!("Config has [iroh-manual] section but mode = \"custom\"");
+                }
+            }
+            _ => {}
+        }
+
         Ok(())
     }
 }
