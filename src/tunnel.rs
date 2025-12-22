@@ -652,9 +652,13 @@ pub async fn run_manual_tcp_receiver(listen: String, stun_servers: Vec<String>) 
 
 async fn handle_tcp_sender_stream_quic(
     send_stream: quinn::SendStream,
-    recv_stream: quinn::RecvStream,
+    mut recv_stream: quinn::RecvStream,
     target_addr: SocketAddr,
 ) -> Result<()> {
+    // Read and discard the stream marker byte sent by the receiver
+    let mut marker = [0u8; 1];
+    recv_stream.read_exact(&mut marker).await.context("Failed to read stream marker")?;
+
     let tcp_stream = TcpStream::connect(target_addr)
         .await
         .context("Failed to connect to target TCP service")?;
@@ -665,13 +669,22 @@ async fn handle_tcp_sender_stream_quic(
     Ok(())
 }
 
+/// Marker byte sent when opening a new QUIC stream to ensure
+/// the STREAM frame is immediately sent to the peer.
+const STREAM_OPEN_MARKER: u8 = 0x00;
+
 async fn handle_tcp_receiver_connection_quic(
     conn: Arc<quinn::Connection>,
     tcp_stream: TcpStream,
     peer_addr: SocketAddr,
     tunnel_established: Arc<AtomicBool>,
 ) -> Result<()> {
-    let (send_stream, recv_stream) = conn.open_bi().await.context("Failed to open QUIC stream")?;
+    let (mut send_stream, recv_stream) = conn.open_bi().await.context("Failed to open QUIC stream")?;
+
+    // Write a marker byte to ensure the STREAM frame is sent to the peer.
+    // QUIC defers sending STREAM frames until actual data is written,
+    // and empty writes don't trigger transmission.
+    send_stream.write_all(&[STREAM_OPEN_MARKER]).await.context("Failed to write stream marker")?;
 
     if !tunnel_established.swap(true, Ordering::Relaxed) {
         println!("Tunnel to sender established!");

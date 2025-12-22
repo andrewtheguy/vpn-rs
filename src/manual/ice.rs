@@ -303,8 +303,6 @@ impl IceEndpoint {
                         let nominated_tokio = UdpSocket::from_std(sock.std_socket)
                             .context("Failed to create tokio socket from nominated socket")?;
 
-                        println!("ICE nominated: {} -> {}", source, destination);
-
                         // Create the demultiplexing socket
                         let (demux_socket, stun_rx) = DemuxSocket::new(nominated_tokio)
                             .context("Failed to create demux socket")?;
