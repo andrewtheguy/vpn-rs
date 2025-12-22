@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::net::{TcpListener, TcpStream, UdpSocket};
+use tokio::net::{lookup_host, TcpListener, TcpStream, UdpSocket};
 use tokio::sync::Mutex;
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -29,6 +29,13 @@ use crate::manual::signaling::{
 /// Timeout for QUIC connection (matches webrtc crate's 180 second connection timeout)
 const QUIC_CONNECTION_TIMEOUT: Duration = Duration::from_secs(180);
 
+async fn resolve_target_addr(target: &str) -> Result<SocketAddr> {
+    let mut addrs = lookup_host(target)
+        .await
+        .with_context(|| format!("Failed to resolve '{}'", target))?;
+    addrs.next().context("No addresses found for host")
+}
+
 // ============================================================================
 // UDP Tunnel Implementation
 // ============================================================================
@@ -42,7 +49,9 @@ pub async fn run_udp_sender(
 ) -> Result<()> {
     validate_relay_only(relay_only, &relay_urls)?;
 
-    let target_addr: SocketAddr = target.parse().context("Invalid target address format")?;
+    let target_addr = resolve_target_addr(&target)
+        .await
+        .with_context(|| format!("Invalid target address or hostname '{}'", target))?;
 
     println!("UDP Tunnel - Sender Mode");
     println!("========================");
@@ -288,7 +297,9 @@ pub async fn run_tcp_sender(
 ) -> Result<()> {
     validate_relay_only(relay_only, &relay_urls)?;
 
-    let target_addr: SocketAddr = target.parse().context("Invalid target address format")?;
+    let target_addr = resolve_target_addr(&target)
+        .await
+        .with_context(|| format!("Invalid target address or hostname '{}'", target))?;
 
     println!("TCP Tunnel - Sender Mode");
     println!("========================");
@@ -443,7 +454,9 @@ pub async fn run_tcp_receiver(
 // ============================================================================
 
 pub async fn run_manual_tcp_sender(target: String, stun_servers: Vec<String>) -> Result<()> {
-    let target_addr: SocketAddr = target.parse().context("Invalid target address format")?;
+    let target_addr = resolve_target_addr(&target)
+        .await
+        .with_context(|| format!("Invalid target address or hostname '{}'", target))?;
 
     println!("Manual TCP Tunnel - Sender Mode");
     println!("================================");
@@ -616,7 +629,9 @@ pub async fn run_manual_tcp_receiver(listen: String, stun_servers: Vec<String>) 
 // ============================================================================
 
 pub async fn run_manual_udp_sender(target: String, stun_servers: Vec<String>) -> Result<()> {
-    let target_addr: SocketAddr = target.parse().context("Invalid target address format")?;
+    let target_addr = resolve_target_addr(&target)
+        .await
+        .with_context(|| format!("Invalid target address or hostname '{}'", target))?;
 
     println!("Manual UDP Tunnel - Sender Mode");
     println!("================================");
@@ -1232,7 +1247,9 @@ async fn race_connect_accept(
 }
 
 pub async fn run_iroh_manual_tcp_sender(target: String, stun_servers: Vec<String>) -> Result<()> {
-    let target_addr: SocketAddr = target.parse().context("Invalid target address format")?;
+    let target_addr = resolve_target_addr(&target)
+        .await
+        .with_context(|| format!("Invalid target address or hostname '{}'", target))?;
 
     println!("Iroh Manual TCP Tunnel - Sender Mode");
     println!("=====================================");
@@ -1405,7 +1422,9 @@ pub async fn run_iroh_manual_tcp_receiver(listen: String, stun_servers: Vec<Stri
 // ============================================================================
 
 pub async fn run_iroh_manual_udp_sender(target: String, stun_servers: Vec<String>) -> Result<()> {
-    let target_addr: SocketAddr = target.parse().context("Invalid target address format")?;
+    let target_addr = resolve_target_addr(&target)
+        .await
+        .with_context(|| format!("Invalid target address or hostname '{}'", target))?;
 
     println!("Iroh Manual UDP Tunnel - Sender Mode");
     println!("=====================================");
