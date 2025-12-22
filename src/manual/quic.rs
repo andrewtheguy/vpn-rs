@@ -1,8 +1,9 @@
 //! QUIC setup helpers for manual mode.
 
 use anyhow::{Context, Result};
-use quinn::{AsyncUdpSocket, ClientConfig, Endpoint, EndpointConfig, Runtime, ServerConfig};
+use quinn::{AsyncUdpSocket, ClientConfig, Endpoint, EndpointConfig, IdleTimeout, Runtime, ServerConfig};
 use quinn::crypto::rustls::QuicClientConfig;
+use std::time::Duration;
 use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer, ServerName, UnixTime};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
@@ -35,11 +36,17 @@ pub fn generate_server_identity() -> Result<QuicServerIdentity> {
 
     let mut server_config =
         ServerConfig::with_single_cert(cert_chain, key.into()).context("Invalid TLS config")?;
-    if let Some(transport) = Arc::get_mut(&mut server_config.transport) {
-        transport.max_concurrent_uni_streams(0_u8.into());
-        transport.max_idle_timeout(None);
-        transport.keep_alive_interval(Some(std::time::Duration::from_secs(15)));
-    }
+
+    // Configure transport: 5 minute idle timeout with 15s keepalive.
+    // Active connections send pings every 15s, so idle timeout only triggers
+    // for truly dead/unresponsive connections.
+    let mut transport = quinn::TransportConfig::default();
+    transport.max_concurrent_uni_streams(0_u8.into());
+    transport.max_idle_timeout(Some(
+        IdleTimeout::try_from(Duration::from_secs(300)).unwrap(),
+    ));
+    transport.keep_alive_interval(Some(Duration::from_secs(15)));
+    server_config.transport_config(Arc::new(transport));
 
     Ok(QuicServerIdentity {
         server_config,
@@ -94,9 +101,15 @@ fn build_client_config(expected_fingerprint: &str) -> Result<ClientConfig> {
         .context("Failed to build QUIC client config")?;
 
     let mut client_config = ClientConfig::new(Arc::new(quic_cfg));
+
+    // Configure transport: 5 minute idle timeout with 15s keepalive.
+    // Active connections send pings every 15s, so idle timeout only triggers
+    // for truly dead/unresponsive connections.
     let mut transport = quinn::TransportConfig::default();
-    transport.max_idle_timeout(None);
-    transport.keep_alive_interval(Some(std::time::Duration::from_secs(15)));
+    transport.max_idle_timeout(Some(
+        IdleTimeout::try_from(Duration::from_secs(300)).unwrap(),
+    ));
+    transport.keep_alive_interval(Some(Duration::from_secs(15)));
     client_config.transport_config(Arc::new(transport));
 
     Ok(client_config)

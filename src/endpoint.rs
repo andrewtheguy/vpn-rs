@@ -95,9 +95,12 @@ pub fn create_endpoint_builder(
     dns_server: Option<&str>,
     secret_key: Option<&SecretKey>,
 ) -> Result<EndpointBuilder> {
+    // Configure transport: 5 minute idle timeout with 15s keepalive.
+    // Active connections send pings every 15s, so idle timeout only triggers
+    // for truly dead/unresponsive connections.
     let mut transport_config = iroh::endpoint::TransportConfig::default();
-    transport_config.max_idle_timeout(None);
-    transport_config.keep_alive_interval(Some(std::time::Duration::from_secs(15)));
+    transport_config.max_idle_timeout(Some(Duration::from_secs(300).try_into().unwrap()));
+    transport_config.keep_alive_interval(Some(Duration::from_secs(15)));
 
     let mut builder = Endpoint::empty_builder(relay_mode)
         .transport_config(transport_config);

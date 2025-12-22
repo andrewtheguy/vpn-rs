@@ -62,6 +62,30 @@ Custom and nostr modes use full ICE but have no relay fallback for symmetric NAT
 
 ---
 
+#### Automatic Reconnection
+
+**Status:** Partial
+
+Resilience features for handling connection failures:
+
+| Feature | Status |
+|---------|--------|
+| QUIC keepalive (15s interval) | **Implemented** |
+| Stream retry with backoff | **Implemented** |
+| Connection-level auto-reconnect | Planned |
+
+**Current Implementation:**
+- QUIC sends periodic PING frames to detect dead connections
+- Failed `open_bi()` calls retry 3 times with exponential backoff (100ms → 200ms → 400ms)
+
+**Planned (Connection-level reconnect):**
+- Detect when QUIC connection is dead (not just stream failures)
+- For nostr mode: Re-signal via Nostr relays and re-establish ICE/QUIC
+- For iroh-default: Leverage iroh's built-in reconnection
+- Seamlessly resume accepting local connections after reconnect
+
+---
+
 ### Medium Priority
 
 #### Connection Migration

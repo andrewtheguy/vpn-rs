@@ -1985,9 +1985,12 @@ where
 async fn create_iroh_manual_endpoint(alpn: &[u8]) -> Result<(Endpoint, Arc<StaticProvider>)> {
     let discovery = Arc::new(StaticProvider::new());
 
+    // Configure transport: 5 minute idle timeout with 15s keepalive.
+    // Active connections send pings every 15s, so idle timeout only triggers
+    // for truly dead/unresponsive connections.
     let mut transport_config = iroh::endpoint::TransportConfig::default();
-    transport_config.max_idle_timeout(None);
-    transport_config.keep_alive_interval(Some(std::time::Duration::from_secs(15)));
+    transport_config.max_idle_timeout(Some(Duration::from_secs(300).try_into().unwrap()));
+    transport_config.keep_alive_interval(Some(Duration::from_secs(15)));
 
     let endpoint = Endpoint::empty_builder(RelayMode::Disabled)
         .transport_config(transport_config)
