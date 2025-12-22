@@ -277,7 +277,7 @@ async fn main() -> Result<()> {
                     relay_only,
                     dns_server,
                 } => {
-                    // Merge: CLI > Config > Default
+                    cfg.validate("iroh-default")?;
                     let iroh_cfg = cfg.iroh_default();
                     let protocol = protocol
                         .or_else(|| cfg.protocol.as_deref().and_then(Protocol::from_str_opt))
@@ -322,6 +322,7 @@ async fn main() -> Result<()> {
                     target,
                     stun_servers,
                 } => {
+                    cfg.validate("iroh-manual")?;
                     let protocol = protocol
                         .or_else(|| cfg.protocol.as_deref().and_then(Protocol::from_str_opt))
                         .unwrap_or_default();
@@ -344,6 +345,7 @@ async fn main() -> Result<()> {
                     target,
                     stun_servers,
                 } => {
+                    cfg.validate("custom")?;
                     let protocol = protocol
                         .or_else(|| cfg.protocol.as_deref().and_then(Protocol::from_str_opt))
                         .unwrap_or_default();
@@ -379,7 +381,7 @@ async fn main() -> Result<()> {
                     relay_only,
                     dns_server,
                 } => {
-                    // Merge: CLI > Config > Default
+                    cfg.validate("iroh-default")?;
                     let iroh_cfg = cfg.iroh_default();
                     let protocol = protocol
                         .or_else(|| cfg.protocol.as_deref().and_then(Protocol::from_str_opt))
@@ -418,6 +420,7 @@ async fn main() -> Result<()> {
                     listen,
                     stun_servers,
                 } => {
+                    cfg.validate("iroh-manual")?;
                     let protocol = protocol
                         .or_else(|| cfg.protocol.as_deref().and_then(Protocol::from_str_opt))
                         .unwrap_or_default();
@@ -440,6 +443,7 @@ async fn main() -> Result<()> {
                     listen,
                     stun_servers,
                 } => {
+                    cfg.validate("custom")?;
                     let protocol = protocol
                         .or_else(|| cfg.protocol.as_deref().and_then(Protocol::from_str_opt))
                         .unwrap_or_default();

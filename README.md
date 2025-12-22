@@ -147,17 +147,22 @@ Config files apply to **iroh-default** and **custom** modes. **iroh-manual mode 
 
 ```toml
 # ~/.config/tunnel-rs/sender.toml
+
+# Required: validates config matches CLI command
+role = "sender"
+mode = "iroh-default"
+
+# Shared options
 protocol = "tcp"
 target = "127.0.0.1:22"
+stun_servers = ["stun.l.google.com:19302"]
 
-# Iroh default mode options
+# iroh-default mode options
+[iroh.default]
 secret_file = "./sender.key"
 relay_urls = ["https://relay.example.com"]
 relay_only = false
 dns_server = "https://dns.example.com/pkarr"
-
-# Custom mode options
-stun_servers = ["stun.l.google.com:19302"]
 ```
 
 ```bash
@@ -174,17 +179,22 @@ tunnel-rs sender -c ./my-sender.toml iroh-default
 
 ```toml
 # ~/.config/tunnel-rs/receiver.toml
+
+# Required: validates config matches CLI command
+role = "receiver"
+mode = "iroh-default"
+
+# Shared options
 protocol = "tcp"
 listen = "127.0.0.1:2222"
+stun_servers = ["stun.l.google.com:19302"]
 
-# Iroh default mode options
+# iroh-default mode options
+[iroh.default]
 node_id = "2xnbkpbc7izsilvewd7c62w7wnwziacmpfwvhcrya5nt76dqkpga"
 relay_urls = ["https://relay.example.com"]
 relay_only = false
 dns_server = "https://dns.example.com/pkarr"
-
-# Custom mode options
-stun_servers = ["stun.l.google.com:19302"]
 ```
 
 ```bash

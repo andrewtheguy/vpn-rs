@@ -1,27 +1,28 @@
 # tunnel-rs sender configuration example
 #
-# Usage: tunnel-rs sender --config sender.toml
+# Usage: tunnel-rs sender -c sender.toml iroh-default
+#        tunnel-rs sender --default-config iroh-default
 #
-# All options can be overridden by CLI arguments.
 # CLI arguments take precedence over config file values.
 
-# Protocol to tunnel: "tcp" or "udp"
-protocol = "tcp"
+# Required: validates config matches CLI command
+role = "sender"
+mode = "iroh-default"  # or "iroh-manual", "custom"
 
-# Manual mode (bypass discovery/relays)
-manual = false
+# Shared options (apply to all modes)
+protocol = "tcp"  # "tcp" or "udp"
+target = "127.0.0.1:22"
 
-# STUN servers for manual mode (optional)
+# STUN servers for iroh-manual and custom modes
 stun_servers = [
     "stun.l.google.com:19302",
     "stun1.l.google.com:19302",
     "stun.services.mozilla.com:3478",
 ]
 
-# Target address to forward traffic to
-target = "127.0.0.1:22"
-
-# Path to secret key file for persistent identity (optional)
+# iroh-default mode options
+[iroh.default]
+# Path to secret key file for persistent identity
 # Generate with: tunnel-rs generate-secret --output sender.key
 secret_file = "./sender.key"
 
@@ -33,19 +34,9 @@ relay_urls = [
 ]
 
 # Force all connections through relay (disables direct P2P)
-# Requires relay_urls to be specified
 relay_only = false
 
-# Require direct P2P connections only (reject relay connections)
-# Waits a few seconds for hole-punching before rejecting
-# Mutually exclusive with relay_only
-direct_only = false
-
-# Optional manual secret key (reserved for future use)
-# manual_secret_key = ""
-
-# Custom DNS server URL for peer discovery (optional)
+# Custom DNS server URL for peer discovery
 # Used with self-hosted iroh-dns-server for fully independent operation
-# Requires secret_file for publishing peer addresses
 # NOTE: URL must include the /pkarr path
 # dns_server = "https://dns.example.com/pkarr"

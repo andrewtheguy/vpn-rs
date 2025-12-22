@@ -1,18 +1,16 @@
 //! Configuration file support for tunnel-rs.
 //!
-//! Hierarchical configuration with explicit mode selection:
-//! - mode: "iroh.default", "iroh.manual", or "custom"
+//! Configuration structure:
+//! - `role` and `mode` fields for validation
 //! - Shared options at top level (protocol, target/listen, stun_servers)
-//! - [iroh.default] section for iroh default mode options
-//! - [iroh.manual] section for iroh manual mode options
-//! - [custom] section for custom mode options
+//! - [iroh.default] section for iroh-default mode options
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
 // ============================================================================
-// Hierarchical Configuration Structures
+// Configuration Structures
 // ============================================================================
 
 /// Iroh default mode configuration.
@@ -25,31 +23,17 @@ pub struct IrohDefaultConfig {
     pub node_id: Option<String>, // receiver only
 }
 
-/// Iroh manual mode configuration.
-#[derive(Deserialize, Default, Clone)]
-pub struct IrohManualConfig {
-    // Currently uses stun_servers from top level
-    // Reserved for future iroh-manual-specific options
-}
-
-/// Iroh section containing default and manual subsections.
+/// Iroh section containing default subsection.
 #[derive(Deserialize, Default, Clone)]
 pub struct IrohConfig {
     pub default: Option<IrohDefaultConfig>,
-    pub manual: Option<IrohManualConfig>,
 }
 
-/// Custom mode configuration.
-#[derive(Deserialize, Default, Clone)]
-pub struct CustomConfig {
-    // Currently uses stun_servers from top level
-    // Reserved for future custom-mode-specific options
-}
-
-/// Unified sender configuration with hierarchical structure.
+/// Unified sender configuration.
 #[derive(Deserialize, Default)]
 pub struct SenderConfig {
-    // Mode selector: "iroh.default", "iroh.manual", or "custom"
+    // Validation fields
+    pub role: Option<String>,
     pub mode: Option<String>,
 
     // Shared options
@@ -59,13 +43,13 @@ pub struct SenderConfig {
 
     // Mode-specific sections
     pub iroh: Option<IrohConfig>,
-    pub custom: Option<CustomConfig>,
 }
 
-/// Unified receiver configuration with hierarchical structure.
+/// Unified receiver configuration.
 #[derive(Deserialize, Default)]
 pub struct ReceiverConfig {
-    // Mode selector: "iroh.default", "iroh.manual", or "custom"
+    // Validation fields
+    pub role: Option<String>,
     pub mode: Option<String>,
 
     // Shared options
@@ -75,7 +59,6 @@ pub struct ReceiverConfig {
 
     // Mode-specific sections
     pub iroh: Option<IrohConfig>,
-    pub custom: Option<CustomConfig>,
 }
 
 // ============================================================================
@@ -91,17 +74,29 @@ impl SenderConfig {
             .unwrap_or_default()
     }
 
-    /// Get iroh manual config, with defaults.
-    pub fn iroh_manual(&self) -> IrohManualConfig {
-        self.iroh
-            .as_ref()
-            .and_then(|i| i.manual.clone())
-            .unwrap_or_default()
-    }
+    /// Validate that config matches expected role and mode.
+    pub fn validate(&self, expected_mode: &str) -> Result<()> {
+        let role = self.role.as_deref().context(
+            "Config file missing required 'role' field. Add: role = \"sender\"",
+        )?;
+        if role != "sender" {
+            anyhow::bail!(
+                "Config file has role = \"{}\", but running as sender",
+                role
+            );
+        }
 
-    /// Get custom config, with defaults.
-    pub fn custom(&self) -> CustomConfig {
-        self.custom.clone().unwrap_or_default()
+        let mode = self.mode.as_deref().context(
+            "Config file missing required 'mode' field. Add: mode = \"iroh-default\" (or iroh-manual, custom)",
+        )?;
+        if mode != expected_mode {
+            anyhow::bail!(
+                "Config file has mode = \"{}\", but running with {}",
+                mode,
+                expected_mode
+            );
+        }
+        Ok(())
     }
 }
 
@@ -114,17 +109,29 @@ impl ReceiverConfig {
             .unwrap_or_default()
     }
 
-    /// Get iroh manual config, with defaults.
-    pub fn iroh_manual(&self) -> IrohManualConfig {
-        self.iroh
-            .as_ref()
-            .and_then(|i| i.manual.clone())
-            .unwrap_or_default()
-    }
+    /// Validate that config matches expected role and mode.
+    pub fn validate(&self, expected_mode: &str) -> Result<()> {
+        let role = self.role.as_deref().context(
+            "Config file missing required 'role' field. Add: role = \"receiver\"",
+        )?;
+        if role != "receiver" {
+            anyhow::bail!(
+                "Config file has role = \"{}\", but running as receiver",
+                role
+            );
+        }
 
-    /// Get custom config, with defaults.
-    pub fn custom(&self) -> CustomConfig {
-        self.custom.clone().unwrap_or_default()
+        let mode = self.mode.as_deref().context(
+            "Config file missing required 'mode' field. Add: mode = \"iroh-default\" (or iroh-manual, custom)",
+        )?;
+        if mode != expected_mode {
+            anyhow::bail!(
+                "Config file has mode = \"{}\", but running with {}",
+                mode,
+                expected_mode
+            );
+        }
+        Ok(())
     }
 }
 
