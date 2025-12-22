@@ -25,7 +25,7 @@ use crate::manual::signaling::{
     display_answer, display_iroh_answer, display_iroh_offer, display_offer,
     read_answer_from_stdin, read_iroh_answer_from_stdin, read_iroh_offer_from_stdin,
     read_offer_from_stdin, IrohManualAnswer, IrohManualOffer, ManualAnswer, ManualOffer,
-    ManualRequest, IROH_SIGNAL_VERSION, MANUAL_SIGNAL_VERSION,
+    ManualReject, ManualRequest, IROH_SIGNAL_VERSION, MANUAL_SIGNAL_VERSION,
 };
 
 /// Timeout for QUIC connection (matches webrtc crate's 180 second connection timeout)
@@ -102,12 +102,14 @@ async fn publish_offer_and_wait_for_answer(
             );
         }
 
+        // Exponential backoff
+        let next_interval = (current_interval * 2).min(MAX_INTERVAL);
+
         // Re-publish offer with backoff
-        println!("Re-publishing offer (next wait: {}s)...", current_interval);
+        println!("Re-publishing offer (next wait: {}s)...", next_interval);
         signaling.publish_offer(offer).await?;
 
-        // Exponential backoff
-        current_interval = (current_interval * 2).min(MAX_INTERVAL);
+        current_interval = next_interval;
     }
 }
 
@@ -148,6 +150,13 @@ async fn publish_request_and_wait_for_offer(
             println!("Ignoring offer with mismatched session ID (stale event)");
         }
 
+        // Check for rejection
+        if let Some(reject) = signaling.try_check_for_rejection().await {
+            if reject.session_id == *session_id {
+                anyhow::bail!("Session rejected by sender: {}", reject.reason);
+            }
+        }
+
         // Check overall timeout
         if start_time.elapsed().as_secs() >= max_wait_secs {
             anyhow::bail!(
@@ -156,12 +165,14 @@ async fn publish_request_and_wait_for_offer(
             );
         }
 
+        // Exponential backoff
+        let next_interval = (current_interval * 2).min(MAX_INTERVAL);
+
         // Re-publish request with backoff
-        println!("Re-publishing request (next wait: {}s)...", current_interval);
+        println!("Re-publishing request (next wait: {}s)...", next_interval);
         signaling.publish_request(request).await?;
 
-        // Exponential backoff
-        current_interval = (current_interval * 2).min(MAX_INTERVAL);
+        current_interval = next_interval;
     }
 }
 
@@ -1130,11 +1141,23 @@ pub async fn run_nostr_tcp_sender(
             // Recheck after cleanup
             if active_sessions.load(Ordering::Relaxed) >= max_sessions {
                 println!(
-                    "Rejecting session {} - still at capacity ({}/{})",
+                    "Rejecting session {} - at capacity ({}/{})",
                     &session_id[..8.min(session_id.len())],
                     active_sessions.load(Ordering::Relaxed),
                     max_sessions
                 );
+
+                // Send explicit rejection to receiver
+                let reject = ManualReject {
+                    version: MANUAL_SIGNAL_VERSION,
+                    session_id: session_id.clone(),
+                    reason: format!("Sender at capacity ({}/{})", max_sessions, max_sessions),
+                };
+                if let Err(e) = signaling.publish_reject(&reject).await {
+                    eprintln!("Failed to send rejection: {}", e);
+                } else {
+                    println!("Sent rejection for session {}", &session_id[..8.min(session_id.len())]);
+                }
                 continue;
             }
             println!("Slot freed up, accepting session");
@@ -1517,11 +1540,23 @@ pub async fn run_nostr_udp_sender(
             // Recheck after cleanup
             if active_sessions.load(Ordering::Relaxed) >= max_sessions {
                 println!(
-                    "Rejecting session {} - still at capacity ({}/{})",
+                    "Rejecting session {} - at capacity ({}/{})",
                     &session_id[..8.min(session_id.len())],
                     active_sessions.load(Ordering::Relaxed),
                     max_sessions
                 );
+
+                // Send explicit rejection to receiver
+                let reject = ManualReject {
+                    version: MANUAL_SIGNAL_VERSION,
+                    session_id: session_id.clone(),
+                    reason: format!("Sender at capacity ({}/{})", max_sessions, max_sessions),
+                };
+                if let Err(e) = signaling.publish_reject(&reject).await {
+                    eprintln!("Failed to send rejection: {}", e);
+                } else {
+                    println!("Sent rejection for session {}", &session_id[..8.min(session_id.len())]);
+                }
                 continue;
             }
             println!("Slot freed up, accepting session");

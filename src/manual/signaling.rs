@@ -72,6 +72,15 @@ pub struct ManualRequest {
     pub timestamp: u64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManualReject {
+    pub version: u16,
+    /// Session ID echoed from request
+    pub session_id: String,
+    /// Rejection reason
+    pub reason: String,
+}
+
 // ============================================================================
 // Iroh Manual Mode (v2) - Iroh endpoint
 // ============================================================================

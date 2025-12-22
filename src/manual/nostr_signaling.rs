@@ -11,7 +11,7 @@ use sha2::{Digest, Sha256};
 use std::time::Duration;
 use tokio::sync::broadcast::error::{RecvError, TryRecvError};
 
-use super::signaling::{ManualAnswer, ManualOffer, ManualRequest};
+use super::signaling::{ManualAnswer, ManualOffer, ManualReject, ManualRequest};
 
 /// Custom event kind for tunnel-rs signaling (ephemeral range)
 fn tunnel_signaling_kind() -> Kind {
@@ -21,6 +21,7 @@ fn tunnel_signaling_kind() -> Kind {
 const SIGNALING_TYPE_REQUEST: &str = "tunnel-request";
 const SIGNALING_TYPE_OFFER: &str = "tunnel-offer";
 const SIGNALING_TYPE_ANSWER: &str = "tunnel-answer";
+const SIGNALING_TYPE_REJECT: &str = "tunnel-reject";
 
 
 /// Nostr signaling client for ICE exchange
@@ -172,6 +173,21 @@ impl NostrSignaling {
         Ok(())
     }
 
+    /// Publish a session rejection to the peer (sender -> receiver when at capacity)
+    pub async fn publish_reject(&self, reject: &ManualReject) -> Result<()> {
+        let json = serde_json::to_string(reject)?;
+        let content = URL_SAFE_NO_PAD.encode(json.as_bytes());
+
+        let event = self.create_signaling_event(SIGNALING_TYPE_REJECT, &content)?;
+
+        self.client
+            .send_event(&event)
+            .await
+            .context("Failed to publish session rejection")?;
+
+        Ok(())
+    }
+
     /// Wait for a fresh request from the peer indefinitely.
     /// For multi-session senders that should run forever.
     /// Rejects requests older than `max_age_secs` seconds.
@@ -201,16 +217,20 @@ impl NostrSignaling {
         let mut notifications = self.client.notifications();
 
         loop {
-            // Check deadline if set
-            if let Some(d) = deadline {
-                if tokio::time::Instant::now() >= d {
+            // Compute wait duration: min(remaining until deadline, 1s), or 1s if no deadline
+            let wait_duration = if let Some(d) = deadline {
+                let remaining = d.saturating_duration_since(tokio::time::Instant::now());
+                if remaining.is_zero() {
                     return Err(anyhow::anyhow!(
                         "Timeout waiting for fresh request from peer"
                     ));
                 }
-            }
+                remaining.min(Duration::from_secs(1))
+            } else {
+                Duration::from_secs(1)
+            };
 
-            match tokio::time::timeout(Duration::from_secs(1), notifications.recv()).await {
+            match tokio::time::timeout(wait_duration, notifications.recv()).await {
                 Ok(Ok(RelayPoolNotification::Event { event, .. })) => {
                     if let Some(request) =
                         self.try_parse_event::<ManualRequest>(&event, SIGNALING_TYPE_REQUEST)
@@ -267,6 +287,13 @@ impl NostrSignaling {
             .await
     }
 
+    /// Check for a rejection from the peer (non-blocking, very short timeout).
+    pub async fn try_check_for_rejection(&self) -> Option<ManualReject> {
+        // Very short timeout - just check if there's a rejection already pending
+        self.wait_for_message_optional(SIGNALING_TYPE_REJECT, 0)
+            .await
+    }
+
     /// Wait for a specific message type with timeout, returns None on timeout or channel closed.
     ///
     /// If the notification receiver lags behind, this will drain buffered messages
@@ -289,8 +316,15 @@ impl NostrSignaling {
         let mut notifications = self.client.notifications();
         let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_secs);
 
-        while tokio::time::Instant::now() < deadline {
-            match tokio::time::timeout(Duration::from_secs(1), notifications.recv()).await {
+        loop {
+            // Compute remaining time until deadline
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                return None; // Timeout
+            }
+            let wait_duration = remaining.min(Duration::from_secs(1));
+
+            match tokio::time::timeout(wait_duration, notifications.recv()).await {
                 Ok(Ok(RelayPoolNotification::Event { event, .. })) => {
                     if let Some(payload) = self.try_parse_event::<T>(&event, expected_type) {
                         println!("Received {} from peer", expected_type);
@@ -324,8 +358,6 @@ impl NostrSignaling {
                 Err(_) => continue, // tokio::time::timeout elapsed, try again
             }
         }
-
-        None
     }
 
     /// Drain buffered messages from the notification channel and return the first matching payload.
