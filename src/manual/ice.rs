@@ -398,7 +398,12 @@ async fn detect_local_ip(stun_servers: &[String]) -> Option<IpAddr> {
 }
 
 async fn local_ip_for_target(target: SocketAddr) -> Result<IpAddr> {
-    let socket = std::net::UdpSocket::bind("0.0.0.0:0")
+    let bind_addr = if target.ip().is_ipv4() {
+        "0.0.0.0:0"
+    } else {
+        "[::]:0"
+    };
+    let socket = std::net::UdpSocket::bind(bind_addr)
         .context("Failed to bind UDP socket for local IP lookup")?;
     socket.connect(target).context("Failed to connect UDP socket")?;
     Ok(socket.local_addr()?.ip())

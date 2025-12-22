@@ -164,15 +164,21 @@ fn read_marked_payload(begin: &str, end: &str) -> Result<String> {
         return Err(anyhow!("Unexpected text before BEGIN marker"));
     }
 
+    let mut found_end = false;
     for line in lines {
         let line = line?;
         let trimmed = line.trim();
         if trimmed == end {
+            found_end = true;
             break;
         }
         if !trimmed.is_empty() {
             collected.push(trimmed.to_string());
         }
+    }
+
+    if !found_end {
+        return Err(anyhow!("END marker not found"));
     }
 
     if collected.is_empty() {
