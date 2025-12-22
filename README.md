@@ -19,6 +19,7 @@ tunnel-rs enables you to forward TCP and UDP traffic between machines without re
 - Remote desktop access without port forwarding
 - Secure service exposure without public infrastructure
 - Development and testing across network boundaries
+- Cross-platform tunneling (including Windows endpoints)
 
 ## Overview
 
