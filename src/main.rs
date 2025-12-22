@@ -61,6 +61,16 @@ fn parse_endpoint(value: &str) -> Result<(Protocol, String)> {
     Ok((protocol, addr.to_string()))
 }
 
+fn normalize_optional_endpoint(value: Option<String>) -> Option<String> {
+    value.and_then(|v| {
+        if v.trim().is_empty() {
+            None
+        } else {
+            Some(v)
+        }
+    })
+}
+
 #[derive(Parser)]
 #[command(name = "tunnel-rs")]
 #[command(version)]
@@ -384,7 +394,7 @@ async fn main() -> Result<()> {
             }
 
             // Get common values from config
-            let target = cfg.target.clone();
+            let target = normalize_optional_endpoint(cfg.target.clone());
 
             match effective_mode {
                 "iroh-default" => {
@@ -393,7 +403,7 @@ async fn main() -> Result<()> {
                     let (node_id, target, relay_urls, relay_only, dns_server) = match &mode {
                         Some(ReceiverMode::IrohDefault { node_id: n, target: t, relay_urls: r, relay_only: ro, dns_server: d }) => (
                             n.clone().or_else(|| iroh_cfg.and_then(|c| c.node_id.clone())),
-                            t.clone().or(target),
+                            normalize_optional_endpoint(t.clone()).or(target),
                             if r.is_empty() { iroh_cfg.and_then(|c| c.relay_urls.clone()).unwrap_or_default() } else { r.clone() },
                             *ro || iroh_cfg.and_then(|c| c.relay_only).unwrap_or(false),
                             d.clone().or_else(|| iroh_cfg.and_then(|c| c.dns_server.clone())),
@@ -426,7 +436,7 @@ async fn main() -> Result<()> {
                     let manual_cfg = cfg.iroh_manual();
                     let (target, stun_servers) = match &mode {
                         Some(ReceiverMode::IrohManual { target: t, stun_servers: s }) => (
-                            t.clone().or(target),
+                            normalize_optional_endpoint(t.clone()).or(target),
                             if s.is_empty() { manual_cfg.and_then(|c| c.stun_servers.clone()).unwrap_or_else(default_stun_servers) } else { s.clone() },
                         ),
                         _ => (target, manual_cfg.and_then(|c| c.stun_servers.clone()).unwrap_or_else(default_stun_servers)),
@@ -448,7 +458,7 @@ async fn main() -> Result<()> {
                     let custom_cfg = cfg.custom();
                     let (target, stun_servers) = match &mode {
                         Some(ReceiverMode::Custom { target: t, stun_servers: s }) => (
-                            t.clone().or(target),
+                            normalize_optional_endpoint(t.clone()).or(target),
                             if s.is_empty() { custom_cfg.and_then(|c| c.stun_servers.clone()).unwrap_or_else(default_stun_servers) } else { s.clone() },
                         ),
                         _ => (target, custom_cfg.and_then(|c| c.stun_servers.clone()).unwrap_or_else(default_stun_servers)),

@@ -1,0 +1,84 @@
+name: Release (Manual)
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: 'Tag name (leave empty for auto-generated yyyymmddhhmmss)'
+        required: false
+
+permissions:
+  contents: write
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      release_tag: ${{ steps.tag.outputs.release_tag }}
+      is_prerelease: ${{ steps.tag.outputs.is_prerelease }}
+    steps:
+      - name: Generate Tag
+        id: tag
+        run: |
+          if [ -z "${{ inputs.tag_name }}" ]; then
+            echo "release_tag=$(date +'%Y%m%d%H%M%S')" >> $GITHUB_OUTPUT
+            echo "is_prerelease=true" >> $GITHUB_OUTPUT
+          else
+            echo "release_tag=${{ inputs.tag_name }}" >> $GITHUB_OUTPUT
+            echo "is_prerelease=false" >> $GITHUB_OUTPUT
+          fi
+
+  build-and-release:
+    needs: setup
+    name: Build and Release
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            suffix: linux-amd64
+            binary: tunnel-rs
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            suffix: linux-arm64
+            binary: tunnel-rs
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            suffix: macos-arm64
+            binary: tunnel-rs
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            suffix: windows-amd64
+            binary: tunnel-rs.exe
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build Release
+        run: cargo build --release --all-features --target ${{ matrix.target }}
+
+      - name: Rename Binary (Unix)
+        if: runner.os != 'Windows'
+        run: mv target/${{ matrix.target }}/release/${{ matrix.binary }} target/release/tunnel-rs-${{ matrix.suffix }}
+
+      - name: Rename Binary (Windows)
+        if: runner.os == 'Windows'
+        run: move target\${{ matrix.target }}\release\${{ matrix.binary }} target\release\tunnel-rs-${{ matrix.suffix }}.exe
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ needs.setup.outputs.release_tag }}
+          name: Release ${{ needs.setup.outputs.release_tag }}
+          prerelease: ${{ needs.setup.outputs.is_prerelease }}
+          generate_release_notes: true
+          files: |
+            target/release/tunnel-rs-${{ matrix.suffix }}
+            target/release/tunnel-rs-${{ matrix.suffix }}.exe
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
