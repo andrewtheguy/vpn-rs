@@ -22,8 +22,6 @@ const SIGNALING_TYPE_REQUEST: &str = "tunnel-request";
 const SIGNALING_TYPE_OFFER: &str = "tunnel-offer";
 const SIGNALING_TYPE_ANSWER: &str = "tunnel-answer";
 
-/// Default timeout for waiting for signaling messages (seconds)
-const DEFAULT_SIGNALING_TIMEOUT_SECS: u64 = 120;
 
 /// Nostr signaling client for ICE exchange
 pub struct NostrSignaling {
@@ -174,19 +172,44 @@ impl NostrSignaling {
         Ok(())
     }
 
-    /// Wait for a fresh request from the peer (uses default timeout).
+    /// Wait for a fresh request from the peer indefinitely.
+    /// For multi-session senders that should run forever.
     /// Rejects requests older than `max_age_secs` seconds.
-    pub async fn wait_for_fresh_request(&self, max_age_secs: u64) -> Result<ManualRequest> {
-        println!(
-            "Waiting for {} from peer (timeout: {}s, max age: {}s)...",
-            SIGNALING_TYPE_REQUEST, DEFAULT_SIGNALING_TIMEOUT_SECS, max_age_secs
-        );
+    pub async fn wait_for_fresh_request_forever(&self, max_age_secs: u64) -> Result<ManualRequest> {
+        self.wait_for_fresh_request_inner(max_age_secs, None).await
+    }
 
-        let deadline =
-            tokio::time::Instant::now() + Duration::from_secs(DEFAULT_SIGNALING_TIMEOUT_SECS);
+    /// Inner implementation for waiting for fresh requests.
+    /// If `timeout_secs` is None, waits indefinitely.
+    async fn wait_for_fresh_request_inner(
+        &self,
+        max_age_secs: u64,
+        timeout_secs: Option<u64>,
+    ) -> Result<ManualRequest> {
+        match timeout_secs {
+            Some(t) => println!(
+                "Waiting for {} from peer (timeout: {}s, max age: {}s)...",
+                SIGNALING_TYPE_REQUEST, t, max_age_secs
+            ),
+            None => println!(
+                "Waiting for {} from peer (max age: {}s)...",
+                SIGNALING_TYPE_REQUEST, max_age_secs
+            ),
+        }
+
+        let deadline = timeout_secs.map(|t| tokio::time::Instant::now() + Duration::from_secs(t));
         let mut notifications = self.client.notifications();
 
-        while tokio::time::Instant::now() < deadline {
+        loop {
+            // Check deadline if set
+            if let Some(d) = deadline {
+                if tokio::time::Instant::now() >= d {
+                    return Err(anyhow::anyhow!(
+                        "Timeout waiting for fresh request from peer"
+                    ));
+                }
+            }
+
             match tokio::time::timeout(Duration::from_secs(1), notifications.recv()).await {
                 Ok(Ok(RelayPoolNotification::Event { event, .. })) => {
                     if let Some(request) =
@@ -228,10 +251,6 @@ impl NostrSignaling {
                 Err(_) => continue,
             }
         }
-
-        Err(anyhow::anyhow!(
-            "Timeout waiting for fresh request from peer"
-        ))
     }
 
     /// Wait for an offer from the peer with custom timeout, returns None on timeout.

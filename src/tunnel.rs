@@ -1079,8 +1079,8 @@ pub async fn run_nostr_tcp_sender(
             continue;
         }
 
-        // Wait for fresh request from receiver
-        let request = match signaling.wait_for_fresh_request(MAX_REQUEST_AGE_SECS).await {
+        // Wait for fresh request from receiver (no timeout for multi-session mode)
+        let request = match signaling.wait_for_fresh_request_forever(MAX_REQUEST_AGE_SECS).await {
             Ok(req) => req,
             Err(e) => {
                 eprintln!("Error waiting for request: {}", e);
@@ -1448,8 +1448,8 @@ pub async fn run_nostr_udp_sender(
             continue;
         }
 
-        // Wait for fresh request from receiver
-        let request = match signaling.wait_for_fresh_request(MAX_REQUEST_AGE_SECS).await {
+        // Wait for fresh request from receiver (no timeout for multi-session mode)
+        let request = match signaling.wait_for_fresh_request_forever(MAX_REQUEST_AGE_SECS).await {
             Ok(req) => req,
             Err(e) => {
                 eprintln!("Error waiting for request: {}", e);
