@@ -1,7 +1,8 @@
 //! TCP and UDP tunnel implementations.
 
 use anyhow::{Context, Result};
-use iroh::EndpointId;
+use iroh::discovery::static_provider::StaticProvider;
+use iroh::{Endpoint, EndpointAddr, EndpointId, RelayMode, TransportAddr};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -19,8 +20,10 @@ use crate::endpoint::{
 use crate::manual::ice::{IceEndpoint, IceRole};
 use crate::manual::quic;
 use crate::manual::signaling::{
-    display_answer, display_offer, read_answer_from_stdin, read_offer_from_stdin, ManualAnswer,
-    ManualOffer, MANUAL_SIGNAL_VERSION,
+    display_answer, display_iroh_answer, display_iroh_offer, display_offer,
+    read_answer_from_stdin, read_iroh_answer_from_stdin, read_iroh_offer_from_stdin,
+    read_offer_from_stdin, IrohManualAnswer, IrohManualOffer, ManualAnswer, ManualOffer,
+    IROH_SIGNAL_VERSION, MANUAL_SIGNAL_VERSION,
 };
 
 /// Timeout for QUIC connection (matches webrtc crate's 180 second connection timeout)
@@ -746,5 +749,422 @@ where
     tokio::io::copy(reader, writer)
         .await
         .context("Stream copy failed")?;
+    Ok(())
+}
+
+// ============================================================================
+// Iroh Manual Mode - TCP Tunnel Implementation
+// ============================================================================
+
+/// Create an iroh endpoint for manual mode (no relay, no discovery servers)
+async fn create_iroh_manual_endpoint(alpn: &[u8]) -> Result<(Endpoint, Arc<StaticProvider>)> {
+    let discovery = Arc::new(StaticProvider::new());
+
+    let mut transport_config = iroh::endpoint::TransportConfig::default();
+    transport_config.max_idle_timeout(None);
+
+    let endpoint = Endpoint::empty_builder(RelayMode::Disabled)
+        .transport_config(transport_config)
+        .discovery(discovery.clone())
+        .alpns(vec![alpn.to_vec()])
+        .bind()
+        .await
+        .context("Failed to create iroh endpoint")?;
+
+    Ok((endpoint, discovery))
+}
+
+/// Get direct addresses from endpoint for signaling
+fn get_direct_addresses(endpoint: &Endpoint) -> Vec<String> {
+    endpoint
+        .bound_sockets()
+        .iter()
+        .map(|addr| addr.to_string())
+        .collect()
+}
+
+pub async fn run_iroh_manual_tcp_sender(target: String) -> Result<()> {
+    let target_addr: SocketAddr = target.parse().context("Invalid target address format")?;
+
+    println!("Iroh Manual TCP Tunnel - Sender Mode");
+    println!("=====================================");
+    println!("Creating iroh endpoint (no relay)...");
+
+    let (endpoint, discovery) = create_iroh_manual_endpoint(TCP_ALPN).await?;
+
+    let node_id = endpoint.id();
+    let direct_addrs = get_direct_addresses(&endpoint);
+
+    let offer = IrohManualOffer {
+        version: IROH_SIGNAL_VERSION,
+        node_id: node_id.to_string(),
+        direct_addresses: direct_addrs,
+    };
+
+    println!("\nIroh Manual Offer (copy to receiver):");
+    display_iroh_offer(&offer)?;
+
+    println!("Paste receiver answer (include BEGIN/END markers), then press Enter:");
+    let answer = read_iroh_answer_from_stdin()?;
+    if answer.version != IROH_SIGNAL_VERSION {
+        anyhow::bail!(
+            "Iroh signaling version mismatch (expected {}, got {})",
+            IROH_SIGNAL_VERSION,
+            answer.version
+        );
+    }
+
+    // Parse and add remote peer info
+    let remote_id: EndpointId = answer
+        .node_id
+        .parse()
+        .context("Invalid remote NodeId format")?;
+    let remote_addrs: Vec<SocketAddr> = answer
+        .direct_addresses
+        .iter()
+        .filter_map(|s| s.parse().ok())
+        .collect();
+
+    let remote_addr = EndpointAddr::new(remote_id)
+        .with_addrs(remote_addrs.into_iter().map(TransportAddr::Ip));
+    discovery.add_endpoint_info(remote_addr);
+    println!("Added remote peer: {}", remote_id);
+
+    println!("Waiting for receiver to connect...");
+
+    loop {
+        let conn = match endpoint.accept().await {
+            Some(incoming) => match incoming.await {
+                Ok(conn) => conn,
+                Err(e) => {
+                    eprintln!("Failed to accept connection: {}", e);
+                    continue;
+                }
+            },
+            None => {
+                println!("Endpoint closed");
+                break;
+            }
+        };
+
+        let remote_id = conn.remote_id();
+        println!("Receiver connected from: {}", remote_id);
+        println!("Forwarding TCP connections to {}", target_addr);
+
+        let target = target_addr;
+        tokio::spawn(async move {
+            loop {
+                let (send_stream, recv_stream) = match conn.accept_bi().await {
+                    Ok(streams) => streams,
+                    Err(e) => {
+                        println!("Receiver disconnected: {}", e);
+                        break;
+                    }
+                };
+
+                println!("New TCP connection request received");
+
+                tokio::spawn(async move {
+                    if let Err(e) = handle_tcp_sender_stream(send_stream, recv_stream, target).await
+                    {
+                        eprintln!("TCP connection error: {}", e);
+                    }
+                });
+            }
+
+            conn.close(0u32.into(), b"done");
+            println!("Receiver connection closed.");
+        });
+
+        println!("Waiting for next receiver to connect...");
+    }
+
+    endpoint.close().await;
+    Ok(())
+}
+
+pub async fn run_iroh_manual_tcp_receiver(listen: String) -> Result<()> {
+    let listen_addr: SocketAddr = listen
+        .parse()
+        .context("Invalid listen address format. Use format like 127.0.0.1:2222 or [::]:2222")?;
+
+    println!("Iroh Manual TCP Tunnel - Receiver Mode");
+    println!("======================================");
+    println!("Creating iroh endpoint (no relay)...");
+
+    let (endpoint, discovery) = create_iroh_manual_endpoint(TCP_ALPN).await?;
+
+    let node_id = endpoint.id();
+    let direct_addrs = get_direct_addresses(&endpoint);
+
+    println!("Paste sender offer (include BEGIN/END markers), then press Enter:");
+    let offer = read_iroh_offer_from_stdin()?;
+    if offer.version != IROH_SIGNAL_VERSION {
+        anyhow::bail!(
+            "Iroh signaling version mismatch (expected {}, got {})",
+            IROH_SIGNAL_VERSION,
+            offer.version
+        );
+    }
+
+    let answer = IrohManualAnswer {
+        version: IROH_SIGNAL_VERSION,
+        node_id: node_id.to_string(),
+        direct_addresses: direct_addrs,
+    };
+
+    println!("\nIroh Manual Answer (copy to sender):");
+    display_iroh_answer(&answer)?;
+
+    // Parse and add remote peer info
+    let remote_id: EndpointId = offer
+        .node_id
+        .parse()
+        .context("Invalid remote NodeId format")?;
+    let remote_addrs: Vec<SocketAddr> = offer
+        .direct_addresses
+        .iter()
+        .filter_map(|s| s.parse().ok())
+        .collect();
+
+    let remote_addr = EndpointAddr::new(remote_id)
+        .with_addrs(remote_addrs.into_iter().map(TransportAddr::Ip));
+    discovery.add_endpoint_info(remote_addr);
+    println!("Added remote peer: {}", remote_id);
+
+    println!("Connecting to sender...");
+    let conn = tokio::time::timeout(
+        QUIC_CONNECTION_TIMEOUT,
+        endpoint.connect(EndpointAddr::new(remote_id), TCP_ALPN),
+    )
+    .await
+    .context("Connection timeout")?
+    .context("Failed to connect to sender")?;
+
+    println!("Connected to sender!");
+
+    let conn = Arc::new(conn);
+    let tunnel_established = Arc::new(AtomicBool::new(false));
+
+    let listener = TcpListener::bind(listen_addr)
+        .await
+        .context("Failed to bind TCP listener")?;
+    println!(
+        "Listening on TCP {} - configure your client to connect here",
+        listen_addr
+    );
+
+    loop {
+        let (tcp_stream, peer_addr) = match listener.accept().await {
+            Ok(result) => result,
+            Err(e) => {
+                eprintln!("Failed to accept TCP connection: {}", e);
+                continue;
+            }
+        };
+
+        println!("New local connection from {}", peer_addr);
+
+        let conn_clone = conn.clone();
+        let established = tunnel_established.clone();
+
+        tokio::spawn(async move {
+            match handle_tcp_receiver_connection(conn_clone, tcp_stream, peer_addr, established)
+                .await
+            {
+                Ok(()) => {}
+                Err(e) => {
+                    eprintln!("TCP tunnel error for {}: {}", peer_addr, e);
+                }
+            }
+        });
+    }
+}
+
+// ============================================================================
+// Iroh Manual Mode - UDP Tunnel Implementation
+// ============================================================================
+
+pub async fn run_iroh_manual_udp_sender(target: String) -> Result<()> {
+    let target_addr: SocketAddr = target.parse().context("Invalid target address format")?;
+
+    println!("Iroh Manual UDP Tunnel - Sender Mode");
+    println!("=====================================");
+    println!("Creating iroh endpoint (no relay)...");
+
+    let (endpoint, discovery) = create_iroh_manual_endpoint(UDP_ALPN).await?;
+
+    let node_id = endpoint.id();
+    let direct_addrs = get_direct_addresses(&endpoint);
+
+    let offer = IrohManualOffer {
+        version: IROH_SIGNAL_VERSION,
+        node_id: node_id.to_string(),
+        direct_addresses: direct_addrs,
+    };
+
+    println!("\nIroh Manual Offer (copy to receiver):");
+    display_iroh_offer(&offer)?;
+
+    println!("Paste receiver answer (include BEGIN/END markers), then press Enter:");
+    let answer = read_iroh_answer_from_stdin()?;
+    if answer.version != IROH_SIGNAL_VERSION {
+        anyhow::bail!(
+            "Iroh signaling version mismatch (expected {}, got {})",
+            IROH_SIGNAL_VERSION,
+            answer.version
+        );
+    }
+
+    // Parse and add remote peer info
+    let remote_id: EndpointId = answer
+        .node_id
+        .parse()
+        .context("Invalid remote NodeId format")?;
+    let remote_addrs: Vec<SocketAddr> = answer
+        .direct_addresses
+        .iter()
+        .filter_map(|s| s.parse().ok())
+        .collect();
+
+    let remote_addr = EndpointAddr::new(remote_id)
+        .with_addrs(remote_addrs.into_iter().map(TransportAddr::Ip));
+    discovery.add_endpoint_info(remote_addr);
+    println!("Added remote peer: {}", remote_id);
+
+    println!("Waiting for receiver to connect...");
+
+    let conn = endpoint
+        .accept()
+        .await
+        .context("No incoming connection")?
+        .await
+        .context("Failed to accept connection")?;
+
+    let remote_id = conn.remote_id();
+    println!("Receiver connected from: {}", remote_id);
+
+    let (send_stream, recv_stream) = conn
+        .accept_bi()
+        .await
+        .context("Failed to accept stream from receiver")?;
+
+    println!("Forwarding UDP traffic to {}", target_addr);
+
+    // Bind to the same address family as the target
+    let bind_addr: SocketAddr = if target_addr.is_ipv6() {
+        "[::]:0".parse().unwrap()
+    } else {
+        "0.0.0.0:0".parse().unwrap()
+    };
+    let udp_socket = Arc::new(
+        UdpSocket::bind(bind_addr)
+            .await
+            .context("Failed to bind UDP socket")?,
+    );
+
+    forward_stream_to_udp_sender(recv_stream, send_stream, udp_socket, target_addr).await?;
+
+    conn.close(0u32.into(), b"done");
+    endpoint.close().await;
+    println!("Connection closed.");
+
+    Ok(())
+}
+
+pub async fn run_iroh_manual_udp_receiver(listen: String) -> Result<()> {
+    let listen_addr: SocketAddr = listen
+        .parse()
+        .context("Invalid listen address format. Use format like 127.0.0.1:51820 or [::]:51820")?;
+
+    println!("Iroh Manual UDP Tunnel - Receiver Mode");
+    println!("======================================");
+    println!("Creating iroh endpoint (no relay)...");
+
+    let (endpoint, discovery) = create_iroh_manual_endpoint(UDP_ALPN).await?;
+
+    let node_id = endpoint.id();
+    let direct_addrs = get_direct_addresses(&endpoint);
+
+    println!("Paste sender offer (include BEGIN/END markers), then press Enter:");
+    let offer = read_iroh_offer_from_stdin()?;
+    if offer.version != IROH_SIGNAL_VERSION {
+        anyhow::bail!(
+            "Iroh signaling version mismatch (expected {}, got {})",
+            IROH_SIGNAL_VERSION,
+            offer.version
+        );
+    }
+
+    let answer = IrohManualAnswer {
+        version: IROH_SIGNAL_VERSION,
+        node_id: node_id.to_string(),
+        direct_addresses: direct_addrs,
+    };
+
+    println!("\nIroh Manual Answer (copy to sender):");
+    display_iroh_answer(&answer)?;
+
+    // Parse and add remote peer info
+    let remote_id: EndpointId = offer
+        .node_id
+        .parse()
+        .context("Invalid remote NodeId format")?;
+    let remote_addrs: Vec<SocketAddr> = offer
+        .direct_addresses
+        .iter()
+        .filter_map(|s| s.parse().ok())
+        .collect();
+
+    let remote_addr = EndpointAddr::new(remote_id)
+        .with_addrs(remote_addrs.into_iter().map(TransportAddr::Ip));
+    discovery.add_endpoint_info(remote_addr);
+    println!("Added remote peer: {}", remote_id);
+
+    println!("Connecting to sender...");
+    let conn = tokio::time::timeout(
+        QUIC_CONNECTION_TIMEOUT,
+        endpoint.connect(EndpointAddr::new(remote_id), UDP_ALPN),
+    )
+    .await
+    .context("Connection timeout")?
+    .context("Failed to connect to sender")?;
+
+    println!("Connected to sender!");
+
+    let (send_stream, recv_stream) = conn.open_bi().await.context("Failed to open stream")?;
+
+    let udp_socket = Arc::new(
+        UdpSocket::bind(listen_addr)
+            .await
+            .context("Failed to bind UDP socket")?,
+    );
+    println!(
+        "Listening on UDP {} - configure your client to connect here",
+        listen_addr
+    );
+
+    let client_addr: Arc<Mutex<Option<SocketAddr>>> = Arc::new(Mutex::new(None));
+
+    let udp_clone = udp_socket.clone();
+    let client_clone = client_addr.clone();
+
+    tokio::select! {
+        result = forward_udp_to_stream(udp_clone, send_stream, client_clone) => {
+            if let Err(e) = result {
+                eprintln!("UDP to stream error: {}", e);
+            }
+        }
+        result = forward_stream_to_udp_receiver(recv_stream, udp_socket, client_addr) => {
+            if let Err(e) = result {
+                eprintln!("Stream to UDP error: {}", e);
+            }
+        }
+    }
+
+    conn.close(0u32.into(), b"done");
+    endpoint.close().await;
+    println!("Connection closed.");
+
     Ok(())
 }
