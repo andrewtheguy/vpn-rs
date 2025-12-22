@@ -774,13 +774,46 @@ async fn create_iroh_manual_endpoint(alpn: &[u8]) -> Result<(Endpoint, Arc<Stati
     Ok((endpoint, discovery))
 }
 
-/// Get direct addresses from endpoint for signaling
+/// Get direct addresses from endpoint for signaling.
+///
+/// Returns local network interface addresses with the actual bound port.
+/// This allows direct peer-to-peer connections on the local network.
 fn get_direct_addresses(endpoint: &Endpoint) -> Vec<String> {
-    endpoint
-        .bound_sockets()
-        .iter()
-        .map(|addr| addr.to_string())
-        .collect()
+    let bound_sockets = endpoint.bound_sockets();
+    let mut addrs = Vec::new();
+
+    // Get the actual bound ports from the endpoint
+    let ipv4_port = bound_sockets.iter()
+        .find(|a| a.is_ipv4())
+        .map(|a| a.port());
+    let ipv6_port = bound_sockets.iter()
+        .find(|a| a.is_ipv6())
+        .map(|a| a.port());
+
+    // Get local network interface addresses
+    if let Ok(interfaces) = get_if_addrs::get_if_addrs() {
+        for iface in interfaces {
+            // Skip loopback interfaces
+            if iface.is_loopback() {
+                continue;
+            }
+
+            let ip = iface.ip();
+            let port = if ip.is_ipv4() { ipv4_port } else { ipv6_port };
+
+            if let Some(port) = port {
+                let addr = SocketAddr::new(ip, port);
+                addrs.push(addr.to_string());
+            }
+        }
+    }
+
+    println!("Local addresses:");
+    for addr in &addrs {
+        println!("  - {}", addr);
+    }
+
+    addrs
 }
 
 pub async fn run_iroh_manual_tcp_sender(target: String) -> Result<()> {
