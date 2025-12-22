@@ -293,10 +293,7 @@ async fn main() -> Result<()> {
             }
 
             // Get common values from config
-            let source = cfg
-                .source
-                .clone()
-                .unwrap_or_else(|| "tcp://127.0.0.1:22".to_string());
+            let source = normalize_optional_endpoint(cfg.source.clone());
 
             match effective_mode {
                 "iroh-default" => {
@@ -304,7 +301,7 @@ async fn main() -> Result<()> {
                     // Override with CLI values if provided
                     let (source, secret_file, relay_urls, relay_only, dns_server) = match &mode {
                         Some(SenderMode::IrohDefault { source: s, secret_file: sf, relay_urls: r, relay_only: ro, dns_server: d }) => (
-                            s.clone().unwrap_or(source),
+                            normalize_optional_endpoint(s.clone()).or(source),
                             sf.clone().or_else(|| iroh_cfg.and_then(|c| c.secret_file.clone())),
                             if r.is_empty() { iroh_cfg.and_then(|c| c.relay_urls.clone()).unwrap_or_default() } else { r.clone() },
                             *ro || iroh_cfg.and_then(|c| c.relay_only).unwrap_or(false),
@@ -319,6 +316,10 @@ async fn main() -> Result<()> {
                         ),
                     };
 
+                    let source = source.context(
+                        "source is required. Provide via --source or in config file.",
+                    )?;
+
                     let (protocol, target) = parse_endpoint(&source)
                         .with_context(|| format!("Invalid sender source '{}'", source))?;
 
@@ -331,11 +332,15 @@ async fn main() -> Result<()> {
                     let manual_cfg = cfg.iroh_manual();
                     let (source, stun_servers) = match &mode {
                         Some(SenderMode::IrohManual { source: s, stun_servers: ss }) => (
-                            s.clone().unwrap_or(source),
+                            normalize_optional_endpoint(s.clone()).or(source),
                             if ss.is_empty() { manual_cfg.and_then(|c| c.stun_servers.clone()).unwrap_or_else(default_stun_servers) } else { ss.clone() },
                         ),
                         _ => (source, manual_cfg.and_then(|c| c.stun_servers.clone()).unwrap_or_else(default_stun_servers)),
                     };
+
+                    let source = source.context(
+                        "source is required. Provide via --source or in config file.",
+                    )?;
 
                     let (protocol, target) = parse_endpoint(&source)
                         .with_context(|| format!("Invalid sender source '{}'", source))?;
@@ -349,11 +354,15 @@ async fn main() -> Result<()> {
                     let custom_cfg = cfg.custom();
                     let (source, stun_servers) = match &mode {
                         Some(SenderMode::Custom { source: s, stun_servers: ss }) => (
-                            s.clone().unwrap_or(source),
+                            normalize_optional_endpoint(s.clone()).or(source),
                             if ss.is_empty() { custom_cfg.and_then(|c| c.stun_servers.clone()).unwrap_or_else(default_stun_servers) } else { ss.clone() },
                         ),
                         _ => (source, custom_cfg.and_then(|c| c.stun_servers.clone()).unwrap_or_else(default_stun_servers)),
                     };
+
+                    let source = source.context(
+                        "source is required. Provide via --source or in config file.",
+                    )?;
 
                     let (protocol, target) = parse_endpoint(&source)
                         .with_context(|| format!("Invalid sender source '{}'", source))?;

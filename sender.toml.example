@@ -13,6 +13,7 @@ role = "sender"
 mode = "iroh-default"  # or "iroh-manual" or "custom"
 
 # Shared options
+# source is required at runtime (via config or CLI)
 source = "tcp://127.0.0.1:22"
 
 [iroh-default]

@@ -127,7 +127,7 @@ tunnel-rs receiver iroh-default --node-id <ENDPOINT_ID> --target udp://0.0.0.0:5
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--source`, `-s` | tcp://127.0.0.1:22 | Source address to forward traffic to |
+| `--source`, `-s` | required | Source address to forward traffic to |
 | `--secret-file` | - | Path to secret key file for persistent identity |
 | `--relay-url` | public | Custom relay server URL(s), repeatable |
 | `--relay-only` | false | Force all traffic through relay |
@@ -310,7 +310,7 @@ Uses iroh's QUIC transport with manual copy-paste signaling. No discovery server
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--source`, `-s` | tcp://127.0.0.1:22 | Source address to forward traffic to |
+| `--source`, `-s` | required | Source address to forward traffic to |
 | `--stun-server` | public | STUN server(s), repeatable |
 
 ### receiver iroh-manual
@@ -394,7 +394,7 @@ tunnel-rs receiver custom --target udp://0.0.0.0:51820
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--source`, `-s` | tcp://127.0.0.1:22 | Source address to forward traffic to |
+| `--source`, `-s` | required | Source address to forward traffic to |
 | `--stun-server` | public | STUN server(s), repeatable |
 
 ### receiver custom
