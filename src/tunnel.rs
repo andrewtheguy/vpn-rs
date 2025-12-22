@@ -5,6 +5,7 @@ use iroh::EndpointId;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::sync::Mutex;
@@ -22,6 +23,9 @@ use crate::manual::signaling::{
     display_answer, display_offer, read_answer_from_stdin, read_offer_from_stdin, ManualAnswer,
     ManualOffer, MANUAL_SIGNAL_VERSION,
 };
+
+/// Timeout for QUIC connection (matches webrtc crate's 180 second connection timeout)
+const QUIC_CONNECTION_TIMEOUT: Duration = Duration::from_secs(180);
 
 // ============================================================================
 // UDP Tunnel Implementation
@@ -523,13 +527,16 @@ pub async fn run_manual_tcp_sender(target: String, stun_servers: Vec<String>) ->
     tokio::spawn(ice_conn.ice_keeper.run());
 
     let endpoint = quic::make_server_endpoint(ice_conn.socket, quic_identity.server_config)?;
-    println!("Waiting for receiver QUIC connection...");
+    println!("Waiting for receiver QUIC connection (timeout: {:?})...", QUIC_CONNECTION_TIMEOUT);
 
-    let connecting = endpoint
-        .accept()
+    let connecting = tokio::time::timeout(QUIC_CONNECTION_TIMEOUT, endpoint.accept())
         .await
+        .context("Timeout waiting for QUIC connection")?
         .context("No incoming QUIC connection")?;
-    let conn = connecting.await.context("Failed to accept QUIC connection")?;
+    let conn = tokio::time::timeout(QUIC_CONNECTION_TIMEOUT, connecting)
+        .await
+        .context("Timeout during QUIC handshake")?
+        .context("Failed to accept QUIC connection")?;
     println!("Receiver connected over QUIC.");
 
     loop {
@@ -598,10 +605,14 @@ pub async fn run_manual_tcp_receiver(listen: String, stun_servers: Vec<String>) 
     tokio::spawn(ice_conn.ice_keeper.run());
 
     let endpoint = quic::make_client_endpoint(ice_conn.socket, &offer.quic_fingerprint)?;
+    println!("Connecting to sender via QUIC (timeout: {:?})...", QUIC_CONNECTION_TIMEOUT);
     let connecting = endpoint
         .connect(ice_conn.remote_addr, "manual")
         .context("Failed to start QUIC connection")?;
-    let conn = connecting.await.context("Failed to connect to sender")?;
+    let conn = tokio::time::timeout(QUIC_CONNECTION_TIMEOUT, connecting)
+        .await
+        .context("Timeout during QUIC connection")?
+        .context("Failed to connect to sender")?;
     println!("Connected to sender over QUIC.");
 
     let conn = Arc::new(conn);

@@ -4,6 +4,7 @@ use anyhow::{anyhow, Context, Result};
 use get_if_addrs::get_if_addrs;
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -42,11 +43,12 @@ impl IceEndpoint {
         provider.install_process_default();
 
         let mut ice = IceAgent::new(IceCreds::new(), sha1);
-        // Speed up connectivity checks for manual mode.
-        ice.set_timing_advance(Duration::from_millis(10));
-        ice.set_initial_stun_rto(Duration::from_millis(100));
-        ice.set_max_stun_rto(Duration::from_millis(500));
-        ice.set_max_stun_retransmits(3);
+        // Use more conservative timing (similar to webrtc crate defaults)
+        // Aggressive timing causes issues when one side connects faster than the other
+        ice.set_timing_advance(Duration::from_millis(50));
+        ice.set_initial_stun_rto(Duration::from_millis(250));
+        ice.set_max_stun_rto(Duration::from_millis(3000));
+        ice.set_max_stun_retransmits(7);
         ice.set_local_preference(|c: &str0m::Candidate, same_kind| {
             use str0m::CandidateKind;
             let ip = c.addr();
@@ -150,45 +152,74 @@ impl IceEndpoint {
         let mut nominated_source: Option<SocketAddr> = None;
         let mut nominated_dest: Option<SocketAddr> = None;
         let mut buf = vec![0u8; 2000];
-        let mut tick = interval(Duration::from_millis(10));
+        let mut tick = interval(Duration::from_millis(50)); // Slower tick to match conservative timing
 
         self.ice.handle_timeout(Instant::now());
+
+        // Use a stop flag to signal receive tasks to stop
+        let stop_flag = Arc::new(AtomicBool::new(false));
 
         let (tx, mut rx) = mpsc::unbounded_channel();
         for sock in &self.sockets {
             let udp = sock.udp.clone();
             let local_addr = sock.local_addr;
             let tx = tx.clone();
+            let stop = stop_flag.clone();
             tokio::spawn(async move {
                 let mut buf = vec![0u8; 2000];
                 loop {
-                    let (len, source) = match udp.recv_from(&mut buf).await {
-                        Ok(v) => v,
-                        Err(_) => break,
-                    };
-                    let data = buf[..len].to_vec();
-                    if tx.send((local_addr, source, data)).is_err() {
+                    if stop.load(Ordering::Relaxed) {
                         break;
+                    }
+                    // Use a short timeout so we can check the stop flag
+                    let result = tokio::time::timeout(
+                        Duration::from_millis(100),
+                        udp.recv_from(&mut buf),
+                    ).await;
+
+                    match result {
+                        Ok(Ok((len, source))) => {
+                            let data = buf[..len].to_vec();
+                            if tx.send((local_addr, source, data)).is_err() {
+                                break;
+                            }
+                        }
+                        Ok(Err(_)) => break,
+                        Err(_) => continue, // Timeout, check stop flag
                     }
                 }
             });
         }
 
         loop {
-        let socket_map = socket_map(&self.sockets);
-        drain_transmit(&mut self.ice, &socket_map).await?;
+            let socket_map = socket_map(&self.sockets);
+            drain_transmit(&mut self.ice, &socket_map).await?;
             drain_events(&mut self.ice, &mut nominated_source, &mut nominated_dest);
 
             if self.ice.state().is_connected() {
                 if let (Some(source), Some(destination)) = (nominated_source, nominated_dest) {
-                    if let Some(sock) = self
+                    // Find and take ownership of the nominated socket
+                    let nominated_idx = self
                         .sockets
                         .iter()
-                        .find(|s| s.local_addr == source)
-                    {
-                        // Create a new tokio socket from the nominated std socket
-                        let nominated_std = sock.std_socket.try_clone()?;
-                        let nominated_tokio = UdpSocket::from_std(nominated_std)
+                        .position(|s| s.local_addr == source);
+
+                    if let Some(idx) = nominated_idx {
+                        // Signal receive tasks to stop
+                        stop_flag.store(true, Ordering::Relaxed);
+
+                        // Give tasks time to stop (they check every 100ms)
+                        tokio::time::sleep(Duration::from_millis(150)).await;
+
+                        // Take ownership of the nominated socket by removing it
+                        let sock = self.sockets.remove(idx);
+
+                        // Drop other sockets to release them
+                        drop(self.sockets);
+
+                        // Use the original tokio socket directly (via try_clone on std)
+                        // We need a fresh tokio socket since the Arc'd one is shared
+                        let nominated_tokio = UdpSocket::from_std(sock.std_socket)
                             .context("Failed to create tokio socket from nominated socket")?;
 
                         // Create the demultiplexing socket
