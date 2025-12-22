@@ -163,19 +163,6 @@ impl NostrSignaling {
             .await
     }
 
-    /// Wait for an answer from the peer (uses default timeout)
-    pub async fn wait_for_answer(&self) -> Result<ManualAnswer> {
-        self.wait_for_message(SIGNALING_TYPE_ANSWER, DEFAULT_SIGNALING_TIMEOUT_SECS)
-            .await
-    }
-
-    /// Wait for an answer from the peer with custom timeout.
-    /// Returns Err on timeout or channel closed.
-    pub async fn wait_for_answer_timeout(&self, timeout_secs: u64) -> Result<ManualAnswer> {
-        self.wait_for_message(SIGNALING_TYPE_ANSWER, timeout_secs)
-            .await
-    }
-
     /// Wait for an answer from the peer with custom timeout, returns None on timeout.
     /// Use this variant for re-publish loops where timeout is expected and not an error.
     pub async fn try_wait_for_answer_timeout(&self, timeout_secs: u64) -> Option<ManualAnswer> {
