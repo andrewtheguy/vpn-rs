@@ -4,7 +4,10 @@
       "Bash(rm:*)",
       "Bash(cargo doc:*)",
       "Bash(cargo build:*)",
-      "Bash(cargo tree:*)"
+      "Bash(cargo tree:*)",
+      "WebFetch(domain:docs.rs)",
+      "WebFetch(domain:www.rfc-editor.org)",
+      "WebFetch(domain:datatracker.ietf.org)"
     ]
   }
 }

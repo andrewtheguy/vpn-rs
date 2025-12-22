@@ -5,10 +5,16 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use crc32fast::Hasher;
 use serde::{Deserialize, Serialize};
+use std::io::BufRead;
 
 pub const MANUAL_SIGNAL_VERSION: u16 = 1;
 
 const PREFIX: &str = "TRS";
+const LINE_WIDTH: usize = 76;
+const OFFER_BEGIN_MARKER: &str = "-----BEGIN TUNNEL-RS MANUAL OFFER-----";
+const OFFER_END_MARKER: &str = "-----END TUNNEL-RS MANUAL OFFER-----";
+const ANSWER_BEGIN_MARKER: &str = "-----BEGIN TUNNEL-RS MANUAL ANSWER-----";
+const ANSWER_END_MARKER: &str = "-----END TUNNEL-RS MANUAL ANSWER-----";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ManualOffer {
@@ -41,6 +47,24 @@ pub fn encode_answer(answer: &ManualAnswer) -> Result<String> {
 
 pub fn decode_answer(payload: &str) -> Result<ManualAnswer> {
     decode_payload(payload)
+}
+
+pub fn display_offer(offer: &ManualOffer) -> Result<()> {
+    display_payload(encode_offer(offer)?, OFFER_BEGIN_MARKER, OFFER_END_MARKER)
+}
+
+pub fn display_answer(answer: &ManualAnswer) -> Result<()> {
+    display_payload(encode_answer(answer)?, ANSWER_BEGIN_MARKER, ANSWER_END_MARKER)
+}
+
+pub fn read_offer_from_stdin() -> Result<ManualOffer> {
+    let payload = read_marked_payload(OFFER_BEGIN_MARKER, OFFER_END_MARKER)?;
+    decode_offer(&payload)
+}
+
+pub fn read_answer_from_stdin() -> Result<ManualAnswer> {
+    let payload = read_marked_payload(ANSWER_BEGIN_MARKER, ANSWER_END_MARKER)?;
+    decode_answer(&payload)
 }
 
 fn encode_payload<T: Serialize>(payload: &T) -> Result<String> {
@@ -101,4 +125,59 @@ fn crc32(bytes: &[u8]) -> u32 {
     let mut hasher = Hasher::new();
     hasher.update(bytes);
     hasher.finalize()
+}
+
+fn wrap_lines(s: &str, width: usize) -> String {
+    s.as_bytes()
+        .chunks(width)
+        .map(|chunk| std::str::from_utf8(chunk).unwrap_or(""))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn display_payload(payload: String, begin: &str, end: &str) -> Result<()> {
+    let wrapped = wrap_lines(&payload, LINE_WIDTH);
+    println!();
+    println!("{}", begin);
+    println!("{}", wrapped);
+    println!("{}", end);
+    println!();
+    Ok(())
+}
+
+fn read_marked_payload(begin: &str, end: &str) -> Result<String> {
+    let stdin = std::io::stdin();
+    let mut lines = stdin.lock().lines();
+    let mut collected = Vec::new();
+
+    loop {
+        let line = lines
+            .next()
+            .ok_or_else(|| anyhow!("Missing BEGIN marker"))??;
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if trimmed == begin {
+            break;
+        }
+        return Err(anyhow!("Unexpected text before BEGIN marker"));
+    }
+
+    for line in lines {
+        let line = line?;
+        let trimmed = line.trim();
+        if trimmed == end {
+            break;
+        }
+        if !trimmed.is_empty() {
+            collected.push(trimmed.to_string());
+        }
+    }
+
+    if collected.is_empty() {
+        return Err(anyhow!("No payload found between markers"));
+    }
+
+    Ok(collected.join(""))
 }

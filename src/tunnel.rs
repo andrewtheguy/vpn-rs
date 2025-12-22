@@ -19,8 +19,8 @@ use crate::endpoint::{
 use crate::manual::ice::{IceEndpoint, IceRole};
 use crate::manual::quic;
 use crate::manual::signaling::{
-    decode_answer, decode_offer, encode_answer, encode_offer, ManualAnswer, ManualOffer,
-    MANUAL_SIGNAL_VERSION,
+    display_answer, display_offer, read_answer_from_stdin, read_offer_from_stdin, ManualAnswer,
+    ManualOffer, MANUAL_SIGNAL_VERSION,
 };
 
 // ============================================================================
@@ -497,11 +497,11 @@ pub async fn run_manual_tcp_sender(target: String, stun_servers: Vec<String>) ->
         quic_fingerprint: quic_identity.fingerprint.clone(),
     };
 
-    let offer_payload = encode_offer(&offer)?;
-    println!("\nManual Offer (copy to receiver):\n{}\n", offer_payload);
+    println!("\nManual Offer (copy to receiver):");
+    display_offer(&offer)?;
 
-    let answer_payload = prompt_for_payload("Paste receiver answer: ")?;
-    let answer = decode_answer(&answer_payload)?;
+    println!("Paste receiver answer (include BEGIN/END markers), then press Enter:");
+    let answer = read_answer_from_stdin()?;
     if answer.version != MANUAL_SIGNAL_VERSION {
         anyhow::bail!(
             "Manual signaling version mismatch (expected {}, got {})",
@@ -515,11 +515,14 @@ pub async fn run_manual_tcp_sender(target: String, stun_servers: Vec<String>) ->
         pass: answer.ice_pwd,
     };
 
-    let (socket, _remote_addr) = ice
+    let ice_conn = ice
         .connect(IceRole::Controlling, remote_creds, answer.candidates)
         .await?;
 
-    let endpoint = quic::make_server_endpoint(socket, quic_identity.server_config)?;
+    // Spawn the ICE keeper to handle STUN packets in the background
+    tokio::spawn(ice_conn.ice_keeper.run());
+
+    let endpoint = quic::make_server_endpoint(ice_conn.socket, quic_identity.server_config)?;
     println!("Waiting for receiver QUIC connection...");
 
     let connecting = endpoint
@@ -562,8 +565,8 @@ pub async fn run_manual_tcp_receiver(listen: String, stun_servers: Vec<String>) 
     let local_creds = ice.local_credentials();
     let local_candidates = ice.local_candidates();
 
-    let offer_payload = prompt_for_payload("Paste sender offer: ")?;
-    let offer = decode_offer(&offer_payload)?;
+    println!("Paste sender offer (include BEGIN/END markers), then press Enter:");
+    let offer = read_offer_from_stdin()?;
     if offer.version != MANUAL_SIGNAL_VERSION {
         anyhow::bail!(
             "Manual signaling version mismatch (expected {}, got {})",
@@ -579,21 +582,24 @@ pub async fn run_manual_tcp_receiver(listen: String, stun_servers: Vec<String>) 
         candidates: local_candidates,
     };
 
-    let answer_payload = encode_answer(&answer)?;
-    println!("\nManual Answer (copy to sender):\n{}\n", answer_payload);
+    println!("\nManual Answer (copy to sender):");
+    display_answer(&answer)?;
 
     let remote_creds = str0m::IceCreds {
         ufrag: offer.ice_ufrag,
         pass: offer.ice_pwd,
     };
 
-    let (socket, remote_addr) = ice
+    let ice_conn = ice
         .connect(IceRole::Controlled, remote_creds, offer.candidates)
         .await?;
 
-    let endpoint = quic::make_client_endpoint(socket, &offer.quic_fingerprint)?;
+    // Spawn the ICE keeper to handle STUN packets in the background
+    tokio::spawn(ice_conn.ice_keeper.run());
+
+    let endpoint = quic::make_client_endpoint(ice_conn.socket, &offer.quic_fingerprint)?;
     let connecting = endpoint
-        .connect(remote_addr, "manual")
+        .connect(ice_conn.remote_addr, "manual")
         .context("Failed to start QUIC connection")?;
     let conn = connecting.await.context("Failed to connect to sender")?;
     println!("Connected to sender over QUIC.");
@@ -696,18 +702,7 @@ async fn bridge_quinn_streams(
     Ok(())
 }
 
-fn prompt_for_payload(prompt: &str) -> Result<String> {
-    use std::io::{self, Write};
-
-    print!("{}", prompt);
-    io::stdout().flush().ok();
-
-    let mut buf = String::new();
-    io::stdin()
-        .read_line(&mut buf)
-        .context("Failed to read manual signaling payload")?;
-    Ok(buf.trim().to_string())
-}
+// no longer used: multiline payloads are read via markers in signaling.rs
 
 async fn handle_tcp_receiver_connection(
     conn: Arc<iroh::endpoint::Connection>,

@@ -170,19 +170,29 @@ tunnel-rs receiver --config receiver.toml
 
 Manual mode bypasses iroh discovery/relays and uses copy-paste signaling (ICE + QUIC).
 
+### Quick Start
+
 1. Sender:
    ```bash
    tunnel-rs sender --manual --target 127.0.0.1:22
    ```
-   Copy the Manual Offer.
+   Copy the Manual Offer printed in the terminal.
 2. Receiver:
    ```bash
    tunnel-rs receiver --manual --listen 127.0.0.1:2222
    ```
-   Paste the Manual Offer, copy the Manual Answer.
+   Paste the Manual Offer, then copy the Manual Answer.
 3. Paste the Manual Answer back into the sender.
 
 Then connect through the receiver listener (e.g., `ssh -p 2222 user@127.0.0.1`).
+
+### Notes
+
+- Manual mode is **TCP only** in this release.
+- Manual mode uses STUN servers to gather ICE candidates. Override with `--stun-server` (repeatable)
+  or `stun_servers` in config.
+- Manual signaling payloads include a **version**; mismatches are rejected.
+- Manual mode bypasses relays and discovery; symmetric NATs may not connect without a relay.
 
 ### Config Options
 

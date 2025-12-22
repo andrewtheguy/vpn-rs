@@ -1,7 +1,7 @@
 //! QUIC setup helpers for manual mode.
 
 use anyhow::{Context, Result};
-use quinn::{ClientConfig, Endpoint, EndpointConfig, ServerConfig};
+use quinn::{AsyncUdpSocket, ClientConfig, Endpoint, EndpointConfig, Runtime, ServerConfig};
 use quinn::crypto::rustls::QuicClientConfig;
 use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer, ServerName, UnixTime};
 use sha2::{Digest, Sha256};
@@ -35,23 +35,32 @@ pub fn generate_server_identity() -> Result<QuicServerIdentity> {
 }
 
 pub fn make_server_endpoint(
-    socket: std::net::UdpSocket,
+    socket: Arc<dyn AsyncUdpSocket>,
     server_config: ServerConfig,
 ) -> Result<Endpoint> {
-    let runtime = Arc::new(quinn::TokioRuntime);
-    let endpoint = Endpoint::new(EndpointConfig::default(), Some(server_config), socket, runtime)
-        .context("Failed to create QUIC server endpoint")?;
+    let runtime: Arc<dyn Runtime> = Arc::new(quinn::TokioRuntime);
+    let endpoint = Endpoint::new_with_abstract_socket(
+        EndpointConfig::default(),
+        Some(server_config),
+        socket,
+        runtime,
+    )
+    .context("Failed to create QUIC server endpoint")?;
     Ok(endpoint)
 }
 
 pub fn make_client_endpoint(
-    socket: std::net::UdpSocket,
+    socket: Arc<dyn AsyncUdpSocket>,
     expected_fingerprint: &str,
 ) -> Result<Endpoint> {
-    let runtime = Arc::new(quinn::TokioRuntime);
-    let mut endpoint =
-        Endpoint::new(EndpointConfig::default(), None, socket, runtime)
-            .context("Failed to create QUIC client endpoint")?;
+    let runtime: Arc<dyn Runtime> = Arc::new(quinn::TokioRuntime);
+    let mut endpoint = Endpoint::new_with_abstract_socket(
+        EndpointConfig::default(),
+        None,
+        socket,
+        runtime,
+    )
+    .context("Failed to create QUIC client endpoint")?;
 
     let client_cfg = build_client_config(expected_fingerprint)?;
     endpoint.set_default_client_config(client_cfg);
