@@ -109,7 +109,7 @@ impl SenderConfig {
         self.nostr.as_ref()
     }
 
-    /// Validate that config matches expected role and mode, and has no unexpected sections.
+    /// Validate that config matches expected role and mode.
     pub fn validate(&self, expected_mode: &str) -> Result<()> {
         let role = self.role.as_deref().context(
             "Config file missing required 'role' field. Add: role = \"sender\"",
@@ -132,52 +132,9 @@ impl SenderConfig {
             );
         }
 
-        // Validate no unexpected sections for the current mode
+        // Validate mode is known
         match expected_mode {
-            "iroh-default" => {
-                if self.iroh_manual.is_some() {
-                    anyhow::bail!("Config has [iroh-manual] section but mode = \"iroh-default\"");
-                }
-                if self.custom.is_some() {
-                    anyhow::bail!("Config has [custom] section but mode = \"iroh-default\"");
-                }
-                if self.nostr.is_some() {
-                    anyhow::bail!("Config has [nostr] section but mode = \"iroh-default\"");
-                }
-            }
-            "iroh-manual" => {
-                if self.iroh_default.is_some() {
-                    anyhow::bail!("Config has [iroh-default] section but mode = \"iroh-manual\"");
-                }
-                if self.custom.is_some() {
-                    anyhow::bail!("Config has [custom] section but mode = \"iroh-manual\"");
-                }
-                if self.nostr.is_some() {
-                    anyhow::bail!("Config has [nostr] section but mode = \"iroh-manual\"");
-                }
-            }
-            "custom" => {
-                if self.iroh_default.is_some() {
-                    anyhow::bail!("Config has [iroh-default] section but mode = \"custom\"");
-                }
-                if self.iroh_manual.is_some() {
-                    anyhow::bail!("Config has [iroh-manual] section but mode = \"custom\"");
-                }
-                if self.nostr.is_some() {
-                    anyhow::bail!("Config has [nostr] section but mode = \"custom\"");
-                }
-            }
-            "nostr" => {
-                if self.iroh_default.is_some() {
-                    anyhow::bail!("Config has [iroh-default] section but mode = \"nostr\"");
-                }
-                if self.iroh_manual.is_some() {
-                    anyhow::bail!("Config has [iroh-manual] section but mode = \"nostr\"");
-                }
-                if self.custom.is_some() {
-                    anyhow::bail!("Config has [custom] section but mode = \"nostr\"");
-                }
-            }
+            "iroh-default" | "iroh-manual" | "custom" | "nostr" => {}
             _ => anyhow::bail!("Unknown mode '{}'. Valid modes: iroh-default, iroh-manual, custom, nostr", expected_mode),
         }
 
@@ -206,7 +163,7 @@ impl ReceiverConfig {
         self.nostr.as_ref()
     }
 
-    /// Validate that config matches expected role and mode, and has no unexpected sections.
+    /// Validate that config matches expected role and mode.
     pub fn validate(&self, expected_mode: &str) -> Result<()> {
         let role = self.role.as_deref().context(
             "Config file missing required 'role' field. Add: role = \"receiver\"",
@@ -229,52 +186,9 @@ impl ReceiverConfig {
             );
         }
 
-        // Validate no unexpected sections for the current mode
+        // Validate mode is known
         match expected_mode {
-            "iroh-default" => {
-                if self.iroh_manual.is_some() {
-                    anyhow::bail!("Config has [iroh-manual] section but mode = \"iroh-default\"");
-                }
-                if self.custom.is_some() {
-                    anyhow::bail!("Config has [custom] section but mode = \"iroh-default\"");
-                }
-                if self.nostr.is_some() {
-                    anyhow::bail!("Config has [nostr] section but mode = \"iroh-default\"");
-                }
-            }
-            "iroh-manual" => {
-                if self.iroh_default.is_some() {
-                    anyhow::bail!("Config has [iroh-default] section but mode = \"iroh-manual\"");
-                }
-                if self.custom.is_some() {
-                    anyhow::bail!("Config has [custom] section but mode = \"iroh-manual\"");
-                }
-                if self.nostr.is_some() {
-                    anyhow::bail!("Config has [nostr] section but mode = \"iroh-manual\"");
-                }
-            }
-            "custom" => {
-                if self.iroh_default.is_some() {
-                    anyhow::bail!("Config has [iroh-default] section but mode = \"custom\"");
-                }
-                if self.iroh_manual.is_some() {
-                    anyhow::bail!("Config has [iroh-manual] section but mode = \"custom\"");
-                }
-                if self.nostr.is_some() {
-                    anyhow::bail!("Config has [nostr] section but mode = \"custom\"");
-                }
-            }
-            "nostr" => {
-                if self.iroh_default.is_some() {
-                    anyhow::bail!("Config has [iroh-default] section but mode = \"nostr\"");
-                }
-                if self.iroh_manual.is_some() {
-                    anyhow::bail!("Config has [iroh-manual] section but mode = \"nostr\"");
-                }
-                if self.custom.is_some() {
-                    anyhow::bail!("Config has [custom] section but mode = \"nostr\"");
-                }
-            }
+            "iroh-default" | "iroh-manual" | "custom" | "nostr" => {}
             _ => anyhow::bail!("Unknown mode '{}'. Valid modes: iroh-default, iroh-manual, custom, nostr", expected_mode),
         }
 
