@@ -6,11 +6,24 @@ TCP/UDP port forwarding through P2P connections.
 
 tunnel-rs provides multiple modes for establishing tunnels:
 
-| Mode | Discovery | Protocols | Use Case |
-|------|-----------|-----------|----------|
-| **iroh default** | Automatic (Pkarr/DNS/mDNS) | TCP, UDP | Production, always-on tunnels |
-| **iroh manual** | Manual copy-paste | TCP, UDP | Serverless, no infrastructure needed |
-| **custom** | Manual copy-paste (ICE) | TCP only | Alternative QUIC stack (str0m+quinn) |
+| Mode | Discovery | NAT Traversal | Protocols | Use Case |
+|------|-----------|---------------|-----------|----------|
+| **iroh default** | Automatic (Pkarr/DNS/mDNS) | Relay fallback | TCP, UDP | Production, always-on tunnels |
+| **iroh manual** | Manual copy-paste | STUN heuristic | TCP, UDP | Serverless, simple NATs |
+| **custom** | Manual copy-paste | Full ICE | TCP only | Best NAT compatibility |
+
+### Choosing a Manual Mode
+
+Both `iroh manual` and `custom` modes use copy-paste signaling without servers:
+
+| Feature | iroh manual | custom |
+|---------|-------------|--------|
+| NAT traversal | STUN-based (heuristic) | Full ICE (connectivity checks) |
+| Symmetric NAT | May fail | Works |
+| Protocols | TCP + UDP | TCP only |
+| QUIC stack | iroh | str0m + quinn |
+
+**Recommendation:** Use `custom` mode for best NAT traversal. Use `iroh manual` if you need UDP or have simple network topology.
 
 ## Installation
 
@@ -234,6 +247,8 @@ tunnel-rs receiver iroh default --dns-server https://dns.example.com/pkarr --nod
 
 Uses iroh's QUIC transport with manual copy-paste signaling. No discovery servers or relay infrastructure needed - fully serverless.
 
+**NAT Traversal:** Uses STUN to discover public addresses and bidirectional connection racing. Works with most NATs but may fail on symmetric NATs. For difficult NAT scenarios, use [Custom Mode](#custom-mode) which has full ICE support.
+
 ## Quick Start
 
 1. **Sender** starts and outputs an offer:
@@ -267,6 +282,7 @@ Uses iroh's QUIC transport with manual copy-paste signaling. No discovery server
 |--------|---------|-------------|
 | `--protocol`, `-p` | tcp | Protocol to tunnel (tcp or udp) |
 | `--target`, `-t` | 127.0.0.1:22 | Target address to forward traffic to |
+| `--stun-server` | public | STUN server(s), repeatable |
 
 ### receiver iroh manual
 
@@ -274,6 +290,7 @@ Uses iroh's QUIC transport with manual copy-paste signaling. No discovery server
 |--------|---------|-------------|
 | `--protocol`, `-p` | tcp | Protocol to tunnel (tcp or udp) |
 | `--listen`, `-l` | required | Local address to listen on |
+| `--stun-server` | public | STUN server(s), repeatable |
 
 Note: Config file options (`-c`, `--default-config`) are at the `sender`/`receiver` command level. See [Configuration Files](#configuration-files) above.
 
@@ -293,7 +310,9 @@ tunnel-rs receiver iroh manual --protocol udp --listen 0.0.0.0:51820
 
 # Custom Mode
 
-Uses manual ICE signaling with str0m + quinn QUIC. TCP tunneling only.
+Uses full ICE (Interactive Connectivity Establishment) with str0m + quinn QUIC. TCP tunneling only.
+
+**NAT Traversal:** Full ICE implementation with STUN candidate gathering and connectivity checks. This provides the best NAT traversal success rate, including support for symmetric NATs that fail with simpler STUN-only approaches.
 
 ## Architecture
 
@@ -366,8 +385,8 @@ ICE connection established!
 
 ## Notes
 
-- Custom mode is **TCP only**
-- Symmetric NATs may not connect without a relay (not supported in custom mode)
+- Custom mode is **TCP only** (use iroh manual for UDP)
+- Full ICE provides best NAT traversal - works with most symmetric NATs
 - Signaling payloads include a version number; mismatches are rejected
 
 ---
@@ -415,11 +434,18 @@ tunnel-rs show-id --secret-file ./sender.key
 
 ### Iroh Manual Mode
 1. Sender creates iroh endpoint (no relay, no discovery)
-2. Manual exchange of offer/answer (copy-paste with NodeId + addresses)
-3. Direct connection established via iroh's QUIC
+2. STUN queries discover public addresses (heuristic port mapping)
+3. Manual exchange of offer/answer (copy-paste with NodeId + addresses)
+4. Both sides race connect/accept for hole punching
+5. Direct connection established via iroh's QUIC
+
+*Limitation: Uses heuristic port mapping which may fail on symmetric NATs.*
 
 ### Custom Mode
-1. Both sides gather ICE candidates via STUN
+1. Both sides gather ICE candidates via STUN (same socket used for data)
 2. Manual exchange of offer/answer (copy-paste)
-3. ICE connectivity checks find best path
-4. QUIC connection established over ICE socket
+3. ICE connectivity checks probe all candidate pairs simultaneously
+4. Best working path selected via ICE nomination
+5. QUIC connection established over ICE socket
+
+*Advantage: Full ICE provides reliable NAT traversal even for symmetric NATs.*

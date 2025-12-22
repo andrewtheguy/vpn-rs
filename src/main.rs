@@ -207,7 +207,7 @@ enum IrohReceiverMode {
         #[arg(long)]
         dns_server: Option<String>,
     },
-    /// Use manual signaling (copy-paste) with STUN for NAT traversal
+    /// STUN-based manual signaling - works with most NATs (may fail on symmetric NAT)
     Manual {
         /// Protocol to tunnel (tcp or udp)
         #[arg(short, long)]
