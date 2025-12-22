@@ -7,7 +7,10 @@
       "Bash(cargo tree:*)",
       "WebFetch(domain:docs.rs)",
       "WebFetch(domain:www.rfc-editor.org)",
-      "WebFetch(domain:datatracker.ietf.org)"
+      "WebFetch(domain:datatracker.ietf.org)",
+      "Bash(ls:*)",
+      "Bash(find:*)",
+      "Bash(xargs dirname:*)"
     ]
   }
 }

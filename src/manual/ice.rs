@@ -68,6 +68,7 @@ impl IceEndpoint {
         let mut local_candidates = Vec::new();
         let mut sockets = Vec::new();
 
+        // Step 1: Get non-loopback interface IPs for host candidates
         let interface_ips = list_interface_ips()?;
         if interface_ips.is_empty() {
             let fallback_ip = detect_local_ip(stun_servers)
@@ -82,6 +83,7 @@ impl IceEndpoint {
             }
         }
 
+        // Step 2: Add host candidates from interface-bound sockets
         for sock in &sockets {
             if let Ok(candidate) = str0m::Candidate::host(sock.local_addr, "udp") {
                 if let Some(added) = ice.add_local_candidate(candidate) {
@@ -90,26 +92,66 @@ impl IceEndpoint {
             }
         }
 
-        for sock in &sockets {
-            for stun in stun_servers {
-                for server in resolve_stun_addrs(stun) {
-                    if sock.local_addr.is_ipv4() != server.is_ipv4() {
+        // Step 3: Gather server-reflexive (STUN) candidates using WILDCARD sockets
+        // This is the key difference from our previous approach - webrtc-ice binds to
+        // 0.0.0.0:0 or [::]:0 for STUN, letting the OS choose the right interface
+        for stun in stun_servers {
+            for server in resolve_stun_addrs(stun) {
+                // Create a wildcard socket matching the STUN server's address family
+                let bind_addr: SocketAddr = if server.is_ipv4() {
+                    "0.0.0.0:0".parse().unwrap()
+                } else {
+                    "[::]:0".parse().unwrap()
+                };
+
+                let stun_socket = match std::net::UdpSocket::bind(bind_addr) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        eprintln!("Failed to bind STUN socket for {}: {}", server, e);
                         continue;
                     }
-                    let client = stunclient::StunClient::new(server);
-                    match client.query_external_address_async(&sock.udp).await {
-                        Ok(external) => {
-                            if let Ok(candidate) =
-                                str0m::Candidate::server_reflexive(external, sock.local_addr, "udp")
-                            {
-                                if let Some(added) = ice.add_local_candidate(candidate) {
-                                    local_candidates.push(added.to_sdp_string());
-                                }
+                };
+                stun_socket.set_nonblocking(true).ok();
+
+                let tokio_socket = match UdpSocket::from_std(stun_socket.try_clone().unwrap_or_else(|_| {
+                    std::net::UdpSocket::bind(bind_addr).unwrap()
+                })) {
+                    Ok(s) => Arc::new(s),
+                    Err(e) => {
+                        eprintln!("Failed to create tokio socket for STUN: {}", e);
+                        continue;
+                    }
+                };
+
+                let client = stunclient::StunClient::new(server);
+                match client.query_external_address_async(&tokio_socket).await {
+                    Ok(external) => {
+                        // Get the local address that was used for the STUN query
+                        let local_addr = match stun_socket.local_addr() {
+                            Ok(addr) => addr,
+                            Err(_) => continue,
+                        };
+
+                        // Create srflx candidate - the base is our local addr, mapped is external
+                        if let Ok(candidate) =
+                            str0m::Candidate::server_reflexive(external, local_addr, "udp")
+                        {
+                            if let Some(added) = ice.add_local_candidate(candidate) {
+                                local_candidates.push(added.to_sdp_string());
+                                println!("STUN: {} -> external {}", local_addr, external);
                             }
                         }
-                        Err(e) => {
-                            eprintln!("STUN query failed for {} on {}: {}", stun, sock.local_addr, e);
+
+                        // Also add this socket to our sockets list for ICE connectivity checks
+                        if let Ok(socket) = bind_socket_from_std(stun_socket) {
+                            sockets.push(socket);
                         }
+
+                        // Only need one successful STUN per address family
+                        break;
+                    }
+                    Err(e) => {
+                        eprintln!("STUN query failed for {}: {}", stun, e);
                     }
                 }
             }
@@ -355,7 +397,8 @@ fn list_interface_ips() -> Result<Vec<IpAddr>> {
     let mut ips = Vec::new();
     for iface in get_if_addrs().context("Failed to list network interfaces")? {
         let ip = iface.ip();
-        if ip.is_multicast() {
+        // Filter out loopback and multicast - they can't do NAT traversal
+        if ip.is_loopback() || ip.is_multicast() {
             continue;
         }
         ips.push(ip);
@@ -366,6 +409,10 @@ fn list_interface_ips() -> Result<Vec<IpAddr>> {
 fn bind_socket(ip: IpAddr) -> Result<IceSocket> {
     let socket = std::net::UdpSocket::bind(SocketAddr::new(ip, 0))
         .with_context(|| format!("Failed to bind UDP socket on {}", ip))?;
+    bind_socket_from_std(socket)
+}
+
+fn bind_socket_from_std(socket: std::net::UdpSocket) -> Result<IceSocket> {
     socket
         .set_nonblocking(true)
         .context("Failed to set ICE socket nonblocking")?;
