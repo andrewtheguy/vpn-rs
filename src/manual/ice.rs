@@ -4,7 +4,6 @@ use anyhow::{anyhow, Context, Result};
 use get_if_addrs::get_if_addrs;
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -95,10 +94,22 @@ impl IceEndpoint {
         // Step 3: Gather server-reflexive (STUN) candidates using WILDCARD sockets
         // This is the key difference from our previous approach - webrtc-ice binds to
         // 0.0.0.0:0 or [::]:0 for STUN, letting the OS choose the right interface
+        let mut got_ipv4_stun = false;
+        let mut got_ipv6_stun = false;
+
         for stun in stun_servers {
             for server in resolve_stun_addrs(stun) {
+                // Skip if we already have STUN for this address family
+                let is_ipv4 = server.is_ipv4();
+                if is_ipv4 && got_ipv4_stun {
+                    continue;
+                }
+                if !is_ipv4 && got_ipv6_stun {
+                    continue;
+                }
+
                 // Create a wildcard socket matching the STUN server's address family
-                let bind_addr: SocketAddr = if server.is_ipv4() {
+                let bind_addr: SocketAddr = if is_ipv4 {
                     "0.0.0.0:0".parse().unwrap()
                 } else {
                     "[::]:0".parse().unwrap()
@@ -113,9 +124,9 @@ impl IceEndpoint {
                 };
                 stun_socket.set_nonblocking(true).ok();
 
-                let tokio_socket = match UdpSocket::from_std(stun_socket.try_clone().unwrap_or_else(|_| {
-                    std::net::UdpSocket::bind(bind_addr).unwrap()
-                })) {
+                // Create tokio socket - DON'T clone, use the original
+                // We'll drop this after STUN query and create a fresh one for ICE
+                let tokio_socket = match UdpSocket::from_std(stun_socket) {
                     Ok(s) => Arc::new(s),
                     Err(e) => {
                         eprintln!("Failed to create tokio socket for STUN: {}", e);
@@ -127,7 +138,7 @@ impl IceEndpoint {
                 match client.query_external_address_async(&tokio_socket).await {
                     Ok(external) => {
                         // Get the local address that was used for the STUN query
-                        let local_addr = match stun_socket.local_addr() {
+                        let local_addr = match tokio_socket.local_addr() {
                             Ok(addr) => addr,
                             Err(_) => continue,
                         };
@@ -142,16 +153,27 @@ impl IceEndpoint {
                             }
                         }
 
-                        // Also add this socket to our sockets list for ICE connectivity checks
-                        if let Ok(socket) = bind_socket_from_std(stun_socket) {
-                            sockets.push(socket);
+                        // Get the std socket back from tokio - this is safe because we have the only Arc
+                        let std_socket = match Arc::try_unwrap(tokio_socket) {
+                            Ok(ts) => ts.into_std().ok(),
+                            Err(_) => None,
+                        };
+
+                        // Add this socket to our sockets list for ICE connectivity checks
+                        if let Some(std_sock) = std_socket {
+                            if let Ok(ice_socket) = bind_socket_from_std(std_sock) {
+                                sockets.push(ice_socket);
+                            }
                         }
 
-                        // Only need one successful STUN per address family
-                        break;
+                        if is_ipv4 {
+                            got_ipv4_stun = true;
+                        } else {
+                            got_ipv6_stun = true;
+                        }
                     }
                     Err(e) => {
-                        eprintln!("STUN query failed for {}: {}", stun, e);
+                        eprintln!("STUN query failed for {} ({}): {}", stun, server, e);
                     }
                 }
             }
@@ -198,40 +220,45 @@ impl IceEndpoint {
 
         self.ice.handle_timeout(Instant::now());
 
-        // Use a stop flag to signal receive tasks to stop
-        let stop_flag = Arc::new(AtomicBool::new(false));
+        // Use channels to signal receive tasks to stop and confirm they stopped
+        let (stop_tx, _) = tokio::sync::broadcast::channel::<()>(1);
+        let (done_tx, mut done_rx) = mpsc::channel::<()>(self.sockets.len());
 
         let (tx, mut rx) = mpsc::unbounded_channel();
+        let num_tasks = self.sockets.len();
         for sock in &self.sockets {
             let udp = sock.udp.clone();
             let local_addr = sock.local_addr;
             let tx = tx.clone();
-            let stop = stop_flag.clone();
+            let mut stop_rx = stop_tx.subscribe();
+            let done = done_tx.clone();
             tokio::spawn(async move {
                 let mut buf = vec![0u8; 2000];
                 loop {
-                    if stop.load(Ordering::Relaxed) {
-                        break;
-                    }
-                    // Use a short timeout so we can check the stop flag
-                    let result = tokio::time::timeout(
-                        Duration::from_millis(100),
-                        udp.recv_from(&mut buf),
-                    ).await;
-
-                    match result {
-                        Ok(Ok((len, source))) => {
-                            let data = buf[..len].to_vec();
-                            if tx.send((local_addr, source, data)).is_err() {
-                                break;
+                    tokio::select! {
+                        biased;
+                        _ = stop_rx.recv() => {
+                            break;
+                        }
+                        result = udp.recv_from(&mut buf) => {
+                            match result {
+                                Ok((len, source)) => {
+                                    let data = buf[..len].to_vec();
+                                    if tx.send((local_addr, source, data)).is_err() {
+                                        break;
+                                    }
+                                }
+                                Err(_) => break,
                             }
                         }
-                        Ok(Err(_)) => break,
-                        Err(_) => continue, // Timeout, check stop flag
                     }
                 }
+                // Drop the udp socket before signaling done
+                drop(udp);
+                let _ = done.send(()).await;
             });
         }
+        drop(done_tx); // Drop our copy so done_rx completes when all tasks finish
 
         loop {
             let socket_map = socket_map(&self.sockets);
@@ -247,20 +274,32 @@ impl IceEndpoint {
                         .position(|s| s.local_addr == source);
 
                     if let Some(idx) = nominated_idx {
-                        // Signal receive tasks to stop
-                        stop_flag.store(true, Ordering::Relaxed);
+                        // Signal all receive tasks to stop
+                        let _ = stop_tx.send(());
 
-                        // Give tasks time to stop (they check every 100ms)
-                        tokio::time::sleep(Duration::from_millis(150)).await;
+                        // Wait for all tasks to confirm they stopped and dropped their sockets
+                        for _ in 0..num_tasks {
+                            let _ = tokio::time::timeout(
+                                Duration::from_millis(500),
+                                done_rx.recv()
+                            ).await;
+                        }
 
                         // Take ownership of the nominated socket by removing it
                         let sock = self.sockets.remove(idx);
 
-                        // Drop other sockets to release them
-                        drop(self.sockets);
+                        // Drop other sockets and their tokio wrappers
+                        for s in self.sockets.drain(..) {
+                            drop(s.udp);
+                            drop(s.std_socket);
+                        }
 
-                        // Use the original tokio socket directly (via try_clone on std)
-                        // We need a fresh tokio socket since the Arc'd one is shared
+                        // Drop the cloned tokio socket for the nominated one too
+                        // (tasks already dropped their clones, this is our last reference)
+                        drop(sock.udp);
+
+                        // Now create a fresh tokio socket from the std socket
+                        // This is safe because all tokio sockets for this fd are dropped
                         let nominated_tokio = UdpSocket::from_std(sock.std_socket)
                             .context("Failed to create tokio socket from nominated socket")?;
 
@@ -416,9 +455,11 @@ fn bind_socket_from_std(socket: std::net::UdpSocket) -> Result<IceSocket> {
     socket
         .set_nonblocking(true)
         .context("Failed to set ICE socket nonblocking")?;
-    let udp = UdpSocket::from_std(socket.try_clone().context("Failed to clone ICE socket")?)
-        .context("Failed to create tokio UDP socket for ICE")?;
     let local_addr = socket.local_addr().context("ICE socket local addr")?;
+    // Clone for tokio socket - the original will be used for DemuxSocket later
+    let tokio_clone = socket.try_clone().context("Failed to clone ICE socket")?;
+    let udp = UdpSocket::from_std(tokio_clone)
+        .context("Failed to create tokio UDP socket for ICE")?;
     Ok(IceSocket {
         std_socket: socket,
         udp: Arc::new(udp),
