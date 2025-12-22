@@ -951,12 +951,176 @@ pub async fn run_manual_udp_receiver(listen: String, stun_servers: Vec<String>) 
 }
 
 // ============================================================================
+// Nostr Sender Loop (shared session management for TCP/UDP)
+// ============================================================================
+
+/// Session handler function signature for nostr sender modes.
+/// Takes signaling client, request, target address, STUN servers, and timing params.
+type SessionHandler = fn(
+    Arc<NostrSignaling>,
+    ManualRequest,
+    SocketAddr,
+    Vec<String>,
+    u64,
+    u64,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>>;
+
+/// Generic nostr sender loop that handles session management for both TCP and UDP.
+///
+/// This function encapsulates the common logic for:
+/// - Waiting for incoming session requests
+/// - Checking session limits and rejecting when at capacity
+/// - Spawning session handler tasks
+/// - Tracking active sessions and cleaning up completed ones
+async fn run_nostr_sender_loop(
+    protocol_name: &str,
+    target_addr: SocketAddr,
+    signaling: Arc<NostrSignaling>,
+    stun_servers: Vec<String>,
+    republish_interval_secs: u64,
+    max_wait_secs: u64,
+    max_sessions: usize,
+    session_handler: SessionHandler,
+) -> Result<()> {
+    // Session tracking
+    let active_sessions = Arc::new(AtomicUsize::new(0));
+    let mut session_tasks: JoinSet<Result<()>> = JoinSet::new();
+
+    let limit_str = if max_sessions == 0 {
+        "unlimited".to_string()
+    } else {
+        max_sessions.to_string()
+    };
+    println!("Waiting for tunnel requests (max sessions: {})...", limit_str);
+
+    loop {
+        // Clean up completed tasks without blocking
+        while let Some(result) = session_tasks.try_join_next() {
+            if let Err(e) = result {
+                eprintln!("Session task panicked: {:?}", e);
+            }
+        }
+
+        // Wait for fresh request from receiver (no timeout for multi-session mode)
+        let request = match signaling.wait_for_fresh_request_forever(MAX_REQUEST_AGE_SECS).await {
+            Ok(req) => req,
+            Err(e) => {
+                eprintln!("Error waiting for request: {}", e);
+                // Brief delay before retrying
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                continue;
+            }
+        };
+
+        if request.version != MANUAL_SIGNAL_VERSION {
+            eprintln!(
+                "Ignoring request with version mismatch (expected {}, got {})",
+                MANUAL_SIGNAL_VERSION, request.version
+            );
+            continue;
+        }
+
+        let session_id = request.session_id.clone();
+        println!("Received {} request for session {}", protocol_name, &session_id[..8.min(session_id.len())]);
+
+        // Check session limit - if at capacity, wait briefly for dead sessions to be cleaned up
+        if max_sessions > 0 && active_sessions.load(Ordering::Relaxed) >= max_sessions {
+            println!(
+                "At capacity ({}/{}), checking for dead sessions...",
+                active_sessions.load(Ordering::Relaxed),
+                max_sessions
+            );
+
+            // Wait briefly for any dying connections to complete, then clean up
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            while let Some(result) = session_tasks.try_join_next() {
+                if let Err(e) = result {
+                    eprintln!("Session task panicked: {:?}", e);
+                }
+            }
+
+            // Recheck after cleanup
+            if active_sessions.load(Ordering::Relaxed) >= max_sessions {
+                println!(
+                    "Rejecting session {} - at capacity ({}/{})",
+                    &session_id[..8.min(session_id.len())],
+                    active_sessions.load(Ordering::Relaxed),
+                    max_sessions
+                );
+
+                // Send explicit rejection to receiver
+                let reject = ManualReject {
+                    version: MANUAL_SIGNAL_VERSION,
+                    session_id: session_id.clone(),
+                    reason: format!("Sender at capacity ({}/{})", max_sessions, max_sessions),
+                };
+                if let Err(e) = signaling.publish_reject(&reject).await {
+                    eprintln!("Failed to send rejection: {}", e);
+                } else {
+                    println!("Sent rejection for session {}", &session_id[..8.min(session_id.len())]);
+                }
+                continue;
+            }
+            println!("Slot freed up, accepting session");
+        }
+
+        // Spawn session handler
+        let current = active_sessions.fetch_add(1, Ordering::Relaxed) + 1;
+        println!("Active sessions: {}/{}", current, limit_str);
+
+        let sig = signaling.clone();
+        let active = active_sessions.clone();
+        let stun = stun_servers.clone();
+        let limit_str_clone = limit_str.clone();
+
+        session_tasks.spawn(async move {
+            let result = session_handler(
+                sig,
+                request,
+                target_addr,
+                stun,
+                republish_interval_secs,
+                max_wait_secs,
+            )
+            .await;
+
+            let remaining = active.fetch_sub(1, Ordering::Relaxed) - 1;
+            println!("Session ended. Active sessions: {}/{}", remaining, limit_str_clone);
+
+            if let Err(ref e) = result {
+                eprintln!("Session error: {}", e);
+            }
+            result
+        });
+    }
+}
+
+// ============================================================================
 // Nostr TCP Tunnel Implementation (ICE + QUIC with Nostr signaling)
 // ============================================================================
 
+/// Wrapper function for handle_nostr_tcp_session_impl that returns a boxed future.
+fn handle_nostr_tcp_session(
+    signaling: Arc<NostrSignaling>,
+    request: ManualRequest,
+    target_addr: SocketAddr,
+    stun_servers: Vec<String>,
+    republish_interval_secs: u64,
+    max_wait_secs: u64,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>> {
+    Box::pin(handle_nostr_tcp_session_impl(
+        signaling,
+        request,
+        target_addr,
+        stun_servers,
+        republish_interval_secs,
+        max_wait_secs,
+    ))
+}
+
 /// Handle a single nostr TCP session from request to connection closure.
-async fn handle_nostr_tcp_session(
-    signaling: &NostrSignaling,
+async fn handle_nostr_tcp_session_impl(
+    signaling: Arc<NostrSignaling>,
     request: ManualRequest,
     target_addr: SocketAddr,
     stun_servers: Vec<String>,
@@ -965,7 +1129,7 @@ async fn handle_nostr_tcp_session(
 ) -> Result<()> {
     let session_id = request.session_id.clone();
     let short_id = &session_id[..8.min(session_id.len())];
-    println!("[{}] Starting session...", short_id);
+    println!("[{}] Starting TCP session...", short_id);
 
     // Gather ICE candidates
     let ice = IceEndpoint::gather(&stun_servers).await?;
@@ -986,7 +1150,7 @@ async fn handle_nostr_tcp_session(
 
     // Publish offer and wait for answer
     let answer = publish_offer_and_wait_for_answer(
-        signaling,
+        &signaling,
         &offer,
         &session_id,
         republish_interval_secs,
@@ -1081,116 +1245,18 @@ pub async fn run_nostr_tcp_sender(
     // Subscribe to incoming events
     signaling.subscribe().await?;
 
-    // Session tracking
-    let active_sessions = Arc::new(AtomicUsize::new(0));
-    let mut session_tasks: JoinSet<Result<()>> = JoinSet::new();
-
-    let limit_str = if max_sessions == 0 {
-        "unlimited".to_string()
-    } else {
-        max_sessions.to_string()
-    };
-    println!("Waiting for tunnel requests (max sessions: {})...", limit_str);
-
-    loop {
-        // Clean up completed tasks without blocking
-        while let Some(result) = session_tasks.try_join_next() {
-            if let Err(e) = result {
-                eprintln!("Session task panicked: {:?}", e);
-            }
-        }
-
-        // Wait for fresh request from receiver (no timeout for multi-session mode)
-        let request = match signaling.wait_for_fresh_request_forever(MAX_REQUEST_AGE_SECS).await {
-            Ok(req) => req,
-            Err(e) => {
-                eprintln!("Error waiting for request: {}", e);
-                // Brief delay before retrying
-                tokio::time::sleep(Duration::from_secs(1)).await;
-                continue;
-            }
-        };
-
-        if request.version != MANUAL_SIGNAL_VERSION {
-            eprintln!(
-                "Ignoring request with version mismatch (expected {}, got {})",
-                MANUAL_SIGNAL_VERSION, request.version
-            );
-            continue;
-        }
-
-        let session_id = request.session_id.clone();
-        println!("Received request for session {}", &session_id[..8.min(session_id.len())]);
-
-        // Check session limit - if at capacity, wait briefly for dead sessions to be cleaned up
-        if max_sessions > 0 && active_sessions.load(Ordering::Relaxed) >= max_sessions {
-            println!(
-                "At capacity ({}/{}), checking for dead sessions...",
-                active_sessions.load(Ordering::Relaxed),
-                max_sessions
-            );
-
-            // Wait briefly for any dying connections to complete, then clean up
-            tokio::time::sleep(Duration::from_millis(100)).await;
-            while let Some(result) = session_tasks.try_join_next() {
-                if let Err(e) = result {
-                    eprintln!("Session task panicked: {:?}", e);
-                }
-            }
-
-            // Recheck after cleanup
-            if active_sessions.load(Ordering::Relaxed) >= max_sessions {
-                println!(
-                    "Rejecting session {} - at capacity ({}/{})",
-                    &session_id[..8.min(session_id.len())],
-                    active_sessions.load(Ordering::Relaxed),
-                    max_sessions
-                );
-
-                // Send explicit rejection to receiver
-                let reject = ManualReject {
-                    version: MANUAL_SIGNAL_VERSION,
-                    session_id: session_id.clone(),
-                    reason: format!("Sender at capacity ({}/{})", max_sessions, max_sessions),
-                };
-                if let Err(e) = signaling.publish_reject(&reject).await {
-                    eprintln!("Failed to send rejection: {}", e);
-                } else {
-                    println!("Sent rejection for session {}", &session_id[..8.min(session_id.len())]);
-                }
-                continue;
-            }
-            println!("Slot freed up, accepting session");
-        }
-
-        // Spawn session handler
-        let current = active_sessions.fetch_add(1, Ordering::Relaxed) + 1;
-        println!("Active sessions: {}/{}", current, limit_str);
-
-        let sig = signaling.clone();
-        let active = active_sessions.clone();
-        let stun = stun_servers.clone();
-
-        session_tasks.spawn(async move {
-            let result = handle_nostr_tcp_session(
-                &sig,
-                request,
-                target_addr,
-                stun,
-                republish_interval_secs,
-                max_wait_secs,
-            )
-            .await;
-
-            let remaining = active.fetch_sub(1, Ordering::Relaxed) - 1;
-            println!("Session ended. Active sessions: {}", remaining);
-
-            if let Err(ref e) = result {
-                eprintln!("Session error: {}", e);
-            }
-            result
-        });
-    }
+    // Run the session management loop
+    run_nostr_sender_loop(
+        "TCP",
+        target_addr,
+        signaling,
+        stun_servers,
+        republish_interval_secs,
+        max_wait_secs,
+        max_sessions,
+        handle_nostr_tcp_session,
+    )
+    .await
 }
 
 pub async fn run_nostr_tcp_receiver(
@@ -1346,9 +1412,28 @@ pub async fn run_nostr_tcp_receiver(
 // Nostr UDP Tunnel Implementation (ICE + QUIC with Nostr signaling)
 // ============================================================================
 
+/// Wrapper function for handle_nostr_udp_session_impl that returns a boxed future.
+fn handle_nostr_udp_session(
+    signaling: Arc<NostrSignaling>,
+    request: ManualRequest,
+    target_addr: SocketAddr,
+    stun_servers: Vec<String>,
+    republish_interval_secs: u64,
+    max_wait_secs: u64,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>> {
+    Box::pin(handle_nostr_udp_session_impl(
+        signaling,
+        request,
+        target_addr,
+        stun_servers,
+        republish_interval_secs,
+        max_wait_secs,
+    ))
+}
+
 /// Handle a single nostr UDP session from request to connection closure.
-async fn handle_nostr_udp_session(
-    signaling: &NostrSignaling,
+async fn handle_nostr_udp_session_impl(
+    signaling: Arc<NostrSignaling>,
     request: ManualRequest,
     target_addr: SocketAddr,
     stun_servers: Vec<String>,
@@ -1378,7 +1463,7 @@ async fn handle_nostr_udp_session(
 
     // Publish offer and wait for answer
     let answer = publish_offer_and_wait_for_answer(
-        signaling,
+        &signaling,
         &offer,
         &session_id,
         republish_interval_secs,
@@ -1479,116 +1564,18 @@ pub async fn run_nostr_udp_sender(
     // Subscribe to incoming events
     signaling.subscribe().await?;
 
-    // Session tracking
-    let active_sessions = Arc::new(AtomicUsize::new(0));
-    let mut session_tasks: JoinSet<Result<()>> = JoinSet::new();
-
-    let limit_str = if max_sessions == 0 {
-        "unlimited".to_string()
-    } else {
-        max_sessions.to_string()
-    };
-    println!("Waiting for tunnel requests (max sessions: {})...", limit_str);
-
-    loop {
-        // Clean up completed tasks without blocking
-        while let Some(result) = session_tasks.try_join_next() {
-            if let Err(e) = result {
-                eprintln!("Session task panicked: {:?}", e);
-            }
-        }
-
-        // Wait for fresh request from receiver (no timeout for multi-session mode)
-        let request = match signaling.wait_for_fresh_request_forever(MAX_REQUEST_AGE_SECS).await {
-            Ok(req) => req,
-            Err(e) => {
-                eprintln!("Error waiting for request: {}", e);
-                // Brief delay before retrying
-                tokio::time::sleep(Duration::from_secs(1)).await;
-                continue;
-            }
-        };
-
-        if request.version != MANUAL_SIGNAL_VERSION {
-            eprintln!(
-                "Ignoring request with version mismatch (expected {}, got {})",
-                MANUAL_SIGNAL_VERSION, request.version
-            );
-            continue;
-        }
-
-        let session_id = request.session_id.clone();
-        println!("Received request for session {}", &session_id[..8.min(session_id.len())]);
-
-        // Check session limit - if at capacity, wait briefly for dead sessions to be cleaned up
-        if max_sessions > 0 && active_sessions.load(Ordering::Relaxed) >= max_sessions {
-            println!(
-                "At capacity ({}/{}), checking for dead sessions...",
-                active_sessions.load(Ordering::Relaxed),
-                max_sessions
-            );
-
-            // Wait briefly for any dying connections to complete, then clean up
-            tokio::time::sleep(Duration::from_millis(100)).await;
-            while let Some(result) = session_tasks.try_join_next() {
-                if let Err(e) = result {
-                    eprintln!("Session task panicked: {:?}", e);
-                }
-            }
-
-            // Recheck after cleanup
-            if active_sessions.load(Ordering::Relaxed) >= max_sessions {
-                println!(
-                    "Rejecting session {} - at capacity ({}/{})",
-                    &session_id[..8.min(session_id.len())],
-                    active_sessions.load(Ordering::Relaxed),
-                    max_sessions
-                );
-
-                // Send explicit rejection to receiver
-                let reject = ManualReject {
-                    version: MANUAL_SIGNAL_VERSION,
-                    session_id: session_id.clone(),
-                    reason: format!("Sender at capacity ({}/{})", max_sessions, max_sessions),
-                };
-                if let Err(e) = signaling.publish_reject(&reject).await {
-                    eprintln!("Failed to send rejection: {}", e);
-                } else {
-                    println!("Sent rejection for session {}", &session_id[..8.min(session_id.len())]);
-                }
-                continue;
-            }
-            println!("Slot freed up, accepting session");
-        }
-
-        // Spawn session handler
-        let current = active_sessions.fetch_add(1, Ordering::Relaxed) + 1;
-        println!("Active sessions: {}/{}", current, limit_str);
-
-        let sig = signaling.clone();
-        let active = active_sessions.clone();
-        let stun = stun_servers.clone();
-
-        session_tasks.spawn(async move {
-            let result = handle_nostr_udp_session(
-                &sig,
-                request,
-                target_addr,
-                stun,
-                republish_interval_secs,
-                max_wait_secs,
-            )
-            .await;
-
-            let remaining = active.fetch_sub(1, Ordering::Relaxed) - 1;
-            println!("Session ended. Active sessions: {}", remaining);
-
-            if let Err(ref e) = result {
-                eprintln!("Session error: {}", e);
-            }
-            result
-        });
-    }
+    // Run the session management loop
+    run_nostr_sender_loop(
+        "UDP",
+        target_addr,
+        signaling,
+        stun_servers,
+        republish_interval_secs,
+        max_wait_secs,
+        max_sessions,
+        handle_nostr_udp_session,
+    )
+    .await
 }
 
 pub async fn run_nostr_udp_receiver(
