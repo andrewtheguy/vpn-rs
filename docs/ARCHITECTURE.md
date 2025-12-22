@@ -503,7 +503,7 @@ graph TB
         G[Base64 Encode]
         H[Add CRC32 Checksum]
         I[Wrap in Markers]
-        J[Line Wrap at 64 chars]
+        J[Line Wrap at 76 chars]
     end
     
     A --> F
@@ -808,7 +808,7 @@ graph TB
     end
     
     subgraph "UDP Tunneling"
-        F[UDP Packet] --> G[Open QUIC Stream]
+        F[UDP Packet] --> G[Single Bidirectional Stream]
         G --> H[Encode: Length + Data]
         H --> I[Send over Stream]
         I --> J[Decode Packet]
@@ -1134,7 +1134,7 @@ graph TB
     end
     
     subgraph "QUIC Tunnel"
-        E[Open Uni-Stream per packet]
+        E[Single Bidirectional Stream]
         F[Send Stream]
         G[Recv Stream]
     end

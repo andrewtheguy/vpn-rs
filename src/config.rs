@@ -16,11 +16,13 @@ use std::path::{Path, PathBuf};
 /// iroh-default mode configuration.
 #[derive(Deserialize, Default, Clone)]
 pub struct IrohDefaultConfig {
+    /// Path to secret key file for persistent identity (sender only)
     pub secret_file: Option<PathBuf>,
     pub relay_urls: Option<Vec<String>>,
     pub relay_only: Option<bool>,
     pub dns_server: Option<String>,
-    pub node_id: Option<String>, // receiver only
+    /// NodeId of the sender to connect to (receiver only)
+    pub node_id: Option<String>,
 }
 
 /// iroh-manual mode configuration.
