@@ -139,7 +139,9 @@ def stream_session(duration: float, stats: Stats):
         recv_buf = b""
         pending_payloads = {}
 
-        while time.time() < end_time:
+        # Send phase
+        send_end_time = end_time - 1.0  # Stop sending 1s early for drain
+        while time.time() < send_end_time:
             try:
                 rand_data = ''.join(random.choices(string.ascii_letters + string.digits, k=40))
                 payload = f"SEQ{msg_num:06d}DATA{rand_data}"
@@ -180,6 +182,33 @@ def stream_session(duration: float, stats: Stats):
             except Exception:
                 stats.errors += 1
 
+            time.sleep(0.01)
+
+        # Drain phase - receive remaining data
+        while time.time() < end_time:
+            try:
+                data = sock.recv(8192)
+                if data:
+                    stats.recv_bytes += len(data)
+                    stats.update_recv(data)
+                    recv_buf += data
+                    while b'\n' in recv_buf:
+                        line, recv_buf = recv_buf.split(b'\n', 1)
+                        stats.recv_msgs += 1
+                        line_str = line.decode('utf-8', errors='replace')
+                        found = False
+                        for seq, payload in list(pending_payloads.items()):
+                            if payload in line_str:
+                                stats.verified += 1
+                                del pending_payloads[seq]
+                                found = True
+                                break
+                        if not found and 'SEQ' in line_str:
+                            stats.corrupted += 1
+            except BlockingIOError:
+                pass
+            except Exception:
+                stats.errors += 1
             time.sleep(0.01)
 
         sock.close()
@@ -307,9 +336,20 @@ def run_stream_once():
     total_corrupted = 0
     total_errors = 0
 
+    failures = 0
     for s in stats_list:
-        status = "OK" if s.connected and s.errors == 0 and s.corrupted == 0 else "FAIL"
-        print(f"  [{status}] {s.label}: {format_bytes(s.sent_bytes)}↑ {format_bytes(s.recv_bytes)}↓ msgs={s.sent_msgs}/{s.recv_msgs} verified={s.verified} err={s.errors}")
+        checksum_match = s.sent_checksum and s.recv_checksum and s.sent_checksum == s.recv_checksum
+        is_ok = s.connected and s.errors == 0 and s.corrupted == 0 and checksum_match
+        status = "OK" if is_ok else "FAIL"
+        if not is_ok:
+            failures += 1
+        if not s.sent_checksum or not s.recv_checksum:
+            checksum_str = "✗ no data"
+        elif checksum_match:
+            checksum_str = f"✓{s.sent_checksum}"
+        else:
+            checksum_str = f"✗ sent={s.sent_checksum} recv={s.recv_checksum}"
+        print(f"  [{status}] {s.label}: {format_bytes(s.sent_bytes)}↑ {format_bytes(s.recv_bytes)}↓ verified={s.verified} {checksum_str}")
         total_sent_bytes += s.sent_bytes
         total_recv_bytes += s.recv_bytes
         total_verified += s.verified
@@ -320,8 +360,8 @@ def run_stream_once():
     print(f"Total: {format_bytes(total_sent_bytes)} sent, {format_bytes(total_recv_bytes)} recv, {total_verified} verified")
     print(f"Throughput: {format_bytes(int(total_sent_bytes/STREAM_DURATION))}/s")
 
-    if total_corrupted > 0 or total_errors > 0:
-        print("*** ERRORS DETECTED ***")
+    if failures > 0:
+        print(f"*** {failures} FAILED ***")
         return False
     else:
         print("*** ALL OK ***")
