@@ -141,7 +141,7 @@ Use `--default-config` to load from the default location, or `-c <path>` for a c
 - Sender: `~/.config/tunnel-rs/sender.toml`
 - Receiver: `~/.config/tunnel-rs/receiver.toml`
 
-### Sender Config
+### Sender Config Example
 
 ```toml
 # ~/.config/tunnel-rs/sender.toml
@@ -169,7 +169,10 @@ tunnel-rs sender --default-config
 tunnel-rs sender -c ./my-sender.toml
 ```
 
-### Receiver Config
+> [!NOTE]
+> See [`sender.toml.example`](sender.toml.example) for comprehensive configuration examples showing all available options for each mode.
+
+### Receiver Config Example
 
 ```toml
 # ~/.config/tunnel-rs/receiver.toml
@@ -196,6 +199,9 @@ tunnel-rs receiver --default-config
 # Load from custom path
 tunnel-rs receiver -c ./my-receiver.toml
 ```
+
+> [!NOTE]
+> See [`receiver.toml.example`](receiver.toml.example) for comprehensive configuration examples showing all available options for each mode.
 
 ## Persistent Identity
 
