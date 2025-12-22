@@ -151,7 +151,7 @@ async fn publish_request_and_wait_for_offer(
         }
 
         // Check for rejection
-        if let Some(reject) = signaling.try_check_for_rejection().await {
+        if let Some(reject) = signaling.try_check_for_rejection() {
             if reject.session_id == *session_id {
                 anyhow::bail!("Session rejected by sender: {}", reject.reason);
             }

@@ -287,11 +287,25 @@ impl NostrSignaling {
             .await
     }
 
-    /// Check for a rejection from the peer (non-blocking, very short timeout).
-    pub async fn try_check_for_rejection(&self) -> Option<ManualReject> {
-        // Very short timeout - just check if there's a rejection already pending
-        self.wait_for_message_optional(SIGNALING_TYPE_REJECT, 0)
-            .await
+    /// Check for a rejection from the peer (non-blocking).
+    pub fn try_check_for_rejection(&self) -> Option<ManualReject> {
+        let mut notifications = self.client.notifications();
+        loop {
+            match notifications.try_recv() {
+                Ok(RelayPoolNotification::Event { event, .. }) => {
+                    if let Some(reject) =
+                        self.try_parse_event::<ManualReject>(&event, SIGNALING_TYPE_REJECT)
+                    {
+                        println!("Received {} from peer", SIGNALING_TYPE_REJECT);
+                        return Some(reject);
+                    }
+                }
+                Ok(_) => continue,
+                Err(TryRecvError::Empty) => return None,
+                Err(TryRecvError::Closed) => return None,
+                Err(TryRecvError::Lagged(_)) => continue, // Keep draining
+            }
+        }
     }
 
     /// Wait for a specific message type with timeout, returns None on timeout or channel closed.
