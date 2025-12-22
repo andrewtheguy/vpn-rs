@@ -818,6 +818,9 @@ pub async fn run_nostr_tcp_sender(
     peer_npub: String,
     relays: Vec<String>,
 ) -> Result<()> {
+    // Ensure crypto provider is installed before nostr-sdk uses rustls
+    quic::ensure_crypto_provider();
+
     let target_addr = resolve_target_addr(&target)
         .await
         .with_context(|| format!("Invalid target address or hostname '{}'", target))?;
@@ -924,6 +927,9 @@ pub async fn run_nostr_tcp_receiver(
     peer_npub: String,
     relays: Vec<String>,
 ) -> Result<()> {
+    // Ensure crypto provider is installed before nostr-sdk uses rustls
+    quic::ensure_crypto_provider();
+
     let listen_addr: SocketAddr = listen
         .parse()
         .context("Invalid listen address format. Use format like 127.0.0.1:2222 or [::]:2222")?;
@@ -1045,6 +1051,9 @@ pub async fn run_nostr_udp_sender(
     peer_npub: String,
     relays: Vec<String>,
 ) -> Result<()> {
+    // Ensure crypto provider is installed before nostr-sdk uses rustls
+    quic::ensure_crypto_provider();
+
     let target_addr = resolve_target_addr(&target)
         .await
         .with_context(|| format!("Invalid target address or hostname '{}'", target))?;
@@ -1157,6 +1166,9 @@ pub async fn run_nostr_udp_receiver(
     peer_npub: String,
     relays: Vec<String>,
 ) -> Result<()> {
+    // Ensure crypto provider is installed before nostr-sdk uses rustls
+    quic::ensure_crypto_provider();
+
     let listen_addr: SocketAddr = listen
         .parse()
         .context("Invalid listen address format. Use format like 127.0.0.1:51820 or [::]:51820")?;
