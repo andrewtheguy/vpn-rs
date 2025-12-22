@@ -309,7 +309,9 @@ ICE connection established!
 
 ---
 
-# Utility Commands
+# Utility Commands (Iroh Mode)
+
+These commands are for managing persistent identity in iroh mode. ICE mode uses ephemeral credentials and doesn't require key management.
 
 ## generate-secret
 
