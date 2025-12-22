@@ -78,19 +78,19 @@ pub struct ReceiverConfig {
 // ============================================================================
 
 impl SenderConfig {
-    /// Get iroh-default config, with defaults.
-    pub fn iroh_default(&self) -> IrohDefaultConfig {
-        self.iroh_default.clone().unwrap_or_default()
+    /// Get iroh-default config section.
+    pub fn iroh_default(&self) -> Option<&IrohDefaultConfig> {
+        self.iroh_default.as_ref()
     }
 
-    /// Get iroh-manual config, with defaults.
-    pub fn iroh_manual(&self) -> IrohManualConfig {
-        self.iroh_manual.clone().unwrap_or_default()
+    /// Get iroh-manual config section.
+    pub fn iroh_manual(&self) -> Option<&IrohManualConfig> {
+        self.iroh_manual.as_ref()
     }
 
-    /// Get custom config, with defaults.
-    pub fn custom(&self) -> CustomConfig {
-        self.custom.clone().unwrap_or_default()
+    /// Get custom config section.
+    pub fn custom(&self) -> Option<&CustomConfig> {
+        self.custom.as_ref()
     }
 
     /// Validate that config matches expected role and mode, and has no unexpected sections.
@@ -142,7 +142,7 @@ impl SenderConfig {
                     anyhow::bail!("Config has [iroh-manual] section but mode = \"custom\"");
                 }
             }
-            _ => {}
+            _ => anyhow::bail!("Unknown mode '{}'. Valid modes: iroh-default, iroh-manual, custom", expected_mode),
         }
 
         Ok(())
@@ -150,19 +150,19 @@ impl SenderConfig {
 }
 
 impl ReceiverConfig {
-    /// Get iroh-default config, with defaults.
-    pub fn iroh_default(&self) -> IrohDefaultConfig {
-        self.iroh_default.clone().unwrap_or_default()
+    /// Get iroh-default config section.
+    pub fn iroh_default(&self) -> Option<&IrohDefaultConfig> {
+        self.iroh_default.as_ref()
     }
 
-    /// Get iroh-manual config, with defaults.
-    pub fn iroh_manual(&self) -> IrohManualConfig {
-        self.iroh_manual.clone().unwrap_or_default()
+    /// Get iroh-manual config section.
+    pub fn iroh_manual(&self) -> Option<&IrohManualConfig> {
+        self.iroh_manual.as_ref()
     }
 
-    /// Get custom config, with defaults.
-    pub fn custom(&self) -> CustomConfig {
-        self.custom.clone().unwrap_or_default()
+    /// Get custom config section.
+    pub fn custom(&self) -> Option<&CustomConfig> {
+        self.custom.as_ref()
     }
 
     /// Validate that config matches expected role and mode, and has no unexpected sections.
@@ -214,7 +214,7 @@ impl ReceiverConfig {
                     anyhow::bail!("Config has [iroh-manual] section but mode = \"custom\"");
                 }
             }
-            _ => {}
+            _ => anyhow::bail!("Unknown mode '{}'. Valid modes: iroh-default, iroh-manual, custom", expected_mode),
         }
 
         Ok(())
@@ -251,7 +251,7 @@ pub fn load_sender_config(path: Option<&Path>) -> Result<SenderConfig> {
     let config_path = match path {
         Some(p) => p.to_path_buf(),
         None => default_sender_config_path()
-            .ok_or_else(|| anyhow::anyhow!("Could not determine config directory"))?,
+            .ok_or_else(|| anyhow::anyhow!("Could not find default config path. Use -c to specify a config file."))?,
     };
     load_config(&config_path)
 }
@@ -264,7 +264,7 @@ pub fn load_receiver_config(path: Option<&Path>) -> Result<ReceiverConfig> {
     let config_path = match path {
         Some(p) => p.to_path_buf(),
         None => default_receiver_config_path()
-            .ok_or_else(|| anyhow::anyhow!("Could not determine config directory"))?,
+            .ok_or_else(|| anyhow::anyhow!("Could not find default config path. Use -c to specify a config file."))?,
     };
     load_config(&config_path)
 }

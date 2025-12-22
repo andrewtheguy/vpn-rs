@@ -296,23 +296,25 @@ async fn main() -> Result<()> {
 
             match effective_mode {
                 "iroh-default" => {
+                    let iroh_cfg = cfg.iroh_default();
                     // Override with CLI values if provided
                     let (protocol, target, secret_file, relay_urls, relay_only, dns_server) = match &mode {
-                        Some(SenderMode::IrohDefault { protocol: p, target: t, secret_file: s, relay_urls: r, relay_only: ro, dns_server: d }) => {
-                            let iroh_cfg = cfg.iroh_default();
-                            (
-                                p.unwrap_or(protocol),
-                                t.clone().unwrap_or(target),
-                                s.clone().or(iroh_cfg.secret_file),
-                                if r.is_empty() { iroh_cfg.relay_urls.unwrap_or_default() } else { r.clone() },
-                                *ro || iroh_cfg.relay_only.unwrap_or(false),
-                                d.clone().or(iroh_cfg.dns_server),
-                            )
-                        }
-                        _ => {
-                            let iroh_cfg = cfg.iroh_default();
-                            (protocol, target, iroh_cfg.secret_file, iroh_cfg.relay_urls.unwrap_or_default(), iroh_cfg.relay_only.unwrap_or(false), iroh_cfg.dns_server)
-                        }
+                        Some(SenderMode::IrohDefault { protocol: p, target: t, secret_file: s, relay_urls: r, relay_only: ro, dns_server: d }) => (
+                            p.unwrap_or(protocol),
+                            t.clone().unwrap_or(target),
+                            s.clone().or_else(|| iroh_cfg.and_then(|c| c.secret_file.clone())),
+                            if r.is_empty() { iroh_cfg.and_then(|c| c.relay_urls.clone()).unwrap_or_default() } else { r.clone() },
+                            *ro || iroh_cfg.and_then(|c| c.relay_only).unwrap_or(false),
+                            d.clone().or_else(|| iroh_cfg.and_then(|c| c.dns_server.clone())),
+                        ),
+                        _ => (
+                            protocol,
+                            target,
+                            iroh_cfg.and_then(|c| c.secret_file.clone()),
+                            iroh_cfg.and_then(|c| c.relay_urls.clone()).unwrap_or_default(),
+                            iroh_cfg.and_then(|c| c.relay_only).unwrap_or(false),
+                            iroh_cfg.and_then(|c| c.dns_server.clone()),
+                        ),
                     };
 
                     match protocol {
@@ -321,13 +323,14 @@ async fn main() -> Result<()> {
                     }
                 }
                 "iroh-manual" => {
+                    let manual_cfg = cfg.iroh_manual();
                     let (protocol, target, stun_servers) = match &mode {
                         Some(SenderMode::IrohManual { protocol: p, target: t, stun_servers: s }) => (
                             p.unwrap_or(protocol),
                             t.clone().unwrap_or(target),
-                            if s.is_empty() { cfg.iroh_manual().stun_servers.unwrap_or_else(default_stun_servers) } else { s.clone() },
+                            if s.is_empty() { manual_cfg.and_then(|c| c.stun_servers.clone()).unwrap_or_else(default_stun_servers) } else { s.clone() },
                         ),
-                        _ => (protocol, target, cfg.iroh_manual().stun_servers.unwrap_or_else(default_stun_servers)),
+                        _ => (protocol, target, manual_cfg.and_then(|c| c.stun_servers.clone()).unwrap_or_else(default_stun_servers)),
                     };
 
                     match protocol {
@@ -336,13 +339,14 @@ async fn main() -> Result<()> {
                     }
                 }
                 "custom" => {
+                    let custom_cfg = cfg.custom();
                     let (protocol, target, stun_servers) = match &mode {
                         Some(SenderMode::Custom { protocol: p, target: t, stun_servers: s }) => (
                             p.unwrap_or(protocol),
                             t.clone().unwrap_or(target),
-                            if s.is_empty() { cfg.custom().stun_servers.unwrap_or_else(default_stun_servers) } else { s.clone() },
+                            if s.is_empty() { custom_cfg.and_then(|c| c.stun_servers.clone()).unwrap_or_else(default_stun_servers) } else { s.clone() },
                         ),
-                        _ => (protocol, target, cfg.custom().stun_servers.unwrap_or_else(default_stun_servers)),
+                        _ => (protocol, target, custom_cfg.and_then(|c| c.stun_servers.clone()).unwrap_or_else(default_stun_servers)),
                     };
 
                     match protocol {
@@ -386,23 +390,25 @@ async fn main() -> Result<()> {
 
             match effective_mode {
                 "iroh-default" => {
+                    let iroh_cfg = cfg.iroh_default();
                     // Override with CLI values if provided
                     let (protocol, node_id, listen, relay_urls, relay_only, dns_server) = match &mode {
-                        Some(ReceiverMode::IrohDefault { protocol: p, node_id: n, listen: l, relay_urls: r, relay_only: ro, dns_server: d }) => {
-                            let iroh_cfg = cfg.iroh_default();
-                            (
-                                p.unwrap_or(protocol),
-                                n.clone().or(iroh_cfg.node_id),
-                                l.clone().or(listen),
-                                if r.is_empty() { iroh_cfg.relay_urls.unwrap_or_default() } else { r.clone() },
-                                *ro || iroh_cfg.relay_only.unwrap_or(false),
-                                d.clone().or(iroh_cfg.dns_server),
-                            )
-                        }
-                        _ => {
-                            let iroh_cfg = cfg.iroh_default();
-                            (protocol, iroh_cfg.node_id.clone(), listen, iroh_cfg.relay_urls.unwrap_or_default(), iroh_cfg.relay_only.unwrap_or(false), iroh_cfg.dns_server.clone())
-                        }
+                        Some(ReceiverMode::IrohDefault { protocol: p, node_id: n, listen: l, relay_urls: r, relay_only: ro, dns_server: d }) => (
+                            p.unwrap_or(protocol),
+                            n.clone().or_else(|| iroh_cfg.and_then(|c| c.node_id.clone())),
+                            l.clone().or(listen),
+                            if r.is_empty() { iroh_cfg.and_then(|c| c.relay_urls.clone()).unwrap_or_default() } else { r.clone() },
+                            *ro || iroh_cfg.and_then(|c| c.relay_only).unwrap_or(false),
+                            d.clone().or_else(|| iroh_cfg.and_then(|c| c.dns_server.clone())),
+                        ),
+                        _ => (
+                            protocol,
+                            iroh_cfg.and_then(|c| c.node_id.clone()),
+                            listen,
+                            iroh_cfg.and_then(|c| c.relay_urls.clone()).unwrap_or_default(),
+                            iroh_cfg.and_then(|c| c.relay_only).unwrap_or(false),
+                            iroh_cfg.and_then(|c| c.dns_server.clone()),
+                        ),
                     };
 
                     let node_id = node_id.context(
@@ -418,13 +424,14 @@ async fn main() -> Result<()> {
                     }
                 }
                 "iroh-manual" => {
+                    let manual_cfg = cfg.iroh_manual();
                     let (protocol, listen, stun_servers) = match &mode {
                         Some(ReceiverMode::IrohManual { protocol: p, listen: l, stun_servers: s }) => (
                             p.unwrap_or(protocol),
                             l.clone().or(listen),
-                            if s.is_empty() { cfg.iroh_manual().stun_servers.unwrap_or_else(default_stun_servers) } else { s.clone() },
+                            if s.is_empty() { manual_cfg.and_then(|c| c.stun_servers.clone()).unwrap_or_else(default_stun_servers) } else { s.clone() },
                         ),
-                        _ => (protocol, listen, cfg.iroh_manual().stun_servers.unwrap_or_else(default_stun_servers)),
+                        _ => (protocol, listen, manual_cfg.and_then(|c| c.stun_servers.clone()).unwrap_or_else(default_stun_servers)),
                     };
 
                     let listen: String = listen.context(
@@ -437,13 +444,14 @@ async fn main() -> Result<()> {
                     }
                 }
                 "custom" => {
+                    let custom_cfg = cfg.custom();
                     let (protocol, listen, stun_servers) = match &mode {
                         Some(ReceiverMode::Custom { protocol: p, listen: l, stun_servers: s }) => (
                             p.unwrap_or(protocol),
                             l.clone().or(listen),
-                            if s.is_empty() { cfg.custom().stun_servers.unwrap_or_else(default_stun_servers) } else { s.clone() },
+                            if s.is_empty() { custom_cfg.and_then(|c| c.stun_servers.clone()).unwrap_or_else(default_stun_servers) } else { s.clone() },
                         ),
-                        _ => (protocol, listen, cfg.custom().stun_servers.unwrap_or_else(default_stun_servers)),
+                        _ => (protocol, listen, custom_cfg.and_then(|c| c.stun_servers.clone()).unwrap_or_else(default_stun_servers)),
                     };
 
                     let listen: String = listen.context(
