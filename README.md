@@ -9,7 +9,7 @@ tunnel-rs enables you to forward TCP and UDP traffic between machines without re
 - **End-to-end encryption** via QUIC/TLS 1.3
 - **NAT traversal** with multiple strategies (relay fallback, STUN, full ICE)
 - **Minimal configuration** for automatic peer discovery (iroh-default mode; EndpointId required)
-- **Serverless options** with manual signaling (iroh-manual, custom modes)
+- **Serverless options** with manual signaling (iroh-manual, custom) or Nostr relay signaling (nostr mode)
 - **Protocol support** for both TCP and UDP tunneling
 - **High performance** with QUIC multiplexing
 
@@ -106,7 +106,7 @@ tunnel-rs is fully supported on:
 - **macOS** (Intel, Apple Silicon)
 - **Windows** (x86_64)
 
-All three modes (iroh-default, iroh-manual, custom) work across all platforms, enabling cross-platform P2P tunneling.
+All four modes (iroh-default, iroh-manual, custom, nostr) work across all platforms, enabling cross-platform P2P tunneling.
 
 ---
 
@@ -212,7 +212,7 @@ tunnel-rs receiver iroh-default --node-id <ENDPOINT_ID> --target udp://0.0.0.0:5
 
 ## Configuration Files
 
-Use `--default-config` to load from the default location, or `-c <path>` for a custom path. Each mode has its own section (`[iroh-default]`, `[iroh-manual]`, `[custom]`).
+Use `--default-config` to load from the default location, or `-c <path>` for a custom path. Each mode has its own section (`[iroh-default]`, `[iroh-manual]`, `[custom]`, `[nostr]`).
 
 **Default locations:**
 - Sender: `~/.config/tunnel-rs/sender.toml`
@@ -505,11 +505,165 @@ ICE connection established!
 
 ---
 
+# Nostr Mode
+
+Uses full ICE with Nostr-based signaling. Instead of manual copy-paste, ICE offers/answers are exchanged automatically via Nostr relays using static keypairs (like WireGuard).
+
+**Key Features:**
+- **Static keys** — Persistent identity using nsec/npub keypairs (like WireGuard)
+- **Automated signaling** — No copy-paste required; offers/answers exchanged via Nostr relays
+- **Full ICE** — Same NAT traversal as custom mode (str0m + quinn)
+- **Deterministic pairing** — Transfer ID derived from both pubkeys; no coordination needed
+
+## Architecture
+
+```
++-----------------+        +-----------------+        +---------------+        +-----------------+        +-----------------+
+| SSH Client      |  TCP   | receiver        |  ICE   |   Nostr       |  ICE   | sender          |  TCP   | SSH Server      |
+|                 |<------>| (local:2222)    |<======>|   Relays      |<======>|                 |<------>| (local:22)      |
+|                 |        |                 |  QUIC  | (signaling)   |  QUIC  |                 |        |                 |
++-----------------+        +-----------------+        +---------------+        +-----------------+        +-----------------+
+     Client Side                                                                     Server Side
+```
+
+## Quick Start
+
+### 1. Generate Keypairs (One-Time Setup)
+
+Each peer needs their own keypair:
+
+```bash
+# On sender machine
+tunnel-rs generate-nostr-key
+# Output: nsec1sender... / npub1sender...
+
+# On receiver machine
+tunnel-rs generate-nostr-key
+# Output: nsec1receiver... / npub1receiver...
+```
+
+Exchange public keys (npub) between peers.
+
+### 2. Start Tunnel
+
+**Sender** (on server with SSH):
+```bash
+tunnel-rs sender nostr \
+  --source tcp://127.0.0.1:22 \
+  --nsec nsec1sender... \
+  --peer-npub npub1receiver...
+```
+
+**Receiver** (on client):
+```bash
+tunnel-rs receiver nostr \
+  --target 127.0.0.1:2222 \
+  --nsec nsec1receiver... \
+  --peer-npub npub1sender...
+```
+
+### 3. Connect
+
+```bash
+ssh -p 2222 user@127.0.0.1
+```
+
+## UDP Tunnel (e.g., WireGuard)
+
+```bash
+# Sender
+tunnel-rs sender nostr \
+  --source udp://127.0.0.1:51820 \
+  --nsec nsec1sender... \
+  --peer-npub npub1receiver...
+
+# Receiver
+tunnel-rs receiver nostr \
+  --target udp://0.0.0.0:51820 \
+  --nsec nsec1receiver... \
+  --peer-npub npub1sender...
+```
+
+## CLI Options
+
+### sender nostr
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--source`, `-s` | required | Source address to forward traffic to |
+| `--nsec` | required | Your Nostr private key (nsec or hex format) |
+| `--peer-npub` | required | Peer's Nostr public key (npub or hex format) |
+| `--relay` | public relays | Nostr relay URL(s), repeatable |
+| `--stun-server` | public | STUN server(s), repeatable |
+| `--no-stun` | false | Disable STUN |
+
+### receiver nostr
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--target`, `-t` | required | Local address to listen on |
+| `--nsec` | required | Your Nostr private key (nsec or hex format) |
+| `--peer-npub` | required | Peer's Nostr public key (npub or hex format) |
+| `--relay` | public relays | Nostr relay URL(s), repeatable |
+| `--stun-server` | public | STUN server(s), repeatable |
+| `--no-stun` | false | Disable STUN |
+
+## Configuration File
+
+```toml
+role = "sender"
+mode = "nostr"
+source = "tcp://127.0.0.1:22"
+
+[nostr]
+nsec = "nsec1..."
+peer_npub = "npub1..."
+relays = ["wss://relay.damus.io", "wss://nos.lol"]
+stun_servers = ["stun.l.google.com:19302"]
+```
+
+## Default Nostr Relays
+
+When no relays are specified, these public relays are used:
+- `wss://relay.damus.io`
+- `wss://nos.lol`
+- `wss://nostr.wine`
+
+## Notes
+
+- Keys are static like WireGuard — generate once, use repeatedly
+- Transfer ID is derived from SHA256 of sorted pubkeys — both peers compute the same ID
+- Signaling uses Nostr event kind 24242 with tags for transfer ID and peer pubkey
+- Full ICE provides best NAT traversal (same as custom mode)
+
+---
+
 # Utility Commands
 
-These commands manage persistent identity (secret files, EndpointId) and apply only to **iroh-default mode**. Other modes do not use persistent identity.
+## generate-nostr-key
+
+Generate a Nostr keypair for use with nostr mode:
+
+```bash
+tunnel-rs generate-nostr-key
+```
+
+Output:
+```
+Nostr Keypair Generated
+========================
+Private key (nsec): nsec1...
+Public key (npub):  npub1...
+
+Add to config file:
+[nostr]
+nsec = "nsec1..."
+peer_npub = "<peer's npub>"
+```
 
 ## generate-secret
+
+*For iroh-default mode only.*
 
 Generate a new secret key for persistent identity:
 
@@ -572,3 +726,13 @@ All protocol modes and features are available on all platforms.
 5. QUIC connection established over ICE socket
 
 *Advantage: Full ICE provides reliable NAT traversal even for symmetric NATs.*
+
+### Nostr Mode
+1. Both peers derive deterministic transfer ID from their sorted public keys
+2. Sender gathers ICE candidates and publishes offer to Nostr relays
+3. Receiver subscribes to relays, receives offer, gathers candidates
+4. Receiver publishes answer to Nostr relays
+5. Sender receives answer, ICE connectivity checks begin
+6. Best working path selected, QUIC connection established
+
+*Advantage: Automated signaling with static keys (like WireGuard) + full ICE NAT traversal.*
