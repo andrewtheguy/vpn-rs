@@ -8,6 +8,16 @@
 # Protocol to tunnel: "tcp" or "udp"
 protocol = "tcp"
 
+# Manual mode (bypass discovery/relays)
+manual = false
+
+# STUN servers for manual mode (optional)
+stun_servers = [
+    "stun.l.google.com:19302",
+    "stun1.l.google.com:19302",
+    "stun.services.mozilla.com:3478",
+]
+
 # NodeId of the sender to connect to (required)
 node_id = "2xnbkpbc7izsilvewd7c62w7wnwziacmpfwvhcrya5nt76dqkpga"
 
@@ -24,6 +34,9 @@ relay_urls = [
 # Force all connections through relay (disables direct P2P)
 # Requires relay_urls to be specified
 relay_only = false
+
+# Optional manual secret key (reserved for future use)
+# manual_secret_key = ""
 
 # Custom DNS server URL for peer discovery (optional)
 # Used with self-hosted iroh-dns-server for fully independent operation

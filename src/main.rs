@@ -10,12 +10,13 @@
 
 mod config;
 mod endpoint;
+mod manual;
 mod secret;
 mod tunnel;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
-use config::{load_config, ReceiverConfig, SenderConfig};
+use config::{default_stun_servers, load_config_or_default, ReceiverConfig, SenderConfig};
 use std::path::PathBuf;
 
 #[derive(Clone, Copy, ValueEnum, Default, Debug, PartialEq)]
@@ -85,6 +86,14 @@ enum Mode {
         /// Used with self-hosted iroh-dns-server for fully independent operation
         #[arg(long)]
         dns_server: Option<String>,
+
+        /// Enable manual signaling mode (bypass iroh discovery/relays)
+        #[arg(long)]
+        manual: bool,
+
+        /// STUN server for manual mode (repeatable, e.g., stun.l.google.com:19302)
+        #[arg(long = "stun-server")]
+        stun_servers: Vec<String>,
     },
     /// Run as receiver (connects to sender and exposes local port)
     Receiver {
@@ -118,6 +127,14 @@ enum Mode {
         /// Used with self-hosted iroh-dns-server for fully independent operation
         #[arg(long)]
         dns_server: Option<String>,
+
+        /// Enable manual signaling mode (bypass iroh discovery/relays)
+        #[arg(long)]
+        manual: bool,
+
+        /// STUN server for manual mode (repeatable, e.g., stun.l.google.com:19302)
+        #[arg(long = "stun-server")]
+        stun_servers: Vec<String>,
     },
     /// Generate a new secret key file (for automation/setup)
     GenerateSecret {
@@ -151,13 +168,11 @@ async fn main() -> Result<()> {
             relay_only,
             direct_only,
             dns_server,
+            manual,
+            stun_servers,
         } => {
             // Load config if provided
-            let cfg: SenderConfig = if let Some(config_path) = &config {
-                load_config(config_path)?
-            } else {
-                SenderConfig::default()
-            };
+            let cfg: SenderConfig = load_config_or_default(config.as_deref())?;
 
             // Merge: CLI > Config > Default
             let protocol = protocol
@@ -175,13 +190,26 @@ async fn main() -> Result<()> {
             let relay_only = if relay_only { true } else { cfg.relay_only.unwrap_or(false) };
             let direct_only = if direct_only { true } else { cfg.direct_only.unwrap_or(false) };
             let dns_server = dns_server.or(cfg.dns_server);
+            let manual = if manual { true } else { cfg.manual.unwrap_or(false) };
+            let stun_servers = if stun_servers.is_empty() {
+                cfg.stun_servers.unwrap_or_else(default_stun_servers)
+            } else {
+                stun_servers
+            };
 
-            match protocol {
-                Protocol::Udp => {
-                    tunnel::run_udp_sender(target, secret_file, relay_urls, relay_only, direct_only, dns_server).await
+            if manual {
+                if protocol != Protocol::Tcp {
+                    anyhow::bail!("Manual mode currently supports TCP only.");
                 }
-                Protocol::Tcp => {
-                    tunnel::run_tcp_sender(target, secret_file, relay_urls, relay_only, direct_only, dns_server).await
+                tunnel::run_manual_tcp_sender(target, stun_servers).await
+            } else {
+                match protocol {
+                    Protocol::Udp => {
+                        tunnel::run_udp_sender(target, secret_file, relay_urls, relay_only, direct_only, dns_server).await
+                    }
+                    Protocol::Tcp => {
+                        tunnel::run_tcp_sender(target, secret_file, relay_urls, relay_only, direct_only, dns_server).await
+                    }
                 }
             }
         }
@@ -193,21 +221,16 @@ async fn main() -> Result<()> {
             relay_urls,
             relay_only,
             dns_server,
+            manual,
+            stun_servers,
         } => {
             // Load config if provided
-            let cfg: ReceiverConfig = if let Some(config_path) = &config {
-                load_config(config_path)?
-            } else {
-                ReceiverConfig::default()
-            };
+            let cfg: ReceiverConfig = load_config_or_default(config.as_deref())?;
 
             // Merge: CLI > Config > Default
             let protocol = protocol
                 .or_else(|| cfg.protocol.as_deref().and_then(Protocol::from_str_opt))
                 .unwrap_or_default();
-            let node_id = node_id.or(cfg.node_id).context(
-                "node_id is required. Provide via --node-id or in config file.",
-            )?;
             let listen = listen.or(cfg.listen).context(
                 "listen is required. Provide via --listen or in config file.",
             )?;
@@ -218,10 +241,26 @@ async fn main() -> Result<()> {
             };
             let relay_only = if relay_only { true } else { cfg.relay_only.unwrap_or(false) };
             let dns_server = dns_server.or(cfg.dns_server);
+            let manual = if manual { true } else { cfg.manual.unwrap_or(false) };
+            let stun_servers = if stun_servers.is_empty() {
+                cfg.stun_servers.unwrap_or_else(default_stun_servers)
+            } else {
+                stun_servers
+            };
 
-            match protocol {
-                Protocol::Udp => tunnel::run_udp_receiver(node_id, listen, relay_urls, relay_only, dns_server).await,
-                Protocol::Tcp => tunnel::run_tcp_receiver(node_id, listen, relay_urls, relay_only, dns_server).await,
+            if manual {
+                if protocol != Protocol::Tcp {
+                    anyhow::bail!("Manual mode currently supports TCP only.");
+                }
+                tunnel::run_manual_tcp_receiver(listen, stun_servers).await
+            } else {
+                let node_id = node_id.or(cfg.node_id).context(
+                    "node_id is required. Provide via --node-id or in config file.",
+                )?;
+                match protocol {
+                    Protocol::Udp => tunnel::run_udp_receiver(node_id, listen, relay_urls, relay_only, dns_server).await,
+                    Protocol::Tcp => tunnel::run_tcp_receiver(node_id, listen, relay_urls, relay_only, dns_server).await,
+                }
             }
         }
         Mode::GenerateSecret { output, force } => secret::generate_secret(output, force),

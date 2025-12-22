@@ -97,6 +97,8 @@ Then configure your WireGuard client to connect to `127.0.0.1:51820`.
 | `--relay-url` | (optional) | Custom relay server URL(s). Can be specified multiple times for failover |
 | `--relay-only` | false | Force all traffic through relay (requires `--relay-url`) |
 | `--dns-server` | (optional) | Custom DNS server URL for peer discovery (for self-hosted iroh-dns-server) |
+| `--manual` | false | Enable manual signaling mode (bypass discovery/relays) |
+| `--stun-server` | (optional) | STUN server for manual mode (repeatable) |
 
 ### receiver
 
@@ -104,11 +106,13 @@ Then configure your WireGuard client to connect to `127.0.0.1:51820`.
 |--------|---------|-------------|
 | `--config`, `-c` | (optional) | Path to TOML config file |
 | `--protocol`, `-p` | tcp | Protocol to tunnel (tcp or udp) |
-| `--node-id`, `-n` | (required) | EndpointId of the sender to connect to |
+| `--node-id`, `-n` | (required unless `--manual`) | EndpointId of the sender to connect to |
 | `--listen`, `-l` | (required) | Local address to listen on |
 | `--relay-url` | (optional) | Custom relay server URL(s). Can be specified multiple times for failover |
 | `--relay-only` | false | Force all traffic through relay (requires `--relay-url`) |
 | `--dns-server` | (optional) | Custom DNS server URL for peer discovery (for self-hosted iroh-dns-server) |
+| `--manual` | false | Enable manual signaling mode (bypass discovery/relays) |
+| `--stun-server` | (optional) | STUN server for manual mode (repeatable) |
 
 ## Configuration File
 
@@ -120,6 +124,12 @@ You can use a TOML config file instead of (or in addition to) command line argum
 # sender.toml
 protocol = "tcp"
 target = "127.0.0.1:22"
+manual = false
+stun_servers = [
+    "stun.l.google.com:19302",
+    "stun1.l.google.com:19302",
+    "stun.services.mozilla.com:3478",
+]
 secret_file = "./sender.key"
 relay_urls = [
     "https://relay1.example.com",
@@ -138,6 +148,12 @@ tunnel-rs sender --config sender.toml
 # receiver.toml
 protocol = "tcp"
 node_id = "2xnbkpbc7izsilvewd7c62w7wnwziacmpfwvhcrya5nt76dqkpga"
+manual = false
+stun_servers = [
+    "stun.l.google.com:19302",
+    "stun1.l.google.com:19302",
+    "stun.services.mozilla.com:3478",
+]
 listen = "127.0.0.1:2222"
 relay_urls = [
     "https://relay1.example.com",
@@ -149,6 +165,24 @@ relay_only = false
 ```bash
 tunnel-rs receiver --config receiver.toml
 ```
+
+## Manual Mode (TCP only)
+
+Manual mode bypasses iroh discovery/relays and uses copy-paste signaling (ICE + QUIC).
+
+1. Sender:
+   ```bash
+   tunnel-rs sender --manual --target 127.0.0.1:22
+   ```
+   Copy the Manual Offer.
+2. Receiver:
+   ```bash
+   tunnel-rs receiver --manual --listen 127.0.0.1:2222
+   ```
+   Paste the Manual Offer, copy the Manual Answer.
+3. Paste the Manual Answer back into the sender.
+
+Then connect through the receiver listener (e.g., `ssh -p 2222 user@127.0.0.1`).
 
 ### Config Options
 
