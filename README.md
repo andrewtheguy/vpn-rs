@@ -5,6 +5,7 @@
 tunnel-rs enables you to forward TCP and UDP traffic between machines without requiring public IP addresses, port forwarding, or VPN infrastructure. It establishes direct encrypted connections between peers using modern P2P networking techniques.
 
 **Key Features:**
+- **Cross-platform support** — Works on Linux, macOS, and Windows
 - **End-to-end encryption** via QUIC/TLS 1.3
 - **NAT traversal** with multiple strategies (relay fallback, STUN, full ICE)
 - **Minimal configuration** for automatic peer discovery (iroh-default mode; EndpointId required)
@@ -44,9 +45,20 @@ Both `iroh-manual` and `custom` modes use copy-paste signaling without servers:
 
 ## Installation
 
+### From Source
+
 ```bash
 cargo install --path .
 ```
+
+### Supported Platforms
+
+tunnel-rs is fully supported on:
+- **Linux** (x86_64, ARM64)
+- **macOS** (Intel, Apple Silicon)
+- **Windows** (x86_64)
+
+All three modes (iroh-default, iroh-manual, custom) work across all platforms, enabling cross-platform P2P tunneling.
 
 ---
 
@@ -454,11 +466,20 @@ tunnel-rs show-id --secret-file ./sender.key
 
 ---
 
-# Security
+## Platform Compatibility
+
+tunnel-rs is designed to work across different operating systems:
+- **Windows** can receive connections from Linux/macOS and vice versa
+- **macOS** endpoints can tunnel to Linux systems
+- **Linux** endpoints work with all platforms
+
+All protocol modes and features are available on all platforms.
+
+## Security
 
 - All traffic is encrypted using QUIC/TLS 1.3
 - The EndpointId is a public key that identifies the sender
-- Secret key files are created with `0600` permissions (Unix)
+- Secret key files are created with `0600` permissions (Unix) and appropriate permissions on Windows
 - Treat secret key files like SSH private keys
 
 ## How It Works
