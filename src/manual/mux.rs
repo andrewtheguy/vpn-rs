@@ -88,14 +88,9 @@ impl AsyncUdpSocket for DemuxSocket {
     }
 
     fn try_send(&self, transmit: &Transmit) -> io::Result<()> {
-        eprintln!("[demux] SEND {} bytes to {}", transmit.contents.len(), transmit.destination);
-        let result = self.io.try_io(Interest::WRITABLE, || {
+        self.io.try_io(Interest::WRITABLE, || {
             self.inner.send((&self.io).into(), transmit)
-        });
-        if let Err(ref e) = result {
-            eprintln!("[demux] SEND error: {}", e);
-        }
-        result
+        })
     }
 
     fn poll_recv(
@@ -105,21 +100,11 @@ impl AsyncUdpSocket for DemuxSocket {
         meta: &mut [RecvMeta],
     ) -> Poll<io::Result<usize>> {
         loop {
-            eprintln!("[demux] poll_recv: waiting for data on {}", self.local_addr);
-            let ready = self.io.poll_recv_ready(cx);
-            match &ready {
-                Poll::Ready(Ok(())) => eprintln!("[demux] poll_recv: socket ready"),
-                Poll::Ready(Err(e)) => eprintln!("[demux] poll_recv: ready error: {}", e),
-                Poll::Pending => eprintln!("[demux] poll_recv: pending"),
-            }
-            std::task::ready!(ready)?;
+            std::task::ready!(self.io.poll_recv_ready(cx))?;
 
-            let recv_result = self.io.try_io(Interest::READABLE, || {
+            match self.io.try_io(Interest::READABLE, || {
                 self.inner.recv((&self.io).into(), bufs, meta)
-            });
-            eprintln!("[demux] poll_recv: try_io result: {:?}", recv_result.as_ref().map(|n| format!("{} packets", n)).map_err(|e| e.kind()));
-
-            match recv_result {
+            }) {
                 Ok(count) => {
                     // Process received packets: route STUN to ICE, keep QUIC
                     let mut quic_count = 0;
@@ -130,12 +115,10 @@ impl AsyncUdpSocket for DemuxSocket {
 
                         if is_stun_packet(data) {
                             // Route STUN to ICE handler
-                            eprintln!("[demux] STUN from {} ({} bytes)", meta[i].addr, len);
                             self.route_stun(meta[i].addr, data.to_vec());
                             // Don't include in results for quinn
                         } else {
                             // Keep QUIC packet in results
-                            eprintln!("[demux] QUIC from {} ({} bytes, first=0x{:02x})", meta[i].addr, len, data[0]);
                             if quic_count != i {
                                 // Shift meta entry down
                                 meta[quic_count] = meta[i];
@@ -267,7 +250,6 @@ impl IceKeeper {
 
     fn handle_stun_packet(&mut self, packet: ReceivedPacket) {
         if let Ok(message) = StunMessage::parse(&packet.data) {
-            eprintln!("[ice-keeper] STUN from {}", packet.source);
             let stun_packet = StunPacket {
                 proto: Protocol::Udp,
                 source: packet.source,
