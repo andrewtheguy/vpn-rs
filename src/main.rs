@@ -144,7 +144,7 @@ enum IrohSenderMode {
         #[arg(long)]
         dns_server: Option<String>,
     },
-    /// Use manual signaling (copy-paste), no servers, direct-only
+    /// Use manual signaling (copy-paste) with STUN for NAT traversal
     Manual {
         /// Protocol to tunnel (tcp or udp)
         #[arg(short, long)]
@@ -153,6 +153,10 @@ enum IrohSenderMode {
         /// Target address to forward traffic to
         #[arg(short, long)]
         target: Option<String>,
+
+        /// STUN server (repeatable, e.g., stun.l.google.com:19302)
+        #[arg(long = "stun-server")]
+        stun_servers: Vec<String>,
     },
 }
 
@@ -203,7 +207,7 @@ enum IrohReceiverMode {
         #[arg(long)]
         dns_server: Option<String>,
     },
-    /// Use manual signaling (copy-paste), no servers, direct-only
+    /// Use manual signaling (copy-paste) with STUN for NAT traversal
     Manual {
         /// Protocol to tunnel (tcp or udp)
         #[arg(short, long)]
@@ -212,6 +216,10 @@ enum IrohReceiverMode {
         /// Local address to listen on (e.g., 127.0.0.1:2222)
         #[arg(short, long)]
         listen: Option<String>,
+
+        /// STUN server (repeatable, e.g., stun.l.google.com:19302)
+        #[arg(long = "stun-server")]
+        stun_servers: Vec<String>,
     },
 }
 
@@ -312,17 +320,22 @@ async fn main() -> Result<()> {
                             }
                         }
                     }
-                    IrohSenderMode::Manual { protocol, target } => {
+                    IrohSenderMode::Manual { protocol, target, stun_servers } => {
                         let protocol = protocol
                             .or_else(|| cfg.protocol.as_deref().and_then(Protocol::from_str_opt))
                             .unwrap_or_default();
                         let target = target
                             .or(cfg.target)
                             .unwrap_or_else(|| "127.0.0.1:22".to_string());
+                        let stun_servers = if stun_servers.is_empty() {
+                            cfg.stun_servers.unwrap_or_else(default_stun_servers)
+                        } else {
+                            stun_servers
+                        };
 
                         match protocol {
-                            Protocol::Udp => tunnel::run_iroh_manual_udp_sender(target).await,
-                            Protocol::Tcp => tunnel::run_iroh_manual_tcp_sender(target).await,
+                            Protocol::Udp => tunnel::run_iroh_manual_udp_sender(target, stun_servers).await,
+                            Protocol::Tcp => tunnel::run_iroh_manual_tcp_sender(target, stun_servers).await,
                         }
                     }
                 },
@@ -393,17 +406,22 @@ async fn main() -> Result<()> {
                             }
                         }
                     }
-                    IrohReceiverMode::Manual { protocol, listen } => {
+                    IrohReceiverMode::Manual { protocol, listen, stun_servers } => {
                         let protocol = protocol
                             .or_else(|| cfg.protocol.as_deref().and_then(Protocol::from_str_opt))
                             .unwrap_or_default();
                         let listen = listen.or(cfg.listen).context(
                             "listen is required. Provide via --listen or in config file.",
                         )?;
+                        let stun_servers = if stun_servers.is_empty() {
+                            cfg.stun_servers.unwrap_or_else(default_stun_servers)
+                        } else {
+                            stun_servers
+                        };
 
                         match protocol {
-                            Protocol::Udp => tunnel::run_iroh_manual_udp_receiver(listen).await,
-                            Protocol::Tcp => tunnel::run_iroh_manual_tcp_receiver(listen).await,
+                            Protocol::Udp => tunnel::run_iroh_manual_udp_receiver(listen, stun_servers).await,
+                            Protocol::Tcp => tunnel::run_iroh_manual_tcp_receiver(listen, stun_servers).await,
                         }
                     }
                 },

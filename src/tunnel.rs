@@ -3,7 +3,7 @@
 use anyhow::{Context, Result};
 use iroh::discovery::static_provider::StaticProvider;
 use iroh::{Endpoint, EndpointAddr, EndpointId, RelayMode, TransportAddr};
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -774,13 +774,22 @@ async fn create_iroh_manual_endpoint(alpn: &[u8]) -> Result<(Endpoint, Arc<Stati
     Ok((endpoint, discovery))
 }
 
+/// Resolve STUN server hostname to socket addresses
+fn resolve_stun_addrs(stun: &str) -> Vec<SocketAddr> {
+    match stun.to_socket_addrs() {
+        Ok(iter) => iter.collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
 /// Get direct addresses from endpoint for signaling.
 ///
-/// Returns local network interface addresses with the actual bound port.
-/// This allows direct peer-to-peer connections on the local network.
-fn get_direct_addresses(endpoint: &Endpoint) -> Vec<String> {
+/// Returns local network interface addresses and optionally STUN-discovered
+/// public addresses. This enables both LAN connections and NAT traversal.
+async fn get_direct_addresses(endpoint: &Endpoint, stun_servers: &[String]) -> Vec<String> {
     let bound_sockets = endpoint.bound_sockets();
     let mut addrs = Vec::new();
+    let mut seen = std::collections::HashSet::new();
 
     // Get the actual bound ports from the endpoint
     let ipv4_port = bound_sockets.iter()
@@ -790,7 +799,72 @@ fn get_direct_addresses(endpoint: &Endpoint) -> Vec<String> {
         .find(|a| a.is_ipv6())
         .map(|a| a.port());
 
-    // Get local network interface addresses
+    // Step 1: Get STUN-discovered public addresses (for NAT traversal)
+    if !stun_servers.is_empty() {
+        println!("Discovering public addresses via STUN...");
+        let mut got_ipv4_stun = false;
+        let mut got_ipv6_stun = false;
+
+        for stun in stun_servers {
+            for server in resolve_stun_addrs(stun) {
+                // Skip if we already have STUN for this address family
+                let is_ipv4 = server.is_ipv4();
+                if is_ipv4 && got_ipv4_stun {
+                    continue;
+                }
+                if !is_ipv4 && got_ipv6_stun {
+                    continue;
+                }
+
+                // Create a wildcard socket matching the STUN server's address family
+                let bind_addr: SocketAddr = if is_ipv4 {
+                    "0.0.0.0:0".parse().unwrap()
+                } else {
+                    "[::]:0".parse().unwrap()
+                };
+
+                let stun_socket = match std::net::UdpSocket::bind(bind_addr) {
+                    Ok(s) => s,
+                    Err(_) => continue,
+                };
+                stun_socket.set_nonblocking(true).ok();
+
+                let tokio_socket = match UdpSocket::from_std(stun_socket) {
+                    Ok(s) => Arc::new(s),
+                    Err(_) => continue,
+                };
+
+                let client = stunclient::StunClient::new(server);
+                match client.query_external_address_async(&tokio_socket).await {
+                    Ok(external) => {
+                        // Use the iroh endpoint's bound port, not the STUN socket's port
+                        // This is a heuristic - many NATs use predictable port mapping
+                        let port = if is_ipv4 { ipv4_port } else { ipv6_port };
+                        if let Some(port) = port {
+                            let addr = SocketAddr::new(external.ip(), port);
+                            let addr_str = addr.to_string();
+                            if seen.insert(addr_str.clone()) {
+                                println!("  STUN: {} (via {})", addr, stun);
+                                addrs.push(addr_str);
+                            }
+                        }
+
+                        if is_ipv4 {
+                            got_ipv4_stun = true;
+                        } else {
+                            got_ipv6_stun = true;
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("  STUN query failed for {} ({}): {}", stun, server, e);
+                    }
+                }
+            }
+        }
+    }
+
+    // Step 2: Get local network interface addresses (for LAN connections)
+    println!("Local addresses:");
     if let Ok(interfaces) = get_if_addrs::get_if_addrs() {
         for iface in interfaces {
             // Skip loopback interfaces
@@ -803,20 +877,71 @@ fn get_direct_addresses(endpoint: &Endpoint) -> Vec<String> {
 
             if let Some(port) = port {
                 let addr = SocketAddr::new(ip, port);
-                addrs.push(addr.to_string());
+                let addr_str = addr.to_string();
+                if seen.insert(addr_str.clone()) {
+                    println!("  - {}", addr);
+                    addrs.push(addr_str);
+                }
             }
         }
-    }
-
-    println!("Local addresses:");
-    for addr in &addrs {
-        println!("  - {}", addr);
     }
 
     addrs
 }
 
-pub async fn run_iroh_manual_tcp_sender(target: String) -> Result<()> {
+/// Race between connecting to remote and accepting from remote.
+/// This enables NAT hole punching by having both sides send packets simultaneously.
+async fn race_connect_accept(
+    endpoint: &Endpoint,
+    remote_id: EndpointId,
+    alpn: &[u8],
+) -> Result<iroh::endpoint::Connection> {
+    use tokio::time::timeout;
+
+    let connect_timeout = Duration::from_secs(30);
+
+    // Create futures for both operations
+    let connect_fut = async {
+        // Small delay before connecting to give the other side time to start accepting
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        endpoint.connect(EndpointAddr::new(remote_id), alpn).await
+    };
+
+    let accept_fut = async {
+        match endpoint.accept().await {
+            Some(incoming) => incoming.await,
+            None => Err(anyhow::anyhow!("Endpoint closed").into()),
+        }
+    };
+
+    println!("Racing connect vs accept for NAT hole punching...");
+
+    // Race both operations with a timeout
+    tokio::select! {
+        result = timeout(connect_timeout, connect_fut) => {
+            match result {
+                Ok(Ok(conn)) => {
+                    println!("Connected via outbound connection");
+                    Ok(conn)
+                }
+                Ok(Err(e)) => Err(anyhow::anyhow!("Connect failed: {}", e)),
+                Err(_) => Err(anyhow::anyhow!("Connect timeout")),
+            }
+        }
+        result = timeout(connect_timeout, accept_fut) => {
+            match result {
+                Ok(Ok(conn)) => {
+                    println!("Connected via inbound connection");
+                    Ok(conn)
+                }
+                Ok(Err(e)) => Err(anyhow::anyhow!("Accept failed: {}", e)),
+                Err(_) => Err(anyhow::anyhow!("Accept timeout")),
+            }
+        }
+    }
+}
+
+pub async fn run_iroh_manual_tcp_sender(target: String, stun_servers: Vec<String>) -> Result<()> {
     let target_addr: SocketAddr = target.parse().context("Invalid target address format")?;
 
     println!("Iroh Manual TCP Tunnel - Sender Mode");
@@ -826,7 +951,7 @@ pub async fn run_iroh_manual_tcp_sender(target: String) -> Result<()> {
     let (endpoint, discovery) = create_iroh_manual_endpoint(TCP_ALPN).await?;
 
     let node_id = endpoint.id();
-    let direct_addrs = get_direct_addresses(&endpoint);
+    let direct_addrs = get_direct_addresses(&endpoint, &stun_servers).await;
 
     let offer = IrohManualOffer {
         version: IROH_SIGNAL_VERSION,
@@ -861,62 +986,39 @@ pub async fn run_iroh_manual_tcp_sender(target: String) -> Result<()> {
     let remote_addr = EndpointAddr::new(remote_id)
         .with_addrs(remote_addrs.into_iter().map(TransportAddr::Ip));
     discovery.add_endpoint_info(remote_addr);
-    println!("Added remote peer: {}", remote_id);
+    println!("Added remote peer: {} ({} addresses)", remote_id, answer.direct_addresses.len());
 
-    println!("Waiting for receiver to connect...");
+    // Race connect vs accept for NAT hole punching
+    let conn = race_connect_accept(&endpoint, remote_id, TCP_ALPN).await?;
+
+    let remote_id = conn.remote_id();
+    println!("Peer connected: {}", remote_id);
+    println!("Forwarding TCP connections to {}", target_addr);
 
     loop {
-        let conn = match endpoint.accept().await {
-            Some(incoming) => match incoming.await {
-                Ok(conn) => conn,
-                Err(e) => {
-                    eprintln!("Failed to accept connection: {}", e);
-                    continue;
-                }
-            },
-            None => {
-                println!("Endpoint closed");
+        let (send_stream, recv_stream) = match conn.accept_bi().await {
+            Ok(streams) => streams,
+            Err(e) => {
+                println!("Peer disconnected: {}", e);
                 break;
             }
         };
 
-        let remote_id = conn.remote_id();
-        println!("Receiver connected from: {}", remote_id);
-        println!("Forwarding TCP connections to {}", target_addr);
-
+        println!("New TCP connection request received");
         let target = target_addr;
         tokio::spawn(async move {
-            loop {
-                let (send_stream, recv_stream) = match conn.accept_bi().await {
-                    Ok(streams) => streams,
-                    Err(e) => {
-                        println!("Receiver disconnected: {}", e);
-                        break;
-                    }
-                };
-
-                println!("New TCP connection request received");
-
-                tokio::spawn(async move {
-                    if let Err(e) = handle_tcp_sender_stream(send_stream, recv_stream, target).await
-                    {
-                        eprintln!("TCP connection error: {}", e);
-                    }
-                });
+            if let Err(e) = handle_tcp_sender_stream(send_stream, recv_stream, target).await {
+                eprintln!("TCP connection error: {}", e);
             }
-
-            conn.close(0u32.into(), b"done");
-            println!("Receiver connection closed.");
         });
-
-        println!("Waiting for next receiver to connect...");
     }
 
+    conn.close(0u32.into(), b"done");
     endpoint.close().await;
     Ok(())
 }
 
-pub async fn run_iroh_manual_tcp_receiver(listen: String) -> Result<()> {
+pub async fn run_iroh_manual_tcp_receiver(listen: String, stun_servers: Vec<String>) -> Result<()> {
     let listen_addr: SocketAddr = listen
         .parse()
         .context("Invalid listen address format. Use format like 127.0.0.1:2222 or [::]:2222")?;
@@ -928,7 +1030,7 @@ pub async fn run_iroh_manual_tcp_receiver(listen: String) -> Result<()> {
     let (endpoint, discovery) = create_iroh_manual_endpoint(TCP_ALPN).await?;
 
     let node_id = endpoint.id();
-    let direct_addrs = get_direct_addresses(&endpoint);
+    let direct_addrs = get_direct_addresses(&endpoint, &stun_servers).await;
 
     println!("Paste sender offer (include BEGIN/END markers), then press Enter:");
     let offer = read_iroh_offer_from_stdin()?;
@@ -963,18 +1065,12 @@ pub async fn run_iroh_manual_tcp_receiver(listen: String) -> Result<()> {
     let remote_addr = EndpointAddr::new(remote_id)
         .with_addrs(remote_addrs.into_iter().map(TransportAddr::Ip));
     discovery.add_endpoint_info(remote_addr);
-    println!("Added remote peer: {}", remote_id);
+    println!("Added remote peer: {} ({} addresses)", remote_id, offer.direct_addresses.len());
 
-    println!("Connecting to sender...");
-    let conn = tokio::time::timeout(
-        QUIC_CONNECTION_TIMEOUT,
-        endpoint.connect(EndpointAddr::new(remote_id), TCP_ALPN),
-    )
-    .await
-    .context("Connection timeout")?
-    .context("Failed to connect to sender")?;
+    // Race connect vs accept for NAT hole punching
+    let conn = race_connect_accept(&endpoint, remote_id, TCP_ALPN).await?;
 
-    println!("Connected to sender!");
+    println!("Peer connected: {}", conn.remote_id());
 
     let conn = Arc::new(conn);
     let tunnel_established = Arc::new(AtomicBool::new(false));
@@ -1018,7 +1114,7 @@ pub async fn run_iroh_manual_tcp_receiver(listen: String) -> Result<()> {
 // Iroh Manual Mode - UDP Tunnel Implementation
 // ============================================================================
 
-pub async fn run_iroh_manual_udp_sender(target: String) -> Result<()> {
+pub async fn run_iroh_manual_udp_sender(target: String, stun_servers: Vec<String>) -> Result<()> {
     let target_addr: SocketAddr = target.parse().context("Invalid target address format")?;
 
     println!("Iroh Manual UDP Tunnel - Sender Mode");
@@ -1028,7 +1124,7 @@ pub async fn run_iroh_manual_udp_sender(target: String) -> Result<()> {
     let (endpoint, discovery) = create_iroh_manual_endpoint(UDP_ALPN).await?;
 
     let node_id = endpoint.id();
-    let direct_addrs = get_direct_addresses(&endpoint);
+    let direct_addrs = get_direct_addresses(&endpoint, &stun_servers).await;
 
     let offer = IrohManualOffer {
         version: IROH_SIGNAL_VERSION,
@@ -1063,19 +1159,12 @@ pub async fn run_iroh_manual_udp_sender(target: String) -> Result<()> {
     let remote_addr = EndpointAddr::new(remote_id)
         .with_addrs(remote_addrs.into_iter().map(TransportAddr::Ip));
     discovery.add_endpoint_info(remote_addr);
-    println!("Added remote peer: {}", remote_id);
+    println!("Added remote peer: {} ({} addresses)", remote_id, answer.direct_addresses.len());
 
-    println!("Waiting for receiver to connect...");
+    // Race connect vs accept for NAT hole punching
+    let conn = race_connect_accept(&endpoint, remote_id, UDP_ALPN).await?;
 
-    let conn = endpoint
-        .accept()
-        .await
-        .context("No incoming connection")?
-        .await
-        .context("Failed to accept connection")?;
-
-    let remote_id = conn.remote_id();
-    println!("Receiver connected from: {}", remote_id);
+    println!("Peer connected: {}", conn.remote_id());
 
     let (send_stream, recv_stream) = conn
         .accept_bi()
@@ -1105,7 +1194,7 @@ pub async fn run_iroh_manual_udp_sender(target: String) -> Result<()> {
     Ok(())
 }
 
-pub async fn run_iroh_manual_udp_receiver(listen: String) -> Result<()> {
+pub async fn run_iroh_manual_udp_receiver(listen: String, stun_servers: Vec<String>) -> Result<()> {
     let listen_addr: SocketAddr = listen
         .parse()
         .context("Invalid listen address format. Use format like 127.0.0.1:51820 or [::]:51820")?;
@@ -1117,7 +1206,7 @@ pub async fn run_iroh_manual_udp_receiver(listen: String) -> Result<()> {
     let (endpoint, discovery) = create_iroh_manual_endpoint(UDP_ALPN).await?;
 
     let node_id = endpoint.id();
-    let direct_addrs = get_direct_addresses(&endpoint);
+    let direct_addrs = get_direct_addresses(&endpoint, &stun_servers).await;
 
     println!("Paste sender offer (include BEGIN/END markers), then press Enter:");
     let offer = read_iroh_offer_from_stdin()?;
@@ -1152,18 +1241,12 @@ pub async fn run_iroh_manual_udp_receiver(listen: String) -> Result<()> {
     let remote_addr = EndpointAddr::new(remote_id)
         .with_addrs(remote_addrs.into_iter().map(TransportAddr::Ip));
     discovery.add_endpoint_info(remote_addr);
-    println!("Added remote peer: {}", remote_id);
+    println!("Added remote peer: {} ({} addresses)", remote_id, offer.direct_addresses.len());
 
-    println!("Connecting to sender...");
-    let conn = tokio::time::timeout(
-        QUIC_CONNECTION_TIMEOUT,
-        endpoint.connect(EndpointAddr::new(remote_id), UDP_ALPN),
-    )
-    .await
-    .context("Connection timeout")?
-    .context("Failed to connect to sender")?;
+    // Race connect vs accept for NAT hole punching
+    let conn = race_connect_accept(&endpoint, remote_id, UDP_ALPN).await?;
 
-    println!("Connected to sender!");
+    println!("Peer connected: {}", conn.remote_id());
 
     let (send_stream, recv_stream) = conn.open_bi().await.context("Failed to open stream")?;
 
