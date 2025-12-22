@@ -10,7 +10,11 @@
       "WebFetch(domain:datatracker.ietf.org)",
       "Bash(ls:*)",
       "Bash(find:*)",
-      "Bash(xargs dirname:*)"
+      "Bash(xargs dirname:*)",
+      "Bash(timeout 90 /tmp/test_manual.sh:*)",
+      "Bash(pkill:*)",
+      "Bash(timeout 60 python3 /tmp/test_tunnel.py)",
+      "Bash(timeout 45 python3 /tmp/test_tunnel.py)"
     ]
   }
 }
