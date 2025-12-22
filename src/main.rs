@@ -510,9 +510,11 @@ async fn main() -> Result<()> {
                     let peer_npub = peer_npub.context(
                         "peer-npub is required. Provide via --peer-npub or in config file.",
                     )?;
-                    if relays.is_empty() {
-                        anyhow::bail!("At least one relay is required. Provide via --relay or in config file.");
-                    }
+                    let relays = if relays.is_empty() {
+                        config::default_nostr_relays()
+                    } else {
+                        relays
+                    };
 
                     let (protocol, target) = parse_endpoint(&source)
                         .with_context(|| format!("Invalid sender source '{}'", source))?;
@@ -664,9 +666,11 @@ async fn main() -> Result<()> {
                     let peer_npub = peer_npub.context(
                         "peer-npub is required. Provide via --peer-npub or in config file.",
                     )?;
-                    if relays.is_empty() {
-                        anyhow::bail!("At least one relay is required. Provide via --relay or in config file.");
-                    }
+                    let relays = if relays.is_empty() {
+                        config::default_nostr_relays()
+                    } else {
+                        relays
+                    };
 
                     // For nostr mode, target is just host:port (no protocol prefix)
                     let listen = target;
