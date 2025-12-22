@@ -45,6 +45,50 @@ Both `iroh-manual` and `custom` modes use copy-paste signaling without servers:
 
 ## Installation
 
+The release installers fetch a native, standalone executable. You only need the binary in your PATH; no runtime dependencies or package managers are required.
+
+### Quick Install (Linux & macOS)
+
+```bash
+curl -sSL https://andrewtheguy.github.io/tunnel-rs/install.sh | bash
+```
+
+Install with custom release tag:
+```bash
+curl -sSL https://andrewtheguy.github.io/tunnel-rs/install.sh | bash -s <RELEASE_TAG>
+```
+
+By default the installer pulls the latest **stable** release. Use `--prerelease` for the newest prerelease, or pass an explicit tag to pin to a specific build. Examples:
+
+```bash
+# Latest prerelease
+curl -sSL https://andrewtheguy.github.io/tunnel-rs/install.sh | bash -s -- --prerelease
+
+# Pin to a specific tag
+curl -sSL https://andrewtheguy.github.io/tunnel-rs/install.sh | bash -s 20251210172710
+```
+
+### Quick Install (Windows)
+
+```powershell
+irm https://andrewtheguy.github.io/tunnel-rs/install.ps1 | iex
+```
+
+Install with custom release tag:
+```powershell
+irm https://andrewtheguy.github.io/tunnel-rs/install.ps1 | iex -Args <RELEASE_TAG>
+```
+
+By default the PowerShell installer pulls the latest **stable** release. Use `-PreRelease` for the newest prerelease, or pass an explicit tag to pin to a specific build. Examples:
+
+```powershell
+# Latest prerelease
+irm https://andrewtheguy.github.io/tunnel-rs/install.ps1 | iex -Args -PreRelease
+
+# Pin to a specific tag
+irm https://andrewtheguy.github.io/tunnel-rs/install.ps1 | iex -Args 20251210172710
+```
+
 ### From Source
 
 ```bash
