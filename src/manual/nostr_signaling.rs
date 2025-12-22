@@ -9,7 +9,7 @@ use base64::Engine;
 use nostr_sdk::prelude::*;
 use sha2::{Digest, Sha256};
 use std::time::Duration;
-use tokio::sync::broadcast::error::RecvError;
+use tokio::sync::broadcast::error::{RecvError, TryRecvError};
 
 use super::signaling::{ManualAnswer, ManualOffer};
 
@@ -169,89 +169,42 @@ impl NostrSignaling {
             .await
     }
 
-    /// Wait for a specific message type with timeout
+    /// Wait for a specific message type with timeout.
+    ///
+    /// If the notification receiver lags behind, this will drain buffered messages
+    /// and check each one for the expected type before continuing to wait.
     async fn wait_for_message<T: for<'de> serde::Deserialize<'de>>(
         &self,
         expected_type: &str,
         timeout_secs: u64,
     ) -> Result<T> {
-        let mut notifications = self.client.notifications();
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_secs);
-
         println!(
             "Waiting for {} from peer (timeout: {}s)...",
             expected_type, timeout_secs
         );
 
-        while tokio::time::Instant::now() < deadline {
-            match tokio::time::timeout(Duration::from_secs(1), notifications.recv()).await {
-                Ok(Ok(RelayPoolNotification::Event { event, .. })) => {
-                    // Verify this is from our peer
-                    if event.pubkey != self.peer_pubkey {
-                        continue;
-                    }
-
-                    // Check transfer ID
-                    let is_our_transfer = event.tags.iter().any(|t| {
-                        t.kind() == TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::T))
-                            && t.content() == Some(&self.transfer_id)
-                    });
-                    if !is_our_transfer {
-                        continue;
-                    }
-
-                    // Check event type
-                    let event_type = event
-                        .tags
-                        .iter()
-                        .find(|t| t.kind() == TagKind::custom("type"))
-                        .and_then(|t| t.content());
-
-                    if event_type != Some(expected_type) {
-                        continue;
-                    }
-
-                    // Decode content
-                    let decoded = URL_SAFE_NO_PAD
-                        .decode(event.content.as_bytes())
-                        .context("Failed to decode event content")?;
-                    let payload: T =
-                        serde_json::from_slice(&decoded).context("Failed to parse event payload")?;
-
-                    println!("Received {} from peer", expected_type);
-                    return Ok(payload);
-                }
-                Ok(Ok(_)) => continue,
-                Ok(Err(recv_err)) => {
-                    // Handle broadcast channel errors
-                    match recv_err {
-                        RecvError::Closed => {
-                            return Err(anyhow::anyhow!(
-                                "Notification channel closed while waiting for {}",
-                                expected_type
-                            ));
-                        }
-                        RecvError::Lagged(skipped) => {
-                            eprintln!(
-                                "Warning: Notification receiver lagged, skipped {} messages",
-                                skipped
-                            );
-                            continue;
-                        }
-                    }
-                }
-                Err(_) => continue, // tokio::time::timeout elapsed, try again
-            }
-        }
-
-        Err(anyhow::anyhow!(
-            "Timeout waiting for {} from peer",
-            expected_type
-        ))
+        self.wait_for_message_inner(expected_type, timeout_secs)
+            .await
+            .ok_or_else(|| {
+                anyhow::anyhow!("Timeout waiting for {} from peer", expected_type)
+            })
     }
 
-    /// Wait for a specific message type with timeout, returns None on timeout
+    /// Wait for a specific message type with timeout, returns None on timeout or channel closed.
+    ///
+    /// If the notification receiver lags behind, this will drain buffered messages
+    /// and check each one for the expected type before continuing to wait.
     async fn wait_for_message_optional<T: for<'de> serde::Deserialize<'de>>(
+        &self,
+        expected_type: &str,
+        timeout_secs: u64,
+    ) -> Option<T> {
+        self.wait_for_message_inner(expected_type, timeout_secs)
+            .await
+    }
+
+    /// Internal helper that waits for a message, returning None on timeout or channel closed.
+    async fn wait_for_message_inner<T: for<'de> serde::Deserialize<'de>>(
         &self,
         expected_type: &str,
         timeout_secs: u64,
@@ -262,42 +215,13 @@ impl NostrSignaling {
         while tokio::time::Instant::now() < deadline {
             match tokio::time::timeout(Duration::from_secs(1), notifications.recv()).await {
                 Ok(Ok(RelayPoolNotification::Event { event, .. })) => {
-                    // Verify this is from our peer
-                    if event.pubkey != self.peer_pubkey {
-                        continue;
-                    }
-
-                    // Check transfer ID
-                    let is_our_transfer = event.tags.iter().any(|t| {
-                        t.kind() == TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::T))
-                            && t.content() == Some(&self.transfer_id)
-                    });
-                    if !is_our_transfer {
-                        continue;
-                    }
-
-                    // Check event type
-                    let event_type_tag = event
-                        .tags
-                        .iter()
-                        .find(|t| t.kind() == TagKind::custom("type"))
-                        .and_then(|t| t.content());
-
-                    if event_type_tag != Some(expected_type) {
-                        continue;
-                    }
-
-                    // Decode content
-                    if let Ok(decoded) = URL_SAFE_NO_PAD.decode(event.content.as_bytes()) {
-                        if let Ok(payload) = serde_json::from_slice(&decoded) {
-                            println!("Received {} from peer", expected_type);
-                            return Some(payload);
-                        }
+                    if let Some(payload) = self.try_parse_event::<T>(&event, expected_type) {
+                        println!("Received {} from peer", expected_type);
+                        return Some(payload);
                     }
                 }
                 Ok(Ok(_)) => continue,
                 Ok(Err(recv_err)) => {
-                    // Handle broadcast channel errors
                     match recv_err {
                         RecvError::Closed => {
                             eprintln!(
@@ -308,10 +232,15 @@ impl NostrSignaling {
                         }
                         RecvError::Lagged(skipped) => {
                             eprintln!(
-                                "Warning: Notification receiver lagged, skipped {} messages",
+                                "Warning: Notification receiver lagged, skipped {} messages; draining buffer...",
                                 skipped
                             );
-                            continue;
+                            // Drain buffered messages and check each one
+                            if let Some(payload) =
+                                self.drain_and_find::<T>(&mut notifications, expected_type)
+                            {
+                                return Some(payload);
+                            }
                         }
                     }
                 }
@@ -320,6 +249,80 @@ impl NostrSignaling {
         }
 
         None
+    }
+
+    /// Drain buffered messages from the notification channel and return the first matching payload.
+    fn drain_and_find<T: for<'de> serde::Deserialize<'de>>(
+        &self,
+        notifications: &mut tokio::sync::broadcast::Receiver<RelayPoolNotification>,
+        expected_type: &str,
+    ) -> Option<T> {
+        loop {
+            match notifications.try_recv() {
+                Ok(RelayPoolNotification::Event { event, .. }) => {
+                    if let Some(payload) = self.try_parse_event::<T>(&event, expected_type) {
+                        println!(
+                            "Received {} from peer (found in drained messages)",
+                            expected_type
+                        );
+                        return Some(payload);
+                    }
+                }
+                Ok(_) => continue,
+                Err(TryRecvError::Empty) => return None,
+                Err(TryRecvError::Closed) => {
+                    eprintln!(
+                        "Error: Notification channel closed while draining for {}",
+                        expected_type
+                    );
+                    return None;
+                }
+                Err(TryRecvError::Lagged(more_skipped)) => {
+                    eprintln!(
+                        "Warning: Additional {} messages skipped while draining",
+                        more_skipped
+                    );
+                    continue;
+                }
+            }
+        }
+    }
+
+    /// Try to parse an event as the expected message type.
+    /// Returns Some(payload) if the event matches our criteria and can be parsed.
+    fn try_parse_event<T: for<'de> serde::Deserialize<'de>>(
+        &self,
+        event: &Event,
+        expected_type: &str,
+    ) -> Option<T> {
+        // Verify this is from our peer
+        if event.pubkey != self.peer_pubkey {
+            return None;
+        }
+
+        // Check transfer ID
+        let is_our_transfer = event.tags.iter().any(|t| {
+            t.kind() == TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::T))
+                && t.content() == Some(&self.transfer_id)
+        });
+        if !is_our_transfer {
+            return None;
+        }
+
+        // Check event type
+        let event_type = event
+            .tags
+            .iter()
+            .find(|t| t.kind() == TagKind::custom("type"))
+            .and_then(|t| t.content());
+
+        if event_type != Some(expected_type) {
+            return None;
+        }
+
+        // Decode content
+        let decoded = URL_SAFE_NO_PAD.decode(event.content.as_bytes()).ok()?;
+        serde_json::from_slice(&decoded).ok()
     }
 
     fn create_signaling_event(&self, event_type: &str, content: &str) -> Result<Event> {

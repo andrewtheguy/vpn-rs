@@ -16,7 +16,7 @@
 //!   tunnel-rs receiver iroh-default --node-id <NODE_ID> --target tcp://127.0.0.1:2222
 //!   tunnel-rs receiver iroh-manual --target tcp://127.0.0.1:2222
 //!   tunnel-rs receiver custom --target tcp://127.0.0.1:2222
-//!   tunnel-rs receiver nostr --target 127.0.0.1:2222 --nsec <NSEC> --peer-npub <NPUB>
+//!   tunnel-rs receiver nostr --target tcp://127.0.0.1:2222 --nsec <NSEC> --peer-npub <NPUB>
 
 mod config;
 mod endpoint;
@@ -295,7 +295,7 @@ enum ReceiverMode {
     },
     /// Full ICE with Nostr-based signaling (WireGuard-like static keys)
     Nostr {
-        /// Local address to listen on (host:port format, e.g., 127.0.0.1:2222)
+        /// Local address to listen on (tcp://host:port or udp://host:port, or host:port for TCP, e.g., tcp://127.0.0.1:2222)
         #[arg(short, long)]
         target: Option<String>,
 
@@ -498,6 +498,9 @@ async fn main() -> Result<()> {
                     let peer_npub = peer_npub.context(
                         "peer-npub is required. Provide via --peer-npub or in config file.",
                     )?;
+                    if relays.is_empty() {
+                        anyhow::bail!("At least one relay is required. Provide via --relay or in config file.");
+                    }
 
                     let (protocol, target) = parse_endpoint(&source)
                         .with_context(|| format!("Invalid sender source '{}'", source))?;
@@ -649,6 +652,9 @@ async fn main() -> Result<()> {
                     let peer_npub = peer_npub.context(
                         "peer-npub is required. Provide via --peer-npub or in config file.",
                     )?;
+                    if relays.is_empty() {
+                        anyhow::bail!("At least one relay is required. Provide via --relay or in config file.");
+                    }
 
                     // For nostr mode, target is just host:port (no protocol prefix)
                     let listen = target;
