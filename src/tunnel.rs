@@ -30,6 +30,10 @@ use crate::manual::signaling::{
 /// Timeout for QUIC connection (matches webrtc crate's 180 second connection timeout)
 const QUIC_CONNECTION_TIMEOUT: Duration = Duration::from_secs(180);
 
+/// Maximum age for accepting incoming requests (seconds).
+/// Requests older than this are considered stale and ignored.
+const MAX_REQUEST_AGE_SECS: u64 = 60;
+
 async fn resolve_target_addr(target: &str) -> Result<SocketAddr> {
     let mut addrs = lookup_host(target)
         .await
@@ -42,6 +46,14 @@ fn generate_session_id() -> String {
     use rand::Rng;
     let random_bytes: [u8; 8] = rand::rng().random();
     hex::encode(random_bytes)
+}
+
+/// Get current Unix timestamp in seconds.
+fn current_timestamp() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
 }
 
 /// Publish offer and wait for answer with periodic re-publishing.
@@ -946,9 +958,9 @@ pub async fn run_nostr_tcp_sender(
     // Subscribe to incoming events
     signaling.subscribe().await?;
 
-    // Wait for request from receiver first
+    // Wait for fresh request from receiver (reject stale requests)
     println!("Waiting for request from receiver...");
-    let request = signaling.wait_for_request().await?;
+    let request = signaling.wait_for_fresh_request(MAX_REQUEST_AGE_SECS).await?;
 
     if request.version != MANUAL_SIGNAL_VERSION {
         anyhow::bail!(
@@ -1095,6 +1107,7 @@ pub async fn run_nostr_tcp_receiver(
         ice_pwd: local_creds.pass.clone(),
         candidates: local_candidates.clone(),
         session_id: session_id.clone(),
+        timestamp: current_timestamp(),
     };
 
     // Publish request and wait for offer (re-publish periodically)
@@ -1231,9 +1244,9 @@ pub async fn run_nostr_udp_sender(
     // Subscribe to incoming events
     signaling.subscribe().await?;
 
-    // Wait for request from receiver first
+    // Wait for fresh request from receiver (reject stale requests)
     println!("Waiting for request from receiver...");
-    let request = signaling.wait_for_request().await?;
+    let request = signaling.wait_for_fresh_request(MAX_REQUEST_AGE_SECS).await?;
 
     if request.version != MANUAL_SIGNAL_VERSION {
         anyhow::bail!(
@@ -1386,6 +1399,7 @@ pub async fn run_nostr_udp_receiver(
         ice_pwd: local_creds.pass.clone(),
         candidates: local_candidates.clone(),
         session_id: session_id.clone(),
+        timestamp: current_timestamp(),
     };
 
     // Publish request and wait for offer (re-publish periodically)

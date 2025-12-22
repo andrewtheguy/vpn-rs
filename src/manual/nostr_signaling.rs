@@ -174,10 +174,64 @@ impl NostrSignaling {
         Ok(())
     }
 
-    /// Wait for a request from the peer (uses default timeout)
-    pub async fn wait_for_request(&self) -> Result<ManualRequest> {
-        self.wait_for_message(SIGNALING_TYPE_REQUEST, DEFAULT_SIGNALING_TIMEOUT_SECS)
-            .await
+    /// Wait for a fresh request from the peer (uses default timeout).
+    /// Rejects requests older than `max_age_secs` seconds.
+    pub async fn wait_for_fresh_request(&self, max_age_secs: u64) -> Result<ManualRequest> {
+        println!(
+            "Waiting for {} from peer (timeout: {}s, max age: {}s)...",
+            SIGNALING_TYPE_REQUEST, DEFAULT_SIGNALING_TIMEOUT_SECS, max_age_secs
+        );
+
+        let deadline =
+            tokio::time::Instant::now() + Duration::from_secs(DEFAULT_SIGNALING_TIMEOUT_SECS);
+        let mut notifications = self.client.notifications();
+
+        while tokio::time::Instant::now() < deadline {
+            match tokio::time::timeout(Duration::from_secs(1), notifications.recv()).await {
+                Ok(Ok(RelayPoolNotification::Event { event, .. })) => {
+                    if let Some(request) =
+                        self.try_parse_event::<ManualRequest>(&event, SIGNALING_TYPE_REQUEST)
+                    {
+                        // Check if request is fresh
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap()
+                            .as_secs();
+                        let age = now.saturating_sub(request.timestamp);
+                        if age <= max_age_secs {
+                            println!("Received fresh {} from peer (age: {}s)", SIGNALING_TYPE_REQUEST, age);
+                            return Ok(request);
+                        } else {
+                            println!(
+                                "Ignoring stale request (age: {}s > max {}s)",
+                                age, max_age_secs
+                            );
+                        }
+                    }
+                }
+                Ok(Ok(_)) => continue,
+                Ok(Err(recv_err)) => {
+                    match recv_err {
+                        RecvError::Closed => {
+                            return Err(anyhow::anyhow!(
+                                "Notification channel closed while waiting for request"
+                            ));
+                        }
+                        RecvError::Lagged(skipped) => {
+                            eprintln!(
+                                "Warning: Notification receiver lagged, skipped {} messages",
+                                skipped
+                            );
+                        }
+                    }
+                }
+                Err(_) => continue,
+            }
+        }
+
+        Err(anyhow::anyhow!(
+            "Timeout waiting for fresh request from peer"
+        ))
     }
 
     /// Wait for an offer from the peer with custom timeout, returns None on timeout.
@@ -192,27 +246,6 @@ impl NostrSignaling {
     pub async fn try_wait_for_answer_timeout(&self, timeout_secs: u64) -> Option<ManualAnswer> {
         self.wait_for_message_optional(SIGNALING_TYPE_ANSWER, timeout_secs)
             .await
-    }
-
-    /// Wait for a specific message type with timeout.
-    ///
-    /// If the notification receiver lags behind, this will drain buffered messages
-    /// and check each one for the expected type before continuing to wait.
-    async fn wait_for_message<T: for<'de> serde::Deserialize<'de>>(
-        &self,
-        expected_type: &str,
-        timeout_secs: u64,
-    ) -> Result<T> {
-        println!(
-            "Waiting for {} from peer (timeout: {}s)...",
-            expected_type, timeout_secs
-        );
-
-        self.wait_for_message_inner(expected_type, timeout_secs)
-            .await
-            .ok_or_else(|| {
-                anyhow::anyhow!("Timeout waiting for {} from peer", expected_type)
-            })
     }
 
     /// Wait for a specific message type with timeout, returns None on timeout or channel closed.
