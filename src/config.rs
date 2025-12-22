@@ -235,12 +235,12 @@ fn load_config<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T> {
 
 /// Resolve the default sender config path (~/.config/tunnel-rs/sender.toml).
 fn default_sender_config_path() -> Option<PathBuf> {
-    dirs::config_dir().map(|dir| dir.join("tunnel-rs").join("sender.toml"))
+    dirs::home_dir().map(|home| home.join(".config").join("tunnel-rs").join("sender.toml"))
 }
 
 /// Resolve the default receiver config path (~/.config/tunnel-rs/receiver.toml).
 fn default_receiver_config_path() -> Option<PathBuf> {
-    dirs::config_dir().map(|dir| dir.join("tunnel-rs").join("receiver.toml"))
+    dirs::home_dir().map(|home| home.join(".config").join("tunnel-rs").join("receiver.toml"))
 }
 
 /// Load sender configuration from an explicit path, or from default location.
