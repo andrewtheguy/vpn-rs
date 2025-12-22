@@ -244,6 +244,10 @@ enum SenderMode {
         /// Maximum time in seconds to wait for answer before giving up (default: 120)
         #[arg(long, default_value = "120")]
         max_wait: u64,
+
+        /// Maximum concurrent sessions (0 = unlimited, default: 10)
+        #[arg(long, default_value = "10")]
+        max_sessions: usize,
     },
 }
 
@@ -488,8 +492,8 @@ async fn main() -> Result<()> {
                 }
                 "nostr" => {
                     let nostr_cfg = cfg.nostr();
-                    let (source, stun_servers, nsec, peer_npub, relays, republish_interval, max_wait) = match &mode {
-                        Some(SenderMode::Nostr { source: s, stun_servers: ss, no_stun, nsec: n, peer_npub: p, relays: r, republish_interval: ri, max_wait: mw }) => (
+                    let (source, stun_servers, nsec, peer_npub, relays, republish_interval, max_wait, max_sessions) = match &mode {
+                        Some(SenderMode::Nostr { source: s, stun_servers: ss, no_stun, nsec: n, peer_npub: p, relays: r, republish_interval: ri, max_wait: mw, max_sessions: ms }) => (
                             normalize_optional_endpoint(s.clone()).or(source),
                             resolve_stun_servers(ss, nostr_cfg.and_then(|c| c.stun_servers.clone()), *no_stun)?,
                             n.clone().or_else(|| nostr_cfg.and_then(|c| c.nsec.clone())),
@@ -497,6 +501,7 @@ async fn main() -> Result<()> {
                             if r.is_empty() { nostr_cfg.and_then(|c| c.relays.clone()).unwrap_or_default() } else { r.clone() },
                             *ri,
                             *mw,
+                            *ms,
                         ),
                         _ => (
                             source,
@@ -506,6 +511,7 @@ async fn main() -> Result<()> {
                             nostr_cfg.and_then(|c| c.relays.clone()).unwrap_or_default(),
                             10, // default republish interval
                             120, // default max wait
+                            10, // default max sessions
                         ),
                     };
 
@@ -528,8 +534,8 @@ async fn main() -> Result<()> {
                         .with_context(|| format!("Invalid sender source '{}'", source))?;
 
                     match protocol {
-                        Protocol::Udp => tunnel::run_nostr_udp_sender(target, stun_servers, nsec, peer_npub, relays, republish_interval, max_wait).await,
-                        Protocol::Tcp => tunnel::run_nostr_tcp_sender(target, stun_servers, nsec, peer_npub, relays, republish_interval, max_wait).await,
+                        Protocol::Udp => tunnel::run_nostr_udp_sender(target, stun_servers, nsec, peer_npub, relays, republish_interval, max_wait, max_sessions).await,
+                        Protocol::Tcp => tunnel::run_nostr_tcp_sender(target, stun_servers, nsec, peer_npub, relays, republish_interval, max_wait, max_sessions).await,
                     }
                 }
                 _ => anyhow::bail!("Invalid mode '{}'. Use: iroh-default, iroh-manual, custom, or nostr", effective_mode),

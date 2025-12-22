@@ -20,26 +20,32 @@ All modes support TCP and UDP tunneling with end-to-end encryption via QUIC/TLS 
 
 #### Multi-Session Support for Manual Signaling Modes
 
-**Status:** Planned
+**Status:** Partial (Nostr mode complete, others planned)
 
-Currently, `iroh-manual`, `custom`, and `nostr` modes support only one tunnel session at a time. This enhancement would allow a single sender to accept multiple simultaneous receivers.
+| Mode | Multi-Session |
+|------|---------------|
+| `nostr` | **Implemented** - use `--max-sessions` (default: 10) |
+| `iroh-manual` | Planned |
+| `custom` | Planned |
 
-**Scope:**
-- Accept multiple signaling exchanges in parallel
-- Maintain independent ICE/QUIC connections per session
-- Track sessions by unique session_id
-- Handle connection lifecycle independently
+**Nostr Mode Usage:**
+```bash
+# Accept up to 5 concurrent sessions
+tunnel-rs sender nostr -s tcp://127.0.0.1:22 --nsec <KEY> --peer-npub <NPUB> --max-sessions 5
 
-**Design Considerations:**
-- Spawn async task for each incoming request/offer
-- Shared state management for active sessions
-- Graceful handling of session termination
-- Resource limits (max concurrent sessions)
+# Unlimited sessions
+tunnel-rs sender nostr -s tcp://127.0.0.1:22 --nsec <KEY> --peer-npub <NPUB> --max-sessions 0
+```
 
-**Workaround (Current):**
-- Use `iroh-default` mode (already supports multiple receivers)
-- Run separate sender instances per tunnel
-- Use different keypairs for independent tunnels
+**Implementation Details (Nostr):**
+- Each session gets independent ICE/QUIC stack
+- Session IDs prevent cross-session interference
+- Automatic cleanup when receivers disconnect
+- Shared NostrSignaling client for efficient relay usage
+
+**Remaining Work (iroh-manual, custom):**
+- Manual copy-paste signaling is the bottleneck
+- Would require rethinking the signaling UX
 
 ---
 
