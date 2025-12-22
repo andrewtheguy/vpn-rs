@@ -24,7 +24,7 @@ use crate::manual::signaling::{
     display_answer, display_iroh_answer, display_iroh_offer, display_offer,
     read_answer_from_stdin, read_iroh_answer_from_stdin, read_iroh_offer_from_stdin,
     read_offer_from_stdin, IrohManualAnswer, IrohManualOffer, ManualAnswer, ManualOffer,
-    IROH_SIGNAL_VERSION, MANUAL_SIGNAL_VERSION,
+    ManualRequest, IROH_SIGNAL_VERSION, MANUAL_SIGNAL_VERSION,
 };
 
 /// Timeout for QUIC connection (matches webrtc crate's 180 second connection timeout)
@@ -128,6 +128,47 @@ async fn publish_offer_and_wait_for_answer(
         // Re-publish offer
         println!("Re-publishing offer...");
         signaling.publish_offer(offer).await?;
+    }
+}
+
+/// Publish request and wait for offer with periodic re-publishing.
+///
+/// This helper implements the nostr signaling request/offer exchange with:
+/// - Periodic re-publishing of the request at `republish_interval_secs`
+/// - Overall timeout of `max_wait_secs`
+async fn publish_request_and_wait_for_offer(
+    signaling: &NostrSignaling,
+    request: &ManualRequest,
+    republish_interval_secs: u64,
+    max_wait_secs: u64,
+) -> Result<ManualOffer> {
+    let start_time = std::time::Instant::now();
+
+    signaling.publish_request(request).await?;
+    println!(
+        "Waiting for offer (re-publishing request every {}s, max {}s)...",
+        republish_interval_secs, max_wait_secs
+    );
+
+    loop {
+        if let Some(offer) = signaling
+            .try_wait_for_offer_timeout(republish_interval_secs)
+            .await
+        {
+            return Ok(offer);
+        }
+
+        // Check overall timeout
+        if start_time.elapsed().as_secs() >= max_wait_secs {
+            anyhow::bail!(
+                "Timeout waiting for offer from peer ({}s)",
+                max_wait_secs
+            );
+        }
+
+        // Re-publish request
+        println!("Re-publishing request...");
+        signaling.publish_request(request).await?;
     }
 }
 
@@ -939,14 +980,27 @@ pub async fn run_nostr_tcp_sender(
     // Subscribe to incoming events
     signaling.subscribe().await?;
 
-    // Generate session ID to distinguish this session from stale events
-    let session_id = generate_session_id();
-    println!("Session ID: {}", session_id);
+    // Wait for request from receiver first
+    println!("Waiting for request from receiver...");
+    let request = signaling.wait_for_request().await?;
 
-    // Gather ICE candidates
+    if request.version != MANUAL_SIGNAL_VERSION {
+        anyhow::bail!(
+            "Manual signaling version mismatch (expected {}, got {})",
+            MANUAL_SIGNAL_VERSION,
+            request.version
+        );
+    }
+    println!("Received request from receiver");
+
+    // Now gather our ICE candidates
     let ice = IceEndpoint::gather(&stun_servers).await?;
     let local_creds = ice.local_credentials();
     let local_candidates = ice.local_candidates();
+
+    // Generate session ID to distinguish this session from stale events
+    let session_id = generate_session_id();
+    println!("Session ID: {}", session_id);
 
     let quic_identity = quic::generate_server_identity()?;
 
@@ -980,13 +1034,14 @@ pub async fn run_nostr_tcp_sender(
     // Disconnect from Nostr (signaling complete)
     signaling.disconnect().await;
 
+    // Use receiver's ICE credentials from the REQUEST (not answer)
     let remote_creds = str0m::IceCreds {
-        ufrag: answer.ice_ufrag,
-        pass: answer.ice_pwd,
+        ufrag: request.ice_ufrag,
+        pass: request.ice_pwd,
     };
 
     let ice_conn = ice
-        .connect(IceRole::Controlling, remote_creds, answer.candidates)
+        .connect(IceRole::Controlling, remote_creds, request.candidates)
         .await?;
 
     // Spawn the ICE keeper to handle STUN packets in the background
@@ -1059,13 +1114,27 @@ pub async fn run_nostr_tcp_receiver(
     // Subscribe to incoming events
     signaling.subscribe().await?;
 
-    // Gather ICE candidates
+    // Gather ICE candidates first (before sending request)
     let ice = IceEndpoint::gather(&stun_servers).await?;
     let local_creds = ice.local_credentials();
     let local_candidates = ice.local_candidates();
 
-    // Wait for offer from sender
-    let offer = signaling.wait_for_offer().await?;
+    // Create and publish request to initiate session
+    let request = ManualRequest {
+        version: MANUAL_SIGNAL_VERSION,
+        ice_ufrag: local_creds.ufrag.clone(),
+        ice_pwd: local_creds.pass.clone(),
+        candidates: local_candidates.clone(),
+    };
+
+    // Publish request and wait for offer (re-publish periodically)
+    let offer = publish_request_and_wait_for_offer(
+        &signaling,
+        &request,
+        republish_interval_secs,
+        max_wait_secs,
+    )
+    .await?;
 
     if offer.version != MANUAL_SIGNAL_VERSION {
         anyhow::bail!(
@@ -1197,14 +1266,27 @@ pub async fn run_nostr_udp_sender(
     // Subscribe to incoming events
     signaling.subscribe().await?;
 
-    // Generate session ID to distinguish this session from stale events
-    let session_id = generate_session_id();
-    println!("Session ID: {}", session_id);
+    // Wait for request from receiver first
+    println!("Waiting for request from receiver...");
+    let request = signaling.wait_for_request().await?;
 
-    // Gather ICE candidates
+    if request.version != MANUAL_SIGNAL_VERSION {
+        anyhow::bail!(
+            "Manual signaling version mismatch (expected {}, got {})",
+            MANUAL_SIGNAL_VERSION,
+            request.version
+        );
+    }
+    println!("Received request from receiver");
+
+    // Now gather our ICE candidates
     let ice = IceEndpoint::gather(&stun_servers).await?;
     let local_creds = ice.local_credentials();
     let local_candidates = ice.local_candidates();
+
+    // Generate session ID to distinguish this session from stale events
+    let session_id = generate_session_id();
+    println!("Session ID: {}", session_id);
 
     let quic_identity = quic::generate_server_identity()?;
 
@@ -1238,13 +1320,14 @@ pub async fn run_nostr_udp_sender(
     // Disconnect from Nostr (signaling complete)
     signaling.disconnect().await;
 
+    // Use receiver's ICE credentials from the REQUEST (not answer)
     let remote_creds = str0m::IceCreds {
-        ufrag: answer.ice_ufrag,
-        pass: answer.ice_pwd,
+        ufrag: request.ice_ufrag,
+        pass: request.ice_pwd,
     };
 
     let ice_conn = ice
-        .connect(IceRole::Controlling, remote_creds, answer.candidates)
+        .connect(IceRole::Controlling, remote_creds, request.candidates)
         .await?;
 
     // Spawn the ICE keeper to handle STUN packets in the background
@@ -1323,13 +1406,27 @@ pub async fn run_nostr_udp_receiver(
     // Subscribe to incoming events
     signaling.subscribe().await?;
 
-    // Gather ICE candidates
+    // Gather ICE candidates first (before sending request)
     let ice = IceEndpoint::gather(&stun_servers).await?;
     let local_creds = ice.local_credentials();
     let local_candidates = ice.local_candidates();
 
-    // Wait for offer from sender
-    let offer = signaling.wait_for_offer().await?;
+    // Create and publish request to initiate session
+    let request = ManualRequest {
+        version: MANUAL_SIGNAL_VERSION,
+        ice_ufrag: local_creds.ufrag.clone(),
+        ice_pwd: local_creds.pass.clone(),
+        candidates: local_candidates.clone(),
+    };
+
+    // Publish request and wait for offer (re-publish periodically)
+    let offer = publish_request_and_wait_for_offer(
+        &signaling,
+        &request,
+        republish_interval_secs,
+        max_wait_secs,
+    )
+    .await?;
 
     if offer.version != MANUAL_SIGNAL_VERSION {
         anyhow::bail!(

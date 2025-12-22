@@ -58,6 +58,16 @@ pub struct ManualAnswer {
     pub session_id: Option<String>,
 }
 
+/// Request from receiver to initiate a tunnel session (for nostr mode).
+/// Contains receiver's ICE credentials, sent before offer to trigger session start.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManualRequest {
+    pub version: u16,
+    pub ice_ufrag: String,
+    pub ice_pwd: String,
+    pub candidates: Vec<String>,
+}
+
 // ============================================================================
 // Iroh Manual Mode (v2) - Iroh endpoint
 // ============================================================================

@@ -11,13 +11,14 @@ use sha2::{Digest, Sha256};
 use std::time::Duration;
 use tokio::sync::broadcast::error::{RecvError, TryRecvError};
 
-use super::signaling::{ManualAnswer, ManualOffer};
+use super::signaling::{ManualAnswer, ManualOffer, ManualRequest};
 
 /// Custom event kind for tunnel-rs signaling (ephemeral range)
 fn tunnel_signaling_kind() -> Kind {
     Kind::from_u16(24242)
 }
 
+const SIGNALING_TYPE_REQUEST: &str = "tunnel-request";
 const SIGNALING_TYPE_OFFER: &str = "tunnel-offer";
 const SIGNALING_TYPE_ANSWER: &str = "tunnel-answer";
 
@@ -157,9 +158,32 @@ impl NostrSignaling {
         Ok(())
     }
 
-    /// Wait for an offer from the peer (uses default timeout)
-    pub async fn wait_for_offer(&self) -> Result<ManualOffer> {
-        self.wait_for_message(SIGNALING_TYPE_OFFER, DEFAULT_SIGNALING_TIMEOUT_SECS)
+    /// Publish an ICE request to the peer (receiver -> sender to initiate session)
+    pub async fn publish_request(&self, request: &ManualRequest) -> Result<()> {
+        let json = serde_json::to_string(request)?;
+        let content = URL_SAFE_NO_PAD.encode(json.as_bytes());
+
+        let event = self.create_signaling_event(SIGNALING_TYPE_REQUEST, &content)?;
+
+        self.client
+            .send_event(&event)
+            .await
+            .context("Failed to publish ICE request")?;
+
+        println!("Published ICE request to Nostr relays");
+        Ok(())
+    }
+
+    /// Wait for a request from the peer (uses default timeout)
+    pub async fn wait_for_request(&self) -> Result<ManualRequest> {
+        self.wait_for_message(SIGNALING_TYPE_REQUEST, DEFAULT_SIGNALING_TIMEOUT_SECS)
+            .await
+    }
+
+    /// Wait for an offer from the peer with custom timeout, returns None on timeout.
+    /// Use this variant for re-publish loops where timeout is expected and not an error.
+    pub async fn try_wait_for_offer_timeout(&self, timeout_secs: u64) -> Option<ManualOffer> {
+        self.wait_for_message_optional(SIGNALING_TYPE_OFFER, timeout_secs)
             .await
     }
 
