@@ -320,8 +320,6 @@ Uses full ICE (Interactive Connectivity Establishment) with str0m + quinn QUIC. 
 
 **NAT Traversal:** Full ICE implementation with STUN candidate gathering and connectivity checks. This provides the best NAT traversal success rate, including support for symmetric NATs that fail with simpler STUN-only approaches.
 
-**Note:** Custom mode and iroh-manual mode both use the same signaling block label naming (`-----BEGIN TUNNEL-RS MANUAL OFFER/ANSWER-----`), though they differ in transport protocol and ICE support.
-
 ## Architecture
 
 ```
