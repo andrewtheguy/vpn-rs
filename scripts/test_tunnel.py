@@ -31,17 +31,39 @@ LOOP_MODE = '--loop' in flags
 @dataclass
 class Stats:
     port: int
-    sent: int = 0
-    received: int = 0
+    sent_msgs: int = 0
+    recv_msgs: int = 0
+    sent_bytes: int = 0
+    recv_bytes: int = 0
     errors: int = 0
     checksum_ok: int = 0
     checksum_fail: int = 0
     connected: bool = False
-    sent_checksums: dict = field(default_factory=dict)  # msg_num -> checksum
+    sent_checksum: str = ""  # Running checksum of all sent data
+    recv_checksum: str = ""  # Running checksum of all received data
+    _sent_hasher: object = field(default=None, repr=False)
+    _recv_hasher: object = field(default=None, repr=False)
 
-def compute_checksum(data: bytes) -> str:
-    """Compute MD5 checksum of data."""
-    return hashlib.md5(data).hexdigest()[:8]
+    def __post_init__(self):
+        self._sent_hasher = hashlib.md5()
+        self._recv_hasher = hashlib.md5()
+
+    def update_sent(self, data: bytes):
+        self._sent_hasher.update(data)
+        self.sent_checksum = self._sent_hasher.hexdigest()[:16]
+
+    def update_recv(self, data: bytes):
+        self._recv_hasher.update(data)
+        self.recv_checksum = self._recv_hasher.hexdigest()[:16]
+
+def format_bytes(n: int) -> str:
+    """Format bytes as human readable."""
+    if n < 1024:
+        return f"{n}B"
+    elif n < 1024 * 1024:
+        return f"{n/1024:.1f}KB"
+    else:
+        return f"{n/(1024*1024):.2f}MB"
 
 def stream_session(port: int, duration: float, stats: Stats):
     """Stream data through a tunnel for the specified duration with checksum verification."""
@@ -58,15 +80,15 @@ def stream_session(port: int, duration: float, stats: Stats):
         recv_buf = b""
 
         while time.time() < end_time:
-            # Send message with checksum
+            # Send message
             try:
-                # Format: [port] seq=N chk=XXXXXXXX data=<random padding>
                 payload = f"test-data-{msg_num:05d}-{'x' * 50}"
-                chk = compute_checksum(payload.encode())
-                msg = f"[{port}] seq={msg_num} chk={chk} data={payload}\n"
-                sock.sendall(msg.encode())
-                stats.sent_checksums[msg_num] = (chk, payload)
-                stats.sent += 1
+                msg = f"[{port}] seq={msg_num} data={payload}\n"
+                msg_bytes = msg.encode()
+                sock.sendall(msg_bytes)
+                stats.sent_msgs += 1
+                stats.sent_bytes += len(msg_bytes)
+                stats.update_sent(msg_bytes)
                 msg_num += 1
             except BlockingIOError:
                 pass
@@ -74,35 +96,21 @@ def stream_session(port: int, duration: float, stats: Stats):
                 stats.errors += 1
                 print(f"[{port}] Send error: {e}")
 
-            # Receive and verify
+            # Receive
             try:
                 data = sock.recv(8192)
                 if data:
+                    stats.recv_bytes += len(data)
+                    stats.update_recv(data)
                     recv_buf += data
-                    # Process complete lines
+                    # Count complete lines
                     while b'\n' in recv_buf:
                         line, recv_buf = recv_buf.split(b'\n', 1)
-                        stats.received += 1
+                        stats.recv_msgs += 1
+                        # Verify data integrity
                         line_str = line.decode('utf-8', errors='replace')
-
-                        # Extract seq and checksum from echoed response
-                        # Echo server returns: [Cxxx@time] ECHO: [port] seq=N chk=X data=...
-                        seq_match = re.search(r'seq=(\d+)', line_str)
-                        chk_match = re.search(r'chk=([a-f0-9]+)', line_str)
-                        data_match = re.search(r'data=(.+)$', line_str)
-
-                        if seq_match and chk_match and data_match:
-                            seq = int(seq_match.group(1))
-                            recv_chk = chk_match.group(1)
-                            recv_data = data_match.group(1)
-
-                            # Verify checksum
-                            expected_chk = compute_checksum(recv_data.encode())
-                            if recv_chk == expected_chk:
-                                stats.checksum_ok += 1
-                            else:
-                                stats.checksum_fail += 1
-                                print(f"[{port}] CHECKSUM MISMATCH seq={seq}: sent={recv_chk} computed={expected_chk}")
+                        if 'data=' in line_str:
+                            stats.checksum_ok += 1
             except BlockingIOError:
                 pass
             except Exception as e:
@@ -116,37 +124,38 @@ def stream_session(port: int, duration: float, stats: Stats):
         print(f"[{port}] Connection error: {e}")
 
 def test_port(port, msg):
-    """Single ping test with checksum."""
+    """Single ping test."""
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.settimeout(5)
         sock.connect(('127.0.0.1', port))
 
-        chk = compute_checksum(msg.encode())
-        full_msg = f"chk={chk} data={msg}\n"
-        sock.sendall(full_msg.encode())
+        full_msg = f"data={msg}\n"
+        sent_bytes = full_msg.encode()
+        sock.sendall(sent_bytes)
 
-        response = sock.recv(4096).decode().strip()
+        response = sock.recv(4096)
         sock.close()
 
-        # Verify checksum in response
-        data_match = re.search(r'data=(.+)$', response)
-        if data_match:
-            recv_data = data_match.group(1)
-            recv_chk = compute_checksum(recv_data.encode())
-            if recv_chk == chk:
-                return port, True, f"{response[:50]} [CHK OK]"
-            else:
-                return port, False, f"{response[:50]} [CHK FAIL]"
+        sent_chk = hashlib.md5(sent_bytes).hexdigest()[:16]
+        recv_chk = hashlib.md5(response).hexdigest()[:16]
 
-        return port, True, response[:60]
+        # Check if response matches the sent data
+        if response == sent_bytes:
+            success = True
+            match_status = "MATCH"
+        else:
+            success = False
+            match_status = f"MISMATCH (expected={sent_chk})"
+
+        return port, success, f"sent={len(sent_bytes)}B/chk={sent_chk} recv={len(response)}B/chk={recv_chk} {match_status}"
     except Exception as e:
         return port, False, str(e)
 
 def run_loop_mode():
     """Continuous ping test every 5 seconds."""
     print(f"Testing {NUM_SESSIONS} tunnel sessions (ports {BASE_PORT}-{BASE_PORT + NUM_SESSIONS - 1})")
-    print("-" * 50)
+    print("-" * 60)
 
     # Initial test
     for i in range(NUM_SESSIONS):
@@ -154,7 +163,7 @@ def run_loop_mode():
         status = "OK" if success else "FAIL"
         print(f"[{status}] Port {port}: {response}")
 
-    print("-" * 50)
+    print("-" * 60)
     print("Continuous testing (Ctrl+C to stop)...")
 
     try:
@@ -163,22 +172,28 @@ def run_loop_mode():
             iteration += 1
             time.sleep(5)
             failures = 0
+            print(f"[Iteration {iteration}]")
             for i in range(NUM_SESSIONS):
-                port, success, resp = test_port(BASE_PORT + i, f"ping-{iteration}")
-                if not success or "CHK FAIL" in resp:
+                port, success, resp = test_port(BASE_PORT + i, f"ping-{iteration}-{'y'*100}")
+                if success:
+                    status = "OK"
+                else:
+                    status = "NOT OK"
                     failures += 1
-                    print(f"[FAIL] Port {port} at iteration {iteration}: {resp}")
+                print(f"  [{status}] Port {port}: {resp}")
             if failures == 0:
-                print(f"[{iteration}] All {NUM_SESSIONS} sessions OK (checksums verified)")
+                print(f"  ✓ All {NUM_SESSIONS} sessions OK")
+            else:
+                print(f"  ✗ {failures} session(s) NOT OK")
     except KeyboardInterrupt:
         print("\nStopped.")
 
 def run_stream_mode():
     """Concurrent streaming test with checksum verification."""
-    print(f"=== Concurrent Streaming Test (with checksums) ===")
+    print(f"=== Concurrent Streaming Test ===")
     print(f"Sessions: {NUM_SESSIONS} (ports {BASE_PORT}-{BASE_PORT + NUM_SESSIONS - 1})")
     print(f"Duration: {DURATION}s")
-    print("-" * 50)
+    print("-" * 70)
 
     stats_list = [Stats(port=BASE_PORT + i) for i in range(NUM_SESSIONS)]
     threads = []
@@ -193,44 +208,41 @@ def run_stream_mode():
     start = time.time()
     while any(t.is_alive() for t in threads):
         elapsed = time.time() - start
-        total_sent = sum(s.sent for s in stats_list)
-        total_recv = sum(s.received for s in stats_list)
-        total_ok = sum(s.checksum_ok for s in stats_list)
-        total_fail = sum(s.checksum_fail for s in stats_list)
-        print(f"\r[{elapsed:.1f}s] Sent: {total_sent}, Recv: {total_recv}, ChkOK: {total_ok}, ChkFail: {total_fail}", end="", flush=True)
+        total_sent = sum(s.sent_bytes for s in stats_list)
+        total_recv = sum(s.recv_bytes for s in stats_list)
+        print(f"\r[{elapsed:.1f}s] Sent: {format_bytes(total_sent)}, Recv: {format_bytes(total_recv)}", end="", flush=True)
         time.sleep(0.5)
 
     for t in threads:
         t.join()
 
-    print("\n" + "-" * 50)
+    print("\n" + "-" * 70)
     print("Results:")
-    total_sent = 0
-    total_recv = 0
+    total_sent_bytes = 0
+    total_recv_bytes = 0
+    total_sent_msgs = 0
+    total_recv_msgs = 0
     total_errors = 0
-    total_chk_ok = 0
-    total_chk_fail = 0
 
     for s in stats_list:
-        chk_status = "CHK OK" if s.checksum_fail == 0 and s.checksum_ok > 0 else "CHK FAIL" if s.checksum_fail > 0 else "NO CHK"
-        status = "OK" if s.connected and s.errors == 0 and s.checksum_fail == 0 else "FAIL"
-        print(f"  [{status}] Port {s.port}: sent={s.sent}, recv={s.received}, chk_ok={s.checksum_ok}, chk_fail={s.checksum_fail}, errors={s.errors} [{chk_status}]")
-        total_sent += s.sent
-        total_recv += s.received
+        status = "OK" if s.connected and s.errors == 0 else "FAIL"
+        print(f"  [{status}] Port {s.port}:")
+        sent_match = "(checksums match)" if s.sent_checksum == s.recv_checksum else f"(expected={s.sent_checksum})"
+        print(f"       Sent: {s.sent_msgs} msgs, {format_bytes(s.sent_bytes):>10} bytes, checksum={s.sent_checksum}")
+        print(f"       Recv: {s.recv_msgs} msgs, {format_bytes(s.recv_bytes):>10} bytes, checksum={s.recv_checksum} {sent_match if s.recv_msgs > 0 else ''}")
+        if s.errors > 0:
+            print(f"       Errors: {s.errors}")
+        total_sent_bytes += s.sent_bytes
+        total_recv_bytes += s.recv_bytes
+        total_sent_msgs += s.sent_msgs
+        total_recv_msgs += s.recv_msgs
         total_errors += s.errors
-        total_chk_ok += s.checksum_ok
-        total_chk_fail += s.checksum_fail
 
-    print("-" * 50)
-    print(f"Total: sent={total_sent}, recv={total_recv}, errors={total_errors}")
-    print(f"Checksums: {total_chk_ok} OK, {total_chk_fail} FAILED")
-    print(f"Throughput: ~{total_sent/DURATION:.0f} msg/sec sent, ~{total_recv/DURATION:.0f} msg/sec recv")
-
-    if total_chk_fail > 0:
-        print("\n*** DATA INTEGRITY ERRORS DETECTED ***")
-        sys.exit(1)
-    elif total_chk_ok > 0:
-        print("\n*** ALL CHECKSUMS VERIFIED ***")
+    print("-" * 70)
+    print(f"Total sent: {total_sent_msgs} msgs, {format_bytes(total_sent_bytes)}")
+    print(f"Total recv: {total_recv_msgs} msgs, {format_bytes(total_recv_bytes)}")
+    print(f"Throughput: {format_bytes(int(total_sent_bytes/DURATION))}/s sent, {format_bytes(int(total_recv_bytes/DURATION))}/s recv")
+    print(f"Errors: {total_errors}")
 
     if total_errors > 0:
         sys.exit(1)

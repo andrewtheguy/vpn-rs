@@ -25,10 +25,8 @@ def handle_client(conn, addr, conn_id):
             data = conn.recv(4096)
             if not data:
                 break
+            conn.sendall(data)
             msg = data.decode('utf-8', errors='replace').strip()
-            timestamp = datetime.now().strftime('%H:%M:%S')
-            response = f"[{conn_id}@{timestamp}] ECHO: {msg}\n"
-            conn.sendall(response.encode())
             print(f"[{conn_id}] Echoed: {msg[:50]}{'...' if len(msg) > 50 else ''}")
     except Exception as e:
         print(f"[{conn_id}] Error: {e}")
