@@ -10,7 +10,7 @@
 
 # Required: validates config matches CLI command
 role = "receiver"
-mode = "iroh-default"
+mode = "iroh-default"  # or "iroh-manual" or "custom"
 
 # Shared options
 protocol = "tcp"  # "tcp" or "udp"

@@ -165,7 +165,7 @@ Use `--default-config` to load from the default location, or `-c <path>` for a c
 
 # Required: validates config matches CLI command
 role = "sender"
-mode = "iroh-default"
+mode = "iroh-default"  # or "iroh-manual" or "custom"
 
 # Shared options
 protocol = "tcp"
@@ -178,6 +178,9 @@ relay_only = false
 dns_server = "https://dns.example.com/pkarr"
 ```
 
+> [!NOTE]
+> See [`sender.toml.example`](sender.toml.example) for configuration options for other modes and all available options for each mode.
+
 ```bash
 # Load from default location (mode inferred from config)
 tunnel-rs sender --default-config
@@ -186,9 +189,6 @@ tunnel-rs sender --default-config
 tunnel-rs sender -c ./my-sender.toml
 ```
 
-> [!NOTE]
-> See [`sender.toml.example`](sender.toml.example) for comprehensive configuration examples showing all available options for each mode.
-
 ### Receiver Config Example
 
 ```toml
@@ -196,7 +196,7 @@ tunnel-rs sender -c ./my-sender.toml
 
 # Required: validates config matches CLI command
 role = "receiver"
-mode = "iroh-default"
+mode = "iroh-default"  # or "iroh-manual" or "custom"
 
 # Shared options
 protocol = "tcp"
@@ -208,6 +208,9 @@ relay_urls = ["https://relay.example.com"]
 relay_only = false
 dns_server = "https://dns.example.com/pkarr"
 ```
+
+> [!NOTE]
+> See [`receiver.toml.example`](receiver.toml.example) for configuration options for other modes and all available options for each mode.
 
 ```bash
 # Load from default location (mode inferred from config)
