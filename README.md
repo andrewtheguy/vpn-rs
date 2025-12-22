@@ -1,6 +1,23 @@
 # tunnel-rs
 
-TCP/UDP port forwarding through P2P connections.
+**Secure peer-to-peer TCP/UDP port forwarding with NAT traversal.**
+
+tunnel-rs enables you to forward TCP and UDP traffic between machines without requiring public IP addresses, port forwarding, or VPN infrastructure. It establishes direct encrypted connections between peers using modern P2P networking techniques.
+
+**Key Features:**
+- **End-to-end encryption** via QUIC/TLS 1.3
+- **NAT traversal** with multiple strategies (relay fallback, STUN, full ICE)
+- **Zero configuration** for automatic peer discovery (iroh-default mode)
+- **Serverless options** with manual signaling (iroh-manual, custom modes)
+- **Protocol support** for both TCP and UDP tunneling
+- **High performance** with QUIC multiplexing
+
+**Common Use Cases:**
+- SSH access to machines behind NAT/firewalls
+- WireGuard VPN tunneling over P2P connections
+- Remote desktop access without port forwarding
+- Secure service exposure without public infrastructure
+- Development and testing across network boundaries
 
 ## Overview
 
