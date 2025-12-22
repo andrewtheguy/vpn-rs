@@ -37,6 +37,8 @@ pub fn generate_server_identity() -> Result<QuicServerIdentity> {
         ServerConfig::with_single_cert(cert_chain, key.into()).context("Invalid TLS config")?;
     if let Some(transport) = Arc::get_mut(&mut server_config.transport) {
         transport.max_concurrent_uni_streams(0_u8.into());
+        transport.max_idle_timeout(None);
+        transport.keep_alive_interval(Some(std::time::Duration::from_secs(15)));
     }
 
     Ok(QuicServerIdentity {
@@ -90,7 +92,14 @@ fn build_client_config(expected_fingerprint: &str) -> Result<ClientConfig> {
 
     let quic_cfg = QuicClientConfig::try_from(rustls_config)
         .context("Failed to build QUIC client config")?;
-    Ok(ClientConfig::new(Arc::new(quic_cfg)))
+
+    let mut client_config = ClientConfig::new(Arc::new(quic_cfg));
+    let mut transport = quinn::TransportConfig::default();
+    transport.max_idle_timeout(None);
+    transport.keep_alive_interval(Some(std::time::Duration::from_secs(15)));
+    client_config.transport_config(Arc::new(transport));
+
+    Ok(client_config)
 }
 
 fn cert_fingerprint_hex(cert_der: &[u8]) -> String {

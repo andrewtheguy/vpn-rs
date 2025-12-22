@@ -97,6 +97,7 @@ pub fn create_endpoint_builder(
 ) -> Result<EndpointBuilder> {
     let mut transport_config = iroh::endpoint::TransportConfig::default();
     transport_config.max_idle_timeout(None);
+    transport_config.keep_alive_interval(Some(std::time::Duration::from_secs(15)));
 
     let mut builder = Endpoint::empty_builder(relay_mode)
         .transport_config(transport_config);

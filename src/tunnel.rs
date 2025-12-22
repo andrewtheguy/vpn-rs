@@ -251,7 +251,7 @@ pub async fn run_udp_receiver(
     println!("Connected to sender!");
     print_connection_type(&endpoint, conn.remote_id());
 
-    let (send_stream, recv_stream) = conn.open_bi().await.context("Failed to open stream")?;
+    let (send_stream, recv_stream) = open_bi_with_retry_iroh(&conn).await?;
 
     let udp_socket = Arc::new(
         UdpSocket::bind(listen_addr)
@@ -889,7 +889,7 @@ pub async fn run_manual_udp_receiver(listen: String, stun_servers: Vec<String>) 
         .context("Failed to connect to sender")?;
     println!("Connected to sender over QUIC.");
 
-    let (send_stream, recv_stream) = conn.open_bi().await.context("Failed to open stream")?;
+    let (send_stream, recv_stream) = open_bi_with_retry(&conn).await?;
 
     let udp_socket = Arc::new(
         UdpSocket::bind(listen_addr)
@@ -1620,7 +1620,7 @@ pub async fn run_nostr_udp_receiver(
         .context("Failed to connect to sender")?;
     println!("Connected to sender over QUIC.");
 
-    let (send_stream, recv_stream) = conn.open_bi().await.context("Failed to open stream")?;
+    let (send_stream, recv_stream) = open_bi_with_retry(&conn).await?;
 
     let udp_socket = Arc::new(
         UdpSocket::bind(listen_addr)
@@ -1679,13 +1679,49 @@ async fn handle_tcp_sender_stream_quic(
 /// the STREAM frame is immediately sent to the peer.
 const STREAM_OPEN_MARKER: u8 = 0x00;
 
+/// Maximum retry attempts for opening QUIC streams
+const STREAM_OPEN_MAX_RETRIES: u32 = 3;
+
+/// Base delay for exponential backoff (doubles each retry)
+const STREAM_OPEN_BASE_DELAY_MS: u64 = 100;
+
+/// Open a QUIC bidirectional stream with retry and exponential backoff.
+/// Returns the stream pair on success, or an error after all retries are exhausted.
+async fn open_bi_with_retry(
+    conn: &quinn::Connection,
+) -> Result<(quinn::SendStream, quinn::RecvStream)> {
+    let mut last_error = None;
+
+    for attempt in 0..STREAM_OPEN_MAX_RETRIES {
+        match conn.open_bi().await {
+            Ok(streams) => return Ok(streams),
+            Err(e) => {
+                let delay_ms = STREAM_OPEN_BASE_DELAY_MS * (1 << attempt);
+                eprintln!(
+                    "Failed to open QUIC stream (attempt {}/{}): {}. Retrying in {}ms...",
+                    attempt + 1,
+                    STREAM_OPEN_MAX_RETRIES,
+                    e,
+                    delay_ms
+                );
+                last_error = Some(e);
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+            }
+        }
+    }
+
+    Err(last_error
+        .map(|e| anyhow::anyhow!("Failed to open QUIC stream after {} retries: {}", STREAM_OPEN_MAX_RETRIES, e))
+        .unwrap_or_else(|| anyhow::anyhow!("Failed to open QUIC stream")))
+}
+
 async fn handle_tcp_receiver_connection_quic(
     conn: Arc<quinn::Connection>,
     tcp_stream: TcpStream,
     peer_addr: SocketAddr,
     tunnel_established: Arc<AtomicBool>,
 ) -> Result<()> {
-    let (mut send_stream, recv_stream) = conn.open_bi().await.context("Failed to open QUIC stream")?;
+    let (mut send_stream, recv_stream) = open_bi_with_retry(&conn).await?;
 
     // Write a marker byte to ensure the STREAM frame is sent to the peer.
     // QUIC defers sending STREAM frames until actual data is written,
@@ -1849,13 +1885,42 @@ async fn forward_stream_to_udp_receiver_quic(
 
 // no longer used: multiline payloads are read via markers in signaling.rs
 
+/// Open an iroh QUIC bidirectional stream with retry and exponential backoff.
+async fn open_bi_with_retry_iroh(
+    conn: &iroh::endpoint::Connection,
+) -> Result<(iroh::endpoint::SendStream, iroh::endpoint::RecvStream)> {
+    let mut last_error = None;
+
+    for attempt in 0..STREAM_OPEN_MAX_RETRIES {
+        match conn.open_bi().await {
+            Ok(streams) => return Ok(streams),
+            Err(e) => {
+                let delay_ms = STREAM_OPEN_BASE_DELAY_MS * (1 << attempt);
+                eprintln!(
+                    "Failed to open QUIC stream (attempt {}/{}): {}. Retrying in {}ms...",
+                    attempt + 1,
+                    STREAM_OPEN_MAX_RETRIES,
+                    e,
+                    delay_ms
+                );
+                last_error = Some(e);
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+            }
+        }
+    }
+
+    Err(last_error
+        .map(|e| anyhow::anyhow!("Failed to open QUIC stream after {} retries: {}", STREAM_OPEN_MAX_RETRIES, e))
+        .unwrap_or_else(|| anyhow::anyhow!("Failed to open QUIC stream")))
+}
+
 async fn handle_tcp_receiver_connection(
     conn: Arc<iroh::endpoint::Connection>,
     tcp_stream: TcpStream,
     peer_addr: SocketAddr,
     tunnel_established: Arc<AtomicBool>,
 ) -> Result<()> {
-    let (send_stream, recv_stream) = conn.open_bi().await.context("Failed to open QUIC stream")?;
+    let (send_stream, recv_stream) = open_bi_with_retry_iroh(&conn).await?;
 
     // Print success message only on first successful stream
     if !tunnel_established.swap(true, Ordering::Relaxed) {
@@ -1922,6 +1987,7 @@ async fn create_iroh_manual_endpoint(alpn: &[u8]) -> Result<(Endpoint, Arc<Stati
 
     let mut transport_config = iroh::endpoint::TransportConfig::default();
     transport_config.max_idle_timeout(None);
+    transport_config.keep_alive_interval(Some(std::time::Duration::from_secs(15)));
 
     let endpoint = Endpoint::empty_builder(RelayMode::Disabled)
         .transport_config(transport_config)
@@ -2407,7 +2473,7 @@ pub async fn run_iroh_manual_udp_receiver(listen: String, stun_servers: Vec<Stri
 
     println!("Peer connected: {}", conn.remote_id());
 
-    let (send_stream, recv_stream) = conn.open_bi().await.context("Failed to open stream")?;
+    let (send_stream, recv_stream) = open_bi_with_retry_iroh(&conn).await?;
 
     let udp_socket = Arc::new(
         UdpSocket::bind(listen_addr)
