@@ -15,7 +15,14 @@
       "Bash(pkill:*)",
       "Bash(timeout 60 python3 /tmp/test_tunnel.py)",
       "Bash(timeout 45 python3 /tmp/test_tunnel.py)",
-      "Bash(grep:*)"
+      "Bash(grep:*)",
+      "WebFetch(domain:crates.io)",
+      "WebFetch(domain:www.iroh.computer)",
+      "WebSearch",
+      "WebFetch(domain:github.com)",
+      "mcp__plugin_context7_context7__resolve-library-id",
+      "mcp__plugin_context7_context7__get-library-docs",
+      "Bash(cargo run:*)"
     ]
   }
 }

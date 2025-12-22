@@ -1,8 +1,9 @@
 //! TCP and UDP tunnel implementations.
 
 use anyhow::{Context, Result};
-use iroh::EndpointId;
-use std::net::SocketAddr;
+use iroh::discovery::static_provider::StaticProvider;
+use iroh::{Endpoint, EndpointAddr, EndpointId, RelayMode, TransportAddr};
+use std::net::{SocketAddr, ToSocketAddrs};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -14,14 +15,15 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::endpoint::{
     connect_to_sender, create_receiver_endpoint, create_sender_endpoint, print_connection_type,
-    validate_direct_only, validate_relay_only, wait_for_direct_connection, DirectConnectionResult,
-    DIRECT_WAIT_TIMEOUT, TCP_ALPN, UDP_ALPN,
+    validate_relay_only, TCP_ALPN, UDP_ALPN,
 };
 use crate::manual::ice::{IceEndpoint, IceRole};
 use crate::manual::quic;
 use crate::manual::signaling::{
-    display_answer, display_offer, read_answer_from_stdin, read_offer_from_stdin, ManualAnswer,
-    ManualOffer, MANUAL_SIGNAL_VERSION,
+    display_answer, display_iroh_answer, display_iroh_offer, display_offer,
+    read_answer_from_stdin, read_iroh_answer_from_stdin, read_iroh_offer_from_stdin,
+    read_offer_from_stdin, IrohManualAnswer, IrohManualOffer, ManualAnswer, ManualOffer,
+    IROH_SIGNAL_VERSION, MANUAL_SIGNAL_VERSION,
 };
 
 /// Timeout for QUIC connection (matches webrtc crate's 180 second connection timeout)
@@ -36,19 +38,14 @@ pub async fn run_udp_sender(
     secret_file: Option<PathBuf>,
     relay_urls: Vec<String>,
     relay_only: bool,
-    direct_only: bool,
     dns_server: Option<String>,
 ) -> Result<()> {
     validate_relay_only(relay_only, &relay_urls)?;
-    validate_direct_only(direct_only, relay_only)?;
 
     let target_addr: SocketAddr = target.parse().context("Invalid target address format")?;
 
     println!("UDP Tunnel - Sender Mode");
     println!("========================");
-    if direct_only {
-        println!("Direct-only mode: relay connections will be rejected");
-    }
     println!("Creating iroh endpoint...");
 
     let endpoint =
@@ -73,21 +70,6 @@ pub async fn run_udp_sender(
 
     let remote_id = conn.remote_id();
     println!("Receiver connected from: {}", remote_id);
-
-    // Check direct-only requirement
-    if direct_only {
-        println!(
-            "Waiting up to {}s for direct connection...",
-            DIRECT_WAIT_TIMEOUT.as_secs()
-        );
-        if wait_for_direct_connection(&endpoint, remote_id).await == DirectConnectionResult::StillRelay {
-            conn.close(1u32.into(), b"relay connections not allowed");
-            anyhow::bail!(
-                "Connection rejected: relay connection not allowed (direct-only mode enabled)"
-            );
-        }
-        println!("Direct connection established!");
-    }
 
     let (send_stream, recv_stream) = conn
         .accept_bi()
@@ -302,19 +284,14 @@ pub async fn run_tcp_sender(
     secret_file: Option<PathBuf>,
     relay_urls: Vec<String>,
     relay_only: bool,
-    direct_only: bool,
     dns_server: Option<String>,
 ) -> Result<()> {
     validate_relay_only(relay_only, &relay_urls)?;
-    validate_direct_only(direct_only, relay_only)?;
 
     let target_addr: SocketAddr = target.parse().context("Invalid target address format")?;
 
     println!("TCP Tunnel - Sender Mode");
     println!("========================");
-    if direct_only {
-        println!("Direct-only mode: relay connections will be rejected");
-    }
     println!("Creating iroh endpoint...");
 
     let endpoint =
@@ -347,22 +324,6 @@ pub async fn run_tcp_sender(
 
         let remote_id = conn.remote_id();
         println!("Receiver connected from: {}", remote_id);
-
-        // Check direct-only requirement
-        if direct_only {
-            println!(
-                "Waiting up to {}s for direct connection...",
-                DIRECT_WAIT_TIMEOUT.as_secs()
-            );
-            if wait_for_direct_connection(&endpoint, remote_id).await == DirectConnectionResult::StillRelay {
-                println!("Connection rejected: relay connection not allowed (direct-only mode)");
-                conn.close(1u32.into(), b"relay connections not allowed");
-                println!("Waiting for next receiver to connect...");
-                continue;
-            }
-            println!("Direct connection established!");
-        }
-
         println!("Forwarding TCP connections to {}", target_addr);
 
         let target = target_addr;
@@ -650,6 +611,186 @@ pub async fn run_manual_tcp_receiver(listen: String, stun_servers: Vec<String>) 
     }
 }
 
+// ============================================================================
+// Manual UDP Tunnel Implementation (ICE + QUIC)
+// ============================================================================
+
+pub async fn run_manual_udp_sender(target: String, stun_servers: Vec<String>) -> Result<()> {
+    let target_addr: SocketAddr = target.parse().context("Invalid target address format")?;
+
+    println!("Manual UDP Tunnel - Sender Mode");
+    println!("================================");
+
+    let ice = IceEndpoint::gather(&stun_servers).await?;
+    let local_creds = ice.local_credentials();
+    let local_candidates = ice.local_candidates();
+
+    let quic_identity = quic::generate_server_identity()?;
+
+    let offer = ManualOffer {
+        version: MANUAL_SIGNAL_VERSION,
+        ice_ufrag: local_creds.ufrag.clone(),
+        ice_pwd: local_creds.pass.clone(),
+        candidates: local_candidates,
+        quic_fingerprint: quic_identity.fingerprint.clone(),
+    };
+
+    println!("\nManual Offer (copy to receiver):");
+    display_offer(&offer)?;
+
+    println!("Paste receiver answer (include BEGIN/END markers), then press Enter:");
+    let answer = read_answer_from_stdin()?;
+    if answer.version != MANUAL_SIGNAL_VERSION {
+        anyhow::bail!(
+            "Manual signaling version mismatch (expected {}, got {})",
+            MANUAL_SIGNAL_VERSION,
+            answer.version
+        );
+    }
+
+    let remote_creds = str0m::IceCreds {
+        ufrag: answer.ice_ufrag,
+        pass: answer.ice_pwd,
+    };
+
+    let ice_conn = ice
+        .connect(IceRole::Controlling, remote_creds, answer.candidates)
+        .await?;
+
+    // Spawn the ICE keeper to handle STUN packets in the background
+    tokio::spawn(ice_conn.ice_keeper.run());
+
+    let endpoint = quic::make_server_endpoint(ice_conn.socket, quic_identity.server_config)?;
+    println!("Waiting for receiver QUIC connection (timeout: {:?})...", QUIC_CONNECTION_TIMEOUT);
+
+    let connecting = tokio::time::timeout(QUIC_CONNECTION_TIMEOUT, endpoint.accept())
+        .await
+        .context("Timeout waiting for QUIC connection")?
+        .context("No incoming QUIC connection")?;
+    let conn = tokio::time::timeout(QUIC_CONNECTION_TIMEOUT, connecting)
+        .await
+        .context("Timeout during QUIC handshake")?
+        .context("Failed to accept QUIC connection")?;
+    println!("Receiver connected over QUIC.");
+
+    let (send_stream, recv_stream) = conn
+        .accept_bi()
+        .await
+        .context("Failed to accept stream from receiver")?;
+
+    println!("Forwarding UDP traffic to {}", target_addr);
+
+    // Bind to the same address family as the target
+    let bind_addr: SocketAddr = if target_addr.is_ipv6() {
+        "[::]:0".parse().unwrap()
+    } else {
+        "0.0.0.0:0".parse().unwrap()
+    };
+    let udp_socket = Arc::new(
+        UdpSocket::bind(bind_addr)
+            .await
+            .context("Failed to bind UDP socket")?,
+    );
+
+    forward_stream_to_udp_sender_quic(recv_stream, send_stream, udp_socket, target_addr).await?;
+
+    conn.close(0u32.into(), b"done");
+    println!("Connection closed.");
+
+    Ok(())
+}
+
+pub async fn run_manual_udp_receiver(listen: String, stun_servers: Vec<String>) -> Result<()> {
+    let listen_addr: SocketAddr = listen
+        .parse()
+        .context("Invalid listen address format. Use format like 127.0.0.1:51820 or [::]:51820")?;
+
+    println!("Manual UDP Tunnel - Receiver Mode");
+    println!("=================================");
+
+    let ice = IceEndpoint::gather(&stun_servers).await?;
+    let local_creds = ice.local_credentials();
+    let local_candidates = ice.local_candidates();
+
+    println!("Paste sender offer (include BEGIN/END markers), then press Enter:");
+    let offer = read_offer_from_stdin()?;
+    if offer.version != MANUAL_SIGNAL_VERSION {
+        anyhow::bail!(
+            "Manual signaling version mismatch (expected {}, got {})",
+            MANUAL_SIGNAL_VERSION,
+            offer.version
+        );
+    }
+
+    let answer = ManualAnswer {
+        version: MANUAL_SIGNAL_VERSION,
+        ice_ufrag: local_creds.ufrag.clone(),
+        ice_pwd: local_creds.pass.clone(),
+        candidates: local_candidates,
+    };
+
+    println!("\nManual Answer (copy to sender):");
+    display_answer(&answer)?;
+
+    let remote_creds = str0m::IceCreds {
+        ufrag: offer.ice_ufrag,
+        pass: offer.ice_pwd,
+    };
+
+    let ice_conn = ice
+        .connect(IceRole::Controlled, remote_creds, offer.candidates)
+        .await?;
+
+    // Spawn the ICE keeper to handle STUN packets in the background
+    tokio::spawn(ice_conn.ice_keeper.run());
+
+    let endpoint = quic::make_client_endpoint(ice_conn.socket, &offer.quic_fingerprint)?;
+    println!("Connecting to sender via QUIC (timeout: {:?})...", QUIC_CONNECTION_TIMEOUT);
+    let connecting = endpoint
+        .connect(ice_conn.remote_addr, "manual")
+        .context("Failed to start QUIC connection")?;
+    let conn = tokio::time::timeout(QUIC_CONNECTION_TIMEOUT, connecting)
+        .await
+        .context("Timeout during QUIC connection")?
+        .context("Failed to connect to sender")?;
+    println!("Connected to sender over QUIC.");
+
+    let (send_stream, recv_stream) = conn.open_bi().await.context("Failed to open stream")?;
+
+    let udp_socket = Arc::new(
+        UdpSocket::bind(listen_addr)
+            .await
+            .context("Failed to bind UDP socket")?,
+    );
+    println!(
+        "Listening on UDP {} - configure your client to connect here",
+        listen_addr
+    );
+
+    let client_addr: Arc<Mutex<Option<SocketAddr>>> = Arc::new(Mutex::new(None));
+
+    let udp_clone = udp_socket.clone();
+    let client_clone = client_addr.clone();
+
+    tokio::select! {
+        result = forward_udp_to_stream_quic(udp_clone, send_stream, client_clone) => {
+            if let Err(e) = result {
+                eprintln!("UDP to stream error: {}", e);
+            }
+        }
+        result = forward_stream_to_udp_receiver_quic(recv_stream, udp_socket, client_addr) => {
+            if let Err(e) = result {
+                eprintln!("Stream to UDP error: {}", e);
+            }
+        }
+    }
+
+    conn.close(0u32.into(), b"done");
+    println!("Connection closed.");
+
+    Ok(())
+}
+
 async fn handle_tcp_sender_stream_quic(
     send_stream: quinn::SendStream,
     mut recv_stream: quinn::RecvStream,
@@ -726,6 +867,121 @@ async fn bridge_quinn_streams(
     Ok(())
 }
 
+// ============================================================================
+// Manual UDP Forwarding Helpers (quinn streams)
+// ============================================================================
+
+/// Read UDP packets from local socket and forward to quinn stream
+async fn forward_udp_to_stream_quic(
+    udp_socket: Arc<UdpSocket>,
+    mut send_stream: quinn::SendStream,
+    peer_addr: Arc<Mutex<Option<SocketAddr>>>,
+) -> Result<()> {
+    let mut buf = vec![0u8; 65535];
+
+    loop {
+        let (len, addr) = udp_socket
+            .recv_from(&mut buf)
+            .await
+            .context("Failed to receive UDP packet")?;
+
+        *peer_addr.lock().await = Some(addr);
+
+        let frame_len = (len as u16).to_be_bytes();
+        send_stream
+            .write_all(&frame_len)
+            .await
+            .context("Failed to write frame length")?;
+        send_stream
+            .write_all(&buf[..len])
+            .await
+            .context("Failed to write frame payload")?;
+
+        println!("-> Forwarded {} bytes from {}", len, addr);
+    }
+}
+
+/// Read from quinn stream, forward to UDP target, and send responses back (sender mode)
+async fn forward_stream_to_udp_sender_quic(
+    mut recv_stream: quinn::RecvStream,
+    mut send_stream: quinn::SendStream,
+    udp_socket: Arc<UdpSocket>,
+    target_addr: SocketAddr,
+) -> Result<()> {
+    let udp_clone = udp_socket.clone();
+
+    let response_task = tokio::spawn(async move {
+        let mut buf = vec![0u8; 65535];
+        while let Ok((len, _addr)) = udp_clone.recv_from(&mut buf).await {
+            let frame_len = (len as u16).to_be_bytes();
+            if send_stream.write_all(&frame_len).await.is_err() {
+                break;
+            }
+            if send_stream.write_all(&buf[..len]).await.is_err() {
+                break;
+            }
+            println!("-> Sent {} bytes back to receiver", len);
+        }
+    });
+
+    loop {
+        let mut len_buf = [0u8; 2];
+        if recv_stream.read_exact(&mut len_buf).await.is_err() {
+            break;
+        }
+        let len = u16::from_be_bytes(len_buf) as usize;
+
+        let mut buf = vec![0u8; len];
+        recv_stream
+            .read_exact(&mut buf)
+            .await
+            .context("Failed to read frame payload")?;
+
+        udp_socket
+            .send_to(&buf, target_addr)
+            .await
+            .context("Failed to send UDP packet")?;
+
+        println!("<- Forwarded {} bytes to {}", len, target_addr);
+    }
+
+    response_task.abort();
+    Ok(())
+}
+
+/// Read from quinn stream and forward to local UDP client (receiver mode)
+async fn forward_stream_to_udp_receiver_quic(
+    mut recv_stream: quinn::RecvStream,
+    udp_socket: Arc<UdpSocket>,
+    client_addr: Arc<Mutex<Option<SocketAddr>>>,
+) -> Result<()> {
+    loop {
+        let mut len_buf = [0u8; 2];
+        if recv_stream.read_exact(&mut len_buf).await.is_err() {
+            break;
+        }
+        let len = u16::from_be_bytes(len_buf) as usize;
+
+        let mut buf = vec![0u8; len];
+        recv_stream
+            .read_exact(&mut buf)
+            .await
+            .context("Failed to read frame payload")?;
+
+        if let Some(addr) = *client_addr.lock().await {
+            udp_socket
+                .send_to(&buf, addr)
+                .await
+                .context("Failed to send UDP packet to client")?;
+            println!("<- Forwarded {} bytes to client {}", len, addr);
+        } else {
+            println!("<- Received {} bytes but no client connected yet", len);
+        }
+    }
+
+    Ok(())
+}
+
 // no longer used: multiline payloads are read via markers in signaling.rs
 
 async fn handle_tcp_receiver_connection(
@@ -788,5 +1044,533 @@ where
     tokio::io::copy(reader, writer)
         .await
         .context("Stream copy failed")?;
+    Ok(())
+}
+
+// ============================================================================
+// Iroh Manual Mode - TCP Tunnel Implementation
+// ============================================================================
+
+/// Create an iroh endpoint for manual mode (no relay, no discovery servers)
+async fn create_iroh_manual_endpoint(alpn: &[u8]) -> Result<(Endpoint, Arc<StaticProvider>)> {
+    let discovery = Arc::new(StaticProvider::new());
+
+    let mut transport_config = iroh::endpoint::TransportConfig::default();
+    transport_config.max_idle_timeout(None);
+
+    let endpoint = Endpoint::empty_builder(RelayMode::Disabled)
+        .transport_config(transport_config)
+        .discovery(discovery.clone())
+        .alpns(vec![alpn.to_vec()])
+        .bind()
+        .await
+        .context("Failed to create iroh endpoint")?;
+
+    Ok((endpoint, discovery))
+}
+
+/// Resolve STUN server hostname to socket addresses
+fn resolve_stun_addrs(stun: &str) -> Vec<SocketAddr> {
+    match stun.to_socket_addrs() {
+        Ok(iter) => iter.collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// Get direct addresses from endpoint for signaling.
+///
+/// Returns local network interface addresses and optionally STUN-discovered
+/// public addresses. This enables both LAN connections and NAT traversal.
+async fn get_direct_addresses(endpoint: &Endpoint, stun_servers: &[String]) -> Vec<String> {
+    let bound_sockets = endpoint.bound_sockets();
+    let mut addrs = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    // Get the actual bound ports from the endpoint
+    let ipv4_port = bound_sockets.iter()
+        .find(|a| a.is_ipv4())
+        .map(|a| a.port());
+    let ipv6_port = bound_sockets.iter()
+        .find(|a| a.is_ipv6())
+        .map(|a| a.port());
+
+    // Step 1: Get STUN-discovered public addresses (for NAT traversal)
+    if !stun_servers.is_empty() {
+        println!("Discovering public addresses via STUN...");
+        let mut got_ipv4_stun = false;
+        let mut got_ipv6_stun = false;
+
+        for stun in stun_servers {
+            for server in resolve_stun_addrs(stun) {
+                // Skip if we already have STUN for this address family
+                let is_ipv4 = server.is_ipv4();
+                if is_ipv4 && got_ipv4_stun {
+                    continue;
+                }
+                if !is_ipv4 && got_ipv6_stun {
+                    continue;
+                }
+
+                // Create a wildcard socket matching the STUN server's address family
+                let bind_addr: SocketAddr = if is_ipv4 {
+                    "0.0.0.0:0".parse().unwrap()
+                } else {
+                    "[::]:0".parse().unwrap()
+                };
+
+                let stun_socket = match std::net::UdpSocket::bind(bind_addr) {
+                    Ok(s) => s,
+                    Err(_) => continue,
+                };
+                stun_socket.set_nonblocking(true).ok();
+
+                let tokio_socket = match UdpSocket::from_std(stun_socket) {
+                    Ok(s) => Arc::new(s),
+                    Err(_) => continue,
+                };
+
+                let client = stunclient::StunClient::new(server);
+                match client.query_external_address_async(&tokio_socket).await {
+                    Ok(external) => {
+                        // Use the iroh endpoint's bound port, not the STUN socket's port
+                        // This is a heuristic - many NATs use predictable port mapping
+                        let port = if is_ipv4 { ipv4_port } else { ipv6_port };
+                        if let Some(port) = port {
+                            let addr = SocketAddr::new(external.ip(), port);
+                            let addr_str = addr.to_string();
+                            if seen.insert(addr_str.clone()) {
+                                println!("  STUN: {} (via {})", addr, stun);
+                                addrs.push(addr_str);
+                            }
+                        }
+
+                        if is_ipv4 {
+                            got_ipv4_stun = true;
+                        } else {
+                            got_ipv6_stun = true;
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("  STUN query failed for {} ({}): {}", stun, server, e);
+                    }
+                }
+            }
+        }
+    }
+
+    // Step 2: Get local network interface addresses (for LAN connections)
+    println!("Local addresses:");
+    if let Ok(interfaces) = get_if_addrs::get_if_addrs() {
+        for iface in interfaces {
+            // Skip loopback interfaces
+            if iface.is_loopback() {
+                continue;
+            }
+
+            let ip = iface.ip();
+            let port = if ip.is_ipv4() { ipv4_port } else { ipv6_port };
+
+            if let Some(port) = port {
+                let addr = SocketAddr::new(ip, port);
+                let addr_str = addr.to_string();
+                if seen.insert(addr_str.clone()) {
+                    println!("  - {}", addr);
+                    addrs.push(addr_str);
+                }
+            }
+        }
+    }
+
+    addrs
+}
+
+/// Race between connecting to remote and accepting from remote.
+/// This enables NAT hole punching by having both sides send packets simultaneously.
+async fn race_connect_accept(
+    endpoint: &Endpoint,
+    remote_id: EndpointId,
+    alpn: &[u8],
+) -> Result<iroh::endpoint::Connection> {
+    use tokio::time::timeout;
+
+    let connect_timeout = Duration::from_secs(30);
+
+    println!("Racing connect vs accept for NAT hole punching...");
+
+    // Race both operations with a timeout
+    tokio::select! {
+        result = timeout(connect_timeout, async {
+            // Small delay before connecting to give the other side time to start accepting
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            endpoint.connect(EndpointAddr::new(remote_id), alpn).await
+        }) => {
+            match result {
+                Ok(Ok(conn)) => {
+                    println!("Connected via outbound connection");
+                    Ok(conn)
+                }
+                Ok(Err(e)) => Err(anyhow::anyhow!("Connect failed: {}", e)),
+                Err(_) => Err(anyhow::anyhow!("Connect timeout")),
+            }
+        }
+        result = timeout(connect_timeout, async {
+            match endpoint.accept().await {
+                Some(incoming) => incoming.await.map_err(|e| anyhow::anyhow!("Accept error: {}", e)),
+                None => Err(anyhow::anyhow!("Endpoint closed")),
+            }
+        }) => {
+            match result {
+                Ok(Ok(conn)) => {
+                    println!("Connected via inbound connection");
+                    Ok(conn)
+                }
+                Ok(Err(e)) => Err(e),
+                Err(_) => Err(anyhow::anyhow!("Accept timeout")),
+            }
+        }
+    }
+}
+
+pub async fn run_iroh_manual_tcp_sender(target: String, stun_servers: Vec<String>) -> Result<()> {
+    let target_addr: SocketAddr = target.parse().context("Invalid target address format")?;
+
+    println!("Iroh Manual TCP Tunnel - Sender Mode");
+    println!("=====================================");
+    println!("Creating iroh endpoint (no relay)...");
+
+    let (endpoint, discovery) = create_iroh_manual_endpoint(TCP_ALPN).await?;
+
+    let node_id = endpoint.id();
+    let direct_addrs = get_direct_addresses(&endpoint, &stun_servers).await;
+
+    let offer = IrohManualOffer {
+        version: IROH_SIGNAL_VERSION,
+        node_id: node_id.to_string(),
+        direct_addresses: direct_addrs,
+    };
+
+    println!("\nIroh Manual Offer (copy to receiver):");
+    display_iroh_offer(&offer)?;
+
+    println!("Paste receiver answer (include BEGIN/END markers), then press Enter:");
+    let answer = read_iroh_answer_from_stdin()?;
+    if answer.version != IROH_SIGNAL_VERSION {
+        anyhow::bail!(
+            "Iroh signaling version mismatch (expected {}, got {})",
+            IROH_SIGNAL_VERSION,
+            answer.version
+        );
+    }
+
+    // Parse and add remote peer info
+    let remote_id: EndpointId = answer
+        .node_id
+        .parse()
+        .context("Invalid remote NodeId format")?;
+    let remote_addrs: Vec<SocketAddr> = answer
+        .direct_addresses
+        .iter()
+        .filter_map(|s| s.parse().ok())
+        .collect();
+
+    let remote_addr = EndpointAddr::new(remote_id)
+        .with_addrs(remote_addrs.into_iter().map(TransportAddr::Ip));
+    discovery.add_endpoint_info(remote_addr);
+    println!("Added remote peer: {} ({} addresses)", remote_id, answer.direct_addresses.len());
+
+    // Race connect vs accept for NAT hole punching
+    let conn = race_connect_accept(&endpoint, remote_id, TCP_ALPN).await?;
+
+    let remote_id = conn.remote_id();
+    println!("Peer connected: {}", remote_id);
+    println!("Forwarding TCP connections to {}", target_addr);
+
+    loop {
+        let (send_stream, recv_stream) = match conn.accept_bi().await {
+            Ok(streams) => streams,
+            Err(e) => {
+                println!("Peer disconnected: {}", e);
+                break;
+            }
+        };
+
+        println!("New TCP connection request received");
+        let target = target_addr;
+        tokio::spawn(async move {
+            if let Err(e) = handle_tcp_sender_stream(send_stream, recv_stream, target).await {
+                eprintln!("TCP connection error: {}", e);
+            }
+        });
+    }
+
+    conn.close(0u32.into(), b"done");
+    endpoint.close().await;
+    Ok(())
+}
+
+pub async fn run_iroh_manual_tcp_receiver(listen: String, stun_servers: Vec<String>) -> Result<()> {
+    let listen_addr: SocketAddr = listen
+        .parse()
+        .context("Invalid listen address format. Use format like 127.0.0.1:2222 or [::]:2222")?;
+
+    println!("Iroh Manual TCP Tunnel - Receiver Mode");
+    println!("======================================");
+    println!("Creating iroh endpoint (no relay)...");
+
+    let (endpoint, discovery) = create_iroh_manual_endpoint(TCP_ALPN).await?;
+
+    let node_id = endpoint.id();
+    let direct_addrs = get_direct_addresses(&endpoint, &stun_servers).await;
+
+    println!("Paste sender offer (include BEGIN/END markers), then press Enter:");
+    let offer = read_iroh_offer_from_stdin()?;
+    if offer.version != IROH_SIGNAL_VERSION {
+        anyhow::bail!(
+            "Iroh signaling version mismatch (expected {}, got {})",
+            IROH_SIGNAL_VERSION,
+            offer.version
+        );
+    }
+
+    let answer = IrohManualAnswer {
+        version: IROH_SIGNAL_VERSION,
+        node_id: node_id.to_string(),
+        direct_addresses: direct_addrs,
+    };
+
+    println!("\nIroh Manual Answer (copy to sender):");
+    display_iroh_answer(&answer)?;
+
+    // Parse and add remote peer info
+    let remote_id: EndpointId = offer
+        .node_id
+        .parse()
+        .context("Invalid remote NodeId format")?;
+    let remote_addrs: Vec<SocketAddr> = offer
+        .direct_addresses
+        .iter()
+        .filter_map(|s| s.parse().ok())
+        .collect();
+
+    let remote_addr = EndpointAddr::new(remote_id)
+        .with_addrs(remote_addrs.into_iter().map(TransportAddr::Ip));
+    discovery.add_endpoint_info(remote_addr);
+    println!("Added remote peer: {} ({} addresses)", remote_id, offer.direct_addresses.len());
+
+    // Race connect vs accept for NAT hole punching
+    let conn = race_connect_accept(&endpoint, remote_id, TCP_ALPN).await?;
+
+    println!("Peer connected: {}", conn.remote_id());
+
+    let conn = Arc::new(conn);
+    let tunnel_established = Arc::new(AtomicBool::new(false));
+
+    let listener = TcpListener::bind(listen_addr)
+        .await
+        .context("Failed to bind TCP listener")?;
+    println!(
+        "Listening on TCP {} - configure your client to connect here",
+        listen_addr
+    );
+
+    loop {
+        let (tcp_stream, peer_addr) = match listener.accept().await {
+            Ok(result) => result,
+            Err(e) => {
+                eprintln!("Failed to accept TCP connection: {}", e);
+                continue;
+            }
+        };
+
+        println!("New local connection from {}", peer_addr);
+
+        let conn_clone = conn.clone();
+        let established = tunnel_established.clone();
+
+        tokio::spawn(async move {
+            match handle_tcp_receiver_connection(conn_clone, tcp_stream, peer_addr, established)
+                .await
+            {
+                Ok(()) => {}
+                Err(e) => {
+                    eprintln!("TCP tunnel error for {}: {}", peer_addr, e);
+                }
+            }
+        });
+    }
+}
+
+// ============================================================================
+// Iroh Manual Mode - UDP Tunnel Implementation
+// ============================================================================
+
+pub async fn run_iroh_manual_udp_sender(target: String, stun_servers: Vec<String>) -> Result<()> {
+    let target_addr: SocketAddr = target.parse().context("Invalid target address format")?;
+
+    println!("Iroh Manual UDP Tunnel - Sender Mode");
+    println!("=====================================");
+    println!("Creating iroh endpoint (no relay)...");
+
+    let (endpoint, discovery) = create_iroh_manual_endpoint(UDP_ALPN).await?;
+
+    let node_id = endpoint.id();
+    let direct_addrs = get_direct_addresses(&endpoint, &stun_servers).await;
+
+    let offer = IrohManualOffer {
+        version: IROH_SIGNAL_VERSION,
+        node_id: node_id.to_string(),
+        direct_addresses: direct_addrs,
+    };
+
+    println!("\nIroh Manual Offer (copy to receiver):");
+    display_iroh_offer(&offer)?;
+
+    println!("Paste receiver answer (include BEGIN/END markers), then press Enter:");
+    let answer = read_iroh_answer_from_stdin()?;
+    if answer.version != IROH_SIGNAL_VERSION {
+        anyhow::bail!(
+            "Iroh signaling version mismatch (expected {}, got {})",
+            IROH_SIGNAL_VERSION,
+            answer.version
+        );
+    }
+
+    // Parse and add remote peer info
+    let remote_id: EndpointId = answer
+        .node_id
+        .parse()
+        .context("Invalid remote NodeId format")?;
+    let remote_addrs: Vec<SocketAddr> = answer
+        .direct_addresses
+        .iter()
+        .filter_map(|s| s.parse().ok())
+        .collect();
+
+    let remote_addr = EndpointAddr::new(remote_id)
+        .with_addrs(remote_addrs.into_iter().map(TransportAddr::Ip));
+    discovery.add_endpoint_info(remote_addr);
+    println!("Added remote peer: {} ({} addresses)", remote_id, answer.direct_addresses.len());
+
+    // Race connect vs accept for NAT hole punching
+    let conn = race_connect_accept(&endpoint, remote_id, UDP_ALPN).await?;
+
+    println!("Peer connected: {}", conn.remote_id());
+
+    let (send_stream, recv_stream) = conn
+        .accept_bi()
+        .await
+        .context("Failed to accept stream from receiver")?;
+
+    println!("Forwarding UDP traffic to {}", target_addr);
+
+    // Bind to the same address family as the target
+    let bind_addr: SocketAddr = if target_addr.is_ipv6() {
+        "[::]:0".parse().unwrap()
+    } else {
+        "0.0.0.0:0".parse().unwrap()
+    };
+    let udp_socket = Arc::new(
+        UdpSocket::bind(bind_addr)
+            .await
+            .context("Failed to bind UDP socket")?,
+    );
+
+    forward_stream_to_udp_sender(recv_stream, send_stream, udp_socket, target_addr).await?;
+
+    conn.close(0u32.into(), b"done");
+    endpoint.close().await;
+    println!("Connection closed.");
+
+    Ok(())
+}
+
+pub async fn run_iroh_manual_udp_receiver(listen: String, stun_servers: Vec<String>) -> Result<()> {
+    let listen_addr: SocketAddr = listen
+        .parse()
+        .context("Invalid listen address format. Use format like 127.0.0.1:51820 or [::]:51820")?;
+
+    println!("Iroh Manual UDP Tunnel - Receiver Mode");
+    println!("======================================");
+    println!("Creating iroh endpoint (no relay)...");
+
+    let (endpoint, discovery) = create_iroh_manual_endpoint(UDP_ALPN).await?;
+
+    let node_id = endpoint.id();
+    let direct_addrs = get_direct_addresses(&endpoint, &stun_servers).await;
+
+    println!("Paste sender offer (include BEGIN/END markers), then press Enter:");
+    let offer = read_iroh_offer_from_stdin()?;
+    if offer.version != IROH_SIGNAL_VERSION {
+        anyhow::bail!(
+            "Iroh signaling version mismatch (expected {}, got {})",
+            IROH_SIGNAL_VERSION,
+            offer.version
+        );
+    }
+
+    let answer = IrohManualAnswer {
+        version: IROH_SIGNAL_VERSION,
+        node_id: node_id.to_string(),
+        direct_addresses: direct_addrs,
+    };
+
+    println!("\nIroh Manual Answer (copy to sender):");
+    display_iroh_answer(&answer)?;
+
+    // Parse and add remote peer info
+    let remote_id: EndpointId = offer
+        .node_id
+        .parse()
+        .context("Invalid remote NodeId format")?;
+    let remote_addrs: Vec<SocketAddr> = offer
+        .direct_addresses
+        .iter()
+        .filter_map(|s| s.parse().ok())
+        .collect();
+
+    let remote_addr = EndpointAddr::new(remote_id)
+        .with_addrs(remote_addrs.into_iter().map(TransportAddr::Ip));
+    discovery.add_endpoint_info(remote_addr);
+    println!("Added remote peer: {} ({} addresses)", remote_id, offer.direct_addresses.len());
+
+    // Race connect vs accept for NAT hole punching
+    let conn = race_connect_accept(&endpoint, remote_id, UDP_ALPN).await?;
+
+    println!("Peer connected: {}", conn.remote_id());
+
+    let (send_stream, recv_stream) = conn.open_bi().await.context("Failed to open stream")?;
+
+    let udp_socket = Arc::new(
+        UdpSocket::bind(listen_addr)
+            .await
+            .context("Failed to bind UDP socket")?,
+    );
+    println!(
+        "Listening on UDP {} - configure your client to connect here",
+        listen_addr
+    );
+
+    let client_addr: Arc<Mutex<Option<SocketAddr>>> = Arc::new(Mutex::new(None));
+
+    let udp_clone = udp_socket.clone();
+    let client_clone = client_addr.clone();
+
+    tokio::select! {
+        result = forward_udp_to_stream(udp_clone, send_stream, client_clone) => {
+            if let Err(e) = result {
+                eprintln!("UDP to stream error: {}", e);
+            }
+        }
+        result = forward_stream_to_udp_receiver(recv_stream, udp_socket, client_addr) => {
+            if let Err(e) = result {
+                eprintln!("Stream to UDP error: {}", e);
+            }
+        }
+    }
+
+    conn.close(0u32.into(), b"done");
+    endpoint.close().await;
+    println!("Connection closed.");
+
     Ok(())
 }

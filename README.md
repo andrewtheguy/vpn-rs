@@ -4,12 +4,26 @@ TCP/UDP port forwarding through P2P connections.
 
 ## Overview
 
-tunnel-rs provides two modes for establishing tunnels:
+tunnel-rs provides multiple modes for establishing tunnels:
 
-| Mode | Discovery | Protocols | Use Case |
-|------|-----------|-----------|----------|
-| **iroh** | Automatic (Pkarr/DNS/mDNS) | TCP, UDP | Production, always-on tunnels |
-| **ice** | Manual copy-paste | TCP only | Firewalled environments, one-time connections |
+| Mode | Discovery | NAT Traversal | Protocols | Use Case |
+|------|-----------|---------------|-----------|----------|
+| **iroh-default** | Automatic (Pkarr/DNS/mDNS) | Relay fallback | TCP, UDP | Production, always-on tunnels |
+| **iroh-manual** | Manual copy-paste | STUN heuristic | TCP, UDP | Serverless, simple NATs |
+| **custom** | Manual copy-paste | Full ICE | TCP, UDP | Best NAT compatibility |
+
+### Choosing a Manual Mode
+
+Both `iroh-manual` and `custom` modes use copy-paste signaling without servers:
+
+| Feature | iroh-manual | custom |
+|---------|-------------|--------|
+| NAT traversal | STUN-based (heuristic) | Full ICE (connectivity checks) |
+| Symmetric NAT | May fail | Works |
+| Protocols | TCP + UDP | TCP + UDP |
+| QUIC stack | iroh | str0m + quinn |
+
+**Recommendation:** Use `custom` mode for best NAT traversal, especially for symmetric NATs.
 
 ## Installation
 
@@ -19,9 +33,9 @@ cargo install --path .
 
 ---
 
-# Iroh Mode
+# iroh-default Mode
 
-Uses iroh's P2P network for automatic peer discovery and NAT traversal.
+Uses iroh's P2P network for automatic peer discovery and NAT traversal with relay fallback.
 
 ## Architecture
 
@@ -53,7 +67,7 @@ Uses iroh's P2P network for automatic peer discovery and NAT traversal.
 
 **Sender** (on server with SSH):
 ```bash
-tunnel-rs sender iroh --target 127.0.0.1:22
+tunnel-rs sender iroh-default --target 127.0.0.1:22
 ```
 
 Output:
@@ -64,7 +78,7 @@ Waiting for receiver to connect...
 
 **Receiver** (on client):
 ```bash
-tunnel-rs receiver iroh --node-id <ENDPOINT_ID> --listen 127.0.0.1:2222
+tunnel-rs receiver iroh-default --node-id <ENDPOINT_ID> --listen 127.0.0.1:2222
 ```
 
 Then connect: `ssh -p 2222 user@127.0.0.1`
@@ -73,34 +87,45 @@ Then connect: `ssh -p 2222 user@127.0.0.1`
 
 **Sender**:
 ```bash
-tunnel-rs sender iroh --protocol udp --target 127.0.0.1:51820
+tunnel-rs sender iroh-default --protocol udp --target 127.0.0.1:51820
 ```
 
 **Receiver**:
 ```bash
-tunnel-rs receiver iroh --protocol udp --node-id <ENDPOINT_ID> --listen 0.0.0.0:51820
+tunnel-rs receiver iroh-default --protocol udp --node-id <ENDPOINT_ID> --listen 0.0.0.0:51820
 ```
 
 ## CLI Options
 
-### sender iroh
+### sender
 
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--config`, `-c` | - | Path to TOML config file |
+| `--default-config` | false | Load config from `~/.config/tunnel-rs/sender.toml` |
+
+### sender iroh-default
+
+| Option | Default | Description |
+|--------|---------|-------------|
 | `--protocol`, `-p` | tcp | Protocol to tunnel (tcp or udp) |
 | `--target`, `-t` | 127.0.0.1:22 | Target address to forward traffic to |
 | `--secret-file` | - | Path to secret key file for persistent identity |
 | `--relay-url` | public | Custom relay server URL(s), repeatable |
 | `--relay-only` | false | Force all traffic through relay |
-| `--direct-only` | false | Reject relay connections |
 | `--dns-server` | public | Custom DNS server URL for peer discovery |
 
-### receiver iroh
+### receiver
 
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--config`, `-c` | - | Path to TOML config file |
+| `--default-config` | false | Load config from `~/.config/tunnel-rs/receiver.toml` |
+
+### receiver iroh-default
+
+| Option | Default | Description |
+|--------|---------|-------------|
 | `--protocol`, `-p` | tcp | Protocol to tunnel (tcp or udp) |
 | `--node-id`, `-n` | required | EndpointId of the sender |
 | `--listen`, `-l` | required | Local address to listen on |
@@ -110,37 +135,66 @@ tunnel-rs receiver iroh --protocol udp --node-id <ENDPOINT_ID> --listen 0.0.0.0:
 
 ## Configuration Files
 
+Use `--default-config` to load from the default location, or `-c <path>` for a custom path. Each mode has its own section (`[iroh-default]`, `[iroh-manual]`, `[custom]`).
+
+**Default locations:**
+- Sender: `~/.config/tunnel-rs/sender.toml`
+- Receiver: `~/.config/tunnel-rs/receiver.toml`
+
 ### Sender Config
 
 ```toml
-# iroh-sender.toml
+# ~/.config/tunnel-rs/sender.toml
+
+# Required: validates config matches CLI command
+role = "sender"
+mode = "iroh-default"
+
+# Shared options
 protocol = "tcp"
 target = "127.0.0.1:22"
+
+[iroh-default]
 secret_file = "./sender.key"
 relay_urls = ["https://relay.example.com"]
 relay_only = false
-direct_only = false
 dns_server = "https://dns.example.com/pkarr"
 ```
 
 ```bash
-tunnel-rs sender iroh --config iroh-sender.toml
+# Load from default location (mode inferred from config)
+tunnel-rs sender --default-config
+
+# Load from custom path
+tunnel-rs sender -c ./my-sender.toml
 ```
 
 ### Receiver Config
 
 ```toml
-# iroh-receiver.toml
+# ~/.config/tunnel-rs/receiver.toml
+
+# Required: validates config matches CLI command
+role = "receiver"
+mode = "iroh-default"
+
+# Shared options
 protocol = "tcp"
-node_id = "2xnbkpbc7izsilvewd7c62w7wnwziacmpfwvhcrya5nt76dqkpga"
 listen = "127.0.0.1:2222"
+
+[iroh-default]
+node_id = "2xnbkpbc7izsilvewd7c62w7wnwziacmpfwvhcrya5nt76dqkpga"
 relay_urls = ["https://relay.example.com"]
 relay_only = false
 dns_server = "https://dns.example.com/pkarr"
 ```
 
 ```bash
-tunnel-rs receiver iroh --config iroh-receiver.toml
+# Load from default location (mode inferred from config)
+tunnel-rs receiver --default-config
+
+# Load from custom path
+tunnel-rs receiver -c ./my-receiver.toml
 ```
 
 ## Persistent Identity
@@ -149,10 +203,10 @@ By default, a new EndpointId is generated each run. For production, use persiste
 
 ```bash
 # First run: generates and saves key
-tunnel-rs sender iroh --target 127.0.0.1:22 --secret-file ./sender.key
+tunnel-rs sender iroh-default --target 127.0.0.1:22 --secret-file ./sender.key
 
 # Subsequent runs: loads existing key
-tunnel-rs sender iroh --target 127.0.0.1:22 --secret-file ./sender.key
+tunnel-rs sender iroh-default --target 127.0.0.1:22 --secret-file ./sender.key
 ```
 
 ### Pre-generating Keys
@@ -169,11 +223,11 @@ tunnel-rs show-id --secret-file ./sender.key
 
 ```bash
 # Both sides must use the same relay
-tunnel-rs sender iroh --relay-url https://relay.example.com --target 127.0.0.1:22
-tunnel-rs receiver iroh --relay-url https://relay.example.com --node-id <ID> --listen 127.0.0.1:2222
+tunnel-rs sender iroh-default --relay-url https://relay.example.com --target 127.0.0.1:22
+tunnel-rs receiver iroh-default --relay-url https://relay.example.com --node-id <ID> --listen 127.0.0.1:2222
 
 # Force relay-only (no direct P2P)
-tunnel-rs sender iroh --relay-url https://relay.example.com --relay-only --target 127.0.0.1:22
+tunnel-rs sender iroh-default --relay-url https://relay.example.com --relay-only --target 127.0.0.1:22
 ```
 
 ### Running iroh-relay
@@ -189,24 +243,84 @@ For fully independent operation without public infrastructure:
 
 ```bash
 # Both sides use custom DNS server
-tunnel-rs sender iroh --dns-server https://dns.example.com/pkarr --secret-file ./sender.key
-tunnel-rs receiver iroh --dns-server https://dns.example.com/pkarr --node-id <ID> --listen 127.0.0.1:2222
-```
-
-### Running iroh-dns-server
-
-```bash
-git clone https://github.com/n0-computer/iroh
-cd iroh/iroh-dns-server
-cargo build --release
-./iroh-dns-server --config config.dev.toml
+tunnel-rs sender iroh-default --dns-server https://dns.example.com/pkarr --secret-file ./sender.key
+tunnel-rs receiver iroh-default --dns-server https://dns.example.com/pkarr --node-id <ID> --listen 127.0.0.1:2222
 ```
 
 ---
 
-# ICE Mode
+# iroh-manual Mode
 
-Uses manual copy-paste signaling with ICE for NAT traversal. No external discovery infrastructure required.
+Uses iroh's QUIC transport with manual copy-paste signaling. No discovery servers or relay infrastructure needed - fully serverless.
+
+**NAT Traversal:** Uses STUN to discover public addresses and bidirectional connection racing. Works with most NATs but may fail on symmetric NATs. For difficult NAT scenarios, use [Custom Mode](#custom-mode) which has full ICE support.
+
+## Quick Start
+
+1. **Sender** starts and outputs an offer:
+   ```bash
+   tunnel-rs sender iroh-manual --target 127.0.0.1:22
+   ```
+
+   Copy the `-----BEGIN TUNNEL-RS IROH OFFER-----` block.
+
+2. **Receiver** starts and pastes the offer:
+   ```bash
+   tunnel-rs receiver iroh-manual --listen 127.0.0.1:2222
+   ```
+
+   Paste the offer, then copy the `-----BEGIN TUNNEL-RS IROH ANSWER-----` block.
+
+3. **Sender** receives the answer:
+
+   Paste the answer into the sender terminal.
+
+4. **Connect**:
+   ```bash
+   ssh -p 2222 user@127.0.0.1
+   ```
+
+## CLI Options
+
+### sender iroh-manual
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--protocol`, `-p` | tcp | Protocol to tunnel (tcp or udp) |
+| `--target`, `-t` | 127.0.0.1:22 | Target address to forward traffic to |
+| `--stun-server` | public | STUN server(s), repeatable |
+
+### receiver iroh-manual
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--protocol`, `-p` | tcp | Protocol to tunnel (tcp or udp) |
+| `--listen`, `-l` | required | Local address to listen on |
+| `--stun-server` | public | STUN server(s), repeatable |
+
+Note: Config file options (`-c`, `--default-config`) are at the `sender`/`receiver` command level. See [Configuration Files](#configuration-files) above.
+
+## UDP Support
+
+iroh-manual mode supports both TCP and UDP tunneling:
+
+```bash
+# Sender
+tunnel-rs sender iroh-manual --protocol udp --target 127.0.0.1:51820
+
+# Receiver
+tunnel-rs receiver iroh-manual --protocol udp --listen 0.0.0.0:51820
+```
+
+---
+
+# Custom Mode
+
+Uses full ICE (Interactive Connectivity Establishment) with str0m + quinn QUIC. Supports TCP and UDP tunneling.
+
+**NAT Traversal:** Full ICE implementation with STUN candidate gathering and connectivity checks. This provides the best NAT traversal success rate, including support for symmetric NATs that fail with simpler STUN-only approaches.
+
+**Note:** Custom mode and iroh-manual mode both use the same signaling block label naming (`-----BEGIN TUNNEL-RS MANUAL OFFER/ANSWER-----`), though they differ in transport protocol and ICE support.
 
 ## Architecture
 
@@ -223,14 +337,14 @@ Uses manual copy-paste signaling with ICE for NAT traversal. No external discove
 
 1. **Sender** starts and outputs an offer:
    ```bash
-   tunnel-rs sender ice --target 127.0.0.1:22
+   tunnel-rs sender custom --target 127.0.0.1:22
    ```
 
    Copy the `-----BEGIN TUNNEL-RS MANUAL OFFER-----` block.
 
 2. **Receiver** starts and pastes the offer:
    ```bash
-   tunnel-rs receiver ice --listen 127.0.0.1:2222
+   tunnel-rs receiver custom --listen 127.0.0.1:2222
    ```
 
    Paste the offer, then copy the `-----BEGIN TUNNEL-RS MANUAL ANSWER-----` block.
@@ -244,47 +358,35 @@ Uses manual copy-paste signaling with ICE for NAT traversal. No external discove
    ssh -p 2222 user@127.0.0.1
    ```
 
+## UDP Tunnel (e.g., WireGuard)
+
+```bash
+# Sender
+tunnel-rs sender custom --protocol udp --target 127.0.0.1:51820
+
+# Receiver
+tunnel-rs receiver custom --protocol udp --listen 0.0.0.0:51820
+```
+
 ## CLI Options
 
-### sender ice
+### sender custom
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--config`, `-c` | - | Path to TOML config file |
+| `--protocol`, `-p` | tcp | Protocol to tunnel (tcp or udp) |
 | `--target`, `-t` | 127.0.0.1:22 | Target address to forward traffic to |
 | `--stun-server` | public | STUN server(s), repeatable |
 
-### receiver ice
+### receiver custom
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--config`, `-c` | - | Path to TOML config file |
+| `--protocol`, `-p` | tcp | Protocol to tunnel (tcp or udp) |
 | `--listen`, `-l` | required | Local address to listen on |
 | `--stun-server` | public | STUN server(s), repeatable |
 
-## Configuration Files
-
-### Sender Config
-
-```toml
-# ice-sender.toml
-target = "127.0.0.1:22"
-stun_servers = [
-    "stun.l.google.com:19302",
-    "stun1.l.google.com:19302",
-]
-```
-
-### Receiver Config
-
-```toml
-# ice-receiver.toml
-listen = "127.0.0.1:2222"
-stun_servers = [
-    "stun.l.google.com:19302",
-    "stun1.l.google.com:19302",
-]
-```
+Note: Config file options (`-c`, `--default-config`) are at the `sender`/`receiver` command level. See [Configuration Files](#configuration-files) above.
 
 ## Connection Types
 
@@ -303,15 +405,14 @@ ICE connection established!
 
 ## Notes
 
-- ICE mode is **TCP only**
-- Symmetric NATs may not connect without a relay (not supported in ICE mode)
+- Full ICE provides best NAT traversal - works with most symmetric NATs
 - Signaling payloads include a version number; mismatches are rejected
 
 ---
 
-# Utility Commands (Iroh Mode)
+# Utility Commands
 
-These commands are for managing persistent identity in iroh mode. ICE mode uses ephemeral credentials and doesn't require key management.
+These commands manage persistent identity (secret files, EndpointId) and apply only to **iroh-default mode**. Other modes do not use persistent identity.
 
 ## generate-secret
 
@@ -344,14 +445,26 @@ tunnel-rs show-id --secret-file ./sender.key
 
 ## How It Works
 
-### Iroh Mode
+### iroh-default Mode
 1. Sender creates an iroh endpoint with discovery services
 2. Sender publishes its address via Pkarr/DNS
 3. Receiver resolves the sender via discovery
 4. Connection established via iroh's NAT traversal
 
-### ICE Mode
-1. Both sides gather ICE candidates via STUN
+### iroh-manual Mode
+1. Sender creates iroh endpoint (no relay, no discovery)
+2. STUN queries discover public addresses (heuristic port mapping)
+3. Manual exchange of offer/answer (copy-paste with NodeId + addresses)
+4. Both sides race connect/accept for hole punching
+5. Direct connection established via iroh's QUIC
+
+*Limitation: Uses heuristic port mapping which may fail on symmetric NATs.*
+
+### Custom Mode
+1. Both sides gather ICE candidates via STUN (same socket used for data)
 2. Manual exchange of offer/answer (copy-paste)
-3. ICE connectivity checks find best path
-4. QUIC connection established over ICE socket
+3. ICE connectivity checks probe all candidate pairs simultaneously
+4. Best working path selected via ICE nomination
+5. QUIC connection established over ICE socket
+
+*Advantage: Full ICE provides reliable NAT traversal even for symmetric NATs.*

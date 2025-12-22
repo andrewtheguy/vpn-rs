@@ -1,28 +1,24 @@
 # tunnel-rs receiver configuration example
 #
-# Usage: tunnel-rs receiver --config receiver.toml
+# Usage: tunnel-rs receiver -c receiver.toml
+#        tunnel-rs receiver --default-config
 #
-# All options can be overridden by CLI arguments.
+# Mode is inferred from the 'mode' field below.
 # CLI arguments take precedence over config file values.
+#
+# This file shows iroh-default mode. See commented sections below for other modes.
 
-# Protocol to tunnel: "tcp" or "udp"
-protocol = "tcp"
+# Required: validates config matches CLI command
+role = "receiver"
+mode = "iroh-default"
 
-# Manual mode (bypass discovery/relays)
-manual = false
-
-# STUN servers for manual mode (optional)
-stun_servers = [
-    "stun.l.google.com:19302",
-    "stun1.l.google.com:19302",
-    "stun.services.mozilla.com:3478",
-]
-
-# NodeId of the sender to connect to (required)
-node_id = "2xnbkpbc7izsilvewd7c62w7wnwziacmpfwvhcrya5nt76dqkpga"
-
-# Local address to listen on (required)
+# Shared options
+protocol = "tcp"  # "tcp" or "udp"
 listen = "127.0.0.1:2222"
+
+[iroh-default]
+# NodeId of the sender to connect to (required for iroh-default)
+node_id = "2xnbkpbc7izsilvewd7c62w7wnwziacmpfwvhcrya5nt76dqkpga"
 
 # Custom relay server URL(s) for failover
 # Must match the sender's relay configuration
@@ -32,14 +28,23 @@ relay_urls = [
 ]
 
 # Force all connections through relay (disables direct P2P)
-# Requires relay_urls to be specified
 relay_only = false
 
-# Optional manual secret key (reserved for future use)
-# manual_secret_key = ""
-
-# Custom DNS server URL for peer discovery (optional)
-# Used with self-hosted iroh-dns-server for fully independent operation
+# Custom DNS server URL for peer discovery
 # Must match the sender's dns_server configuration
 # NOTE: URL must include the /pkarr path
 # dns_server = "https://dns.example.com/pkarr"
+
+# [iroh-manual]
+# stun_servers = [
+#     "stun.l.google.com:19302",
+#     "stun1.l.google.com:19302",
+#     "stun.services.mozilla.com:3478",
+# ]
+
+# [custom]
+# stun_servers = [
+#     "stun.l.google.com:19302",
+#     "stun1.l.google.com:19302",
+#     "stun.services.mozilla.com:3478",
+# ]

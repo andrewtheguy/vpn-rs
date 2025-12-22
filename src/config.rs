@@ -1,56 +1,224 @@
 //! Configuration file support for tunnel-rs.
 //!
-//! Supports mode-specific configuration:
-//! - Iroh mode: Uses iroh P2P discovery (supports TCP and UDP)
-//! - ICE mode: Uses manual signaling with copy-paste (TCP only)
+//! Configuration structure:
+//! - `role` and `mode` fields for validation
+//! - Shared options at top level (protocol, target/listen)
+//! - Mode-specific sections: [iroh-default], [iroh-manual], [custom]
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
 // ============================================================================
-// Iroh Mode Configurations
+// Configuration Structures
 // ============================================================================
 
-/// Iroh mode sender configuration.
-#[derive(Deserialize, Default)]
-pub struct IrohSenderConfig {
-    pub protocol: Option<String>,
-    pub target: Option<String>,
+/// iroh-default mode configuration.
+#[derive(Deserialize, Default, Clone)]
+pub struct IrohDefaultConfig {
     pub secret_file: Option<PathBuf>,
     pub relay_urls: Option<Vec<String>>,
     pub relay_only: Option<bool>,
-    pub direct_only: Option<bool>,
     pub dns_server: Option<String>,
+    pub node_id: Option<String>, // receiver only
 }
 
-/// Iroh mode receiver configuration.
+/// iroh-manual mode configuration.
+#[derive(Deserialize, Default, Clone)]
+pub struct IrohManualConfig {
+    pub stun_servers: Option<Vec<String>>,
+}
+
+/// custom mode configuration.
+#[derive(Deserialize, Default, Clone)]
+pub struct CustomConfig {
+    pub stun_servers: Option<Vec<String>>,
+}
+
+/// Unified sender configuration.
 #[derive(Deserialize, Default)]
-pub struct IrohReceiverConfig {
+pub struct SenderConfig {
+    // Validation fields
+    pub role: Option<String>,
+    pub mode: Option<String>,
+
+    // Shared options
     pub protocol: Option<String>,
-    pub node_id: Option<String>,
-    pub listen: Option<String>,
-    pub relay_urls: Option<Vec<String>>,
-    pub relay_only: Option<bool>,
-    pub dns_server: Option<String>,
-}
-
-// ============================================================================
-// ICE Mode Configurations
-// ============================================================================
-
-/// ICE mode sender configuration (TCP only).
-#[derive(Deserialize, Default)]
-pub struct IceSenderConfig {
     pub target: Option<String>,
-    pub stun_servers: Option<Vec<String>>,
+
+    // Mode-specific sections
+    #[serde(rename = "iroh-default")]
+    pub iroh_default: Option<IrohDefaultConfig>,
+    #[serde(rename = "iroh-manual")]
+    pub iroh_manual: Option<IrohManualConfig>,
+    pub custom: Option<CustomConfig>,
 }
 
-/// ICE mode receiver configuration (TCP only).
+/// Unified receiver configuration.
 #[derive(Deserialize, Default)]
-pub struct IceReceiverConfig {
+pub struct ReceiverConfig {
+    // Validation fields
+    pub role: Option<String>,
+    pub mode: Option<String>,
+
+    // Shared options
+    pub protocol: Option<String>,
     pub listen: Option<String>,
-    pub stun_servers: Option<Vec<String>>,
+
+    // Mode-specific sections
+    #[serde(rename = "iroh-default")]
+    pub iroh_default: Option<IrohDefaultConfig>,
+    #[serde(rename = "iroh-manual")]
+    pub iroh_manual: Option<IrohManualConfig>,
+    pub custom: Option<CustomConfig>,
+}
+
+// ============================================================================
+// Config Accessor Methods
+// ============================================================================
+
+impl SenderConfig {
+    /// Get iroh-default config section.
+    pub fn iroh_default(&self) -> Option<&IrohDefaultConfig> {
+        self.iroh_default.as_ref()
+    }
+
+    /// Get iroh-manual config section.
+    pub fn iroh_manual(&self) -> Option<&IrohManualConfig> {
+        self.iroh_manual.as_ref()
+    }
+
+    /// Get custom config section.
+    pub fn custom(&self) -> Option<&CustomConfig> {
+        self.custom.as_ref()
+    }
+
+    /// Validate that config matches expected role and mode, and has no unexpected sections.
+    pub fn validate(&self, expected_mode: &str) -> Result<()> {
+        let role = self.role.as_deref().context(
+            "Config file missing required 'role' field. Add: role = \"sender\"",
+        )?;
+        if role != "sender" {
+            anyhow::bail!(
+                "Config file has role = \"{}\", but running as sender",
+                role
+            );
+        }
+
+        let mode = self.mode.as_deref().context(
+            "Config file missing required 'mode' field. Add: mode = \"iroh-default\" (or iroh-manual, custom)",
+        )?;
+        if mode != expected_mode {
+            anyhow::bail!(
+                "Config file has mode = \"{}\", but running with {}",
+                mode,
+                expected_mode
+            );
+        }
+
+        // Validate no unexpected sections for the current mode
+        match expected_mode {
+            "iroh-default" => {
+                if self.iroh_manual.is_some() {
+                    anyhow::bail!("Config has [iroh-manual] section but mode = \"iroh-default\"");
+                }
+                if self.custom.is_some() {
+                    anyhow::bail!("Config has [custom] section but mode = \"iroh-default\"");
+                }
+            }
+            "iroh-manual" => {
+                if self.iroh_default.is_some() {
+                    anyhow::bail!("Config has [iroh-default] section but mode = \"iroh-manual\"");
+                }
+                if self.custom.is_some() {
+                    anyhow::bail!("Config has [custom] section but mode = \"iroh-manual\"");
+                }
+            }
+            "custom" => {
+                if self.iroh_default.is_some() {
+                    anyhow::bail!("Config has [iroh-default] section but mode = \"custom\"");
+                }
+                if self.iroh_manual.is_some() {
+                    anyhow::bail!("Config has [iroh-manual] section but mode = \"custom\"");
+                }
+            }
+            _ => anyhow::bail!("Unknown mode '{}'. Valid modes: iroh-default, iroh-manual, custom", expected_mode),
+        }
+
+        Ok(())
+    }
+}
+
+impl ReceiverConfig {
+    /// Get iroh-default config section.
+    pub fn iroh_default(&self) -> Option<&IrohDefaultConfig> {
+        self.iroh_default.as_ref()
+    }
+
+    /// Get iroh-manual config section.
+    pub fn iroh_manual(&self) -> Option<&IrohManualConfig> {
+        self.iroh_manual.as_ref()
+    }
+
+    /// Get custom config section.
+    pub fn custom(&self) -> Option<&CustomConfig> {
+        self.custom.as_ref()
+    }
+
+    /// Validate that config matches expected role and mode, and has no unexpected sections.
+    pub fn validate(&self, expected_mode: &str) -> Result<()> {
+        let role = self.role.as_deref().context(
+            "Config file missing required 'role' field. Add: role = \"receiver\"",
+        )?;
+        if role != "receiver" {
+            anyhow::bail!(
+                "Config file has role = \"{}\", but running as receiver",
+                role
+            );
+        }
+
+        let mode = self.mode.as_deref().context(
+            "Config file missing required 'mode' field. Add: mode = \"iroh-default\" (or iroh-manual, custom)",
+        )?;
+        if mode != expected_mode {
+            anyhow::bail!(
+                "Config file has mode = \"{}\", but running with {}",
+                mode,
+                expected_mode
+            );
+        }
+
+        // Validate no unexpected sections for the current mode
+        match expected_mode {
+            "iroh-default" => {
+                if self.iroh_manual.is_some() {
+                    anyhow::bail!("Config has [iroh-manual] section but mode = \"iroh-default\"");
+                }
+                if self.custom.is_some() {
+                    anyhow::bail!("Config has [custom] section but mode = \"iroh-default\"");
+                }
+            }
+            "iroh-manual" => {
+                if self.iroh_default.is_some() {
+                    anyhow::bail!("Config has [iroh-default] section but mode = \"iroh-manual\"");
+                }
+                if self.custom.is_some() {
+                    anyhow::bail!("Config has [custom] section but mode = \"iroh-manual\"");
+                }
+            }
+            "custom" => {
+                if self.iroh_default.is_some() {
+                    anyhow::bail!("Config has [iroh-default] section but mode = \"custom\"");
+                }
+                if self.iroh_manual.is_some() {
+                    anyhow::bail!("Config has [iroh-manual] section but mode = \"custom\"");
+                }
+            }
+            _ => anyhow::bail!("Unknown mode '{}'. Valid modes: iroh-default, iroh-manual, custom", expected_mode),
+        }
+
+        Ok(())
+    }
 }
 
 // ============================================================================
@@ -58,55 +226,47 @@ pub struct IceReceiverConfig {
 // ============================================================================
 
 /// Load configuration from a TOML file.
-fn load_config<T: for<'de> Deserialize<'de> + Default>(path: &Path) -> Result<T> {
+fn load_config<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T> {
     let content = std::fs::read_to_string(path)
         .with_context(|| format!("Failed to read config file: {}", path.display()))?;
     toml::from_str(&content)
         .with_context(|| format!("Failed to parse config file: {}", path.display()))
 }
 
-/// Resolve the default config path (~/.config/tunnel-rs/config.toml).
-fn default_config_path() -> Option<PathBuf> {
-    dirs::config_dir().map(|dir| dir.join("tunnel-rs").join("config.toml"))
+/// Resolve the default sender config path (~/.config/tunnel-rs/sender.toml).
+fn default_sender_config_path() -> Option<PathBuf> {
+    dirs::config_dir().map(|dir| dir.join("tunnel-rs").join("sender.toml"))
 }
 
-/// Load configuration from an explicit path, or fall back to default if present.
-fn load_config_or_default<T: for<'de> Deserialize<'de> + Default>(
-    path: Option<&Path>,
-) -> Result<T> {
-    if let Some(path) = path {
-        return load_config(path);
-    }
-
-    if let Some(default_path) = default_config_path() {
-        if default_path.exists() {
-            return load_config(&default_path);
-        }
-    }
-
-    Ok(T::default())
+/// Resolve the default receiver config path (~/.config/tunnel-rs/receiver.toml).
+fn default_receiver_config_path() -> Option<PathBuf> {
+    dirs::config_dir().map(|dir| dir.join("tunnel-rs").join("receiver.toml"))
 }
 
-// Mode-specific config loaders
-
-/// Load Iroh sender configuration.
-pub fn load_iroh_sender_config(path: Option<&Path>) -> Result<IrohSenderConfig> {
-    load_config_or_default(path)
+/// Load sender configuration from an explicit path, or from default location.
+///
+/// - `path`: Some(path) loads from the specified path
+/// - `path`: None loads from the default path (~/.config/tunnel-rs/sender.toml)
+pub fn load_sender_config(path: Option<&Path>) -> Result<SenderConfig> {
+    let config_path = match path {
+        Some(p) => p.to_path_buf(),
+        None => default_sender_config_path()
+            .ok_or_else(|| anyhow::anyhow!("Could not find default config path. Use -c to specify a config file."))?,
+    };
+    load_config(&config_path)
 }
 
-/// Load Iroh receiver configuration.
-pub fn load_iroh_receiver_config(path: Option<&Path>) -> Result<IrohReceiverConfig> {
-    load_config_or_default(path)
-}
-
-/// Load ICE sender configuration.
-pub fn load_ice_sender_config(path: Option<&Path>) -> Result<IceSenderConfig> {
-    load_config_or_default(path)
-}
-
-/// Load ICE receiver configuration.
-pub fn load_ice_receiver_config(path: Option<&Path>) -> Result<IceReceiverConfig> {
-    load_config_or_default(path)
+/// Load receiver configuration from an explicit path, or from default location.
+///
+/// - `path`: Some(path) loads from the specified path
+/// - `path`: None loads from the default path (~/.config/tunnel-rs/receiver.toml)
+pub fn load_receiver_config(path: Option<&Path>) -> Result<ReceiverConfig> {
+    let config_path = match path {
+        Some(p) => p.to_path_buf(),
+        None => default_receiver_config_path()
+            .ok_or_else(|| anyhow::anyhow!("Could not find default config path. Use -c to specify a config file."))?,
+    };
+    load_config(&config_path)
 }
 
 // ============================================================================

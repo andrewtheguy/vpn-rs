@@ -1,4 +1,8 @@
 //! Manual signaling payloads and helpers.
+//!
+//! Supports two signaling formats:
+//! - v1 (Custom mode): ICE/QUIC with str0m + quinn
+//! - v2 (Iroh manual mode): Iroh endpoint with NodeId and direct addresses
 
 use anyhow::{anyhow, Context, Result};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -7,14 +11,29 @@ use crc32fast::Hasher;
 use serde::{Deserialize, Serialize};
 use std::io::BufRead;
 
+/// Version 1: Custom mode (str0m ICE + quinn QUIC)
 pub const MANUAL_SIGNAL_VERSION: u16 = 1;
+/// Version 2: Iroh manual mode
+pub const IROH_SIGNAL_VERSION: u16 = 2;
 
 const PREFIX: &str = "TRS";
 const LINE_WIDTH: usize = 76;
+
+// Custom mode markers (v1)
 const OFFER_BEGIN_MARKER: &str = "-----BEGIN TUNNEL-RS MANUAL OFFER-----";
 const OFFER_END_MARKER: &str = "-----END TUNNEL-RS MANUAL OFFER-----";
 const ANSWER_BEGIN_MARKER: &str = "-----BEGIN TUNNEL-RS MANUAL ANSWER-----";
 const ANSWER_END_MARKER: &str = "-----END TUNNEL-RS MANUAL ANSWER-----";
+
+// Iroh mode markers (v2)
+const IROH_OFFER_BEGIN_MARKER: &str = "-----BEGIN TUNNEL-RS IROH OFFER-----";
+const IROH_OFFER_END_MARKER: &str = "-----END TUNNEL-RS IROH OFFER-----";
+const IROH_ANSWER_BEGIN_MARKER: &str = "-----BEGIN TUNNEL-RS IROH ANSWER-----";
+const IROH_ANSWER_END_MARKER: &str = "-----END TUNNEL-RS IROH ANSWER-----";
+
+// ============================================================================
+// Custom Mode (v1) - str0m ICE + quinn QUIC
+// ============================================================================
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ManualOffer {
@@ -31,6 +50,30 @@ pub struct ManualAnswer {
     pub ice_ufrag: String,
     pub ice_pwd: String,
     pub candidates: Vec<String>,
+}
+
+// ============================================================================
+// Iroh Manual Mode (v2) - Iroh endpoint
+// ============================================================================
+
+/// Iroh manual mode offer (sender -> receiver)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IrohManualOffer {
+    pub version: u16,
+    /// Base32-encoded NodeId (public key)
+    pub node_id: String,
+    /// Direct socket addresses (from STUN/local interfaces)
+    pub direct_addresses: Vec<String>,
+}
+
+/// Iroh manual mode answer (receiver -> sender)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IrohManualAnswer {
+    pub version: u16,
+    /// Base32-encoded NodeId (public key)
+    pub node_id: String,
+    /// Direct socket addresses (from STUN/local interfaces)
+    pub direct_addresses: Vec<String>,
 }
 
 pub fn encode_offer(offer: &ManualOffer) -> Result<String> {
@@ -67,14 +110,64 @@ pub fn read_answer_from_stdin() -> Result<ManualAnswer> {
     decode_answer(&payload)
 }
 
+// ============================================================================
+// Iroh Manual Mode (v2) - Public API
+// ============================================================================
+
+pub fn encode_iroh_offer(offer: &IrohManualOffer) -> Result<String> {
+    encode_payload_v(offer, IROH_SIGNAL_VERSION)
+}
+
+pub fn decode_iroh_offer(payload: &str) -> Result<IrohManualOffer> {
+    decode_payload_v(payload, IROH_SIGNAL_VERSION)
+}
+
+pub fn encode_iroh_answer(answer: &IrohManualAnswer) -> Result<String> {
+    encode_payload_v(answer, IROH_SIGNAL_VERSION)
+}
+
+pub fn decode_iroh_answer(payload: &str) -> Result<IrohManualAnswer> {
+    decode_payload_v(payload, IROH_SIGNAL_VERSION)
+}
+
+pub fn display_iroh_offer(offer: &IrohManualOffer) -> Result<()> {
+    display_payload(encode_iroh_offer(offer)?, IROH_OFFER_BEGIN_MARKER, IROH_OFFER_END_MARKER)
+}
+
+pub fn display_iroh_answer(answer: &IrohManualAnswer) -> Result<()> {
+    display_payload(encode_iroh_answer(answer)?, IROH_ANSWER_BEGIN_MARKER, IROH_ANSWER_END_MARKER)
+}
+
+pub fn read_iroh_offer_from_stdin() -> Result<IrohManualOffer> {
+    let payload = read_marked_payload(IROH_OFFER_BEGIN_MARKER, IROH_OFFER_END_MARKER)?;
+    decode_iroh_offer(&payload)
+}
+
+pub fn read_iroh_answer_from_stdin() -> Result<IrohManualAnswer> {
+    let payload = read_marked_payload(IROH_ANSWER_BEGIN_MARKER, IROH_ANSWER_END_MARKER)?;
+    decode_iroh_answer(&payload)
+}
+
+// ============================================================================
+// Internal Helpers
+// ============================================================================
+
 fn encode_payload<T: Serialize>(payload: &T) -> Result<String> {
+    encode_payload_v(payload, MANUAL_SIGNAL_VERSION)
+}
+
+fn encode_payload_v<T: Serialize>(payload: &T, version: u16) -> Result<String> {
     let json = serde_json::to_vec(payload).context("Failed to serialize manual payload")?;
     let checksum = crc32(&json);
     let encoded = URL_SAFE_NO_PAD.encode(&json);
-    Ok(format!("{}{}:{:08x}:{}", PREFIX, MANUAL_SIGNAL_VERSION, checksum, encoded))
+    Ok(format!("{}{}:{:08x}:{}", PREFIX, version, checksum, encoded))
 }
 
 fn decode_payload<T: for<'de> Deserialize<'de>>(payload: &str) -> Result<T> {
+    decode_payload_v(payload, MANUAL_SIGNAL_VERSION)
+}
+
+fn decode_payload_v<T: for<'de> Deserialize<'de>>(payload: &str, expected_version: u16) -> Result<T> {
     let trimmed = payload.trim();
     let mut parts = trimmed.splitn(3, ':');
     let header = parts
@@ -94,10 +187,10 @@ fn decode_payload<T: for<'de> Deserialize<'de>>(payload: &str) -> Result<T> {
     let version = header
         .strip_prefix(PREFIX)
         .ok_or_else(|| anyhow!("Manual payload missing version"))?;
-    if version != MANUAL_SIGNAL_VERSION.to_string() {
+    if version != expected_version.to_string() {
         return Err(anyhow!(
-            "Manual signaling version mismatch (expected {}, got {})",
-            MANUAL_SIGNAL_VERSION,
+            "Signaling version mismatch (expected {}, got {})",
+            expected_version,
             version
         ));
     }
