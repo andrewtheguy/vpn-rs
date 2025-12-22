@@ -16,6 +16,7 @@ tunnel-rs enables you to forward TCP and UDP traffic between machines without re
 **Common Use Cases:**
 - SSH access to machines behind NAT/firewalls
 - WireGuard VPN tunneling over P2P connections
+- General UDP tunneling (in addition to TCP; e.g., game servers, VoIP, custom UDP services)
 - Remote desktop access without port forwarding
 - Secure service exposure without public infrastructure
 - Development and testing across network boundaries
