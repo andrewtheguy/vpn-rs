@@ -60,7 +60,7 @@ fn current_timestamp() -> u64 {
 /// Publish offer and wait for answer with periodic re-publishing.
 ///
 /// This helper implements the nostr signaling offer/answer exchange with:
-/// - Periodic re-publishing of the offer at `republish_interval_secs`
+/// - Periodic re-publishing of the offer with exponential backoff
 /// - Overall timeout of `max_wait_secs`
 /// - Session ID validation to filter stale answers
 async fn publish_offer_and_wait_for_answer(
@@ -72,15 +72,19 @@ async fn publish_offer_and_wait_for_answer(
 ) -> Result<ManualAnswer> {
     let start_time = std::time::Instant::now();
 
+    // Exponential backoff: start at base interval, double each time, cap at 60s
+    let mut current_interval = republish_interval_secs;
+    const MAX_INTERVAL: u64 = 60;
+
     signaling.publish_offer(offer).await?;
     println!(
-        "Waiting for answer (re-publishing every {}s, max {}s)...",
+        "Waiting for answer (re-publishing with backoff, starting {}s, max {}s)...",
         republish_interval_secs, max_wait_secs
     );
 
     loop {
         if let Some(ans) = signaling
-            .try_wait_for_answer_timeout(republish_interval_secs)
+            .try_wait_for_answer_timeout(current_interval)
             .await
         {
             // Verify session ID matches
@@ -98,16 +102,19 @@ async fn publish_offer_and_wait_for_answer(
             );
         }
 
-        // Re-publish offer
-        println!("Re-publishing offer...");
+        // Re-publish offer with backoff
+        println!("Re-publishing offer (next wait: {}s)...", current_interval);
         signaling.publish_offer(offer).await?;
+
+        // Exponential backoff
+        current_interval = (current_interval * 2).min(MAX_INTERVAL);
     }
 }
 
 /// Publish request and wait for offer with periodic re-publishing.
 ///
 /// This helper implements the nostr signaling request/offer exchange with:
-/// - Periodic re-publishing of the request at `republish_interval_secs`
+/// - Periodic re-publishing of the request with exponential backoff
 /// - Overall timeout of `max_wait_secs`
 /// - Session ID validation to filter stale offers
 async fn publish_request_and_wait_for_offer(
@@ -119,15 +126,19 @@ async fn publish_request_and_wait_for_offer(
     let start_time = std::time::Instant::now();
     let session_id = &request.session_id;
 
+    // Exponential backoff: start at base interval, double each time, cap at 60s
+    let mut current_interval = republish_interval_secs;
+    const MAX_INTERVAL: u64 = 60;
+
     signaling.publish_request(request).await?;
     println!(
-        "Waiting for offer (re-publishing request every {}s, max {}s)...",
+        "Waiting for offer (re-publishing with backoff, starting {}s, max {}s)...",
         republish_interval_secs, max_wait_secs
     );
 
     loop {
         if let Some(offer) = signaling
-            .try_wait_for_offer_timeout(republish_interval_secs)
+            .try_wait_for_offer_timeout(current_interval)
             .await
         {
             // Verify session ID matches
@@ -145,9 +156,12 @@ async fn publish_request_and_wait_for_offer(
             );
         }
 
-        // Re-publish request
-        println!("Re-publishing request...");
+        // Re-publish request with backoff
+        println!("Re-publishing request (next wait: {}s)...", current_interval);
         signaling.publish_request(request).await?;
+
+        // Exponential backoff
+        current_interval = (current_interval * 2).min(MAX_INTERVAL);
     }
 }
 
