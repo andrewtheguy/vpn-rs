@@ -220,39 +220,39 @@ enum ReceiverMode {
     },
 }
 
-/// Load sender config based on flags.
+/// Load sender config based on flags. Returns (config, was_loaded_from_file).
 fn resolve_sender_config(
     config: Option<PathBuf>,
     default_config: bool,
-) -> Result<SenderConfig> {
+) -> Result<(SenderConfig, bool)> {
     if config.is_some() && default_config {
         anyhow::bail!("Cannot use both -c/--config and --default-config");
     }
 
     if let Some(path) = config {
-        load_sender_config(Some(&path))
+        Ok((load_sender_config(Some(&path))?, true))
     } else if default_config {
-        load_sender_config(None)
+        Ok((load_sender_config(None)?, true))
     } else {
-        Ok(SenderConfig::default())
+        Ok((SenderConfig::default(), false))
     }
 }
 
-/// Load receiver config based on flags.
+/// Load receiver config based on flags. Returns (config, was_loaded_from_file).
 fn resolve_receiver_config(
     config: Option<PathBuf>,
     default_config: bool,
-) -> Result<ReceiverConfig> {
+) -> Result<(ReceiverConfig, bool)> {
     if config.is_some() && default_config {
         anyhow::bail!("Cannot use both -c/--config and --default-config");
     }
 
     if let Some(path) = config {
-        load_receiver_config(Some(&path))
+        Ok((load_receiver_config(Some(&path))?, true))
     } else if default_config {
-        load_receiver_config(None)
+        Ok((load_receiver_config(None)?, true))
     } else {
-        Ok(ReceiverConfig::default())
+        Ok((ReceiverConfig::default(), false))
     }
 }
 
@@ -266,7 +266,7 @@ async fn main() -> Result<()> {
             default_config,
             mode,
         } => {
-            let cfg = resolve_sender_config(config, default_config)?;
+            let (cfg, from_file) = resolve_sender_config(config, default_config)?;
 
             match mode {
                 SenderMode::IrohDefault {
@@ -277,7 +277,9 @@ async fn main() -> Result<()> {
                     relay_only,
                     dns_server,
                 } => {
-                    cfg.validate("iroh-default")?;
+                    if from_file {
+                        cfg.validate("iroh-default")?;
+                    }
                     let iroh_cfg = cfg.iroh_default();
                     let protocol = protocol
                         .or_else(|| cfg.protocol.as_deref().and_then(Protocol::from_str_opt))
@@ -322,7 +324,9 @@ async fn main() -> Result<()> {
                     target,
                     stun_servers,
                 } => {
-                    cfg.validate("iroh-manual")?;
+                    if from_file {
+                        cfg.validate("iroh-manual")?;
+                    }
                     let protocol = protocol
                         .or_else(|| cfg.protocol.as_deref().and_then(Protocol::from_str_opt))
                         .unwrap_or_default();
@@ -345,7 +349,9 @@ async fn main() -> Result<()> {
                     target,
                     stun_servers,
                 } => {
-                    cfg.validate("custom")?;
+                    if from_file {
+                        cfg.validate("custom")?;
+                    }
                     let protocol = protocol
                         .or_else(|| cfg.protocol.as_deref().and_then(Protocol::from_str_opt))
                         .unwrap_or_default();
@@ -370,7 +376,7 @@ async fn main() -> Result<()> {
             default_config,
             mode,
         } => {
-            let cfg = resolve_receiver_config(config, default_config)?;
+            let (cfg, from_file) = resolve_receiver_config(config, default_config)?;
 
             match mode {
                 ReceiverMode::IrohDefault {
@@ -381,7 +387,9 @@ async fn main() -> Result<()> {
                     relay_only,
                     dns_server,
                 } => {
-                    cfg.validate("iroh-default")?;
+                    if from_file {
+                        cfg.validate("iroh-default")?;
+                    }
                     let iroh_cfg = cfg.iroh_default();
                     let protocol = protocol
                         .or_else(|| cfg.protocol.as_deref().and_then(Protocol::from_str_opt))
@@ -420,7 +428,9 @@ async fn main() -> Result<()> {
                     listen,
                     stun_servers,
                 } => {
-                    cfg.validate("iroh-manual")?;
+                    if from_file {
+                        cfg.validate("iroh-manual")?;
+                    }
                     let protocol = protocol
                         .or_else(|| cfg.protocol.as_deref().and_then(Protocol::from_str_opt))
                         .unwrap_or_default();
@@ -443,7 +453,9 @@ async fn main() -> Result<()> {
                     listen,
                     stun_servers,
                 } => {
-                    cfg.validate("custom")?;
+                    if from_file {
+                        cfg.validate("custom")?;
+                    }
                     let protocol = protocol
                         .or_else(|| cfg.protocol.as_deref().and_then(Protocol::from_str_opt))
                         .unwrap_or_default();
