@@ -135,13 +135,15 @@ tunnel-rs receiver iroh default --protocol udp --node-id <ENDPOINT_ID> --listen 
 
 ## Configuration Files
 
-Config files are shared across all modes. Use `--default-config` to load from the default location, or `-c <path>` for a custom path.
+Config files apply to **Iroh default** and **custom** modes. **Iroh manual mode does not support config files**—use CLI flags instead. Use `--default-config` to load from the default location, or `-c <path>` for a custom path.
 
 **Default locations:**
 - Sender: `~/.config/tunnel-rs/sender.toml`
 - Receiver: `~/.config/tunnel-rs/receiver.toml`
 
 ### Sender Config
+
+**Note:** Config files apply to **Iroh default** and **custom** modes only. For **Iroh manual mode**, use CLI flags (see `sender iroh manual` at [CLI Options](#cli-options)).
 
 ```toml
 # ~/.config/tunnel-rs/sender.toml
@@ -165,6 +167,8 @@ tunnel-rs sender --default-config iroh default
 # Load from custom path
 tunnel-rs sender -c ./my-sender.toml iroh default
 ```
+
+**Note:** Config files apply to **Iroh default** and **custom** modes only. For **Iroh manual mode**, use CLI flags (see `receiver iroh manual` at [CLI Options](#cli-options)).
 
 ### Receiver Config
 
@@ -314,6 +318,8 @@ Uses full ICE (Interactive Connectivity Establishment) with str0m + quinn QUIC. 
 
 **NAT Traversal:** Full ICE implementation with STUN candidate gathering and connectivity checks. This provides the best NAT traversal success rate, including support for symmetric NATs that fail with simpler STUN-only approaches.
 
+**Note:** Custom mode and Iroh Manual mode both use the same signaling block label naming (`-----BEGIN TUNNEL-RS MANUAL OFFER/ANSWER-----`), though they differ in transport protocol and ICE support.
+
 ## Architecture
 
 ```
@@ -393,7 +399,7 @@ ICE connection established!
 
 # Utility Commands
 
-These commands are for managing persistent identity in iroh mode.
+These commands manage persistent identity (secret files, EndpointId) and apply only to **iroh default mode**. Other iroh modes do not use persistent identity.
 
 ## generate-secret
 
