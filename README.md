@@ -1,8 +1,8 @@
-# tunnel-rs
+# Tunnel-rs
 
-**Cross-platform Secure peer-to-peer TCP/UDP port forwarding with NAT traversal.**
+**Cross-platform Secure Peer-to-Peer TCP/UDP port forwarding with NAT traversal.**
 
-tunnel-rs enables you to forward TCP and UDP traffic between machines without requiring public IP addresses, port forwarding, or VPN infrastructure. It establishes direct encrypted connections between peers using modern P2P networking techniques.
+Tunnel-rs enables you to forward TCP and UDP traffic between machines without requiring public IP addresses, port forwarding, or VPN infrastructure. It establishes direct encrypted connections between peers using modern P2P networking techniques.
 
 **Key Features:**
 - **Cross-platform support** — Works on Linux, macOS, and Windows
