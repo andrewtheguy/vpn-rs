@@ -161,7 +161,7 @@ Use `--default-config` to load from the default location, or `-c <path>` for a c
 ### Sender Config Example
 
 ```toml
-# ~/.config/tunnel-rs/sender.toml
+# Example sender configuration (iroh-default mode)
 
 # Required: validates config matches CLI command
 role = "sender"
@@ -192,7 +192,7 @@ tunnel-rs sender -c ./my-sender.toml
 ### Receiver Config Example
 
 ```toml
-# ~/.config/tunnel-rs/receiver.toml
+# Example receiver configuration (iroh-default mode)
 
 # Required: validates config matches CLI command
 role = "receiver"
