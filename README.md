@@ -31,19 +31,21 @@ tunnel-rs provides multiple modes for establishing tunnels:
 | **iroh-default** | Automatic (Pkarr/DNS/mDNS) | Relay fallback | TCP, UDP | Production, always-on tunnels |
 | **iroh-manual** | Manual copy-paste | STUN heuristic | TCP, UDP | Serverless, simple NATs |
 | **custom** | Manual copy-paste | Full ICE | TCP, UDP | Best NAT compatibility |
+| **nostr** | Nostr relays | Full ICE | TCP, UDP | Automated signaling, static keys |
 
-### Choosing a Manual Mode
+### Choosing a Serverless Mode
 
-Both `iroh-manual` and `custom` modes use copy-paste signaling without servers:
+The `iroh-manual`, `custom`, and `nostr` modes don't require iroh discovery/relay infrastructure:
 
-| Feature | iroh-manual | custom |
-|---------|-------------|--------|
-| NAT traversal | STUN-based (heuristic) | Full ICE (connectivity checks) |
-| Symmetric NAT | May fail | Best-effort (STUN-only, may fail without relay) |
-| Protocols | TCP + UDP | TCP + UDP |
-| QUIC stack | iroh | str0m + quinn |
+| Feature | iroh-manual | custom | nostr |
+|---------|-------------|--------|-------|
+| Signaling | Manual copy-paste | Manual copy-paste | Nostr relays (automated) |
+| NAT traversal | STUN heuristic | Full ICE | Full ICE |
+| Symmetric NAT | May fail | Best-effort | Best-effort |
+| Keys | Ephemeral | Ephemeral | Static (WireGuard-like) |
+| QUIC stack | iroh | str0m + quinn | str0m + quinn |
 
-**Recommendation:** Use `custom` mode for best NAT traversal, especially for symmetric NATs.
+**Recommendation:** Use `nostr` mode for automated signaling with persistent identity, or `custom` mode for best NAT traversal without external dependencies.
 
 ## Installation
 
@@ -223,7 +225,7 @@ Use `--default-config` to load from the default location, or `-c <path>` for a c
 
 # Required: validates config matches CLI command
 role = "sender"
-mode = "iroh-default"  # or "iroh-manual" or "custom"
+mode = "iroh-default"  # or "iroh-manual", "custom", or "nostr"
 
 # Shared options
 source = "tcp://127.0.0.1:22"
@@ -253,7 +255,7 @@ tunnel-rs sender -c ./my-sender.toml
 
 # Required: validates config matches CLI command
 role = "receiver"
-mode = "iroh-default"  # or "iroh-manual" or "custom"
+mode = "iroh-default"  # or "iroh-manual", "custom", or "nostr"
 
 # Shared options
 target = "tcp://127.0.0.1:2222"
