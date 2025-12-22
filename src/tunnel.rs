@@ -18,6 +18,7 @@ use crate::endpoint::{
     validate_relay_only, TCP_ALPN, UDP_ALPN,
 };
 use crate::manual::ice::{IceEndpoint, IceRole};
+use crate::manual::nostr_signaling::NostrSignaling;
 use crate::manual::quic;
 use crate::manual::signaling::{
     display_answer, display_iroh_answer, display_iroh_offer, display_offer,
@@ -761,6 +762,465 @@ pub async fn run_manual_udp_receiver(listen: String, stun_servers: Vec<String>) 
 
     let endpoint = quic::make_client_endpoint(ice_conn.socket, &offer.quic_fingerprint)?;
     println!("Connecting to sender via QUIC (timeout: {:?})...", QUIC_CONNECTION_TIMEOUT);
+    let connecting = endpoint
+        .connect(ice_conn.remote_addr, "manual")
+        .context("Failed to start QUIC connection")?;
+    let conn = tokio::time::timeout(QUIC_CONNECTION_TIMEOUT, connecting)
+        .await
+        .context("Timeout during QUIC connection")?
+        .context("Failed to connect to sender")?;
+    println!("Connected to sender over QUIC.");
+
+    let (send_stream, recv_stream) = conn.open_bi().await.context("Failed to open stream")?;
+
+    let udp_socket = Arc::new(
+        UdpSocket::bind(listen_addr)
+            .await
+            .context("Failed to bind UDP socket")?,
+    );
+    println!(
+        "Listening on UDP {} - configure your client to connect here",
+        listen_addr
+    );
+
+    let client_addr: Arc<Mutex<Option<SocketAddr>>> = Arc::new(Mutex::new(None));
+
+    let udp_clone = udp_socket.clone();
+    let client_clone = client_addr.clone();
+
+    tokio::select! {
+        result = forward_udp_to_stream_quic(udp_clone, send_stream, client_clone) => {
+            if let Err(e) = result {
+                eprintln!("UDP to stream error: {}", e);
+            }
+        }
+        result = forward_stream_to_udp_receiver_quic(recv_stream, udp_socket, client_addr) => {
+            if let Err(e) = result {
+                eprintln!("Stream to UDP error: {}", e);
+            }
+        }
+    }
+
+    conn.close(0u32.into(), b"done");
+    println!("Connection closed.");
+
+    Ok(())
+}
+
+// ============================================================================
+// Nostr TCP Tunnel Implementation (ICE + QUIC with Nostr signaling)
+// ============================================================================
+
+pub async fn run_nostr_tcp_sender(
+    target: String,
+    stun_servers: Vec<String>,
+    nsec: String,
+    peer_npub: String,
+    relays: Vec<String>,
+) -> Result<()> {
+    let target_addr = resolve_target_addr(&target)
+        .await
+        .with_context(|| format!("Invalid target address or hostname '{}'", target))?;
+
+    println!("Nostr TCP Tunnel - Sender Mode");
+    println!("==============================");
+
+    // Create Nostr signaling client
+    let relay_list = if relays.is_empty() { None } else { Some(relays) };
+    let signaling = NostrSignaling::new(&nsec, &peer_npub, relay_list).await?;
+
+    println!("Your pubkey: {}", signaling.public_key_bech32());
+    println!("Transfer ID: {}", signaling.transfer_id());
+    println!("Relays: {:?}", signaling.relay_urls());
+
+    // Subscribe to incoming events
+    signaling.subscribe().await?;
+
+    // Gather ICE candidates
+    let ice = IceEndpoint::gather(&stun_servers).await?;
+    let local_creds = ice.local_credentials();
+    let local_candidates = ice.local_candidates();
+
+    let quic_identity = quic::generate_server_identity()?;
+
+    let offer = ManualOffer {
+        version: MANUAL_SIGNAL_VERSION,
+        ice_ufrag: local_creds.ufrag.clone(),
+        ice_pwd: local_creds.pass.clone(),
+        candidates: local_candidates,
+        quic_fingerprint: quic_identity.fingerprint.clone(),
+    };
+
+    // Publish offer via Nostr
+    signaling.publish_offer(&offer).await?;
+
+    // Wait for answer from peer
+    let answer = signaling.wait_for_answer().await?;
+
+    if answer.version != MANUAL_SIGNAL_VERSION {
+        anyhow::bail!(
+            "Manual signaling version mismatch (expected {}, got {})",
+            MANUAL_SIGNAL_VERSION,
+            answer.version
+        );
+    }
+
+    // Disconnect from Nostr (signaling complete)
+    signaling.disconnect().await;
+
+    let remote_creds = str0m::IceCreds {
+        ufrag: answer.ice_ufrag,
+        pass: answer.ice_pwd,
+    };
+
+    let ice_conn = ice
+        .connect(IceRole::Controlling, remote_creds, answer.candidates)
+        .await?;
+
+    // Spawn the ICE keeper to handle STUN packets in the background
+    tokio::spawn(ice_conn.ice_keeper.run());
+
+    let endpoint = quic::make_server_endpoint(ice_conn.socket, quic_identity.server_config)?;
+    println!(
+        "Waiting for receiver QUIC connection (timeout: {:?})...",
+        QUIC_CONNECTION_TIMEOUT
+    );
+
+    let connecting = tokio::time::timeout(QUIC_CONNECTION_TIMEOUT, endpoint.accept())
+        .await
+        .context("Timeout waiting for QUIC connection")?
+        .context("No incoming QUIC connection")?;
+    let conn = tokio::time::timeout(QUIC_CONNECTION_TIMEOUT, connecting)
+        .await
+        .context("Timeout during QUIC handshake")?
+        .context("Failed to accept QUIC connection")?;
+    println!("Receiver connected over QUIC.");
+
+    loop {
+        let (send_stream, recv_stream) = match conn.accept_bi().await {
+            Ok(streams) => streams,
+            Err(e) => {
+                println!("Receiver disconnected: {}", e);
+                break;
+            }
+        };
+
+        println!("New TCP connection request received");
+        let target = target_addr;
+        tokio::spawn(async move {
+            if let Err(e) = handle_tcp_sender_stream_quic(send_stream, recv_stream, target).await {
+                eprintln!("TCP connection error: {}", e);
+            }
+        });
+    }
+
+    Ok(())
+}
+
+pub async fn run_nostr_tcp_receiver(
+    listen: String,
+    stun_servers: Vec<String>,
+    nsec: String,
+    peer_npub: String,
+    relays: Vec<String>,
+) -> Result<()> {
+    let listen_addr: SocketAddr = listen
+        .parse()
+        .context("Invalid listen address format. Use format like 127.0.0.1:2222 or [::]:2222")?;
+
+    println!("Nostr TCP Tunnel - Receiver Mode");
+    println!("================================");
+
+    // Create Nostr signaling client
+    let relay_list = if relays.is_empty() { None } else { Some(relays) };
+    let signaling = NostrSignaling::new(&nsec, &peer_npub, relay_list).await?;
+
+    println!("Your pubkey: {}", signaling.public_key_bech32());
+    println!("Transfer ID: {}", signaling.transfer_id());
+    println!("Relays: {:?}", signaling.relay_urls());
+
+    // Subscribe to incoming events
+    signaling.subscribe().await?;
+
+    // Gather ICE candidates
+    let ice = IceEndpoint::gather(&stun_servers).await?;
+    let local_creds = ice.local_credentials();
+    let local_candidates = ice.local_candidates();
+
+    // Wait for offer from sender
+    let offer = signaling.wait_for_offer().await?;
+
+    if offer.version != MANUAL_SIGNAL_VERSION {
+        anyhow::bail!(
+            "Manual signaling version mismatch (expected {}, got {})",
+            MANUAL_SIGNAL_VERSION,
+            offer.version
+        );
+    }
+
+    // Create and publish answer
+    let answer = ManualAnswer {
+        version: MANUAL_SIGNAL_VERSION,
+        ice_ufrag: local_creds.ufrag.clone(),
+        ice_pwd: local_creds.pass.clone(),
+        candidates: local_candidates,
+    };
+
+    signaling.publish_answer(&answer).await?;
+
+    // Disconnect from Nostr (signaling complete)
+    signaling.disconnect().await;
+
+    let remote_creds = str0m::IceCreds {
+        ufrag: offer.ice_ufrag,
+        pass: offer.ice_pwd,
+    };
+
+    let ice_conn = ice
+        .connect(IceRole::Controlled, remote_creds, offer.candidates)
+        .await?;
+
+    // Spawn the ICE keeper to handle STUN packets in the background
+    tokio::spawn(ice_conn.ice_keeper.run());
+
+    let endpoint = quic::make_client_endpoint(ice_conn.socket, &offer.quic_fingerprint)?;
+    println!(
+        "Connecting to sender via QUIC (timeout: {:?})...",
+        QUIC_CONNECTION_TIMEOUT
+    );
+    let connecting = endpoint
+        .connect(ice_conn.remote_addr, "manual")
+        .context("Failed to start QUIC connection")?;
+    let conn = tokio::time::timeout(QUIC_CONNECTION_TIMEOUT, connecting)
+        .await
+        .context("Timeout during QUIC connection")?
+        .context("Failed to connect to sender")?;
+    println!("Connected to sender over QUIC.");
+
+    let conn = Arc::new(conn);
+    let tunnel_established = Arc::new(AtomicBool::new(false));
+
+    let listener = TcpListener::bind(listen_addr)
+        .await
+        .context("Failed to bind TCP listener")?;
+    println!(
+        "Listening on TCP {} - configure your client to connect here",
+        listen_addr
+    );
+
+    loop {
+        let (tcp_stream, peer_addr) = match listener.accept().await {
+            Ok(result) => result,
+            Err(e) => {
+                eprintln!("Failed to accept TCP connection: {}", e);
+                continue;
+            }
+        };
+
+        println!("New local connection from {}", peer_addr);
+        let conn_clone = conn.clone();
+        let established = tunnel_established.clone();
+
+        tokio::spawn(async move {
+            match handle_tcp_receiver_connection_quic(conn_clone, tcp_stream, peer_addr, established)
+                .await
+            {
+                Ok(()) => {}
+                Err(e) => {
+                    eprintln!("TCP tunnel error for {}: {}", peer_addr, e);
+                }
+            }
+        });
+    }
+}
+
+// ============================================================================
+// Nostr UDP Tunnel Implementation (ICE + QUIC with Nostr signaling)
+// ============================================================================
+
+pub async fn run_nostr_udp_sender(
+    target: String,
+    stun_servers: Vec<String>,
+    nsec: String,
+    peer_npub: String,
+    relays: Vec<String>,
+) -> Result<()> {
+    let target_addr = resolve_target_addr(&target)
+        .await
+        .with_context(|| format!("Invalid target address or hostname '{}'", target))?;
+
+    println!("Nostr UDP Tunnel - Sender Mode");
+    println!("==============================");
+
+    // Create Nostr signaling client
+    let relay_list = if relays.is_empty() { None } else { Some(relays) };
+    let signaling = NostrSignaling::new(&nsec, &peer_npub, relay_list).await?;
+
+    println!("Your pubkey: {}", signaling.public_key_bech32());
+    println!("Transfer ID: {}", signaling.transfer_id());
+    println!("Relays: {:?}", signaling.relay_urls());
+
+    // Subscribe to incoming events
+    signaling.subscribe().await?;
+
+    // Gather ICE candidates
+    let ice = IceEndpoint::gather(&stun_servers).await?;
+    let local_creds = ice.local_credentials();
+    let local_candidates = ice.local_candidates();
+
+    let quic_identity = quic::generate_server_identity()?;
+
+    let offer = ManualOffer {
+        version: MANUAL_SIGNAL_VERSION,
+        ice_ufrag: local_creds.ufrag.clone(),
+        ice_pwd: local_creds.pass.clone(),
+        candidates: local_candidates,
+        quic_fingerprint: quic_identity.fingerprint.clone(),
+    };
+
+    // Publish offer via Nostr
+    signaling.publish_offer(&offer).await?;
+
+    // Wait for answer from peer
+    let answer = signaling.wait_for_answer().await?;
+
+    if answer.version != MANUAL_SIGNAL_VERSION {
+        anyhow::bail!(
+            "Manual signaling version mismatch (expected {}, got {})",
+            MANUAL_SIGNAL_VERSION,
+            answer.version
+        );
+    }
+
+    // Disconnect from Nostr (signaling complete)
+    signaling.disconnect().await;
+
+    let remote_creds = str0m::IceCreds {
+        ufrag: answer.ice_ufrag,
+        pass: answer.ice_pwd,
+    };
+
+    let ice_conn = ice
+        .connect(IceRole::Controlling, remote_creds, answer.candidates)
+        .await?;
+
+    // Spawn the ICE keeper to handle STUN packets in the background
+    tokio::spawn(ice_conn.ice_keeper.run());
+
+    let endpoint = quic::make_server_endpoint(ice_conn.socket, quic_identity.server_config)?;
+    println!(
+        "Waiting for receiver QUIC connection (timeout: {:?})...",
+        QUIC_CONNECTION_TIMEOUT
+    );
+
+    let connecting = tokio::time::timeout(QUIC_CONNECTION_TIMEOUT, endpoint.accept())
+        .await
+        .context("Timeout waiting for QUIC connection")?
+        .context("No incoming QUIC connection")?;
+    let conn = tokio::time::timeout(QUIC_CONNECTION_TIMEOUT, connecting)
+        .await
+        .context("Timeout during QUIC handshake")?
+        .context("Failed to accept QUIC connection")?;
+    println!("Receiver connected over QUIC.");
+
+    let (send_stream, recv_stream) = conn
+        .accept_bi()
+        .await
+        .context("Failed to accept stream from receiver")?;
+
+    println!("Forwarding UDP traffic to {}", target_addr);
+
+    // Bind to the same address family as the target
+    let bind_addr: SocketAddr = if target_addr.is_ipv6() {
+        "[::]:0".parse().unwrap()
+    } else {
+        "0.0.0.0:0".parse().unwrap()
+    };
+    let udp_socket = Arc::new(
+        UdpSocket::bind(bind_addr)
+            .await
+            .context("Failed to bind UDP socket")?,
+    );
+
+    forward_stream_to_udp_sender_quic(recv_stream, send_stream, udp_socket, target_addr).await?;
+
+    conn.close(0u32.into(), b"done");
+    println!("Connection closed.");
+
+    Ok(())
+}
+
+pub async fn run_nostr_udp_receiver(
+    listen: String,
+    stun_servers: Vec<String>,
+    nsec: String,
+    peer_npub: String,
+    relays: Vec<String>,
+) -> Result<()> {
+    let listen_addr: SocketAddr = listen
+        .parse()
+        .context("Invalid listen address format. Use format like 127.0.0.1:51820 or [::]:51820")?;
+
+    println!("Nostr UDP Tunnel - Receiver Mode");
+    println!("================================");
+
+    // Create Nostr signaling client
+    let relay_list = if relays.is_empty() { None } else { Some(relays) };
+    let signaling = NostrSignaling::new(&nsec, &peer_npub, relay_list).await?;
+
+    println!("Your pubkey: {}", signaling.public_key_bech32());
+    println!("Transfer ID: {}", signaling.transfer_id());
+    println!("Relays: {:?}", signaling.relay_urls());
+
+    // Subscribe to incoming events
+    signaling.subscribe().await?;
+
+    // Gather ICE candidates
+    let ice = IceEndpoint::gather(&stun_servers).await?;
+    let local_creds = ice.local_credentials();
+    let local_candidates = ice.local_candidates();
+
+    // Wait for offer from sender
+    let offer = signaling.wait_for_offer().await?;
+
+    if offer.version != MANUAL_SIGNAL_VERSION {
+        anyhow::bail!(
+            "Manual signaling version mismatch (expected {}, got {})",
+            MANUAL_SIGNAL_VERSION,
+            offer.version
+        );
+    }
+
+    // Create and publish answer
+    let answer = ManualAnswer {
+        version: MANUAL_SIGNAL_VERSION,
+        ice_ufrag: local_creds.ufrag.clone(),
+        ice_pwd: local_creds.pass.clone(),
+        candidates: local_candidates,
+    };
+
+    signaling.publish_answer(&answer).await?;
+
+    // Disconnect from Nostr (signaling complete)
+    signaling.disconnect().await;
+
+    let remote_creds = str0m::IceCreds {
+        ufrag: offer.ice_ufrag,
+        pass: offer.ice_pwd,
+    };
+
+    let ice_conn = ice
+        .connect(IceRole::Controlled, remote_creds, offer.candidates)
+        .await?;
+
+    // Spawn the ICE keeper to handle STUN packets in the background
+    tokio::spawn(ice_conn.ice_keeper.run());
+
+    let endpoint = quic::make_client_endpoint(ice_conn.socket, &offer.quic_fingerprint)?;
+    println!(
+        "Connecting to sender via QUIC (timeout: {:?})...",
+        QUIC_CONNECTION_TIMEOUT
+    );
     let connecting = endpoint
         .connect(ice_conn.remote_addr, "manual")
         .context("Failed to start QUIC connection")?;
