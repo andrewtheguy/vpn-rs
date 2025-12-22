@@ -44,6 +44,46 @@ fn generate_session_id() -> String {
     hex::encode(random_bytes)
 }
 
+/// Publish answer and continue re-publishing until signaling timeout.
+///
+/// This helper ensures the sender receives the answer by:
+/// - Publishing the answer immediately
+/// - Re-publishing every `republish_interval_secs`
+/// - Continuing for total of `signaling_duration_secs`
+///
+/// This is necessary because Nostr is ephemeral - the sender may miss the first
+/// answer due to relay delays or timing issues. Unlike the sender which waits for
+/// an answer, the receiver needs to keep advertising its answer while both sides
+/// work through ICE/QUIC connection establishment.
+async fn publish_answer_with_republish(
+    signaling: &NostrSignaling,
+    answer: &ManualAnswer,
+    republish_interval_secs: u64,
+    signaling_duration_secs: u64,
+) -> Result<()> {
+    signaling.publish_answer(answer).await?;
+    println!(
+        "Waiting for sender to receive answer (re-publishing every {}s for {}s)...",
+        republish_interval_secs, signaling_duration_secs
+    );
+
+    let start_time = std::time::Instant::now();
+
+    while start_time.elapsed().as_secs() < signaling_duration_secs {
+        tokio::time::sleep(Duration::from_secs(republish_interval_secs)).await;
+
+        // Check if we've exceeded the timeout
+        if start_time.elapsed().as_secs() >= signaling_duration_secs {
+            break;
+        }
+
+        println!("Re-publishing answer...");
+        signaling.publish_answer(answer).await?;
+    }
+
+    Ok(())
+}
+
 /// Publish offer and wait for answer with periodic re-publishing.
 ///
 /// This helper implements the nostr signaling offer/answer exchange with:
@@ -995,6 +1035,8 @@ pub async fn run_nostr_tcp_receiver(
     nsec: String,
     peer_npub: String,
     relays: Vec<String>,
+    republish_interval_secs: u64,
+    max_wait_secs: u64,
 ) -> Result<()> {
     // Ensure crypto provider is installed before nostr-sdk uses rustls
     quic::ensure_crypto_provider();
@@ -1046,11 +1088,14 @@ pub async fn run_nostr_tcp_receiver(
         println!("Session ID: {}", sid);
     }
 
-    signaling.publish_answer(&answer).await?;
-
-    // Give sender time to receive answer and start ICE checks
-    println!("Waiting for sender to receive answer...");
-    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    // Publish answer and re-publish periodically to ensure sender receives it
+    publish_answer_with_republish(
+        &signaling,
+        &answer,
+        republish_interval_secs,
+        max_wait_secs,
+    )
+    .await?;
 
     // Disconnect from Nostr (signaling complete)
     signaling.disconnect().await;
@@ -1254,6 +1299,8 @@ pub async fn run_nostr_udp_receiver(
     nsec: String,
     peer_npub: String,
     relays: Vec<String>,
+    republish_interval_secs: u64,
+    max_wait_secs: u64,
 ) -> Result<()> {
     // Ensure crypto provider is installed before nostr-sdk uses rustls
     quic::ensure_crypto_provider();
@@ -1305,11 +1352,14 @@ pub async fn run_nostr_udp_receiver(
         println!("Session ID: {}", sid);
     }
 
-    signaling.publish_answer(&answer).await?;
-
-    // Give sender time to receive answer and start ICE checks
-    println!("Waiting for sender to receive answer...");
-    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    // Publish answer and re-publish periodically to ensure sender receives it
+    publish_answer_with_republish(
+        &signaling,
+        &answer,
+        republish_interval_secs,
+        max_wait_secs,
+    )
+    .await?;
 
     // Disconnect from Nostr (signaling complete)
     signaling.disconnect().await;
