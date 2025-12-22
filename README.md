@@ -7,7 +7,7 @@ tunnel-rs enables you to forward TCP and UDP traffic between machines without re
 **Key Features:**
 - **End-to-end encryption** via QUIC/TLS 1.3
 - **NAT traversal** with multiple strategies (relay fallback, STUN, full ICE)
-- **Zero configuration** for automatic peer discovery (iroh-default mode)
+- **Minimal configuration** for automatic peer discovery (iroh-default mode; EndpointId required)
 - **Serverless options** with manual signaling (iroh-manual, custom modes)
 - **Protocol support** for both TCP and UDP tunneling
 - **High performance** with QUIC multiplexing
@@ -36,7 +36,7 @@ Both `iroh-manual` and `custom` modes use copy-paste signaling without servers:
 | Feature | iroh-manual | custom |
 |---------|-------------|--------|
 | NAT traversal | STUN-based (heuristic) | Full ICE (connectivity checks) |
-| Symmetric NAT | May fail | Works |
+| Symmetric NAT | May fail | Best-effort (STUN-only, may fail without relay) |
 | Protocols | TCP + UDP | TCP + UDP |
 | QUIC stack | iroh | str0m + quinn |
 
@@ -53,6 +53,8 @@ cargo install --path .
 # iroh-default Mode
 
 Uses iroh's P2P network for automatic peer discovery and NAT traversal with relay fallback.
+
+**Note:** While discovery and relay are fully automatic, peers still need to exchange the sender's **EndpointId** to initiate the connection. Optional settings like relay URLs and DNS servers can also be customized per connection.
 
 ## Architecture
 

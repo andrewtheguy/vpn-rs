@@ -100,7 +100,7 @@ graph TD
     subgraph "iroh-default"
         A1[Discovery: Automatic]
         A2[NAT: Relay Fallback]
-        A3[Setup: Zero Config]
+        A3[Setup: Minimal (EndpointId required)]
         A4[Infrastructure: Required]
     end
     
@@ -163,7 +163,7 @@ graph LR
         G1[✓ Direct]
         G2[✓ Direct]
         G3[✓ Direct]
-        G4[✓ Direct]
+        G4[~ Best-effort<br/>may fail without relay]
     end
     
     A --> E1
@@ -194,7 +194,7 @@ graph LR
     style G1 fill:#C8E6C9
     style G2 fill:#C8E6C9
     style G3 fill:#C8E6C9
-    style G4 fill:#C8E6C9
+    style G4 fill:#FFF9C4
 ```
 
 ---
@@ -555,6 +555,8 @@ graph TB
 ---
 
 ## Custom Mode
+
+> **Note:** Custom mode implements full ICE with STUN-only connectivity checks. TURN/relay servers are not implemented. This means symmetric NAT peers may still fail to establish a connection without a relay fallback mechanism.
 
 ### Architecture Overview
 
@@ -1223,7 +1225,7 @@ The `quinn` QUIC implementation provides:
 - **TLS 1.3**: Encrypted transport with certificate-based auth
 - **Stream Multiplexing**: Multiple concurrent streams over one connection
 - **Congestion Control**: Built-in congestion control and flow control
-- **0-RTT**: Optional zero round-trip time connection establishment
+- **0-RTT**: Not currently enabled (future optimization)
 
 ### Endpoint (iroh)
 
