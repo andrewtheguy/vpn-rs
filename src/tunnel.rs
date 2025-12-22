@@ -3,7 +3,7 @@
 use anyhow::{Context, Result};
 use iroh::discovery::static_provider::StaticProvider;
 use iroh::{Endpoint, EndpointAddr, EndpointId, RelayMode, TransportAddr};
-use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
+use std::net::{SocketAddr, ToSocketAddrs};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -900,25 +900,15 @@ async fn race_connect_accept(
 
     let connect_timeout = Duration::from_secs(30);
 
-    // Create futures for both operations
-    let connect_fut = async {
-        // Small delay before connecting to give the other side time to start accepting
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        endpoint.connect(EndpointAddr::new(remote_id), alpn).await
-    };
-
-    let accept_fut = async {
-        match endpoint.accept().await {
-            Some(incoming) => incoming.await,
-            None => Err(anyhow::anyhow!("Endpoint closed").into()),
-        }
-    };
-
     println!("Racing connect vs accept for NAT hole punching...");
 
     // Race both operations with a timeout
     tokio::select! {
-        result = timeout(connect_timeout, connect_fut) => {
+        result = timeout(connect_timeout, async {
+            // Small delay before connecting to give the other side time to start accepting
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            endpoint.connect(EndpointAddr::new(remote_id), alpn).await
+        }) => {
             match result {
                 Ok(Ok(conn)) => {
                     println!("Connected via outbound connection");
@@ -928,13 +918,18 @@ async fn race_connect_accept(
                 Err(_) => Err(anyhow::anyhow!("Connect timeout")),
             }
         }
-        result = timeout(connect_timeout, accept_fut) => {
+        result = timeout(connect_timeout, async {
+            match endpoint.accept().await {
+                Some(incoming) => incoming.await.map_err(|e| anyhow::anyhow!("Accept error: {}", e)),
+                None => Err(anyhow::anyhow!("Endpoint closed")),
+            }
+        }) => {
             match result {
                 Ok(Ok(conn)) => {
                     println!("Connected via inbound connection");
                     Ok(conn)
                 }
-                Ok(Err(e)) => Err(anyhow::anyhow!("Accept failed: {}", e)),
+                Ok(Err(e)) => Err(e),
                 Err(_) => Err(anyhow::anyhow!("Accept timeout")),
             }
         }
