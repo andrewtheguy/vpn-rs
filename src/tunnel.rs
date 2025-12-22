@@ -37,6 +37,13 @@ async fn resolve_target_addr(target: &str) -> Result<SocketAddr> {
     addrs.next().context("No addresses found for host")
 }
 
+/// Generate a random session ID for nostr signaling.
+fn generate_session_id() -> String {
+    use rand::Rng;
+    let random_bytes: [u8; 8] = rand::rng().random();
+    hex::encode(random_bytes)
+}
+
 // ============================================================================
 // UDP Tunnel Implementation
 // ============================================================================
@@ -844,11 +851,7 @@ pub async fn run_nostr_tcp_sender(
     signaling.subscribe().await?;
 
     // Generate session ID to distinguish this session from stale events
-    let session_id: String = {
-        use rand::Rng;
-        let random_bytes: [u8; 8] = rand::rng().random();
-        hex::encode(random_bytes)
-    };
+    let session_id = generate_session_id();
     println!("Session ID: {}", session_id);
 
     // Gather ICE candidates
@@ -880,7 +883,7 @@ pub async fn run_nostr_tcp_sender(
 
     let answer = loop {
         if let Some(ans) = signaling
-            .wait_for_answer_timeout(OFFER_REPUBLISH_INTERVAL_SECS)
+            .try_wait_for_answer_timeout(OFFER_REPUBLISH_INTERVAL_SECS)
             .await
         {
             // Verify session ID matches
@@ -1125,11 +1128,7 @@ pub async fn run_nostr_udp_sender(
     signaling.subscribe().await?;
 
     // Generate session ID to distinguish this session from stale events
-    let session_id: String = {
-        use rand::Rng;
-        let random_bytes: [u8; 8] = rand::rng().random();
-        hex::encode(random_bytes)
-    };
+    let session_id = generate_session_id();
     println!("Session ID: {}", session_id);
 
     // Gather ICE candidates
@@ -1161,7 +1160,7 @@ pub async fn run_nostr_udp_sender(
 
     let answer = loop {
         if let Some(ans) = signaling
-            .wait_for_answer_timeout(OFFER_REPUBLISH_INTERVAL_SECS)
+            .try_wait_for_answer_timeout(OFFER_REPUBLISH_INTERVAL_SECS)
             .await
         {
             // Verify session ID matches
