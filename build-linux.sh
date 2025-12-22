@@ -5,7 +5,7 @@ set -e
 # Builds for both AMD64 and ARM64 architectures
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BUILD_DIR="${SCRIPT_DIR}/build"
+BUILD_DIR="${SCRIPT_DIR}/target/build"
 DOCKERFILE="${SCRIPT_DIR}/Dockerfile.cross"
 IMAGE_NAME="tunnel-rs-builder"
 VERSION="${VERSION:-latest}"
