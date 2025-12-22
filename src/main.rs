@@ -104,7 +104,7 @@ enum SenderMode {
         #[command(subcommand)]
         mode: IrohSenderMode,
     },
-    /// Use custom QUIC with manual signaling (TCP only, str0m+quinn)
+    /// Full ICE with manual signaling - best NAT traversal (TCP only, str0m+quinn)
     Custom {
         /// Target address to forward traffic to
         #[arg(short, long)]
@@ -144,7 +144,7 @@ enum IrohSenderMode {
         #[arg(long)]
         dns_server: Option<String>,
     },
-    /// Use manual signaling (copy-paste) with STUN for NAT traversal
+    /// STUN-based manual signaling - works with most NATs (may fail on symmetric NAT)
     Manual {
         /// Protocol to tunnel (tcp or udp)
         #[arg(short, long)]
@@ -167,7 +167,7 @@ enum ReceiverMode {
         #[command(subcommand)]
         mode: IrohReceiverMode,
     },
-    /// Use custom QUIC with manual signaling (TCP only, str0m+quinn)
+    /// Full ICE with manual signaling - best NAT traversal (TCP only, str0m+quinn)
     Custom {
         /// Local address to listen on (e.g., 127.0.0.1:2222)
         #[arg(short, long)]
