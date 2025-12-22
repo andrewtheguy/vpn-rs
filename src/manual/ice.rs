@@ -514,6 +514,7 @@ fn socket_map(sockets: &[IceSocket]) -> HashMap<SocketAddr, Arc<UdpSocket>> {
 
 fn is_no_route_error(err: &std::io::Error) -> bool {
     match err.raw_os_error() {
+        Some(64) => true, // macOS: Host is down
         Some(65) => true, // macOS: No route to host
         Some(51) => true, // ENETUNREACH
         Some(113) => true, // Linux: No route to host
