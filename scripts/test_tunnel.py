@@ -1,14 +1,20 @@
 #!/usr/bin/env python3
 """
-Test multiple tunnel sessions with concurrent streaming and checksum verification.
+Test multiple tunnel sessions with ping or streaming modes.
 
 Usage:
-    python3 test_tunnel.py [BASE_PORT] [NUM_SESSIONS] [DURATION_SECS]
-    python3 test_tunnel.py [BASE_PORT] [NUM_SESSIONS] --loop
+    python3 test_tunnel.py NUM [OPTIONS]
+
+Options:
+    --port PORT      Base port (default: 7001)
+    --stream SECS    Stream for SECS seconds (default: ping mode)
+    --loop           Repeat continuously
 
 Examples:
-    python3 test_tunnel.py 7001 3 10      # Stream for 10 seconds
-    python3 test_tunnel.py 7001 3 --loop  # Continuous ping test
+    python3 test_tunnel.py 3              # Ping 3 ports (7001-7003)
+    python3 test_tunnel.py 3 --loop       # Ping every 5s
+    python3 test_tunnel.py 3 --stream 10  # Stream for 10s
+    python3 test_tunnel.py 3 --stream 10 --loop  # Stream 10s repeatedly
 """
 
 import socket
@@ -16,17 +22,37 @@ import sys
 import time
 import threading
 import hashlib
-import re
 from dataclasses import dataclass, field
 
-# Parse args
-args = [a for a in sys.argv[1:] if not a.startswith('--')]
-flags = [a for a in sys.argv[1:] if a.startswith('--')]
+def parse_args():
+    args = sys.argv[1:]
+    if not args or args[0] in ['-h', '--help']:
+        print(__doc__)
+        sys.exit(0)
 
-BASE_PORT = int(args[0]) if len(args) > 0 else 7001
-NUM_SESSIONS = int(args[1]) if len(args) > 1 else 3
-DURATION = int(args[2]) if len(args) > 2 else 5
-LOOP_MODE = '--loop' in flags
+    # First positional arg is number of sessions
+    num_sessions = int(args[0]) if args and not args[0].startswith('--') else 3
+
+    # Parse flags
+    loop = '--loop' in args
+
+    base_port = 7001
+    if '--port' in args:
+        idx = args.index('--port')
+        if idx + 1 < len(args):
+            base_port = int(args[idx + 1])
+
+    stream_duration = None
+    if '--stream' in args:
+        idx = args.index('--stream')
+        if idx + 1 < len(args) and not args[idx + 1].startswith('--'):
+            stream_duration = int(args[idx + 1])
+        else:
+            stream_duration = 5  # default
+
+    return base_port, num_sessions, stream_duration, loop
+
+BASE_PORT, NUM_SESSIONS, STREAM_DURATION, LOOP_MODE = parse_args()
 
 @dataclass
 class Stats:
@@ -36,11 +62,11 @@ class Stats:
     sent_bytes: int = 0
     recv_bytes: int = 0
     errors: int = 0
-    checksum_ok: int = 0
-    checksum_fail: int = 0
+    verified: int = 0
+    corrupted: int = 0
     connected: bool = False
-    sent_checksum: str = ""  # Running checksum of all sent data
-    recv_checksum: str = ""  # Running checksum of all received data
+    sent_checksum: str = ""
+    recv_checksum: str = ""
     _sent_hasher: object = field(default=None, repr=False)
     _recv_hasher: object = field(default=None, repr=False)
 
@@ -57,7 +83,6 @@ class Stats:
         self.recv_checksum = self._recv_hasher.hexdigest()[:16]
 
 def format_bytes(n: int) -> str:
-    """Format bytes as human readable."""
     if n < 1024:
         return f"{n}B"
     elif n < 1024 * 1024:
@@ -65,107 +90,122 @@ def format_bytes(n: int) -> str:
     else:
         return f"{n/(1024*1024):.2f}MB"
 
+first_connect_lock = threading.Lock()
+first_connect_done = False
+
 def stream_session(port: int, duration: float, stats: Stats):
-    """Stream data through a tunnel for the specified duration with checksum verification."""
+    """Stream data through a tunnel for the specified duration."""
+    global first_connect_done
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.settimeout(5)
         sock.connect(('127.0.0.1', port))
         sock.setblocking(False)
         stats.connected = True
-        print(f"[{port}] Connected")
+        with first_connect_lock:
+            if not first_connect_done:
+                print(f"\n[{port}] Connected")
+                first_connect_done = True
+            else:
+                print(f"[{port}] Connected")
 
         end_time = time.time() + duration
         msg_num = 0
         recv_buf = b""
+        pending_payloads = {}
 
         while time.time() < end_time:
-            # Send message
             try:
-                payload = f"test-data-{msg_num:05d}-{'x' * 50}"
-                msg = f"[{port}] seq={msg_num} data={payload}\n"
+                payload = f"SEQ{msg_num:06d}DATA{'x' * 40}"
+                msg = f"{payload}\n"
                 msg_bytes = msg.encode()
                 sock.sendall(msg_bytes)
+                pending_payloads[msg_num] = payload
                 stats.sent_msgs += 1
                 stats.sent_bytes += len(msg_bytes)
                 stats.update_sent(msg_bytes)
                 msg_num += 1
             except BlockingIOError:
                 pass
-            except Exception as e:
+            except Exception:
                 stats.errors += 1
-                print(f"[{port}] Send error: {e}")
 
-            # Receive
             try:
                 data = sock.recv(8192)
                 if data:
                     stats.recv_bytes += len(data)
                     stats.update_recv(data)
                     recv_buf += data
-                    # Count complete lines
                     while b'\n' in recv_buf:
                         line, recv_buf = recv_buf.split(b'\n', 1)
                         stats.recv_msgs += 1
-                        # Verify data integrity
                         line_str = line.decode('utf-8', errors='replace')
-                        if 'data=' in line_str:
-                            stats.checksum_ok += 1
+                        found = False
+                        for seq, payload in list(pending_payloads.items()):
+                            if payload in line_str:
+                                stats.verified += 1
+                                del pending_payloads[seq]
+                                found = True
+                                break
+                        if not found and 'SEQ' in line_str:
+                            stats.corrupted += 1
             except BlockingIOError:
                 pass
-            except Exception as e:
+            except Exception:
                 stats.errors += 1
 
-            time.sleep(0.01)  # ~100 msg/sec per session
+            time.sleep(0.01)
 
         sock.close()
     except Exception as e:
         stats.errors += 1
-        print(f"[{port}] Connection error: {e}")
+        print(f"[{port}] Error: {e}")
 
-def test_port(port, msg):
-    """Single ping test."""
+def test_port(port, iteration):
+    """Single ping test - verify payload roundtrip."""
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.settimeout(5)
         sock.connect(('127.0.0.1', port))
 
-        full_msg = f"data={msg}\n"
-        sent_bytes = full_msg.encode()
-        sock.sendall(sent_bytes)
+        payload = f"PING{iteration:04d}PORT{port}TEST{'z' * 50}"
+        sock.sendall(f"{payload}\n".encode())
+        sent_bytes = len(payload) + 1
 
-        response = sock.recv(4096)
+        response = sock.recv(4096).decode('utf-8', errors='replace').strip()
         sock.close()
+        recv_bytes = len(response)
 
-        sent_chk = hashlib.md5(sent_bytes).hexdigest()[:16]
-        recv_chk = hashlib.md5(response).hexdigest()[:16]
-
-        # Check if response matches the sent data
-        if response == sent_bytes:
-            success = True
-            match_status = "MATCH"
+        if payload in response:
+            return port, True, f"sent={sent_bytes}B recv={recv_bytes}B OK"
         else:
-            success = False
-            match_status = f"MISMATCH (expected={sent_chk})"
-
-        return port, success, f"sent={len(sent_bytes)}B/chk={sent_chk} recv={len(response)}B/chk={recv_chk} {match_status}"
+            preview = response[:60] if len(response) > 60 else response
+            return port, False, f"recv={recv_bytes}B got: {repr(preview)}"
     except Exception as e:
         return port, False, str(e)
 
-def run_loop_mode():
-    """Continuous ping test every 5 seconds."""
-    print(f"Testing {NUM_SESSIONS} tunnel sessions (ports {BASE_PORT}-{BASE_PORT + NUM_SESSIONS - 1})")
+def run_ping_once():
+    """Single ping test."""
+    print(f"Pinging {NUM_SESSIONS} sessions (ports {BASE_PORT}-{BASE_PORT + NUM_SESSIONS - 1})")
     print("-" * 60)
-
-    # Initial test
+    failures = 0
     for i in range(NUM_SESSIONS):
-        port, success, response = test_port(BASE_PORT + i, f"Hello from session {i+1}")
+        port, success, response = test_port(BASE_PORT + i, 0)
         status = "OK" if success else "FAIL"
         print(f"[{status}] Port {port}: {response}")
-
+        if not success:
+            failures += 1
     print("-" * 60)
-    print("Continuous testing (Ctrl+C to stop)...")
+    if failures == 0:
+        print(f"✓ All {NUM_SESSIONS} sessions OK")
+    else:
+        print(f"✗ {failures}/{NUM_SESSIONS} session(s) failed")
+        sys.exit(1)
 
+def run_ping_loop():
+    """Continuous ping test every 5 seconds."""
+    run_ping_once()
+    print("\nContinuous testing (Ctrl+C to stop)...")
     try:
         iteration = 0
         while True:
@@ -174,43 +214,41 @@ def run_loop_mode():
             failures = 0
             print(f"[Iteration {iteration}]")
             for i in range(NUM_SESSIONS):
-                port, success, resp = test_port(BASE_PORT + i, f"ping-{iteration}-{'y'*100}")
-                if success:
-                    status = "OK"
-                else:
-                    status = "NOT OK"
-                    failures += 1
+                port, success, resp = test_port(BASE_PORT + i, iteration)
+                status = "OK" if success else "FAIL"
                 print(f"  [{status}] Port {port}: {resp}")
+                if not success:
+                    failures += 1
             if failures == 0:
                 print(f"  ✓ All {NUM_SESSIONS} sessions OK")
             else:
-                print(f"  ✗ {failures} session(s) NOT OK")
+                print(f"  ✗ {failures} session(s) failed")
     except KeyboardInterrupt:
         print("\nStopped.")
 
-def run_stream_mode():
-    """Concurrent streaming test with checksum verification."""
-    print(f"=== Concurrent Streaming Test ===")
+def run_stream_once():
+    """Single streaming test."""
+    global first_connect_done
+    first_connect_done = False
+    print(f"=== Streaming Test ({STREAM_DURATION}s) ===")
     print(f"Sessions: {NUM_SESSIONS} (ports {BASE_PORT}-{BASE_PORT + NUM_SESSIONS - 1})")
-    print(f"Duration: {DURATION}s")
     print("-" * 70)
 
     stats_list = [Stats(port=BASE_PORT + i) for i in range(NUM_SESSIONS)]
     threads = []
 
-    # Start all sessions
     for stats in stats_list:
-        t = threading.Thread(target=stream_session, args=(stats.port, DURATION, stats))
+        t = threading.Thread(target=stream_session, args=(stats.port, STREAM_DURATION, stats))
         t.start()
         threads.append(t)
 
-    # Progress indicator
     start = time.time()
     while any(t.is_alive() for t in threads):
         elapsed = time.time() - start
         total_sent = sum(s.sent_bytes for s in stats_list)
         total_recv = sum(s.recv_bytes for s in stats_list)
-        print(f"\r[{elapsed:.1f}s] Sent: {format_bytes(total_sent)}, Recv: {format_bytes(total_recv)}", end="", flush=True)
+        total_verified = sum(s.verified for s in stats_list)
+        print(f"\r[{elapsed:.1f}s] Sent: {format_bytes(total_sent)}, Recv: {format_bytes(total_recv)}, Verified: {total_verified}", end="", flush=True)
         time.sleep(0.5)
 
     for t in threads:
@@ -220,35 +258,56 @@ def run_stream_mode():
     print("Results:")
     total_sent_bytes = 0
     total_recv_bytes = 0
-    total_sent_msgs = 0
-    total_recv_msgs = 0
+    total_verified = 0
+    total_corrupted = 0
     total_errors = 0
 
     for s in stats_list:
-        status = "OK" if s.connected and s.errors == 0 else "FAIL"
-        print(f"  [{status}] Port {s.port}:")
-        sent_match = "(checksums match)" if s.sent_checksum == s.recv_checksum else f"(expected={s.sent_checksum})"
-        print(f"       Sent: {s.sent_msgs} msgs, {format_bytes(s.sent_bytes):>10} bytes, checksum={s.sent_checksum}")
-        print(f"       Recv: {s.recv_msgs} msgs, {format_bytes(s.recv_bytes):>10} bytes, checksum={s.recv_checksum} {sent_match if s.recv_msgs > 0 else ''}")
-        if s.errors > 0:
-            print(f"       Errors: {s.errors}")
+        status = "OK" if s.connected and s.errors == 0 and s.corrupted == 0 else "FAIL"
+        print(f"  [{status}] Port {s.port}: {format_bytes(s.sent_bytes)}↑ {format_bytes(s.recv_bytes)}↓ msgs={s.sent_msgs}/{s.recv_msgs} verified={s.verified} err={s.errors}")
         total_sent_bytes += s.sent_bytes
         total_recv_bytes += s.recv_bytes
-        total_sent_msgs += s.sent_msgs
-        total_recv_msgs += s.recv_msgs
+        total_verified += s.verified
+        total_corrupted += s.corrupted
         total_errors += s.errors
 
     print("-" * 70)
-    print(f"Total sent: {total_sent_msgs} msgs, {format_bytes(total_sent_bytes)}")
-    print(f"Total recv: {total_recv_msgs} msgs, {format_bytes(total_recv_bytes)}")
-    print(f"Throughput: {format_bytes(int(total_sent_bytes/DURATION))}/s sent, {format_bytes(int(total_recv_bytes/DURATION))}/s recv")
-    print(f"Errors: {total_errors}")
+    print(f"Total: {format_bytes(total_sent_bytes)} sent, {format_bytes(total_recv_bytes)} recv, {total_verified} verified")
+    print(f"Throughput: {format_bytes(int(total_sent_bytes/STREAM_DURATION))}/s")
 
-    if total_errors > 0:
-        sys.exit(1)
+    if total_corrupted > 0 or total_errors > 0:
+        print("*** ERRORS DETECTED ***")
+        return False
+    else:
+        print("*** ALL OK ***")
+        return True
+
+def run_stream_loop():
+    """Continuous streaming test."""
+    print(f"Streaming {STREAM_DURATION}s every round (Ctrl+C to stop)...\n")
+    try:
+        iteration = 0
+        while True:
+            iteration += 1
+            print(f"\n{'='*70}")
+            print(f"Round {iteration}")
+            print(f"{'='*70}")
+            success = run_stream_once()
+            if not success:
+                print("Continuing despite errors...")
+            print(f"\nWaiting 3s before next round...")
+            time.sleep(3)
+    except KeyboardInterrupt:
+        print("\nStopped.")
 
 if __name__ == '__main__':
-    if LOOP_MODE:
-        run_loop_mode()
+    if STREAM_DURATION:
+        if LOOP_MODE:
+            run_stream_loop()
+        else:
+            run_stream_once()
     else:
-        run_stream_mode()
+        if LOOP_MODE:
+            run_ping_loop()
+        else:
+            run_ping_once()

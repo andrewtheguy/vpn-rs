@@ -52,3 +52,5 @@ node_modules/
 wg-test/
 
 tmp/
+
+scripts/.tunnel_keys

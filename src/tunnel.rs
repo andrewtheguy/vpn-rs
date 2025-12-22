@@ -33,7 +33,7 @@ const QUIC_CONNECTION_TIMEOUT: Duration = Duration::from_secs(180);
 
 /// Maximum age for accepting incoming requests (seconds).
 /// Requests older than this are considered stale and ignored.
-const MAX_REQUEST_AGE_SECS: u64 = 60;
+const MAX_REQUEST_AGE_SECS: u64 = 10;
 
 async fn resolve_target_addr(target: &str) -> Result<SocketAddr> {
     let mut addrs = lookup_host(target)
@@ -1068,15 +1068,11 @@ pub async fn run_nostr_tcp_sender(
     println!("Waiting for tunnel requests (max sessions: {})...", limit_str);
 
     loop {
-        // Check session limit
-        if max_sessions > 0 && active_sessions.load(Ordering::Relaxed) >= max_sessions {
-            println!("Session limit reached ({}), waiting for slot...", max_sessions);
-            if let Some(result) = session_tasks.join_next().await {
-                if let Err(e) = result {
-                    eprintln!("Session task panicked: {:?}", e);
-                }
+        // Clean up completed tasks without blocking
+        while let Some(result) = session_tasks.try_join_next() {
+            if let Err(e) = result {
+                eprintln!("Session task panicked: {:?}", e);
             }
-            continue;
         }
 
         // Wait for fresh request from receiver (no timeout for multi-session mode)
@@ -1101,10 +1097,39 @@ pub async fn run_nostr_tcp_sender(
         let session_id = request.session_id.clone();
         println!("Received request for session {}", &session_id[..8.min(session_id.len())]);
 
+        // Check session limit - if at capacity, wait briefly for dead sessions to be cleaned up
+        if max_sessions > 0 && active_sessions.load(Ordering::Relaxed) >= max_sessions {
+            println!(
+                "At capacity ({}/{}), checking for dead sessions...",
+                active_sessions.load(Ordering::Relaxed),
+                max_sessions
+            );
+
+            // Wait briefly for any dying connections to complete, then clean up
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            while let Some(result) = session_tasks.try_join_next() {
+                if let Err(e) = result {
+                    eprintln!("Session task panicked: {:?}", e);
+                }
+            }
+
+            // Recheck after cleanup
+            if active_sessions.load(Ordering::Relaxed) >= max_sessions {
+                println!(
+                    "Rejecting session {} - still at capacity ({}/{})",
+                    &session_id[..8.min(session_id.len())],
+                    active_sessions.load(Ordering::Relaxed),
+                    max_sessions
+                );
+                continue;
+            }
+            println!("Slot freed up, accepting session");
+        }
+
         // Spawn session handler
         active_sessions.fetch_add(1, Ordering::Relaxed);
         let current = active_sessions.load(Ordering::Relaxed);
-        println!("Active sessions: {}", current);
+        println!("Active sessions: {}/{}", current, limit_str);
 
         let sig = signaling.clone();
         let active = active_sessions.clone();
@@ -1129,13 +1154,6 @@ pub async fn run_nostr_tcp_sender(
             }
             result
         });
-
-        // Clean up completed tasks without blocking
-        while let Some(result) = session_tasks.try_join_next() {
-            if let Err(e) = result {
-                eprintln!("Session task panicked: {:?}", e);
-            }
-        }
     }
 }
 
@@ -1437,15 +1455,11 @@ pub async fn run_nostr_udp_sender(
     println!("Waiting for tunnel requests (max sessions: {})...", limit_str);
 
     loop {
-        // Check session limit
-        if max_sessions > 0 && active_sessions.load(Ordering::Relaxed) >= max_sessions {
-            println!("Session limit reached ({}), waiting for slot...", max_sessions);
-            if let Some(result) = session_tasks.join_next().await {
-                if let Err(e) = result {
-                    eprintln!("Session task panicked: {:?}", e);
-                }
+        // Clean up completed tasks without blocking
+        while let Some(result) = session_tasks.try_join_next() {
+            if let Err(e) = result {
+                eprintln!("Session task panicked: {:?}", e);
             }
-            continue;
         }
 
         // Wait for fresh request from receiver (no timeout for multi-session mode)
@@ -1470,10 +1484,39 @@ pub async fn run_nostr_udp_sender(
         let session_id = request.session_id.clone();
         println!("Received request for session {}", &session_id[..8.min(session_id.len())]);
 
+        // Check session limit - if at capacity, wait briefly for dead sessions to be cleaned up
+        if max_sessions > 0 && active_sessions.load(Ordering::Relaxed) >= max_sessions {
+            println!(
+                "At capacity ({}/{}), checking for dead sessions...",
+                active_sessions.load(Ordering::Relaxed),
+                max_sessions
+            );
+
+            // Wait briefly for any dying connections to complete, then clean up
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            while let Some(result) = session_tasks.try_join_next() {
+                if let Err(e) = result {
+                    eprintln!("Session task panicked: {:?}", e);
+                }
+            }
+
+            // Recheck after cleanup
+            if active_sessions.load(Ordering::Relaxed) >= max_sessions {
+                println!(
+                    "Rejecting session {} - still at capacity ({}/{})",
+                    &session_id[..8.min(session_id.len())],
+                    active_sessions.load(Ordering::Relaxed),
+                    max_sessions
+                );
+                continue;
+            }
+            println!("Slot freed up, accepting session");
+        }
+
         // Spawn session handler
         active_sessions.fetch_add(1, Ordering::Relaxed);
         let current = active_sessions.load(Ordering::Relaxed);
-        println!("Active sessions: {}", current);
+        println!("Active sessions: {}/{}", current, limit_str);
 
         let sig = signaling.clone();
         let active = active_sessions.clone();
@@ -1498,13 +1541,6 @@ pub async fn run_nostr_udp_sender(
             }
             result
         });
-
-        // Clean up completed tasks without blocking
-        while let Some(result) = session_tasks.try_join_next() {
-            if let Err(e) = result {
-                eprintln!("Session task panicked: {:?}", e);
-            }
-        }
     }
 }
 
