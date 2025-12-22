@@ -29,7 +29,6 @@ pub enum IceRole {
 pub enum CandidateType {
     Host,
     ServerReflexive,
-    Relay,
 }
 
 impl fmt::Display for CandidateType {
@@ -37,7 +36,6 @@ impl fmt::Display for CandidateType {
         match self {
             CandidateType::Host => write!(f, "Direct (Host)"),
             CandidateType::ServerReflexive => write!(f, "NAT Traversal (Server Reflexive)"),
-            CandidateType::Relay => write!(f, "Relayed (TURN)"),
         }
     }
 }
