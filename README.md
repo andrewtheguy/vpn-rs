@@ -638,6 +638,16 @@ When no relays are specified, these public relays are used:
 - Transfer ID is derived from SHA256 of sorted pubkeys — both peers compute the same ID
 - Signaling uses Nostr event kind 24242 with tags for transfer ID and peer pubkey
 - Full ICE provides best NAT traversal (same as custom mode)
+- **Receiver-first protocol:** The receiver initiates the connection by publishing a request first; sender waits for a request before publishing its offer
+
+## Current Limitations (All Manual Signaling Modes)
+
+> **Note:** These limitations apply to `iroh-manual`, `custom`, and `nostr` modes. The `iroh-default` mode supports multiple simultaneous receivers.
+
+**Single Session:** The sender handles one tunnel session at a time. Each signaling exchange (offer/answer or request/offer/answer) establishes exactly one tunnel. For multiple simultaneous tunnels:
+- Use different keypairs/instances for each tunnel
+- Or use `iroh-default` mode which supports multiple receivers
+- Future: Multi-session support planned (see [Roadmap](docs/ROADMAP.md))
 
 ---
 
