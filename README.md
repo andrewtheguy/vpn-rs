@@ -331,7 +331,7 @@ tunnel-rs receiver iroh-default --dns-server https://dns.example.com/pkarr --nod
 
 # iroh-manual Mode
 
-Uses iroh's QUIC transport with manual copy-paste signaling. No discovery servers or relay infrastructure needed - fully serverless.
+Uses iroh's QUIC transport with manual copy-paste signaling. No discovery servers or relay infrastructure needed, but STUN is used by default.
 
 **NAT Traversal:** Uses STUN to discover public addresses and bidirectional connection racing. Works with most NATs but may fail on symmetric NATs. For difficult NAT scenarios, use [Custom Mode](#custom-mode) which has full ICE support.
 
@@ -368,6 +368,7 @@ Uses iroh's QUIC transport with manual copy-paste signaling. No discovery server
 |--------|---------|-------------|
 | `--source`, `-s` | required | Source address to forward traffic to (hostname allowed) |
 | `--stun-server` | public | STUN server(s), repeatable |
+| `--no-stun` | false | Disable STUN (no external infrastructure, CLI only) |
 
 ### receiver iroh-manual
 
@@ -375,8 +376,13 @@ Uses iroh's QUIC transport with manual copy-paste signaling. No discovery server
 |--------|---------|-------------|
 | `--target`, `-t` | required | Local address to listen on |
 | `--stun-server` | public | STUN server(s), repeatable |
+| `--no-stun` | false | Disable STUN (no external infrastructure, CLI only) |
 
 Note: Config file options (`-c`, `--default-config`) are at the `sender`/`receiver` command level. See [Configuration Files](#configuration-files) above.
+
+## Serverless Manual Mode (No STUN)
+
+If you want **zero external infrastructure**, you can run manual modes without any STUN servers. This works best when both peers are on public IPs or permissive NATs. Use `--no-stun` on the CLI, or set `stun_servers = []` in your config. If you omit STUN entirely (no config and no CLI), tunnel-rs uses its default public STUN list.
 
 ## UDP Support
 
@@ -452,6 +458,7 @@ tunnel-rs receiver custom --target udp://0.0.0.0:51820
 |--------|---------|-------------|
 | `--source`, `-s` | required | Source address to forward traffic to (hostname allowed) |
 | `--stun-server` | public | STUN server(s), repeatable |
+| `--no-stun` | false | Disable STUN (no external infrastructure, CLI only) |
 
 ### receiver custom
 
@@ -459,6 +466,7 @@ tunnel-rs receiver custom --target udp://0.0.0.0:51820
 |--------|---------|-------------|
 | `--target`, `-t` | required | Local address to listen on |
 | `--stun-server` | public | STUN server(s), repeatable |
+| `--no-stun` | false | Disable STUN (no external infrastructure, CLI only) |
 
 Note: Config file options (`-c`, `--default-config`) are at the `sender`/`receiver` command level. See [Configuration Files](#configuration-files) above.
 

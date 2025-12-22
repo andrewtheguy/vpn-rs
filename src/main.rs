@@ -71,6 +71,29 @@ fn normalize_optional_endpoint(value: Option<String>) -> Option<String> {
     })
 }
 
+// STUN precedence: --no-stun disables STUN entirely (CLI only). Otherwise, CLI list wins;
+// config list wins next (even if empty, which disables STUN); if nothing specified, fall
+// back to default public STUN servers.
+fn resolve_stun_servers(
+    cli_stun_servers: &[String],
+    config_stun_servers: Option<Vec<String>>,
+    no_stun: bool,
+) -> Result<Vec<String>> {
+    if no_stun {
+        if !cli_stun_servers.is_empty() {
+            anyhow::bail!("Cannot combine --no-stun with --stun-server");
+        }
+        return Ok(Vec::new());
+    }
+    if !cli_stun_servers.is_empty() {
+        return Ok(cli_stun_servers.to_vec());
+    }
+    if let Some(servers) = config_stun_servers {
+        return Ok(servers);
+    }
+    Ok(default_stun_servers())
+}
+
 #[derive(Parser)]
 #[command(name = "tunnel-rs")]
 #[command(version)]
@@ -163,6 +186,10 @@ enum SenderMode {
         /// STUN server (repeatable, e.g., stun.l.google.com:19302)
         #[arg(long = "stun-server")]
         stun_servers: Vec<String>,
+
+        /// Disable STUN (no external infrastructure)
+        #[arg(long)]
+        no_stun: bool,
     },
     /// Full ICE with manual signaling - best NAT traversal (str0m+quinn)
     Custom {
@@ -173,6 +200,10 @@ enum SenderMode {
         /// STUN server (repeatable, e.g., stun.l.google.com:19302)
         #[arg(long = "stun-server")]
         stun_servers: Vec<String>,
+
+        /// Disable STUN (no external infrastructure)
+        #[arg(long)]
+        no_stun: bool,
     },
 }
 
@@ -211,6 +242,10 @@ enum ReceiverMode {
         /// STUN server (repeatable, e.g., stun.l.google.com:19302)
         #[arg(long = "stun-server")]
         stun_servers: Vec<String>,
+
+        /// Disable STUN (no external infrastructure)
+        #[arg(long)]
+        no_stun: bool,
     },
     /// Full ICE with manual signaling - best NAT traversal (str0m+quinn)
     Custom {
@@ -221,6 +256,10 @@ enum ReceiverMode {
         /// STUN server (repeatable, e.g., stun.l.google.com:19302)
         #[arg(long = "stun-server")]
         stun_servers: Vec<String>,
+
+        /// Disable STUN (no external infrastructure)
+        #[arg(long)]
+        no_stun: bool,
     },
 }
 
@@ -331,11 +370,11 @@ async fn main() -> Result<()> {
                 "iroh-manual" => {
                     let manual_cfg = cfg.iroh_manual();
                     let (source, stun_servers) = match &mode {
-                        Some(SenderMode::IrohManual { source: s, stun_servers: ss }) => (
+                        Some(SenderMode::IrohManual { source: s, stun_servers: ss, no_stun }) => (
                             normalize_optional_endpoint(s.clone()).or(source),
-                            if ss.is_empty() { manual_cfg.and_then(|c| c.stun_servers.clone()).unwrap_or_else(default_stun_servers) } else { ss.clone() },
+                            resolve_stun_servers(ss, manual_cfg.and_then(|c| c.stun_servers.clone()), *no_stun)?,
                         ),
-                        _ => (source, manual_cfg.and_then(|c| c.stun_servers.clone()).unwrap_or_else(default_stun_servers)),
+                        _ => (source, resolve_stun_servers(&[], manual_cfg.and_then(|c| c.stun_servers.clone()), false)?),
                     };
 
                     let source = source.context(
@@ -353,11 +392,11 @@ async fn main() -> Result<()> {
                 "custom" => {
                     let custom_cfg = cfg.custom();
                     let (source, stun_servers) = match &mode {
-                        Some(SenderMode::Custom { source: s, stun_servers: ss }) => (
+                        Some(SenderMode::Custom { source: s, stun_servers: ss, no_stun }) => (
                             normalize_optional_endpoint(s.clone()).or(source),
-                            if ss.is_empty() { custom_cfg.and_then(|c| c.stun_servers.clone()).unwrap_or_else(default_stun_servers) } else { ss.clone() },
+                            resolve_stun_servers(ss, custom_cfg.and_then(|c| c.stun_servers.clone()), *no_stun)?,
                         ),
-                        _ => (source, custom_cfg.and_then(|c| c.stun_servers.clone()).unwrap_or_else(default_stun_servers)),
+                        _ => (source, resolve_stun_servers(&[], custom_cfg.and_then(|c| c.stun_servers.clone()), false)?),
                     };
 
                     let source = source.context(
@@ -444,11 +483,11 @@ async fn main() -> Result<()> {
                 "iroh-manual" => {
                     let manual_cfg = cfg.iroh_manual();
                     let (target, stun_servers) = match &mode {
-                        Some(ReceiverMode::IrohManual { target: t, stun_servers: s }) => (
+                        Some(ReceiverMode::IrohManual { target: t, stun_servers: s, no_stun }) => (
                             normalize_optional_endpoint(t.clone()).or(target),
-                            if s.is_empty() { manual_cfg.and_then(|c| c.stun_servers.clone()).unwrap_or_else(default_stun_servers) } else { s.clone() },
+                            resolve_stun_servers(s, manual_cfg.and_then(|c| c.stun_servers.clone()), *no_stun)?,
                         ),
-                        _ => (target, manual_cfg.and_then(|c| c.stun_servers.clone()).unwrap_or_else(default_stun_servers)),
+                        _ => (target, resolve_stun_servers(&[], manual_cfg.and_then(|c| c.stun_servers.clone()), false)?),
                     };
 
                     let target: String = target.context(
@@ -466,11 +505,11 @@ async fn main() -> Result<()> {
                 "custom" => {
                     let custom_cfg = cfg.custom();
                     let (target, stun_servers) = match &mode {
-                        Some(ReceiverMode::Custom { target: t, stun_servers: s }) => (
+                        Some(ReceiverMode::Custom { target: t, stun_servers: s, no_stun }) => (
                             normalize_optional_endpoint(t.clone()).or(target),
-                            if s.is_empty() { custom_cfg.and_then(|c| c.stun_servers.clone()).unwrap_or_else(default_stun_servers) } else { s.clone() },
+                            resolve_stun_servers(s, custom_cfg.and_then(|c| c.stun_servers.clone()), *no_stun)?,
                         ),
-                        _ => (target, custom_cfg.and_then(|c| c.stun_servers.clone()).unwrap_or_else(default_stun_servers)),
+                        _ => (target, resolve_stun_servers(&[], custom_cfg.and_then(|c| c.stun_servers.clone()), false)?),
                     };
 
                     let target: String = target.context(

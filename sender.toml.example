@@ -37,6 +37,7 @@ relay_only = false
 # dns_server = "https://dns.example.com/pkarr"
 
 # [iroh-manual]
+# # Set to [] to disable STUN entirely
 # stun_servers = [
 #     "stun.l.google.com:19302",
 #     "stun1.l.google.com:19302",
@@ -44,6 +45,7 @@ relay_only = false
 # ]
 
 # [custom]
+# # Set to [] to disable STUN entirely
 # stun_servers = [
 #     "stun.l.google.com:19302",
 #     "stun1.l.google.com:19302",
