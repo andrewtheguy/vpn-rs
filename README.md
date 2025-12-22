@@ -10,7 +10,7 @@ tunnel-rs provides multiple modes for establishing tunnels:
 |------|-----------|---------------|-----------|----------|
 | **iroh default** | Automatic (Pkarr/DNS/mDNS) | Relay fallback | TCP, UDP | Production, always-on tunnels |
 | **iroh manual** | Manual copy-paste | STUN heuristic | TCP, UDP | Serverless, simple NATs |
-| **custom** | Manual copy-paste | Full ICE | TCP only | Best NAT compatibility |
+| **custom** | Manual copy-paste | Full ICE | TCP, UDP | Best NAT compatibility |
 
 ### Choosing a Manual Mode
 
@@ -20,10 +20,10 @@ Both `iroh manual` and `custom` modes use copy-paste signaling without servers:
 |---------|-------------|--------|
 | NAT traversal | STUN-based (heuristic) | Full ICE (connectivity checks) |
 | Symmetric NAT | May fail | Works |
-| Protocols | TCP + UDP | TCP only |
+| Protocols | TCP + UDP | TCP + UDP |
 | QUIC stack | iroh | str0m + quinn |
 
-**Recommendation:** Use `custom` mode for best NAT traversal. Use `iroh manual` if you need UDP or have simple network topology.
+**Recommendation:** Use `custom` mode for best NAT traversal, especially for symmetric NATs.
 
 ## Installation
 
@@ -314,7 +314,7 @@ tunnel-rs receiver iroh manual --protocol udp --listen 0.0.0.0:51820
 
 # Custom Mode
 
-Uses full ICE (Interactive Connectivity Establishment) with str0m + quinn QUIC. TCP tunneling only.
+Uses full ICE (Interactive Connectivity Establishment) with str0m + quinn QUIC. Supports TCP and UDP tunneling.
 
 **NAT Traversal:** Full ICE implementation with STUN candidate gathering and connectivity checks. This provides the best NAT traversal success rate, including support for symmetric NATs that fail with simpler STUN-only approaches.
 
@@ -356,12 +356,23 @@ Uses full ICE (Interactive Connectivity Establishment) with str0m + quinn QUIC. 
    ssh -p 2222 user@127.0.0.1
    ```
 
+## UDP Tunnel (e.g., WireGuard)
+
+```bash
+# Sender
+tunnel-rs sender custom --protocol udp --target 127.0.0.1:51820
+
+# Receiver
+tunnel-rs receiver custom --protocol udp --listen 0.0.0.0:51820
+```
+
 ## CLI Options
 
 ### sender custom
 
 | Option | Default | Description |
 |--------|---------|-------------|
+| `--protocol`, `-p` | tcp | Protocol to tunnel (tcp or udp) |
 | `--target`, `-t` | 127.0.0.1:22 | Target address to forward traffic to |
 | `--stun-server` | public | STUN server(s), repeatable |
 
@@ -369,6 +380,7 @@ Uses full ICE (Interactive Connectivity Establishment) with str0m + quinn QUIC. 
 
 | Option | Default | Description |
 |--------|---------|-------------|
+| `--protocol`, `-p` | tcp | Protocol to tunnel (tcp or udp) |
 | `--listen`, `-l` | required | Local address to listen on |
 | `--stun-server` | public | STUN server(s), repeatable |
 
@@ -391,7 +403,6 @@ ICE connection established!
 
 ## Notes
 
-- Custom mode is **TCP only** (use iroh manual for UDP)
 - Full ICE provides best NAT traversal - works with most symmetric NATs
 - Signaling payloads include a version number; mismatches are rejected
 

@@ -611,6 +611,186 @@ pub async fn run_manual_tcp_receiver(listen: String, stun_servers: Vec<String>) 
     }
 }
 
+// ============================================================================
+// Manual UDP Tunnel Implementation (ICE + QUIC)
+// ============================================================================
+
+pub async fn run_manual_udp_sender(target: String, stun_servers: Vec<String>) -> Result<()> {
+    let target_addr: SocketAddr = target.parse().context("Invalid target address format")?;
+
+    println!("Manual UDP Tunnel - Sender Mode");
+    println!("================================");
+
+    let ice = IceEndpoint::gather(&stun_servers).await?;
+    let local_creds = ice.local_credentials();
+    let local_candidates = ice.local_candidates();
+
+    let quic_identity = quic::generate_server_identity()?;
+
+    let offer = ManualOffer {
+        version: MANUAL_SIGNAL_VERSION,
+        ice_ufrag: local_creds.ufrag.clone(),
+        ice_pwd: local_creds.pass.clone(),
+        candidates: local_candidates,
+        quic_fingerprint: quic_identity.fingerprint.clone(),
+    };
+
+    println!("\nManual Offer (copy to receiver):");
+    display_offer(&offer)?;
+
+    println!("Paste receiver answer (include BEGIN/END markers), then press Enter:");
+    let answer = read_answer_from_stdin()?;
+    if answer.version != MANUAL_SIGNAL_VERSION {
+        anyhow::bail!(
+            "Manual signaling version mismatch (expected {}, got {})",
+            MANUAL_SIGNAL_VERSION,
+            answer.version
+        );
+    }
+
+    let remote_creds = str0m::IceCreds {
+        ufrag: answer.ice_ufrag,
+        pass: answer.ice_pwd,
+    };
+
+    let ice_conn = ice
+        .connect(IceRole::Controlling, remote_creds, answer.candidates)
+        .await?;
+
+    // Spawn the ICE keeper to handle STUN packets in the background
+    tokio::spawn(ice_conn.ice_keeper.run());
+
+    let endpoint = quic::make_server_endpoint(ice_conn.socket, quic_identity.server_config)?;
+    println!("Waiting for receiver QUIC connection (timeout: {:?})...", QUIC_CONNECTION_TIMEOUT);
+
+    let connecting = tokio::time::timeout(QUIC_CONNECTION_TIMEOUT, endpoint.accept())
+        .await
+        .context("Timeout waiting for QUIC connection")?
+        .context("No incoming QUIC connection")?;
+    let conn = tokio::time::timeout(QUIC_CONNECTION_TIMEOUT, connecting)
+        .await
+        .context("Timeout during QUIC handshake")?
+        .context("Failed to accept QUIC connection")?;
+    println!("Receiver connected over QUIC.");
+
+    let (send_stream, recv_stream) = conn
+        .accept_bi()
+        .await
+        .context("Failed to accept stream from receiver")?;
+
+    println!("Forwarding UDP traffic to {}", target_addr);
+
+    // Bind to the same address family as the target
+    let bind_addr: SocketAddr = if target_addr.is_ipv6() {
+        "[::]:0".parse().unwrap()
+    } else {
+        "0.0.0.0:0".parse().unwrap()
+    };
+    let udp_socket = Arc::new(
+        UdpSocket::bind(bind_addr)
+            .await
+            .context("Failed to bind UDP socket")?,
+    );
+
+    forward_stream_to_udp_sender_quic(recv_stream, send_stream, udp_socket, target_addr).await?;
+
+    conn.close(0u32.into(), b"done");
+    println!("Connection closed.");
+
+    Ok(())
+}
+
+pub async fn run_manual_udp_receiver(listen: String, stun_servers: Vec<String>) -> Result<()> {
+    let listen_addr: SocketAddr = listen
+        .parse()
+        .context("Invalid listen address format. Use format like 127.0.0.1:51820 or [::]:51820")?;
+
+    println!("Manual UDP Tunnel - Receiver Mode");
+    println!("=================================");
+
+    let ice = IceEndpoint::gather(&stun_servers).await?;
+    let local_creds = ice.local_credentials();
+    let local_candidates = ice.local_candidates();
+
+    println!("Paste sender offer (include BEGIN/END markers), then press Enter:");
+    let offer = read_offer_from_stdin()?;
+    if offer.version != MANUAL_SIGNAL_VERSION {
+        anyhow::bail!(
+            "Manual signaling version mismatch (expected {}, got {})",
+            MANUAL_SIGNAL_VERSION,
+            offer.version
+        );
+    }
+
+    let answer = ManualAnswer {
+        version: MANUAL_SIGNAL_VERSION,
+        ice_ufrag: local_creds.ufrag.clone(),
+        ice_pwd: local_creds.pass.clone(),
+        candidates: local_candidates,
+    };
+
+    println!("\nManual Answer (copy to sender):");
+    display_answer(&answer)?;
+
+    let remote_creds = str0m::IceCreds {
+        ufrag: offer.ice_ufrag,
+        pass: offer.ice_pwd,
+    };
+
+    let ice_conn = ice
+        .connect(IceRole::Controlled, remote_creds, offer.candidates)
+        .await?;
+
+    // Spawn the ICE keeper to handle STUN packets in the background
+    tokio::spawn(ice_conn.ice_keeper.run());
+
+    let endpoint = quic::make_client_endpoint(ice_conn.socket, &offer.quic_fingerprint)?;
+    println!("Connecting to sender via QUIC (timeout: {:?})...", QUIC_CONNECTION_TIMEOUT);
+    let connecting = endpoint
+        .connect(ice_conn.remote_addr, "manual")
+        .context("Failed to start QUIC connection")?;
+    let conn = tokio::time::timeout(QUIC_CONNECTION_TIMEOUT, connecting)
+        .await
+        .context("Timeout during QUIC connection")?
+        .context("Failed to connect to sender")?;
+    println!("Connected to sender over QUIC.");
+
+    let (send_stream, recv_stream) = conn.open_bi().await.context("Failed to open stream")?;
+
+    let udp_socket = Arc::new(
+        UdpSocket::bind(listen_addr)
+            .await
+            .context("Failed to bind UDP socket")?,
+    );
+    println!(
+        "Listening on UDP {} - configure your client to connect here",
+        listen_addr
+    );
+
+    let client_addr: Arc<Mutex<Option<SocketAddr>>> = Arc::new(Mutex::new(None));
+
+    let udp_clone = udp_socket.clone();
+    let client_clone = client_addr.clone();
+
+    tokio::select! {
+        result = forward_udp_to_stream_quic(udp_clone, send_stream, client_clone) => {
+            if let Err(e) = result {
+                eprintln!("UDP to stream error: {}", e);
+            }
+        }
+        result = forward_stream_to_udp_receiver_quic(recv_stream, udp_socket, client_addr) => {
+            if let Err(e) = result {
+                eprintln!("Stream to UDP error: {}", e);
+            }
+        }
+    }
+
+    conn.close(0u32.into(), b"done");
+    println!("Connection closed.");
+
+    Ok(())
+}
+
 async fn handle_tcp_sender_stream_quic(
     send_stream: quinn::SendStream,
     mut recv_stream: quinn::RecvStream,
@@ -681,6 +861,121 @@ async fn bridge_quinn_streams(
                     eprintln!("TCP->QUIC error: {}", e);
                 }
             }
+        }
+    }
+
+    Ok(())
+}
+
+// ============================================================================
+// Manual UDP Forwarding Helpers (quinn streams)
+// ============================================================================
+
+/// Read UDP packets from local socket and forward to quinn stream
+async fn forward_udp_to_stream_quic(
+    udp_socket: Arc<UdpSocket>,
+    mut send_stream: quinn::SendStream,
+    peer_addr: Arc<Mutex<Option<SocketAddr>>>,
+) -> Result<()> {
+    let mut buf = vec![0u8; 65535];
+
+    loop {
+        let (len, addr) = udp_socket
+            .recv_from(&mut buf)
+            .await
+            .context("Failed to receive UDP packet")?;
+
+        *peer_addr.lock().await = Some(addr);
+
+        let frame_len = (len as u16).to_be_bytes();
+        send_stream
+            .write_all(&frame_len)
+            .await
+            .context("Failed to write frame length")?;
+        send_stream
+            .write_all(&buf[..len])
+            .await
+            .context("Failed to write frame payload")?;
+
+        println!("-> Forwarded {} bytes from {}", len, addr);
+    }
+}
+
+/// Read from quinn stream, forward to UDP target, and send responses back (sender mode)
+async fn forward_stream_to_udp_sender_quic(
+    mut recv_stream: quinn::RecvStream,
+    mut send_stream: quinn::SendStream,
+    udp_socket: Arc<UdpSocket>,
+    target_addr: SocketAddr,
+) -> Result<()> {
+    let udp_clone = udp_socket.clone();
+
+    let response_task = tokio::spawn(async move {
+        let mut buf = vec![0u8; 65535];
+        while let Ok((len, _addr)) = udp_clone.recv_from(&mut buf).await {
+            let frame_len = (len as u16).to_be_bytes();
+            if send_stream.write_all(&frame_len).await.is_err() {
+                break;
+            }
+            if send_stream.write_all(&buf[..len]).await.is_err() {
+                break;
+            }
+            println!("-> Sent {} bytes back to receiver", len);
+        }
+    });
+
+    loop {
+        let mut len_buf = [0u8; 2];
+        if recv_stream.read_exact(&mut len_buf).await.is_err() {
+            break;
+        }
+        let len = u16::from_be_bytes(len_buf) as usize;
+
+        let mut buf = vec![0u8; len];
+        recv_stream
+            .read_exact(&mut buf)
+            .await
+            .context("Failed to read frame payload")?;
+
+        udp_socket
+            .send_to(&buf, target_addr)
+            .await
+            .context("Failed to send UDP packet")?;
+
+        println!("<- Forwarded {} bytes to {}", len, target_addr);
+    }
+
+    response_task.abort();
+    Ok(())
+}
+
+/// Read from quinn stream and forward to local UDP client (receiver mode)
+async fn forward_stream_to_udp_receiver_quic(
+    mut recv_stream: quinn::RecvStream,
+    udp_socket: Arc<UdpSocket>,
+    client_addr: Arc<Mutex<Option<SocketAddr>>>,
+) -> Result<()> {
+    loop {
+        let mut len_buf = [0u8; 2];
+        if recv_stream.read_exact(&mut len_buf).await.is_err() {
+            break;
+        }
+        let len = u16::from_be_bytes(len_buf) as usize;
+
+        let mut buf = vec![0u8; len];
+        recv_stream
+            .read_exact(&mut buf)
+            .await
+            .context("Failed to read frame payload")?;
+
+        if let Some(addr) = *client_addr.lock().await {
+            udp_socket
+                .send_to(&buf, addr)
+                .await
+                .context("Failed to send UDP packet to client")?;
+            println!("<- Forwarded {} bytes to client {}", len, addr);
+        } else {
+            println!("<- Received {} bytes but no client connected yet", len);
         }
     }
 

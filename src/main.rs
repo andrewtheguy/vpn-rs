@@ -104,8 +104,12 @@ enum SenderMode {
         #[command(subcommand)]
         mode: IrohSenderMode,
     },
-    /// Full ICE with manual signaling - best NAT traversal (TCP only, str0m+quinn)
+    /// Full ICE with manual signaling - best NAT traversal (str0m+quinn)
     Custom {
+        /// Protocol to tunnel (tcp or udp)
+        #[arg(short, long)]
+        protocol: Option<Protocol>,
+
         /// Target address to forward traffic to
         #[arg(short, long)]
         target: Option<String>,
@@ -167,8 +171,12 @@ enum ReceiverMode {
         #[command(subcommand)]
         mode: IrohReceiverMode,
     },
-    /// Full ICE with manual signaling - best NAT traversal (TCP only, str0m+quinn)
+    /// Full ICE with manual signaling - best NAT traversal (str0m+quinn)
     Custom {
+        /// Protocol to tunnel (tcp or udp)
+        #[arg(short, long)]
+        protocol: Option<Protocol>,
+
         /// Local address to listen on (e.g., 127.0.0.1:2222)
         #[arg(short, long)]
         listen: Option<String>,
@@ -340,9 +348,13 @@ async fn main() -> Result<()> {
                     }
                 },
                 SenderMode::Custom {
+                    protocol,
                     target,
                     stun_servers,
                 } => {
+                    let protocol = protocol
+                        .or_else(|| cfg.protocol.as_deref().and_then(Protocol::from_str_opt))
+                        .unwrap_or_default();
                     let target = target
                         .or(cfg.target)
                         .unwrap_or_else(|| "127.0.0.1:22".to_string());
@@ -352,7 +364,10 @@ async fn main() -> Result<()> {
                         stun_servers
                     };
 
-                    tunnel::run_manual_tcp_sender(target, stun_servers).await
+                    match protocol {
+                        Protocol::Udp => tunnel::run_manual_udp_sender(target, stun_servers).await,
+                        Protocol::Tcp => tunnel::run_manual_tcp_sender(target, stun_servers).await,
+                    }
                 }
             }
         }
@@ -426,9 +441,13 @@ async fn main() -> Result<()> {
                     }
                 },
                 ReceiverMode::Custom {
+                    protocol,
                     listen,
                     stun_servers,
                 } => {
+                    let protocol = protocol
+                        .or_else(|| cfg.protocol.as_deref().and_then(Protocol::from_str_opt))
+                        .unwrap_or_default();
                     let listen = listen.or(cfg.listen).context(
                         "listen is required. Provide via --listen or in config file.",
                     )?;
@@ -438,7 +457,10 @@ async fn main() -> Result<()> {
                         stun_servers
                     };
 
-                    tunnel::run_manual_tcp_receiver(listen, stun_servers).await
+                    match protocol {
+                        Protocol::Udp => tunnel::run_manual_udp_receiver(listen, stun_servers).await,
+                        Protocol::Tcp => tunnel::run_manual_tcp_receiver(listen, stun_servers).await,
+                    }
                 }
             }
         }
