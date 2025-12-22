@@ -382,7 +382,11 @@ Note: Config file options (`-c`, `--default-config`) are at the `sender`/`receiv
 
 ## Serverless Manual Mode (No STUN)
 
-If you want **zero external infrastructure**, you can run manual modes without any STUN servers. This works best when both peers are on public IPs or permissive NATs. Use `--no-stun` on the CLI, or set `stun_servers = []` in your config. If you omit STUN entirely (no config and no CLI), tunnel-rs uses its default public STUN list.
+If you want **zero external infrastructure**, you can run manual modes without any STUN servers. This only works reliably when both peers are on public IPs or permissive NATs. Disabling STUN reduces NAT hole‑punching success.
+
+If your goal is simply to avoid self‑hosting or depending on smaller/less‑reliable infra (e.g., iroh relay/discovery), you do **not** need `--no-stun`, public STUN servers (like Google's) are widely available and help NAT traversal without requiring you to run anything yourself.
+
+Use `--no-stun` on the CLI, or set `stun_servers = []` in your config. If you omit STUN entirely (no config and no CLI), tunnel-rs uses its default public STUN list.
 
 Example (CLI only):
 ```bash
