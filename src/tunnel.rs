@@ -474,6 +474,7 @@ pub async fn run_manual_tcp_sender(target: String, stun_servers: Vec<String>) ->
         ice_pwd: local_creds.pass.clone(),
         candidates: local_candidates,
         quic_fingerprint: quic_identity.fingerprint.clone(),
+        session_id: None,
     };
 
     println!("\nManual Offer (copy to receiver):");
@@ -562,6 +563,7 @@ pub async fn run_manual_tcp_receiver(listen: String, stun_servers: Vec<String>) 
         ice_ufrag: local_creds.ufrag.clone(),
         ice_pwd: local_creds.pass.clone(),
         candidates: local_candidates,
+        session_id: None,
     };
 
     println!("\nManual Answer (copy to sender):");
@@ -649,6 +651,7 @@ pub async fn run_manual_udp_sender(target: String, stun_servers: Vec<String>) ->
         ice_pwd: local_creds.pass.clone(),
         candidates: local_candidates,
         quic_fingerprint: quic_identity.fingerprint.clone(),
+        session_id: None,
     };
 
     println!("\nManual Offer (copy to receiver):");
@@ -743,6 +746,7 @@ pub async fn run_manual_udp_receiver(listen: String, stun_servers: Vec<String>) 
         ice_ufrag: local_creds.ufrag.clone(),
         ice_pwd: local_creds.pass.clone(),
         candidates: local_candidates,
+        session_id: None,
     };
 
     println!("\nManual Answer (copy to sender):");
@@ -839,6 +843,14 @@ pub async fn run_nostr_tcp_sender(
     // Subscribe to incoming events
     signaling.subscribe().await?;
 
+    // Generate session ID to distinguish this session from stale events
+    let session_id: String = {
+        use rand::Rng;
+        let random_bytes: [u8; 8] = rand::rng().random();
+        hex::encode(random_bytes)
+    };
+    println!("Session ID: {}", session_id);
+
     // Gather ICE candidates
     let ice = IceEndpoint::gather(&stun_servers).await?;
     let local_creds = ice.local_credentials();
@@ -852,13 +864,44 @@ pub async fn run_nostr_tcp_sender(
         ice_pwd: local_creds.pass.clone(),
         candidates: local_candidates,
         quic_fingerprint: quic_identity.fingerprint.clone(),
+        session_id: Some(session_id.clone()),
     };
 
-    // Publish offer via Nostr
-    signaling.publish_offer(&offer).await?;
+    // Publish offer via Nostr and wait for answer (re-publish periodically)
+    const OFFER_REPUBLISH_INTERVAL_SECS: u64 = 10;
+    const MAX_WAIT_TIME_SECS: u64 = 120;
+    let start_time = std::time::Instant::now();
 
-    // Wait for answer from peer
-    let answer = signaling.wait_for_answer().await?;
+    signaling.publish_offer(&offer).await?;
+    println!(
+        "Waiting for answer (re-publishing every {}s, max {}s)...",
+        OFFER_REPUBLISH_INTERVAL_SECS, MAX_WAIT_TIME_SECS
+    );
+
+    let answer = loop {
+        if let Some(ans) = signaling
+            .wait_for_answer_timeout(OFFER_REPUBLISH_INTERVAL_SECS)
+            .await
+        {
+            // Verify session ID matches
+            if ans.session_id.as_ref() == Some(&session_id) {
+                break ans;
+            }
+            println!("Ignoring answer with mismatched session ID (stale event)");
+        }
+
+        // Check overall timeout
+        if start_time.elapsed().as_secs() >= MAX_WAIT_TIME_SECS {
+            anyhow::bail!(
+                "Timeout waiting for answer from peer ({}s)",
+                MAX_WAIT_TIME_SECS
+            );
+        }
+
+        // Re-publish offer
+        println!("Re-publishing offer...");
+        signaling.publish_offer(&offer).await?;
+    };
 
     if answer.version != MANUAL_SIGNAL_VERSION {
         anyhow::bail!(
@@ -964,15 +1007,24 @@ pub async fn run_nostr_tcp_receiver(
         );
     }
 
-    // Create and publish answer
+    // Create and publish answer (echo session_id from offer)
     let answer = ManualAnswer {
         version: MANUAL_SIGNAL_VERSION,
         ice_ufrag: local_creds.ufrag.clone(),
         ice_pwd: local_creds.pass.clone(),
         candidates: local_candidates,
+        session_id: offer.session_id.clone(),
     };
 
+    if let Some(ref sid) = answer.session_id {
+        println!("Session ID: {}", sid);
+    }
+
     signaling.publish_answer(&answer).await?;
+
+    // Give sender time to receive answer and start ICE checks
+    println!("Waiting for sender to receive answer...");
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
 
     // Disconnect from Nostr (signaling complete)
     signaling.disconnect().await;
@@ -1072,6 +1124,14 @@ pub async fn run_nostr_udp_sender(
     // Subscribe to incoming events
     signaling.subscribe().await?;
 
+    // Generate session ID to distinguish this session from stale events
+    let session_id: String = {
+        use rand::Rng;
+        let random_bytes: [u8; 8] = rand::rng().random();
+        hex::encode(random_bytes)
+    };
+    println!("Session ID: {}", session_id);
+
     // Gather ICE candidates
     let ice = IceEndpoint::gather(&stun_servers).await?;
     let local_creds = ice.local_credentials();
@@ -1085,13 +1145,44 @@ pub async fn run_nostr_udp_sender(
         ice_pwd: local_creds.pass.clone(),
         candidates: local_candidates,
         quic_fingerprint: quic_identity.fingerprint.clone(),
+        session_id: Some(session_id.clone()),
     };
 
-    // Publish offer via Nostr
-    signaling.publish_offer(&offer).await?;
+    // Publish offer via Nostr and wait for answer (re-publish periodically)
+    const OFFER_REPUBLISH_INTERVAL_SECS: u64 = 10;
+    const MAX_WAIT_TIME_SECS: u64 = 120;
+    let start_time = std::time::Instant::now();
 
-    // Wait for answer from peer
-    let answer = signaling.wait_for_answer().await?;
+    signaling.publish_offer(&offer).await?;
+    println!(
+        "Waiting for answer (re-publishing every {}s, max {}s)...",
+        OFFER_REPUBLISH_INTERVAL_SECS, MAX_WAIT_TIME_SECS
+    );
+
+    let answer = loop {
+        if let Some(ans) = signaling
+            .wait_for_answer_timeout(OFFER_REPUBLISH_INTERVAL_SECS)
+            .await
+        {
+            // Verify session ID matches
+            if ans.session_id.as_ref() == Some(&session_id) {
+                break ans;
+            }
+            println!("Ignoring answer with mismatched session ID (stale event)");
+        }
+
+        // Check overall timeout
+        if start_time.elapsed().as_secs() >= MAX_WAIT_TIME_SECS {
+            anyhow::bail!(
+                "Timeout waiting for answer from peer ({}s)",
+                MAX_WAIT_TIME_SECS
+            );
+        }
+
+        // Re-publish offer
+        println!("Re-publishing offer...");
+        signaling.publish_offer(&offer).await?;
+    };
 
     if answer.version != MANUAL_SIGNAL_VERSION {
         anyhow::bail!(
@@ -1203,15 +1294,24 @@ pub async fn run_nostr_udp_receiver(
         );
     }
 
-    // Create and publish answer
+    // Create and publish answer (echo session_id from offer)
     let answer = ManualAnswer {
         version: MANUAL_SIGNAL_VERSION,
         ice_ufrag: local_creds.ufrag.clone(),
         ice_pwd: local_creds.pass.clone(),
         candidates: local_candidates,
+        session_id: offer.session_id.clone(),
     };
 
+    if let Some(ref sid) = answer.session_id {
+        println!("Session ID: {}", sid);
+    }
+
     signaling.publish_answer(&answer).await?;
+
+    // Give sender time to receive answer and start ICE checks
+    println!("Waiting for sender to receive answer...");
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
 
     // Disconnect from Nostr (signaling complete)
     signaling.disconnect().await;

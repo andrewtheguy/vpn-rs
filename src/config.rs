@@ -262,6 +262,9 @@ pub fn default_nostr_relays() -> Vec<String> {
     vec![
         "wss://relay.damus.io".to_string(),
         "wss://nos.lol".to_string(),
-        "wss://nostr.wine".to_string(),
+        "wss://relay.nostr.band".to_string(),
+        "wss://relay.primal.net".to_string(),
+        "wss://nostr.mom".to_string(),
+        "wss://relay.snort.social".to_string(),
     ]
 }

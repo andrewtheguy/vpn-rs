@@ -42,6 +42,9 @@ pub struct ManualOffer {
     pub ice_pwd: String,
     pub candidates: Vec<String>,
     pub quic_fingerprint: String,
+    /// Session ID to distinguish between different signaling sessions (for nostr mode)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -50,6 +53,9 @@ pub struct ManualAnswer {
     pub ice_ufrag: String,
     pub ice_pwd: String,
     pub candidates: Vec<String>,
+    /// Session ID echoed from offer (for nostr mode)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
 }
 
 // ============================================================================

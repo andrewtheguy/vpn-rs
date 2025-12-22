@@ -9,6 +9,7 @@ use base64::Engine;
 use nostr_sdk::prelude::*;
 use sha2::{Digest, Sha256};
 use std::time::Duration;
+use tokio::sync::broadcast::error::RecvError;
 
 use super::signaling::{ManualAnswer, ManualOffer};
 
@@ -162,9 +163,9 @@ impl NostrSignaling {
             .await
     }
 
-    /// Wait for an answer from the peer
-    pub async fn wait_for_answer(&self) -> Result<ManualAnswer> {
-        self.wait_for_message(SIGNALING_TYPE_ANSWER, DEFAULT_SIGNALING_TIMEOUT_SECS)
+    /// Wait for an answer from the peer with custom timeout (returns None on timeout)
+    pub async fn wait_for_answer_timeout(&self, timeout_secs: u64) -> Option<ManualAnswer> {
+        self.wait_for_message_optional(SIGNALING_TYPE_ANSWER, timeout_secs)
             .await
     }
 
@@ -221,8 +222,25 @@ impl NostrSignaling {
                     return Ok(payload);
                 }
                 Ok(Ok(_)) => continue,
-                Ok(Err(_)) => break,
-                Err(_) => continue, // timeout on recv, try again
+                Ok(Err(recv_err)) => {
+                    // Handle broadcast channel errors
+                    match recv_err {
+                        RecvError::Closed => {
+                            return Err(anyhow::anyhow!(
+                                "Notification channel closed while waiting for {}",
+                                expected_type
+                            ));
+                        }
+                        RecvError::Lagged(skipped) => {
+                            eprintln!(
+                                "Warning: Notification receiver lagged, skipped {} messages",
+                                skipped
+                            );
+                            continue;
+                        }
+                    }
+                }
+                Err(_) => continue, // tokio::time::timeout elapsed, try again
             }
         }
 
@@ -230,6 +248,78 @@ impl NostrSignaling {
             "Timeout waiting for {} from peer",
             expected_type
         ))
+    }
+
+    /// Wait for a specific message type with timeout, returns None on timeout
+    async fn wait_for_message_optional<T: for<'de> serde::Deserialize<'de>>(
+        &self,
+        expected_type: &str,
+        timeout_secs: u64,
+    ) -> Option<T> {
+        let mut notifications = self.client.notifications();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_secs);
+
+        while tokio::time::Instant::now() < deadline {
+            match tokio::time::timeout(Duration::from_secs(1), notifications.recv()).await {
+                Ok(Ok(RelayPoolNotification::Event { event, .. })) => {
+                    // Verify this is from our peer
+                    if event.pubkey != self.peer_pubkey {
+                        continue;
+                    }
+
+                    // Check transfer ID
+                    let is_our_transfer = event.tags.iter().any(|t| {
+                        t.kind() == TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::T))
+                            && t.content() == Some(&self.transfer_id)
+                    });
+                    if !is_our_transfer {
+                        continue;
+                    }
+
+                    // Check event type
+                    let event_type_tag = event
+                        .tags
+                        .iter()
+                        .find(|t| t.kind() == TagKind::custom("type"))
+                        .and_then(|t| t.content());
+
+                    if event_type_tag != Some(expected_type) {
+                        continue;
+                    }
+
+                    // Decode content
+                    if let Ok(decoded) = URL_SAFE_NO_PAD.decode(event.content.as_bytes()) {
+                        if let Ok(payload) = serde_json::from_slice(&decoded) {
+                            println!("Received {} from peer", expected_type);
+                            return Some(payload);
+                        }
+                    }
+                }
+                Ok(Ok(_)) => continue,
+                Ok(Err(recv_err)) => {
+                    // Handle broadcast channel errors
+                    match recv_err {
+                        RecvError::Closed => {
+                            eprintln!(
+                                "Error: Notification channel closed while waiting for {}",
+                                expected_type
+                            );
+                            return None;
+                        }
+                        RecvError::Lagged(skipped) => {
+                            eprintln!(
+                                "Warning: Notification receiver lagged, skipped {} messages",
+                                skipped
+                            );
+                            continue;
+                        }
+                    }
+                }
+                Err(_) => continue, // tokio::time::timeout elapsed, try again
+            }
+        }
+
+        None
     }
 
     fn create_signaling_event(&self, event_type: &str, content: &str) -> Result<Event> {

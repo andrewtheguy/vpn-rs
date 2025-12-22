@@ -62,7 +62,10 @@ relay_only = false
 # relays = [
 #     "wss://relay.damus.io",
 #     "wss://nos.lol",
-#     "wss://nostr.wine",
+#     "wss://relay.nostr.band",
+#     "wss://relay.primal.net",
+#     "wss://nostr.mom",
+#     "wss://relay.snort.social",
 # ]
 #
 # # Set to [] to disable STUN entirely

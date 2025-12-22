@@ -627,7 +627,10 @@ stun_servers = ["stun.l.google.com:19302"]
 When no relays are specified, these public relays are used:
 - `wss://relay.damus.io`
 - `wss://nos.lol`
-- `wss://nostr.wine`
+- `wss://relay.nostr.band`
+- `wss://relay.primal.net`
+- `wss://nostr.mom`
+- `wss://relay.snort.social`
 
 ## Notes
 
