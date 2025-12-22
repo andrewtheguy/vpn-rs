@@ -3,18 +3,21 @@
 Test multiple tunnel sessions with ping or streaming modes.
 
 Usage:
-    python3 test_tunnel.py NUM [OPTIONS]
+    python3 test_tunnel.py [OPTIONS]
 
 Options:
+    -n, --num NUM    Number of ports/sessions (default: 3)
+    -c, --conns NUM  Connections per port (default: 1)
     --port PORT      Base port (default: 7001)
     --stream SECS    Stream for SECS seconds (default: ping mode)
     --loop           Repeat continuously
 
 Examples:
-    python3 test_tunnel.py 3              # Ping 3 ports (7001-7003)
-    python3 test_tunnel.py 3 --loop       # Ping every 5s
-    python3 test_tunnel.py 3 --stream 10  # Stream for 10s
-    python3 test_tunnel.py 3 --stream 10 --loop  # Stream 10s repeatedly
+    python3 test_tunnel.py                 # Ping 3 ports (7001-7003)
+    python3 test_tunnel.py -n 5            # Ping 5 ports
+    python3 test_tunnel.py -c 3            # 3 connections per port (9 total)
+    python3 test_tunnel.py --stream 10     # Stream for 10s
+    python3 test_tunnel.py -n 2 -c 5 --stream 10  # 2 ports, 5 conns each
 """
 
 import socket
@@ -22,19 +25,34 @@ import sys
 import time
 import threading
 import hashlib
+import random
+import string
 from dataclasses import dataclass, field
 
 def parse_args():
     args = sys.argv[1:]
-    if not args or args[0] in ['-h', '--help']:
+    if args and args[0] in ['-h', '--help']:
         print(__doc__)
         sys.exit(0)
 
-    # First positional arg is number of sessions
-    num_sessions = int(args[0]) if args and not args[0].startswith('--') else 3
-
     # Parse flags
     loop = '--loop' in args
+
+    num_sessions = 3
+    for flag in ['-n', '--num']:
+        if flag in args:
+            idx = args.index(flag)
+            if idx + 1 < len(args):
+                num_sessions = int(args[idx + 1])
+            break
+
+    conns_per_port = 1
+    for flag in ['-c', '--conns']:
+        if flag in args:
+            idx = args.index(flag)
+            if idx + 1 < len(args):
+                conns_per_port = int(args[idx + 1])
+            break
 
     base_port = 7001
     if '--port' in args:
@@ -45,18 +63,19 @@ def parse_args():
     stream_duration = None
     if '--stream' in args:
         idx = args.index('--stream')
-        if idx + 1 < len(args) and not args[idx + 1].startswith('--'):
+        if idx + 1 < len(args) and not args[idx + 1].startswith('-'):
             stream_duration = int(args[idx + 1])
         else:
             stream_duration = 5  # default
 
-    return base_port, num_sessions, stream_duration, loop
+    return base_port, num_sessions, conns_per_port, stream_duration, loop
 
-BASE_PORT, NUM_SESSIONS, STREAM_DURATION, LOOP_MODE = parse_args()
+BASE_PORT, NUM_SESSIONS, CONNS_PER_PORT, STREAM_DURATION, LOOP_MODE = parse_args()
 
 @dataclass
 class Stats:
     port: int
+    conn_id: int = 0
     sent_msgs: int = 0
     recv_msgs: int = 0
     sent_bytes: int = 0
@@ -82,6 +101,12 @@ class Stats:
         self._recv_hasher.update(data)
         self.recv_checksum = self._recv_hasher.hexdigest()[:16]
 
+    @property
+    def label(self):
+        if CONNS_PER_PORT > 1:
+            return f"{self.port}#{self.conn_id}"
+        return str(self.port)
+
 def format_bytes(n: int) -> str:
     if n < 1024:
         return f"{n}B"
@@ -93,21 +118,21 @@ def format_bytes(n: int) -> str:
 first_connect_lock = threading.Lock()
 first_connect_done = False
 
-def stream_session(port: int, duration: float, stats: Stats):
+def stream_session(duration: float, stats: Stats):
     """Stream data through a tunnel for the specified duration."""
     global first_connect_done
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.settimeout(5)
-        sock.connect(('127.0.0.1', port))
+        sock.connect(('127.0.0.1', stats.port))
         sock.setblocking(False)
         stats.connected = True
         with first_connect_lock:
             if not first_connect_done:
-                print(f"\n[{port}] Connected")
+                print(f"\n[{stats.label}] Connected")
                 first_connect_done = True
             else:
-                print(f"[{port}] Connected")
+                print(f"[{stats.label}] Connected")
 
         end_time = time.time() + duration
         msg_num = 0
@@ -116,7 +141,8 @@ def stream_session(port: int, duration: float, stats: Stats):
 
         while time.time() < end_time:
             try:
-                payload = f"SEQ{msg_num:06d}DATA{'x' * 40}"
+                rand_data = ''.join(random.choices(string.ascii_letters + string.digits, k=40))
+                payload = f"SEQ{msg_num:06d}DATA{rand_data}"
                 msg = f"{payload}\n"
                 msg_bytes = msg.encode()
                 sock.sendall(msg_bytes)
@@ -159,7 +185,7 @@ def stream_session(port: int, duration: float, stats: Stats):
         sock.close()
     except Exception as e:
         stats.errors += 1
-        print(f"[{port}] Error: {e}")
+        print(f"[{stats.label}] Error: {e}")
 
 def test_port(port, iteration):
     """Single ping test - verify payload roundtrip."""
@@ -168,7 +194,8 @@ def test_port(port, iteration):
         sock.settimeout(5)
         sock.connect(('127.0.0.1', port))
 
-        payload = f"PING{iteration:04d}PORT{port}TEST{'z' * 50}"
+        rand_data = ''.join(random.choices(string.ascii_letters + string.digits, k=50))
+        payload = f"PING{iteration:04d}PORT{port}TEST{rand_data}"
         sock.sendall(f"{payload}\n".encode())
         sent_bytes = len(payload) + 1
 
@@ -186,25 +213,33 @@ def test_port(port, iteration):
 
 def run_ping_once():
     """Single ping test."""
-    print(f"Pinging {NUM_SESSIONS} sessions (ports {BASE_PORT}-{BASE_PORT + NUM_SESSIONS - 1})")
+    total_conns = NUM_SESSIONS * CONNS_PER_PORT
+    if CONNS_PER_PORT > 1:
+        print(f"Pinging {NUM_SESSIONS} ports ({BASE_PORT}-{BASE_PORT + NUM_SESSIONS - 1}), {CONNS_PER_PORT} conns each = {total_conns} total")
+    else:
+        print(f"Pinging {NUM_SESSIONS} sessions (ports {BASE_PORT}-{BASE_PORT + NUM_SESSIONS - 1})")
     print("-" * 60)
     failures = 0
     for i in range(NUM_SESSIONS):
-        port, success, response = test_port(BASE_PORT + i, 0)
-        status = "OK" if success else "FAIL"
-        print(f"[{status}] Port {port}: {response}")
-        if not success:
-            failures += 1
+        port = BASE_PORT + i
+        for c in range(CONNS_PER_PORT):
+            _, success, response = test_port(port, 0)
+            label = f"{port}#{c+1}" if CONNS_PER_PORT > 1 else str(port)
+            status = "OK" if success else "FAIL"
+            print(f"[{status}] {label}: {response}")
+            if not success:
+                failures += 1
     print("-" * 60)
     if failures == 0:
-        print(f"✓ All {NUM_SESSIONS} sessions OK")
+        print(f"✓ All {total_conns} connections OK")
     else:
-        print(f"✗ {failures}/{NUM_SESSIONS} session(s) failed")
+        print(f"✗ {failures}/{total_conns} connection(s) failed")
         sys.exit(1)
 
 def run_ping_loop():
     """Continuous ping test every 5 seconds."""
     run_ping_once()
+    total_conns = NUM_SESSIONS * CONNS_PER_PORT
     print("\nContinuous testing (Ctrl+C to stop)...")
     try:
         iteration = 0
@@ -214,15 +249,18 @@ def run_ping_loop():
             failures = 0
             print(f"[Iteration {iteration}]")
             for i in range(NUM_SESSIONS):
-                port, success, resp = test_port(BASE_PORT + i, iteration)
-                status = "OK" if success else "FAIL"
-                print(f"  [{status}] Port {port}: {resp}")
-                if not success:
-                    failures += 1
+                port = BASE_PORT + i
+                for c in range(CONNS_PER_PORT):
+                    _, success, resp = test_port(port, iteration)
+                    label = f"{port}#{c+1}" if CONNS_PER_PORT > 1 else str(port)
+                    status = "OK" if success else "FAIL"
+                    print(f"  [{status}] {label}: {resp}")
+                    if not success:
+                        failures += 1
             if failures == 0:
-                print(f"  ✓ All {NUM_SESSIONS} sessions OK")
+                print(f"  ✓ All {total_conns} connections OK")
             else:
-                print(f"  ✗ {failures} session(s) failed")
+                print(f"  ✗ {failures} connection(s) failed")
     except KeyboardInterrupt:
         print("\nStopped.")
 
@@ -230,15 +268,22 @@ def run_stream_once():
     """Single streaming test."""
     global first_connect_done
     first_connect_done = False
+    total_conns = NUM_SESSIONS * CONNS_PER_PORT
     print(f"=== Streaming Test ({STREAM_DURATION}s) ===")
-    print(f"Sessions: {NUM_SESSIONS} (ports {BASE_PORT}-{BASE_PORT + NUM_SESSIONS - 1})")
+    if CONNS_PER_PORT > 1:
+        print(f"Ports: {NUM_SESSIONS} ({BASE_PORT}-{BASE_PORT + NUM_SESSIONS - 1}), {CONNS_PER_PORT} conns each = {total_conns} total")
+    else:
+        print(f"Sessions: {NUM_SESSIONS} (ports {BASE_PORT}-{BASE_PORT + NUM_SESSIONS - 1})")
     print("-" * 70)
 
-    stats_list = [Stats(port=BASE_PORT + i) for i in range(NUM_SESSIONS)]
+    stats_list = []
+    for i in range(NUM_SESSIONS):
+        for c in range(CONNS_PER_PORT):
+            stats_list.append(Stats(port=BASE_PORT + i, conn_id=c + 1))
     threads = []
 
     for stats in stats_list:
-        t = threading.Thread(target=stream_session, args=(stats.port, STREAM_DURATION, stats))
+        t = threading.Thread(target=stream_session, args=(STREAM_DURATION, stats))
         t.start()
         threads.append(t)
 
@@ -264,7 +309,7 @@ def run_stream_once():
 
     for s in stats_list:
         status = "OK" if s.connected and s.errors == 0 and s.corrupted == 0 else "FAIL"
-        print(f"  [{status}] Port {s.port}: {format_bytes(s.sent_bytes)}↑ {format_bytes(s.recv_bytes)}↓ msgs={s.sent_msgs}/{s.recv_msgs} verified={s.verified} err={s.errors}")
+        print(f"  [{status}] {s.label}: {format_bytes(s.sent_bytes)}↑ {format_bytes(s.recv_bytes)}↓ msgs={s.sent_msgs}/{s.recv_msgs} verified={s.verified} err={s.errors}")
         total_sent_bytes += s.sent_bytes
         total_recv_bytes += s.recv_bytes
         total_verified += s.verified
