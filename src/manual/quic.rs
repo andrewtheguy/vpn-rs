@@ -7,12 +7,23 @@ use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer, ServerName, UnixTime
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
+/// Ensure rustls crypto provider is installed.
+/// This must be called before using any rustls functionality.
+pub fn ensure_crypto_provider() {
+    // Install aws-lc-rs as the default crypto provider for rustls.
+    // This is separate from str0m's crypto provider.
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+}
+
 pub struct QuicServerIdentity {
     pub server_config: ServerConfig,
     pub fingerprint: String,
 }
 
 pub fn generate_server_identity() -> Result<QuicServerIdentity> {
+    // Ensure rustls has a crypto provider
+    ensure_crypto_provider();
+
     let rcgen::CertifiedKey { cert, key_pair } =
         rcgen::generate_simple_self_signed(vec!["manual.tunnel".into()])
         .context("Failed to generate self-signed certificate")?;
@@ -53,6 +64,9 @@ pub fn make_client_endpoint(
     socket: Arc<dyn AsyncUdpSocket>,
     expected_fingerprint: &str,
 ) -> Result<Endpoint> {
+    // Ensure rustls has a crypto provider
+    ensure_crypto_provider();
+
     let runtime: Arc<dyn Runtime> = Arc::new(quinn::TokioRuntime);
     let mut endpoint = Endpoint::new_with_abstract_socket(
         EndpointConfig::default(),
