@@ -44,6 +44,53 @@ fn generate_session_id() -> String {
     hex::encode(random_bytes)
 }
 
+/// Publish offer and wait for answer with periodic re-publishing.
+///
+/// This helper implements the nostr signaling offer/answer exchange with:
+/// - Periodic re-publishing of the offer at `republish_interval_secs`
+/// - Overall timeout of `max_wait_secs`
+/// - Session ID validation to filter stale answers
+async fn publish_offer_and_wait_for_answer(
+    signaling: &NostrSignaling,
+    offer: &ManualOffer,
+    session_id: &str,
+    republish_interval_secs: u64,
+    max_wait_secs: u64,
+) -> Result<ManualAnswer> {
+    let start_time = std::time::Instant::now();
+
+    signaling.publish_offer(offer).await?;
+    println!(
+        "Waiting for answer (re-publishing every {}s, max {}s)...",
+        republish_interval_secs, max_wait_secs
+    );
+
+    loop {
+        if let Some(ans) = signaling
+            .try_wait_for_answer_timeout(republish_interval_secs)
+            .await
+        {
+            // Verify session ID matches
+            if ans.session_id.as_ref() == Some(&session_id.to_string()) {
+                return Ok(ans);
+            }
+            println!("Ignoring answer with mismatched session ID (stale event)");
+        }
+
+        // Check overall timeout
+        if start_time.elapsed().as_secs() >= max_wait_secs {
+            anyhow::bail!(
+                "Timeout waiting for answer from peer ({}s)",
+                max_wait_secs
+            );
+        }
+
+        // Re-publish offer
+        println!("Re-publishing offer...");
+        signaling.publish_offer(offer).await?;
+    }
+}
+
 // ============================================================================
 // UDP Tunnel Implementation
 // ============================================================================
@@ -828,6 +875,8 @@ pub async fn run_nostr_tcp_sender(
     nsec: String,
     peer_npub: String,
     relays: Vec<String>,
+    republish_interval_secs: u64,
+    max_wait_secs: u64,
 ) -> Result<()> {
     // Ensure crypto provider is installed before nostr-sdk uses rustls
     quic::ensure_crypto_provider();
@@ -871,40 +920,14 @@ pub async fn run_nostr_tcp_sender(
     };
 
     // Publish offer via Nostr and wait for answer (re-publish periodically)
-    const OFFER_REPUBLISH_INTERVAL_SECS: u64 = 10;
-    const MAX_WAIT_TIME_SECS: u64 = 120;
-    let start_time = std::time::Instant::now();
-
-    signaling.publish_offer(&offer).await?;
-    println!(
-        "Waiting for answer (re-publishing every {}s, max {}s)...",
-        OFFER_REPUBLISH_INTERVAL_SECS, MAX_WAIT_TIME_SECS
-    );
-
-    let answer = loop {
-        if let Some(ans) = signaling
-            .try_wait_for_answer_timeout(OFFER_REPUBLISH_INTERVAL_SECS)
-            .await
-        {
-            // Verify session ID matches
-            if ans.session_id.as_ref() == Some(&session_id) {
-                break ans;
-            }
-            println!("Ignoring answer with mismatched session ID (stale event)");
-        }
-
-        // Check overall timeout
-        if start_time.elapsed().as_secs() >= MAX_WAIT_TIME_SECS {
-            anyhow::bail!(
-                "Timeout waiting for answer from peer ({}s)",
-                MAX_WAIT_TIME_SECS
-            );
-        }
-
-        // Re-publish offer
-        println!("Re-publishing offer...");
-        signaling.publish_offer(&offer).await?;
-    };
+    let answer = publish_offer_and_wait_for_answer(
+        &signaling,
+        &offer,
+        &session_id,
+        republish_interval_secs,
+        max_wait_secs,
+    )
+    .await?;
 
     if answer.version != MANUAL_SIGNAL_VERSION {
         anyhow::bail!(
@@ -1105,6 +1128,8 @@ pub async fn run_nostr_udp_sender(
     nsec: String,
     peer_npub: String,
     relays: Vec<String>,
+    republish_interval_secs: u64,
+    max_wait_secs: u64,
 ) -> Result<()> {
     // Ensure crypto provider is installed before nostr-sdk uses rustls
     quic::ensure_crypto_provider();
@@ -1148,40 +1173,14 @@ pub async fn run_nostr_udp_sender(
     };
 
     // Publish offer via Nostr and wait for answer (re-publish periodically)
-    const OFFER_REPUBLISH_INTERVAL_SECS: u64 = 10;
-    const MAX_WAIT_TIME_SECS: u64 = 120;
-    let start_time = std::time::Instant::now();
-
-    signaling.publish_offer(&offer).await?;
-    println!(
-        "Waiting for answer (re-publishing every {}s, max {}s)...",
-        OFFER_REPUBLISH_INTERVAL_SECS, MAX_WAIT_TIME_SECS
-    );
-
-    let answer = loop {
-        if let Some(ans) = signaling
-            .try_wait_for_answer_timeout(OFFER_REPUBLISH_INTERVAL_SECS)
-            .await
-        {
-            // Verify session ID matches
-            if ans.session_id.as_ref() == Some(&session_id) {
-                break ans;
-            }
-            println!("Ignoring answer with mismatched session ID (stale event)");
-        }
-
-        // Check overall timeout
-        if start_time.elapsed().as_secs() >= MAX_WAIT_TIME_SECS {
-            anyhow::bail!(
-                "Timeout waiting for answer from peer ({}s)",
-                MAX_WAIT_TIME_SECS
-            );
-        }
-
-        // Re-publish offer
-        println!("Re-publishing offer...");
-        signaling.publish_offer(&offer).await?;
-    };
+    let answer = publish_offer_and_wait_for_answer(
+        &signaling,
+        &offer,
+        &session_id,
+        republish_interval_secs,
+        max_wait_secs,
+    )
+    .await?;
 
     if answer.version != MANUAL_SIGNAL_VERSION {
         anyhow::bail!(
