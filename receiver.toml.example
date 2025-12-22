@@ -13,8 +13,7 @@ role = "receiver"
 mode = "iroh-default"  # or "iroh-manual" or "custom"
 
 # Shared options
-protocol = "tcp"  # "tcp" or "udp"
-listen = "127.0.0.1:2222"
+target = "tcp://127.0.0.1:2222"
 
 [iroh-default]
 # NodeId of the sender to connect to (required for iroh-default)

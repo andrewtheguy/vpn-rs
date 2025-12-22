@@ -13,8 +13,7 @@ role = "sender"
 mode = "iroh-default"  # or "iroh-manual" or "custom"
 
 # Shared options
-protocol = "tcp"  # "tcp" or "udp"
-target = "127.0.0.1:22"
+source = "tcp://127.0.0.1:22"
 
 [iroh-default]
 # Path to secret key file for persistent identity

@@ -84,7 +84,7 @@ Uses iroh's P2P network for automatic peer discovery and NAT traversal with rela
 
 **Sender** (on server with SSH):
 ```bash
-tunnel-rs sender iroh-default --target 127.0.0.1:22
+tunnel-rs sender iroh-default --source tcp://127.0.0.1:22
 ```
 
 Output:
@@ -95,7 +95,7 @@ Waiting for receiver to connect...
 
 **Receiver** (on client):
 ```bash
-tunnel-rs receiver iroh-default --node-id <ENDPOINT_ID> --listen 127.0.0.1:2222
+tunnel-rs receiver iroh-default --node-id <ENDPOINT_ID> --target tcp://127.0.0.1:2222
 ```
 
 Then connect: `ssh -p 2222 user@127.0.0.1`
@@ -104,12 +104,12 @@ Then connect: `ssh -p 2222 user@127.0.0.1`
 
 **Sender**:
 ```bash
-tunnel-rs sender iroh-default --protocol udp --target 127.0.0.1:51820
+tunnel-rs sender iroh-default --source udp://127.0.0.1:51820
 ```
 
 **Receiver**:
 ```bash
-tunnel-rs receiver iroh-default --protocol udp --node-id <ENDPOINT_ID> --listen 0.0.0.0:51820
+tunnel-rs receiver iroh-default --node-id <ENDPOINT_ID> --target udp://0.0.0.0:51820
 ```
 
 ## CLI Options
@@ -125,8 +125,7 @@ tunnel-rs receiver iroh-default --protocol udp --node-id <ENDPOINT_ID> --listen 
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--protocol`, `-p` | tcp | Protocol to tunnel (tcp or udp) |
-| `--target`, `-t` | 127.0.0.1:22 | Target address to forward traffic to |
+| `--source`, `-s` | tcp://127.0.0.1:22 | Source address to forward traffic to |
 | `--secret-file` | - | Path to secret key file for persistent identity |
 | `--relay-url` | public | Custom relay server URL(s), repeatable |
 | `--relay-only` | false | Force all traffic through relay |
@@ -143,9 +142,8 @@ tunnel-rs receiver iroh-default --protocol udp --node-id <ENDPOINT_ID> --listen 
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--protocol`, `-p` | tcp | Protocol to tunnel (tcp or udp) |
 | `--node-id`, `-n` | required | EndpointId of the sender |
-| `--listen`, `-l` | required | Local address to listen on |
+| `--target`, `-t` | required | Local address to listen on |
 | `--relay-url` | public | Custom relay server URL(s), repeatable |
 | `--relay-only` | false | Force all traffic through relay |
 | `--dns-server` | public | Custom DNS server URL for peer discovery |
@@ -168,8 +166,7 @@ role = "sender"
 mode = "iroh-default"  # or "iroh-manual" or "custom"
 
 # Shared options
-protocol = "tcp"
-target = "127.0.0.1:22"
+source = "tcp://127.0.0.1:22"
 
 [iroh-default]
 secret_file = "./sender.key"
@@ -199,8 +196,7 @@ role = "receiver"
 mode = "iroh-default"  # or "iroh-manual" or "custom"
 
 # Shared options
-protocol = "tcp"
-listen = "127.0.0.1:2222"
+target = "tcp://127.0.0.1:2222"
 
 [iroh-default]
 node_id = "2xnbkpbc7izsilvewd7c62w7wnwziacmpfwvhcrya5nt76dqkpga"
@@ -229,10 +225,10 @@ By default, a new EndpointId is generated each run. For production, use persiste
 
 ```bash
 # First run: generates and saves key
-tunnel-rs sender iroh-default --target 127.0.0.1:22 --secret-file ./sender.key
+tunnel-rs sender iroh-default --source tcp://127.0.0.1:22 --secret-file ./sender.key
 
 # Subsequent runs: loads existing key
-tunnel-rs sender iroh-default --target 127.0.0.1:22 --secret-file ./sender.key
+tunnel-rs sender iroh-default --source tcp://127.0.0.1:22 --secret-file ./sender.key
 ```
 
 ### Pre-generating Keys
@@ -249,11 +245,11 @@ tunnel-rs show-id --secret-file ./sender.key
 
 ```bash
 # Both sides must use the same relay
-tunnel-rs sender iroh-default --relay-url https://relay.example.com --target 127.0.0.1:22
-tunnel-rs receiver iroh-default --relay-url https://relay.example.com --node-id <ID> --listen 127.0.0.1:2222
+tunnel-rs sender iroh-default --relay-url https://relay.example.com --source tcp://127.0.0.1:22
+tunnel-rs receiver iroh-default --relay-url https://relay.example.com --node-id <ID> --target tcp://127.0.0.1:2222
 
 # Force relay-only (no direct P2P)
-tunnel-rs sender iroh-default --relay-url https://relay.example.com --relay-only --target 127.0.0.1:22
+tunnel-rs sender iroh-default --relay-url https://relay.example.com --relay-only --source tcp://127.0.0.1:22
 ```
 
 ### Running iroh-relay
@@ -270,7 +266,7 @@ For fully independent operation without public infrastructure:
 ```bash
 # Both sides use custom DNS server
 tunnel-rs sender iroh-default --dns-server https://dns.example.com/pkarr --secret-file ./sender.key
-tunnel-rs receiver iroh-default --dns-server https://dns.example.com/pkarr --node-id <ID> --listen 127.0.0.1:2222
+tunnel-rs receiver iroh-default --dns-server https://dns.example.com/pkarr --node-id <ID> --target tcp://127.0.0.1:2222
 ```
 
 ---
@@ -285,14 +281,14 @@ Uses iroh's QUIC transport with manual copy-paste signaling. No discovery server
 
 1. **Sender** starts and outputs an offer:
    ```bash
-   tunnel-rs sender iroh-manual --target 127.0.0.1:22
+   tunnel-rs sender iroh-manual --source tcp://127.0.0.1:22
    ```
 
    Copy the `-----BEGIN TUNNEL-RS IROH OFFER-----` block.
 
 2. **Receiver** starts and pastes the offer:
    ```bash
-   tunnel-rs receiver iroh-manual --listen 127.0.0.1:2222
+   tunnel-rs receiver iroh-manual --target tcp://127.0.0.1:2222
    ```
 
    Paste the offer, then copy the `-----BEGIN TUNNEL-RS IROH ANSWER-----` block.
@@ -312,16 +308,14 @@ Uses iroh's QUIC transport with manual copy-paste signaling. No discovery server
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--protocol`, `-p` | tcp | Protocol to tunnel (tcp or udp) |
-| `--target`, `-t` | 127.0.0.1:22 | Target address to forward traffic to |
+| `--source`, `-s` | tcp://127.0.0.1:22 | Source address to forward traffic to |
 | `--stun-server` | public | STUN server(s), repeatable |
 
 ### receiver iroh-manual
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--protocol`, `-p` | tcp | Protocol to tunnel (tcp or udp) |
-| `--listen`, `-l` | required | Local address to listen on |
+| `--target`, `-t` | required | Local address to listen on |
 | `--stun-server` | public | STUN server(s), repeatable |
 
 Note: Config file options (`-c`, `--default-config`) are at the `sender`/`receiver` command level. See [Configuration Files](#configuration-files) above.
@@ -332,10 +326,10 @@ iroh-manual mode supports both TCP and UDP tunneling:
 
 ```bash
 # Sender
-tunnel-rs sender iroh-manual --protocol udp --target 127.0.0.1:51820
+tunnel-rs sender iroh-manual --source udp://127.0.0.1:51820
 
 # Receiver
-tunnel-rs receiver iroh-manual --protocol udp --listen 0.0.0.0:51820
+tunnel-rs receiver iroh-manual --target udp://0.0.0.0:51820
 ```
 
 ---
@@ -361,14 +355,14 @@ Uses full ICE (Interactive Connectivity Establishment) with str0m + quinn QUIC. 
 
 1. **Sender** starts and outputs an offer:
    ```bash
-   tunnel-rs sender custom --target 127.0.0.1:22
+   tunnel-rs sender custom --source tcp://127.0.0.1:22
    ```
 
    Copy the `-----BEGIN TUNNEL-RS MANUAL OFFER-----` block.
 
 2. **Receiver** starts and pastes the offer:
    ```bash
-   tunnel-rs receiver custom --listen 127.0.0.1:2222
+   tunnel-rs receiver custom --target tcp://127.0.0.1:2222
    ```
 
    Paste the offer, then copy the `-----BEGIN TUNNEL-RS MANUAL ANSWER-----` block.
@@ -386,10 +380,10 @@ Uses full ICE (Interactive Connectivity Establishment) with str0m + quinn QUIC. 
 
 ```bash
 # Sender
-tunnel-rs sender custom --protocol udp --target 127.0.0.1:51820
+tunnel-rs sender custom --source udp://127.0.0.1:51820
 
 # Receiver
-tunnel-rs receiver custom --protocol udp --listen 0.0.0.0:51820
+tunnel-rs receiver custom --target udp://0.0.0.0:51820
 ```
 
 ## CLI Options
@@ -398,16 +392,14 @@ tunnel-rs receiver custom --protocol udp --listen 0.0.0.0:51820
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--protocol`, `-p` | tcp | Protocol to tunnel (tcp or udp) |
-| `--target`, `-t` | 127.0.0.1:22 | Target address to forward traffic to |
+| `--source`, `-s` | tcp://127.0.0.1:22 | Source address to forward traffic to |
 | `--stun-server` | public | STUN server(s), repeatable |
 
 ### receiver custom
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--protocol`, `-p` | tcp | Protocol to tunnel (tcp or udp) |
-| `--listen`, `-l` | required | Local address to listen on |
+| `--target`, `-t` | required | Local address to listen on |
 | `--stun-server` | public | STUN server(s), repeatable |
 
 Note: Config file options (`-c`, `--default-config`) are at the `sender`/`receiver` command level. See [Configuration Files](#configuration-files) above.

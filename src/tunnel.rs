@@ -56,7 +56,7 @@ pub async fn run_udp_sender(
     println!("\nEndpointId: {}", endpoint_id);
     println!("\nOn the receiver side, run:");
     println!(
-        "  tunnel-rs receiver --protocol udp --node-id {} --listen 0.0.0.0:{}\n",
+        "  tunnel-rs receiver --node-id {} --target udp://0.0.0.0:{}\n",
         endpoint_id, target_port
     );
     println!("Waiting for receiver to connect...");
@@ -302,7 +302,7 @@ pub async fn run_tcp_sender(
     println!("\nEndpointId: {}", endpoint_id);
     println!("\nOn the receiver side, run:");
     println!(
-        "  tunnel-rs receiver --node-id {} --listen 127.0.0.1:{}\n",
+        "  tunnel-rs receiver --node-id {} --target tcp://127.0.0.1:{}\n",
         endpoint_id, target_port
     );
     println!("Waiting for receiver to connect...");

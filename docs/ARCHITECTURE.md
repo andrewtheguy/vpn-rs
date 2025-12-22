@@ -858,8 +858,7 @@ graph TB
     subgraph "Config File"
         A[role: sender/receiver]
         B[mode: iroh-default/iroh-manual/custom]
-        C[protocol: tcp/udp]
-        D[target/listen: address]
+        C[source/target: tcp://host:port or udp://host:port]
     end
     
     subgraph "Mode Sections"

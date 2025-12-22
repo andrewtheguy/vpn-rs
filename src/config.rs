@@ -2,7 +2,7 @@
 //!
 //! Configuration structure:
 //! - `role` and `mode` fields for validation
-//! - Shared options at top level (protocol, target/listen)
+//! - Shared options at top level (source/target)
 //! - Mode-specific sections: [iroh-default], [iroh-manual], [custom]
 
 use anyhow::{Context, Result};
@@ -43,8 +43,7 @@ pub struct SenderConfig {
     pub mode: Option<String>,
 
     // Shared options
-    pub protocol: Option<String>,
-    pub target: Option<String>,
+    pub source: Option<String>,
 
     // Mode-specific sections
     #[serde(rename = "iroh-default")]
@@ -62,8 +61,7 @@ pub struct ReceiverConfig {
     pub mode: Option<String>,
 
     // Shared options
-    pub protocol: Option<String>,
-    pub listen: Option<String>,
+    pub target: Option<String>,
 
     // Mode-specific sections
     #[serde(rename = "iroh-default")]

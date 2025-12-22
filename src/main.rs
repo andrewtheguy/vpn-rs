@@ -8,12 +8,12 @@
 //!   - custom:       Uses full ICE with manual signaling (best NAT traversal)
 //!
 //! Usage:
-//!   tunnel-rs sender iroh-default --target 127.0.0.1:22
-//!   tunnel-rs sender iroh-manual --target 127.0.0.1:22
-//!   tunnel-rs sender custom --target 127.0.0.1:22
-//!   tunnel-rs receiver iroh-default --node-id <NODE_ID> --listen 127.0.0.1:2222
-//!   tunnel-rs receiver iroh-manual --listen 127.0.0.1:2222
-//!   tunnel-rs receiver custom --listen 127.0.0.1:2222
+//!   tunnel-rs sender iroh-default --source tcp://127.0.0.1:22
+//!   tunnel-rs sender iroh-manual --source tcp://127.0.0.1:22
+//!   tunnel-rs sender custom --source tcp://127.0.0.1:22
+//!   tunnel-rs receiver iroh-default --node-id <NODE_ID> --target tcp://127.0.0.1:2222
+//!   tunnel-rs receiver iroh-manual --target tcp://127.0.0.1:2222
+//!   tunnel-rs receiver custom --target tcp://127.0.0.1:2222
 
 mod config;
 mod endpoint;
@@ -45,6 +45,22 @@ impl Protocol {
     }
 }
 
+fn parse_endpoint(value: &str) -> Result<(Protocol, String)> {
+    let (scheme, addr) = value
+        .split_once("://")
+        .context("Expected endpoint in the form tcp://host:port or udp://host:port")?;
+    if addr.is_empty() {
+        anyhow::bail!("Endpoint is missing host:port (got '{}')", value);
+    }
+    if addr.contains('/') {
+        anyhow::bail!("Endpoint must not include a path (got '{}')", value);
+    }
+    let protocol = Protocol::from_str_opt(scheme).context(
+        "Invalid scheme. Use tcp://host:port or udp://host:port",
+    )?;
+    Ok((protocol, addr.to_string()))
+}
+
 #[derive(Parser)]
 #[command(name = "tunnel-rs")]
 #[command(version)]
@@ -56,7 +72,7 @@ struct Args {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Run as sender (accepts connections and forwards to target)
+    /// Run as sender (accepts connections and forwards to source)
     #[command(subcommand_negates_reqs = true)]
     Sender {
         /// Path to config file
@@ -107,13 +123,9 @@ enum SenderMode {
     /// Use iroh with automatic discovery (Pkarr/DNS/mDNS) and relay fallback
     #[command(name = "iroh-default")]
     IrohDefault {
-        /// Protocol to tunnel (tcp or udp)
+        /// Source address to forward traffic to (tcp://host:port or udp://host:port)
         #[arg(short, long)]
-        protocol: Option<Protocol>,
-
-        /// Target address to forward traffic to
-        #[arg(short, long)]
-        target: Option<String>,
+        source: Option<String>,
 
         /// Path to secret key file for persistent identity
         #[arg(long)]
@@ -134,13 +146,9 @@ enum SenderMode {
     /// Use iroh with STUN-based manual signaling (may fail on symmetric NAT)
     #[command(name = "iroh-manual")]
     IrohManual {
-        /// Protocol to tunnel (tcp or udp)
+        /// Source address to forward traffic to (tcp://host:port or udp://host:port)
         #[arg(short, long)]
-        protocol: Option<Protocol>,
-
-        /// Target address to forward traffic to
-        #[arg(short, long)]
-        target: Option<String>,
+        source: Option<String>,
 
         /// STUN server (repeatable, e.g., stun.l.google.com:19302)
         #[arg(long = "stun-server")]
@@ -148,13 +156,9 @@ enum SenderMode {
     },
     /// Full ICE with manual signaling - best NAT traversal (str0m+quinn)
     Custom {
-        /// Protocol to tunnel (tcp or udp)
+        /// Source address to forward traffic to (tcp://host:port or udp://host:port)
         #[arg(short, long)]
-        protocol: Option<Protocol>,
-
-        /// Target address to forward traffic to
-        #[arg(short, long)]
-        target: Option<String>,
+        source: Option<String>,
 
         /// STUN server (repeatable, e.g., stun.l.google.com:19302)
         #[arg(long = "stun-server")]
@@ -167,17 +171,13 @@ enum ReceiverMode {
     /// Use iroh with automatic discovery (Pkarr/DNS/mDNS) and relay fallback
     #[command(name = "iroh-default")]
     IrohDefault {
-        /// Protocol to tunnel (tcp or udp)
-        #[arg(short, long)]
-        protocol: Option<Protocol>,
-
         /// EndpointId of the sender to connect to
         #[arg(short, long)]
         node_id: Option<String>,
 
-        /// Local address to listen on (e.g., 127.0.0.1:2222)
+        /// Local address to listen on (tcp://host:port or udp://host:port)
         #[arg(short, long)]
-        listen: Option<String>,
+        target: Option<String>,
 
         /// Custom relay server URL(s) for failover
         #[arg(long = "relay-url")]
@@ -194,13 +194,9 @@ enum ReceiverMode {
     /// Use iroh with STUN-based manual signaling (may fail on symmetric NAT)
     #[command(name = "iroh-manual")]
     IrohManual {
-        /// Protocol to tunnel (tcp or udp)
+        /// Local address to listen on (tcp://host:port or udp://host:port)
         #[arg(short, long)]
-        protocol: Option<Protocol>,
-
-        /// Local address to listen on (e.g., 127.0.0.1:2222)
-        #[arg(short, long)]
-        listen: Option<String>,
+        target: Option<String>,
 
         /// STUN server (repeatable, e.g., stun.l.google.com:19302)
         #[arg(long = "stun-server")]
@@ -208,13 +204,9 @@ enum ReceiverMode {
     },
     /// Full ICE with manual signaling - best NAT traversal (str0m+quinn)
     Custom {
-        /// Protocol to tunnel (tcp or udp)
+        /// Local address to listen on (tcp://host:port or udp://host:port)
         #[arg(short, long)]
-        protocol: Option<Protocol>,
-
-        /// Local address to listen on (e.g., 127.0.0.1:2222)
-        #[arg(short, long)]
-        listen: Option<String>,
+        target: Option<String>,
 
         /// STUN server (repeatable, e.g., stun.l.google.com:19302)
         #[arg(long = "stun-server")]
@@ -291,31 +283,34 @@ async fn main() -> Result<()> {
             }
 
             // Get common values from config
-            let protocol = cfg.protocol.as_deref().and_then(Protocol::from_str_opt).unwrap_or_default();
-            let target = cfg.target.clone().unwrap_or_else(|| "127.0.0.1:22".to_string());
+            let source = cfg
+                .source
+                .clone()
+                .unwrap_or_else(|| "tcp://127.0.0.1:22".to_string());
 
             match effective_mode {
                 "iroh-default" => {
                     let iroh_cfg = cfg.iroh_default();
                     // Override with CLI values if provided
-                    let (protocol, target, secret_file, relay_urls, relay_only, dns_server) = match &mode {
-                        Some(SenderMode::IrohDefault { protocol: p, target: t, secret_file: s, relay_urls: r, relay_only: ro, dns_server: d }) => (
-                            p.unwrap_or(protocol),
-                            t.clone().unwrap_or(target),
-                            s.clone().or_else(|| iroh_cfg.and_then(|c| c.secret_file.clone())),
+                    let (source, secret_file, relay_urls, relay_only, dns_server) = match &mode {
+                        Some(SenderMode::IrohDefault { source: s, secret_file: sf, relay_urls: r, relay_only: ro, dns_server: d }) => (
+                            s.clone().unwrap_or(source),
+                            sf.clone().or_else(|| iroh_cfg.and_then(|c| c.secret_file.clone())),
                             if r.is_empty() { iroh_cfg.and_then(|c| c.relay_urls.clone()).unwrap_or_default() } else { r.clone() },
                             *ro || iroh_cfg.and_then(|c| c.relay_only).unwrap_or(false),
                             d.clone().or_else(|| iroh_cfg.and_then(|c| c.dns_server.clone())),
                         ),
                         _ => (
-                            protocol,
-                            target,
+                            source,
                             iroh_cfg.and_then(|c| c.secret_file.clone()),
                             iroh_cfg.and_then(|c| c.relay_urls.clone()).unwrap_or_default(),
                             iroh_cfg.and_then(|c| c.relay_only).unwrap_or(false),
                             iroh_cfg.and_then(|c| c.dns_server.clone()),
                         ),
                     };
+
+                    let (protocol, target) = parse_endpoint(&source)
+                        .with_context(|| format!("Invalid sender source '{}'", source))?;
 
                     match protocol {
                         Protocol::Udp => tunnel::run_udp_sender(target, secret_file, relay_urls, relay_only, dns_server).await,
@@ -324,14 +319,16 @@ async fn main() -> Result<()> {
                 }
                 "iroh-manual" => {
                     let manual_cfg = cfg.iroh_manual();
-                    let (protocol, target, stun_servers) = match &mode {
-                        Some(SenderMode::IrohManual { protocol: p, target: t, stun_servers: s }) => (
-                            p.unwrap_or(protocol),
-                            t.clone().unwrap_or(target),
-                            if s.is_empty() { manual_cfg.and_then(|c| c.stun_servers.clone()).unwrap_or_else(default_stun_servers) } else { s.clone() },
+                    let (source, stun_servers) = match &mode {
+                        Some(SenderMode::IrohManual { source: s, stun_servers: ss }) => (
+                            s.clone().unwrap_or(source),
+                            if ss.is_empty() { manual_cfg.and_then(|c| c.stun_servers.clone()).unwrap_or_else(default_stun_servers) } else { ss.clone() },
                         ),
-                        _ => (protocol, target, manual_cfg.and_then(|c| c.stun_servers.clone()).unwrap_or_else(default_stun_servers)),
+                        _ => (source, manual_cfg.and_then(|c| c.stun_servers.clone()).unwrap_or_else(default_stun_servers)),
                     };
+
+                    let (protocol, target) = parse_endpoint(&source)
+                        .with_context(|| format!("Invalid sender source '{}'", source))?;
 
                     match protocol {
                         Protocol::Udp => tunnel::run_iroh_manual_udp_sender(target, stun_servers).await,
@@ -340,14 +337,16 @@ async fn main() -> Result<()> {
                 }
                 "custom" => {
                     let custom_cfg = cfg.custom();
-                    let (protocol, target, stun_servers) = match &mode {
-                        Some(SenderMode::Custom { protocol: p, target: t, stun_servers: s }) => (
-                            p.unwrap_or(protocol),
-                            t.clone().unwrap_or(target),
-                            if s.is_empty() { custom_cfg.and_then(|c| c.stun_servers.clone()).unwrap_or_else(default_stun_servers) } else { s.clone() },
+                    let (source, stun_servers) = match &mode {
+                        Some(SenderMode::Custom { source: s, stun_servers: ss }) => (
+                            s.clone().unwrap_or(source),
+                            if ss.is_empty() { custom_cfg.and_then(|c| c.stun_servers.clone()).unwrap_or_else(default_stun_servers) } else { ss.clone() },
                         ),
-                        _ => (protocol, target, custom_cfg.and_then(|c| c.stun_servers.clone()).unwrap_or_else(default_stun_servers)),
+                        _ => (source, custom_cfg.and_then(|c| c.stun_servers.clone()).unwrap_or_else(default_stun_servers)),
                     };
+
+                    let (protocol, target) = parse_endpoint(&source)
+                        .with_context(|| format!("Invalid sender source '{}'", source))?;
 
                     match protocol {
                         Protocol::Udp => tunnel::run_manual_udp_sender(target, stun_servers).await,
@@ -385,26 +384,23 @@ async fn main() -> Result<()> {
             }
 
             // Get common values from config
-            let protocol = cfg.protocol.as_deref().and_then(Protocol::from_str_opt).unwrap_or_default();
-            let listen = cfg.listen.clone();
+            let target = cfg.target.clone();
 
             match effective_mode {
                 "iroh-default" => {
                     let iroh_cfg = cfg.iroh_default();
                     // Override with CLI values if provided
-                    let (protocol, node_id, listen, relay_urls, relay_only, dns_server) = match &mode {
-                        Some(ReceiverMode::IrohDefault { protocol: p, node_id: n, listen: l, relay_urls: r, relay_only: ro, dns_server: d }) => (
-                            p.unwrap_or(protocol),
+                    let (node_id, target, relay_urls, relay_only, dns_server) = match &mode {
+                        Some(ReceiverMode::IrohDefault { node_id: n, target: t, relay_urls: r, relay_only: ro, dns_server: d }) => (
                             n.clone().or_else(|| iroh_cfg.and_then(|c| c.node_id.clone())),
-                            l.clone().or(listen),
+                            t.clone().or(target),
                             if r.is_empty() { iroh_cfg.and_then(|c| c.relay_urls.clone()).unwrap_or_default() } else { r.clone() },
                             *ro || iroh_cfg.and_then(|c| c.relay_only).unwrap_or(false),
                             d.clone().or_else(|| iroh_cfg.and_then(|c| c.dns_server.clone())),
                         ),
                         _ => (
-                            protocol,
                             iroh_cfg.and_then(|c| c.node_id.clone()),
-                            listen,
+                            target,
                             iroh_cfg.and_then(|c| c.relay_urls.clone()).unwrap_or_default(),
                             iroh_cfg.and_then(|c| c.relay_only).unwrap_or(false),
                             iroh_cfg.and_then(|c| c.dns_server.clone()),
@@ -414,9 +410,12 @@ async fn main() -> Result<()> {
                     let node_id = node_id.context(
                         "node_id is required. Provide via --node-id or in config file.",
                     )?;
-                    let listen = listen.context(
-                        "listen is required. Provide via --listen or in config file.",
+                    let target = target.context(
+                        "target is required. Provide via --target or in config file.",
                     )?;
+
+                    let (protocol, listen) = parse_endpoint(&target)
+                        .with_context(|| format!("Invalid receiver target '{}'", target))?;
 
                     match protocol {
                         Protocol::Udp => tunnel::run_udp_receiver(node_id, listen, relay_urls, relay_only, dns_server).await,
@@ -425,18 +424,20 @@ async fn main() -> Result<()> {
                 }
                 "iroh-manual" => {
                     let manual_cfg = cfg.iroh_manual();
-                    let (protocol, listen, stun_servers) = match &mode {
-                        Some(ReceiverMode::IrohManual { protocol: p, listen: l, stun_servers: s }) => (
-                            p.unwrap_or(protocol),
-                            l.clone().or(listen),
+                    let (target, stun_servers) = match &mode {
+                        Some(ReceiverMode::IrohManual { target: t, stun_servers: s }) => (
+                            t.clone().or(target),
                             if s.is_empty() { manual_cfg.and_then(|c| c.stun_servers.clone()).unwrap_or_else(default_stun_servers) } else { s.clone() },
                         ),
-                        _ => (protocol, listen, manual_cfg.and_then(|c| c.stun_servers.clone()).unwrap_or_else(default_stun_servers)),
+                        _ => (target, manual_cfg.and_then(|c| c.stun_servers.clone()).unwrap_or_else(default_stun_servers)),
                     };
 
-                    let listen: String = listen.context(
-                        "listen is required. Provide via --listen or in config file.",
+                    let target: String = target.context(
+                        "target is required. Provide via --target or in config file.",
                     )?;
+
+                    let (protocol, listen) = parse_endpoint(&target)
+                        .with_context(|| format!("Invalid receiver target '{}'", target))?;
 
                     match protocol {
                         Protocol::Udp => tunnel::run_iroh_manual_udp_receiver(listen, stun_servers).await,
@@ -445,18 +446,20 @@ async fn main() -> Result<()> {
                 }
                 "custom" => {
                     let custom_cfg = cfg.custom();
-                    let (protocol, listen, stun_servers) = match &mode {
-                        Some(ReceiverMode::Custom { protocol: p, listen: l, stun_servers: s }) => (
-                            p.unwrap_or(protocol),
-                            l.clone().or(listen),
+                    let (target, stun_servers) = match &mode {
+                        Some(ReceiverMode::Custom { target: t, stun_servers: s }) => (
+                            t.clone().or(target),
                             if s.is_empty() { custom_cfg.and_then(|c| c.stun_servers.clone()).unwrap_or_else(default_stun_servers) } else { s.clone() },
                         ),
-                        _ => (protocol, listen, custom_cfg.and_then(|c| c.stun_servers.clone()).unwrap_or_else(default_stun_servers)),
+                        _ => (target, custom_cfg.and_then(|c| c.stun_servers.clone()).unwrap_or_else(default_stun_servers)),
                     };
 
-                    let listen: String = listen.context(
-                        "listen is required. Provide via --listen or in config file.",
+                    let target: String = target.context(
+                        "target is required. Provide via --target or in config file.",
                     )?;
+
+                    let (protocol, listen) = parse_endpoint(&target)
+                        .with_context(|| format!("Invalid receiver target '{}'", target))?;
 
                     match protocol {
                         Protocol::Udp => tunnel::run_manual_udp_receiver(listen, stun_servers).await,
