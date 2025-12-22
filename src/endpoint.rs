@@ -15,6 +15,31 @@ pub const UDP_ALPN: &[u8] = b"udp-forward/1";
 pub const TCP_ALPN: &[u8] = b"tcp-forward/1";
 pub const RELAY_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// QUIC keep-alive interval for tunnel connections.
+///
+/// Active connections send pings at this interval to prevent idle timeout.
+/// This value matches iroh's relay ping interval (15s), which is designed to be
+/// well under half the typical QUIC idle timeout (30s default) to ensure
+/// connections survive temporary network issues.
+///
+/// For long-running tunnels, 15s is a good balance between:
+/// - Keeping NAT mappings alive (most NAT timeouts are 30-120s)
+/// - Not wasting bandwidth with excessive pings
+/// - Detecting dead connections reasonably quickly
+///
+/// Reference: iroh uses 1s for endpoint default, 15s for relay pings.
+pub const QUIC_KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(15);
+
+/// QUIC idle timeout for tunnel connections.
+///
+/// Connections without activity (no data or keep-alive pings) for this duration
+/// are considered dead and closed. With QUIC_KEEP_ALIVE_INTERVAL enabled,
+/// this timeout only triggers for truly unresponsive connections.
+///
+/// 5 minutes is generous for tunnels where the underlying TCP/UDP connection
+/// may have long idle periods between bursts of activity.
+pub const QUIC_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
+
 /// Load secret key from file (base64 encoded).
 pub fn load_secret(path: &Path) -> Result<SecretKey> {
     if !path.exists() {
@@ -95,12 +120,11 @@ pub fn create_endpoint_builder(
     dns_server: Option<&str>,
     secret_key: Option<&SecretKey>,
 ) -> Result<EndpointBuilder> {
-    // Configure transport: 5 minute idle timeout with 15s keepalive.
-    // Active connections send pings every 15s, so idle timeout only triggers
-    // for truly dead/unresponsive connections.
+    // Configure transport with keep-alive and idle timeout.
+    // See QUIC_KEEP_ALIVE_INTERVAL and QUIC_IDLE_TIMEOUT constants for rationale.
     let mut transport_config = iroh::endpoint::TransportConfig::default();
-    transport_config.max_idle_timeout(Some(Duration::from_secs(300).try_into().unwrap()));
-    transport_config.keep_alive_interval(Some(Duration::from_secs(15)));
+    transport_config.max_idle_timeout(Some(QUIC_IDLE_TIMEOUT.try_into().unwrap()));
+    transport_config.keep_alive_interval(Some(QUIC_KEEP_ALIVE_INTERVAL));
 
     let mut builder = Endpoint::empty_builder(relay_mode)
         .transport_config(transport_config);
