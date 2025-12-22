@@ -93,7 +93,6 @@ tunnel-rs receiver iroh --protocol udp --node-id <ENDPOINT_ID> --listen 0.0.0.0:
 | `--secret-file` | - | Path to secret key file for persistent identity |
 | `--relay-url` | public | Custom relay server URL(s), repeatable |
 | `--relay-only` | false | Force all traffic through relay |
-| `--direct-only` | false | Reject relay connections |
 | `--dns-server` | public | Custom DNS server URL for peer discovery |
 
 ### receiver iroh
@@ -119,7 +118,6 @@ target = "127.0.0.1:22"
 secret_file = "./sender.key"
 relay_urls = ["https://relay.example.com"]
 relay_only = false
-direct_only = false
 dns_server = "https://dns.example.com/pkarr"
 ```
 

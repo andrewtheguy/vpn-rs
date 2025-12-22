@@ -20,7 +20,6 @@ pub struct IrohSenderConfig {
     pub secret_file: Option<PathBuf>,
     pub relay_urls: Option<Vec<String>>,
     pub relay_only: Option<bool>,
-    pub direct_only: Option<bool>,
     pub dns_server: Option<String>,
 }
 

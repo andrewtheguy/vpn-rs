@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use iroh::{
     discovery::{dns::DnsDiscovery, mdns::MdnsDiscovery, pkarr::{PkarrPublisher, PkarrResolver}},
-    endpoint::{Builder as EndpointBuilder, ConnectionType, PathSelection},
+    endpoint::{Builder as EndpointBuilder, PathSelection},
     Endpoint, EndpointAddr, EndpointId, RelayMap, RelayMode, RelayUrl, SecretKey, Watcher,
 };
 use std::path::{Path, PathBuf};
@@ -263,64 +263,5 @@ pub fn print_connection_type(endpoint: &Endpoint, remote_id: EndpointId) {
     if let Some(mut conn_type_watcher) = endpoint.conn_type(remote_id) {
         let conn_type = conn_type_watcher.get();
         println!("Connection type: {:?}", conn_type);
-    }
-}
-
-pub const DIRECT_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
-
-/// Validate that direct-only and relay-only are mutually exclusive.
-pub fn validate_direct_only(direct_only: bool, relay_only: bool) -> Result<()> {
-    if direct_only && relay_only {
-        anyhow::bail!("--direct-only and --relay-only are mutually exclusive");
-    }
-    Ok(())
-}
-
-/// Result of waiting for a direct connection.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DirectConnectionResult {
-    /// Direct P2P connection was established
-    Direct,
-    /// Connection is still using relay (hole-punching failed or timed out)
-    StillRelay,
-}
-
-/// Wait for connection type to stabilize.
-/// Gives time for hole-punching to establish direct connection.
-/// Uses async notifications from the Watcher to react immediately to changes.
-pub async fn wait_for_direct_connection(
-    endpoint: &Endpoint,
-    remote_id: EndpointId,
-) -> DirectConnectionResult {
-    let Some(mut watcher) = endpoint.conn_type(remote_id) else {
-        return DirectConnectionResult::StillRelay; // Unknown = treat as non-direct
-    };
-
-    // Check initial state - if already direct, accept immediately
-    if matches!(watcher.get(), ConnectionType::Direct(_)) {
-        return DirectConnectionResult::Direct;
-    }
-
-    // Wait for connection type updates with timeout
-    let result = tokio::time::timeout(DIRECT_WAIT_TIMEOUT, async {
-        loop {
-            match watcher.updated().await {
-                Ok(ConnectionType::Direct(_)) => {
-                    return DirectConnectionResult::Direct;
-                }
-                Ok(_) => {
-                    // Still Relay or Mixed, continue waiting for next update
-                }
-                Err(_) => {
-                    return DirectConnectionResult::StillRelay;
-                }
-            }
-        }
-    })
-    .await;
-
-    match result {
-        Ok(conn_result) => conn_result,
-        Err(_timeout) => DirectConnectionResult::StillRelay,
     }
 }

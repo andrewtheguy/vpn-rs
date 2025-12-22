@@ -112,10 +112,6 @@ enum SenderMode {
         #[arg(long)]
         relay_only: bool,
 
-        /// Require direct P2P connections only (reject relay connections)
-        #[arg(long)]
-        direct_only: bool,
-
         /// Custom DNS server URL for peer discovery
         #[arg(long)]
         dns_server: Option<String>,
@@ -197,7 +193,6 @@ async fn main() -> Result<()> {
                 secret_file,
                 relay_urls,
                 relay_only,
-                direct_only,
                 dns_server,
             } => {
                 let cfg = load_iroh_sender_config(config.as_deref())?;
@@ -216,7 +211,6 @@ async fn main() -> Result<()> {
                     relay_urls
                 };
                 let relay_only = relay_only || cfg.relay_only.unwrap_or(false);
-                let direct_only = direct_only || cfg.direct_only.unwrap_or(false);
                 let dns_server = dns_server.or(cfg.dns_server);
 
                 match protocol {
@@ -226,7 +220,6 @@ async fn main() -> Result<()> {
                             secret_file,
                             relay_urls,
                             relay_only,
-                            direct_only,
                             dns_server,
                         )
                         .await
@@ -237,7 +230,6 @@ async fn main() -> Result<()> {
                             secret_file,
                             relay_urls,
                             relay_only,
-                            direct_only,
                             dns_server,
                         )
                         .await
