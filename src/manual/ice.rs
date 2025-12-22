@@ -3,6 +3,7 @@
 use anyhow::{anyhow, Context, Result};
 use get_if_addrs::get_if_addrs;
 use std::collections::HashMap;
+use std::fmt;
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -23,10 +24,30 @@ pub enum IceRole {
     Controlled,
 }
 
+/// ICE candidate type for connection info display
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum CandidateType {
+    Host,
+    ServerReflexive,
+    Relay,
+}
+
+impl fmt::Display for CandidateType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            CandidateType::Host => write!(f, "Direct (Host)"),
+            CandidateType::ServerReflexive => write!(f, "NAT Traversal (Server Reflexive)"),
+            CandidateType::Relay => write!(f, "Relayed (TURN)"),
+        }
+    }
+}
+
 pub struct IceEndpoint {
     sockets: Vec<IceSocket>,
     ice: IceAgent,
     local_candidates: Vec<String>,
+    /// Maps local socket addresses to their candidate types
+    candidate_types: HashMap<SocketAddr, CandidateType>,
 }
 
 struct IceSocket {
@@ -66,6 +87,7 @@ impl IceEndpoint {
 
         let mut local_candidates = Vec::new();
         let mut sockets = Vec::new();
+        let mut candidate_types = HashMap::new();
 
         // Step 1: Get non-loopback interface IPs for host candidates
         let interface_ips = list_interface_ips()?;
@@ -87,6 +109,7 @@ impl IceEndpoint {
             if let Ok(candidate) = str0m::Candidate::host(sock.local_addr, "udp") {
                 if let Some(added) = ice.add_local_candidate(candidate) {
                     local_candidates.push(added.to_sdp_string());
+                    candidate_types.insert(sock.local_addr, CandidateType::Host);
                 }
             }
         }
@@ -149,6 +172,7 @@ impl IceEndpoint {
                         {
                             if let Some(added) = ice.add_local_candidate(candidate) {
                                 local_candidates.push(added.to_sdp_string());
+                                candidate_types.insert(local_addr, CandidateType::ServerReflexive);
                                 println!("STUN: {} -> external {}", local_addr, external);
                             }
                         }
@@ -187,6 +211,7 @@ impl IceEndpoint {
             sockets,
             ice,
             local_candidates,
+            candidate_types,
         })
     }
 
@@ -314,6 +339,16 @@ impl IceEndpoint {
                             stun_rx,
                             source,
                         );
+
+                        // Print connection info
+                        let conn_type = self
+                            .candidate_types
+                            .get(&source)
+                            .copied()
+                            .unwrap_or(CandidateType::Host);
+                        println!("ICE connection established!");
+                        println!("   Connection: {}", conn_type);
+                        println!("   Local: {} -> Remote: {}", source, destination);
 
                         return Ok(IceConnection {
                             socket: demux_socket,
