@@ -326,6 +326,14 @@ enum ReceiverMode {
         /// Disable STUN (no external infrastructure)
         #[arg(long)]
         no_stun: bool,
+
+        /// Interval in seconds to re-publish answer while waiting for connection (default: 5)
+        #[arg(long, default_value = "5")]
+        republish_interval: u64,
+
+        /// Maximum time in seconds to wait for offer before giving up (default: 120)
+        #[arg(long, default_value = "120")]
+        max_wait: u64,
     },
 }
 
@@ -640,13 +648,15 @@ async fn main() -> Result<()> {
                 }
                 "nostr" => {
                     let nostr_cfg = cfg.nostr();
-                    let (target, stun_servers, nsec, peer_npub, relays) = match &mode {
-                        Some(ReceiverMode::Nostr { target: t, stun_servers: ss, no_stun, nsec: n, peer_npub: p, relays: r }) => (
+                    let (target, stun_servers, nsec, peer_npub, relays, republish_interval, max_wait) = match &mode {
+                        Some(ReceiverMode::Nostr { target: t, stun_servers: ss, no_stun, nsec: n, peer_npub: p, relays: r, republish_interval: ri, max_wait: mw }) => (
                             normalize_optional_endpoint(t.clone()).or(target),
                             resolve_stun_servers(ss, nostr_cfg.and_then(|c| c.stun_servers.clone()), *no_stun)?,
                             n.clone().or_else(|| nostr_cfg.and_then(|c| c.nsec.clone())),
                             p.clone().or_else(|| nostr_cfg.and_then(|c| c.peer_npub.clone())),
                             if r.is_empty() { nostr_cfg.and_then(|c| c.relays.clone()).unwrap_or_default() } else { r.clone() },
+                            *ri,
+                            *mw,
                         ),
                         _ => (
                             target,
@@ -654,6 +664,8 @@ async fn main() -> Result<()> {
                             nostr_cfg.and_then(|c| c.nsec.clone()),
                             nostr_cfg.and_then(|c| c.peer_npub.clone()),
                             nostr_cfg.and_then(|c| c.relays.clone()).unwrap_or_default(),
+                            5, // default republish interval
+                            120, // default max wait
                         ),
                     };
 
@@ -681,12 +693,12 @@ async fn main() -> Result<()> {
                         let (protocol, addr) = parse_endpoint(&listen)
                             .with_context(|| format!("Invalid receiver target '{}'", listen))?;
                         match protocol {
-                            Protocol::Udp => tunnel::run_nostr_udp_receiver(addr, stun_servers, nsec, peer_npub, relays).await,
-                            Protocol::Tcp => tunnel::run_nostr_tcp_receiver(addr, stun_servers, nsec, peer_npub, relays).await,
+                            Protocol::Udp => tunnel::run_nostr_udp_receiver(addr, stun_servers, nsec, peer_npub, relays, republish_interval, max_wait).await,
+                            Protocol::Tcp => tunnel::run_nostr_tcp_receiver(addr, stun_servers, nsec, peer_npub, relays, republish_interval, max_wait).await,
                         }
                     } else {
                         // Default to TCP if no protocol specified
-                        tunnel::run_nostr_tcp_receiver(listen, stun_servers, nsec, peer_npub, relays).await
+                        tunnel::run_nostr_tcp_receiver(listen, stun_servers, nsec, peer_npub, relays, republish_interval, max_wait).await
                     }
                 }
                 _ => anyhow::bail!("Invalid mode '{}'. Use: iroh-default, iroh-manual, custom, or nostr", effective_mode),
