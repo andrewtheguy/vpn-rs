@@ -393,9 +393,9 @@ Example (CLI only):
 tunnel-rs sender iroh-manual --no-stun --source tcp://127.0.0.1:22
 ```
 
-## UDP Support
+## UDP Example
 
-iroh-manual mode supports both TCP and UDP tunneling:
+All modes support TCP and UDP tunneling; example below uses UDP:
 
 ```bash
 # Sender
@@ -409,7 +409,7 @@ tunnel-rs receiver iroh-manual --target udp://0.0.0.0:51820
 
 # Custom Mode
 
-Uses full ICE (Interactive Connectivity Establishment) with str0m + quinn QUIC. Supports TCP and UDP tunneling.
+Uses full ICE (Interactive Connectivity Establishment) with str0m + quinn QUIC.
 
 **NAT Traversal:** Full ICE implementation with STUN candidate gathering and connectivity checks. This provides the best NAT traversal success rate, including support for symmetric NATs that fail with simpler STUN-only approaches.
 
