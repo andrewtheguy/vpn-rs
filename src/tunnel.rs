@@ -5,6 +5,7 @@ use iroh::EndpointId;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::sync::Mutex;
@@ -16,6 +17,15 @@ use crate::endpoint::{
     validate_direct_only, validate_relay_only, wait_for_direct_connection, DirectConnectionResult,
     DIRECT_WAIT_TIMEOUT, TCP_ALPN, UDP_ALPN,
 };
+use crate::manual::ice::{IceEndpoint, IceRole};
+use crate::manual::quic;
+use crate::manual::signaling::{
+    display_answer, display_offer, read_answer_from_stdin, read_offer_from_stdin, ManualAnswer,
+    ManualOffer, MANUAL_SIGNAL_VERSION,
+};
+
+/// Timeout for QUIC connection (matches webrtc crate's 180 second connection timeout)
+const QUIC_CONNECTION_TIMEOUT: Duration = Duration::from_secs(180);
 
 // ============================================================================
 // UDP Tunnel Implementation
@@ -466,6 +476,257 @@ pub async fn run_tcp_receiver(
         });
     }
 }
+
+// ============================================================================
+// Manual TCP Tunnel Implementation (ICE + QUIC)
+// ============================================================================
+
+pub async fn run_manual_tcp_sender(target: String, stun_servers: Vec<String>) -> Result<()> {
+    let target_addr: SocketAddr = target.parse().context("Invalid target address format")?;
+
+    println!("Manual TCP Tunnel - Sender Mode");
+    println!("================================");
+
+    let ice = IceEndpoint::gather(&stun_servers).await?;
+    let local_creds = ice.local_credentials();
+    let local_candidates = ice.local_candidates();
+
+    let quic_identity = quic::generate_server_identity()?;
+
+    let offer = ManualOffer {
+        version: MANUAL_SIGNAL_VERSION,
+        ice_ufrag: local_creds.ufrag.clone(),
+        ice_pwd: local_creds.pass.clone(),
+        candidates: local_candidates,
+        quic_fingerprint: quic_identity.fingerprint.clone(),
+    };
+
+    println!("\nManual Offer (copy to receiver):");
+    display_offer(&offer)?;
+
+    println!("Paste receiver answer (include BEGIN/END markers), then press Enter:");
+    let answer = read_answer_from_stdin()?;
+    if answer.version != MANUAL_SIGNAL_VERSION {
+        anyhow::bail!(
+            "Manual signaling version mismatch (expected {}, got {})",
+            MANUAL_SIGNAL_VERSION,
+            answer.version
+        );
+    }
+
+    let remote_creds = str0m::IceCreds {
+        ufrag: answer.ice_ufrag,
+        pass: answer.ice_pwd,
+    };
+
+    let ice_conn = ice
+        .connect(IceRole::Controlling, remote_creds, answer.candidates)
+        .await?;
+
+    // Spawn the ICE keeper to handle STUN packets in the background
+    tokio::spawn(ice_conn.ice_keeper.run());
+
+    let endpoint = quic::make_server_endpoint(ice_conn.socket, quic_identity.server_config)?;
+    println!("Waiting for receiver QUIC connection (timeout: {:?})...", QUIC_CONNECTION_TIMEOUT);
+
+    let connecting = tokio::time::timeout(QUIC_CONNECTION_TIMEOUT, endpoint.accept())
+        .await
+        .context("Timeout waiting for QUIC connection")?
+        .context("No incoming QUIC connection")?;
+    let conn = tokio::time::timeout(QUIC_CONNECTION_TIMEOUT, connecting)
+        .await
+        .context("Timeout during QUIC handshake")?
+        .context("Failed to accept QUIC connection")?;
+    println!("Receiver connected over QUIC.");
+
+    loop {
+        let (send_stream, recv_stream) = match conn.accept_bi().await {
+            Ok(streams) => streams,
+            Err(e) => {
+                println!("Receiver disconnected: {}", e);
+                break;
+            }
+        };
+
+        println!("New TCP connection request received");
+        let target = target_addr;
+        tokio::spawn(async move {
+            if let Err(e) = handle_tcp_sender_stream_quic(send_stream, recv_stream, target).await {
+                eprintln!("TCP connection error: {}", e);
+            }
+        });
+    }
+
+    Ok(())
+}
+
+pub async fn run_manual_tcp_receiver(listen: String, stun_servers: Vec<String>) -> Result<()> {
+    let listen_addr: SocketAddr = listen
+        .parse()
+        .context("Invalid listen address format. Use format like 127.0.0.1:2222 or [::]:2222")?;
+
+    println!("Manual TCP Tunnel - Receiver Mode");
+    println!("=================================");
+
+    let ice = IceEndpoint::gather(&stun_servers).await?;
+    let local_creds = ice.local_credentials();
+    let local_candidates = ice.local_candidates();
+
+    println!("Paste sender offer (include BEGIN/END markers), then press Enter:");
+    let offer = read_offer_from_stdin()?;
+    if offer.version != MANUAL_SIGNAL_VERSION {
+        anyhow::bail!(
+            "Manual signaling version mismatch (expected {}, got {})",
+            MANUAL_SIGNAL_VERSION,
+            offer.version
+        );
+    }
+
+    let answer = ManualAnswer {
+        version: MANUAL_SIGNAL_VERSION,
+        ice_ufrag: local_creds.ufrag.clone(),
+        ice_pwd: local_creds.pass.clone(),
+        candidates: local_candidates,
+    };
+
+    println!("\nManual Answer (copy to sender):");
+    display_answer(&answer)?;
+
+    let remote_creds = str0m::IceCreds {
+        ufrag: offer.ice_ufrag,
+        pass: offer.ice_pwd,
+    };
+
+    let ice_conn = ice
+        .connect(IceRole::Controlled, remote_creds, offer.candidates)
+        .await?;
+
+    // Spawn the ICE keeper to handle STUN packets in the background
+    tokio::spawn(ice_conn.ice_keeper.run());
+
+    let endpoint = quic::make_client_endpoint(ice_conn.socket, &offer.quic_fingerprint)?;
+    println!("Connecting to sender via QUIC (timeout: {:?})...", QUIC_CONNECTION_TIMEOUT);
+    let connecting = endpoint
+        .connect(ice_conn.remote_addr, "manual")
+        .context("Failed to start QUIC connection")?;
+    let conn = tokio::time::timeout(QUIC_CONNECTION_TIMEOUT, connecting)
+        .await
+        .context("Timeout during QUIC connection")?
+        .context("Failed to connect to sender")?;
+    println!("Connected to sender over QUIC.");
+
+    let conn = Arc::new(conn);
+    let tunnel_established = Arc::new(AtomicBool::new(false));
+
+    let listener = TcpListener::bind(listen_addr)
+        .await
+        .context("Failed to bind TCP listener")?;
+    println!(
+        "Listening on TCP {} - configure your client to connect here",
+        listen_addr
+    );
+
+    loop {
+        let (tcp_stream, peer_addr) = match listener.accept().await {
+            Ok(result) => result,
+            Err(e) => {
+                eprintln!("Failed to accept TCP connection: {}", e);
+                continue;
+            }
+        };
+
+        println!("New local connection from {}", peer_addr);
+        let conn_clone = conn.clone();
+        let established = tunnel_established.clone();
+
+        tokio::spawn(async move {
+            match handle_tcp_receiver_connection_quic(conn_clone, tcp_stream, peer_addr, established).await {
+                Ok(()) => {}
+                Err(e) => {
+                    eprintln!("TCP tunnel error for {}: {}", peer_addr, e);
+                }
+            }
+        });
+    }
+}
+
+async fn handle_tcp_sender_stream_quic(
+    send_stream: quinn::SendStream,
+    mut recv_stream: quinn::RecvStream,
+    target_addr: SocketAddr,
+) -> Result<()> {
+    // Read and discard the stream marker byte sent by the receiver
+    let mut marker = [0u8; 1];
+    recv_stream.read_exact(&mut marker).await.context("Failed to read stream marker")?;
+
+    let tcp_stream = TcpStream::connect(target_addr)
+        .await
+        .context("Failed to connect to target TCP service")?;
+
+    println!("-> Connected to target {}", target_addr);
+    bridge_quinn_streams(recv_stream, send_stream, tcp_stream).await?;
+    println!("<- TCP connection to {} closed", target_addr);
+    Ok(())
+}
+
+/// Marker byte sent when opening a new QUIC stream to ensure
+/// the STREAM frame is immediately sent to the peer.
+const STREAM_OPEN_MARKER: u8 = 0x00;
+
+async fn handle_tcp_receiver_connection_quic(
+    conn: Arc<quinn::Connection>,
+    tcp_stream: TcpStream,
+    peer_addr: SocketAddr,
+    tunnel_established: Arc<AtomicBool>,
+) -> Result<()> {
+    let (mut send_stream, recv_stream) = conn.open_bi().await.context("Failed to open QUIC stream")?;
+
+    // Write a marker byte to ensure the STREAM frame is sent to the peer.
+    // QUIC defers sending STREAM frames until actual data is written,
+    // and empty writes don't trigger transmission.
+    send_stream.write_all(&[STREAM_OPEN_MARKER]).await.context("Failed to write stream marker")?;
+
+    if !tunnel_established.swap(true, Ordering::Relaxed) {
+        println!("Tunnel to sender established!");
+    }
+    println!("-> Opened tunnel for {}", peer_addr);
+
+    bridge_quinn_streams(recv_stream, send_stream, tcp_stream).await?;
+    println!("<- Connection from {} closed", peer_addr);
+    Ok(())
+}
+
+async fn bridge_quinn_streams(
+    mut quic_recv: quinn::RecvStream,
+    mut quic_send: quinn::SendStream,
+    tcp_stream: TcpStream,
+) -> Result<()> {
+    let (mut tcp_read, mut tcp_write) = tcp_stream.into_split();
+
+    let quic_to_tcp = async { copy_stream(&mut quic_recv, &mut tcp_write).await };
+    let tcp_to_quic = async { copy_stream(&mut tcp_read, &mut quic_send).await };
+
+    tokio::select! {
+        result = quic_to_tcp => {
+            if let Err(e) = result {
+                if !e.to_string().contains("reset") {
+                    eprintln!("QUIC->TCP error: {}", e);
+                }
+            }
+        }
+        result = tcp_to_quic => {
+            if let Err(e) = result {
+                if !e.to_string().contains("reset") {
+                    eprintln!("TCP->QUIC error: {}", e);
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+// no longer used: multiline payloads are read via markers in signaling.rs
 
 async fn handle_tcp_receiver_connection(
     conn: Arc<iroh::endpoint::Connection>,

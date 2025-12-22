@@ -8,6 +8,16 @@
 # Protocol to tunnel: "tcp" or "udp"
 protocol = "tcp"
 
+# Manual mode (bypass discovery/relays)
+manual = false
+
+# STUN servers for manual mode (optional)
+stun_servers = [
+    "stun.l.google.com:19302",
+    "stun1.l.google.com:19302",
+    "stun.services.mozilla.com:3478",
+]
+
 # Target address to forward traffic to
 target = "127.0.0.1:22"
 
@@ -30,6 +40,9 @@ relay_only = false
 # Waits a few seconds for hole-punching before rejecting
 # Mutually exclusive with relay_only
 direct_only = false
+
+# Optional manual secret key (reserved for future use)
+# manual_secret_key = ""
 
 # Custom DNS server URL for peer discovery (optional)
 # Used with self-hosted iroh-dns-server for fully independent operation
