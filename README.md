@@ -384,6 +384,11 @@ Note: Config file options (`-c`, `--default-config`) are at the `sender`/`receiv
 
 If you want **zero external infrastructure**, you can run manual modes without any STUN servers. This works best when both peers are on public IPs or permissive NATs. Use `--no-stun` on the CLI, or set `stun_servers = []` in your config. If you omit STUN entirely (no config and no CLI), tunnel-rs uses its default public STUN list.
 
+Example (CLI only):
+```bash
+tunnel-rs sender iroh-manual --no-stun --source tcp://127.0.0.1:22
+```
+
 ## UDP Support
 
 iroh-manual mode supports both TCP and UDP tunneling:
