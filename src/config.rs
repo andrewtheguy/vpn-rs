@@ -1,50 +1,131 @@
 //! Configuration file support for tunnel-rs.
 //!
-//! Unified configuration shared across all modes:
-//! - Iroh default mode: Uses iroh P2P discovery (supports TCP and UDP)
-//! - Iroh manual mode: Uses manual signaling with iroh transport (TCP and UDP)
-//! - Custom mode: Uses manual ICE signaling with str0m+quinn (TCP only)
+//! Hierarchical configuration with explicit mode selection:
+//! - mode: "iroh.default", "iroh.manual", or "custom"
+//! - Shared options at top level (protocol, target/listen, stun_servers)
+//! - [iroh.default] section for iroh default mode options
+//! - [iroh.manual] section for iroh manual mode options
+//! - [custom] section for custom mode options
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
 // ============================================================================
-// Unified Configurations
+// Hierarchical Configuration Structures
 // ============================================================================
 
-/// Unified sender configuration for all modes.
-#[derive(Deserialize, Default)]
-pub struct SenderConfig {
-    // Common fields
-    pub protocol: Option<String>,
-    pub target: Option<String>,
-
-    // Iroh default mode
+/// Iroh default mode configuration.
+#[derive(Deserialize, Default, Clone)]
+pub struct IrohDefaultConfig {
     pub secret_file: Option<PathBuf>,
     pub relay_urls: Option<Vec<String>>,
     pub relay_only: Option<bool>,
     pub dns_server: Option<String>,
-
-    // Custom mode
-    pub stun_servers: Option<Vec<String>>,
+    pub node_id: Option<String>, // receiver only
 }
 
-/// Unified receiver configuration for all modes.
+/// Iroh manual mode configuration.
+#[derive(Deserialize, Default, Clone)]
+pub struct IrohManualConfig {
+    // Currently uses stun_servers from top level
+    // Reserved for future iroh-manual-specific options
+}
+
+/// Iroh section containing default and manual subsections.
+#[derive(Deserialize, Default, Clone)]
+pub struct IrohConfig {
+    pub default: Option<IrohDefaultConfig>,
+    pub manual: Option<IrohManualConfig>,
+}
+
+/// Custom mode configuration.
+#[derive(Deserialize, Default, Clone)]
+pub struct CustomConfig {
+    // Currently uses stun_servers from top level
+    // Reserved for future custom-mode-specific options
+}
+
+/// Unified sender configuration with hierarchical structure.
+#[derive(Deserialize, Default)]
+pub struct SenderConfig {
+    // Mode selector: "iroh.default", "iroh.manual", or "custom"
+    pub mode: Option<String>,
+
+    // Shared options
+    pub protocol: Option<String>,
+    pub target: Option<String>,
+    pub stun_servers: Option<Vec<String>>,
+
+    // Mode-specific sections
+    pub iroh: Option<IrohConfig>,
+    pub custom: Option<CustomConfig>,
+}
+
+/// Unified receiver configuration with hierarchical structure.
 #[derive(Deserialize, Default)]
 pub struct ReceiverConfig {
-    // Common fields
+    // Mode selector: "iroh.default", "iroh.manual", or "custom"
+    pub mode: Option<String>,
+
+    // Shared options
     pub protocol: Option<String>,
     pub listen: Option<String>,
-
-    // Iroh default mode
-    pub node_id: Option<String>,
-    pub relay_urls: Option<Vec<String>>,
-    pub relay_only: Option<bool>,
-    pub dns_server: Option<String>,
-
-    // Custom mode
     pub stun_servers: Option<Vec<String>>,
+
+    // Mode-specific sections
+    pub iroh: Option<IrohConfig>,
+    pub custom: Option<CustomConfig>,
+}
+
+// ============================================================================
+// Config Accessor Methods
+// ============================================================================
+
+impl SenderConfig {
+    /// Get iroh default config, with defaults.
+    pub fn iroh_default(&self) -> IrohDefaultConfig {
+        self.iroh
+            .as_ref()
+            .and_then(|i| i.default.clone())
+            .unwrap_or_default()
+    }
+
+    /// Get iroh manual config, with defaults.
+    pub fn iroh_manual(&self) -> IrohManualConfig {
+        self.iroh
+            .as_ref()
+            .and_then(|i| i.manual.clone())
+            .unwrap_or_default()
+    }
+
+    /// Get custom config, with defaults.
+    pub fn custom(&self) -> CustomConfig {
+        self.custom.clone().unwrap_or_default()
+    }
+}
+
+impl ReceiverConfig {
+    /// Get iroh default config, with defaults.
+    pub fn iroh_default(&self) -> IrohDefaultConfig {
+        self.iroh
+            .as_ref()
+            .and_then(|i| i.default.clone())
+            .unwrap_or_default()
+    }
+
+    /// Get iroh manual config, with defaults.
+    pub fn iroh_manual(&self) -> IrohManualConfig {
+        self.iroh
+            .as_ref()
+            .and_then(|i| i.manual.clone())
+            .unwrap_or_default()
+    }
+
+    /// Get custom config, with defaults.
+    pub fn custom(&self) -> CustomConfig {
+        self.custom.clone().unwrap_or_default()
+    }
 }
 
 // ============================================================================
