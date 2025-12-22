@@ -1164,8 +1164,7 @@ pub async fn run_nostr_tcp_sender(
         }
 
         // Spawn session handler
-        active_sessions.fetch_add(1, Ordering::Relaxed);
-        let current = active_sessions.load(Ordering::Relaxed);
+        let current = active_sessions.fetch_add(1, Ordering::Relaxed) + 1;
         println!("Active sessions: {}/{}", current, limit_str);
 
         let sig = signaling.clone();
@@ -1563,8 +1562,7 @@ pub async fn run_nostr_udp_sender(
         }
 
         // Spawn session handler
-        active_sessions.fetch_add(1, Ordering::Relaxed);
-        let current = active_sessions.load(Ordering::Relaxed);
+        let current = active_sessions.fetch_add(1, Ordering::Relaxed) + 1;
         println!("Active sessions: {}/{}", current, limit_str);
 
         let sig = signaling.clone();
@@ -1796,7 +1794,7 @@ async fn open_bi_with_retry(
     }
 
     Err(last_error
-        .map(|e| anyhow::anyhow!("Failed to open QUIC stream after {} retries: {}", STREAM_OPEN_MAX_RETRIES, e))
+        .map(|e| anyhow::anyhow!("Failed to open QUIC stream after {} attempts: {}", STREAM_OPEN_MAX_RETRIES, e))
         .unwrap_or_else(|| anyhow::anyhow!("Failed to open QUIC stream")))
 }
 
@@ -1995,7 +1993,7 @@ async fn open_bi_with_retry_iroh(
     }
 
     Err(last_error
-        .map(|e| anyhow::anyhow!("Failed to open QUIC stream after {} retries: {}", STREAM_OPEN_MAX_RETRIES, e))
+        .map(|e| anyhow::anyhow!("Failed to open QUIC stream after {} attempts: {}", STREAM_OPEN_MAX_RETRIES, e))
         .unwrap_or_else(|| anyhow::anyhow!("Failed to open QUIC stream")))
 }
 
