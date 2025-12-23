@@ -9,6 +9,10 @@ on:
 
 permissions:
   contents: write
+  packages: write
+
+env:
+  GHCR_IMAGE: ghcr.io/andrewtheguy/tunnel-rs
 
 jobs:
   setup:
@@ -71,7 +75,7 @@ jobs:
         run: move target\${{ matrix.target }}\release\${{ matrix.binary }} target\release\tunnel-rs-${{ matrix.suffix }}.exe
 
       - name: Create Release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.setup.outputs.release_tag }}
           name: Release ${{ needs.setup.outputs.release_tag }}
@@ -82,3 +86,69 @@ jobs:
             target/release/tunnel-rs-${{ matrix.suffix }}.exe
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  docker-build:
+    needs: setup
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            arch: x86_64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Rename binary
+        run: mv target/release/tunnel-rs target/release/tunnel-rs-linux-${{ matrix.arch }}
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push Docker image (using pre-built binary)
+        run: |
+          TAG=${{ needs.setup.outputs.release_tag }}
+          # Copy binary to build context root for Dockerfile
+          cp target/release/tunnel-rs-linux-${{ matrix.arch }} tunnel-rs
+          docker build -f Dockerfile.build --target runtime-prebuilt -t ${{ env.GHCR_IMAGE }}:${TAG}-${{ matrix.arch }} .
+          docker push ${{ env.GHCR_IMAGE }}:${TAG}-${{ matrix.arch }}
+
+  docker-manifest:
+    needs: [setup, docker-build]
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create and push multi-arch manifest
+        run: |
+          TAG=${{ needs.setup.outputs.release_tag }}
+          # Create manifest combining both architectures
+          docker manifest create ${{ env.GHCR_IMAGE }}:${TAG} \
+            ${{ env.GHCR_IMAGE }}:${TAG}-x86_64 \
+            ${{ env.GHCR_IMAGE }}:${TAG}-arm64
+          docker manifest push ${{ env.GHCR_IMAGE }}:${TAG}
+
+          # Also tag as latest
+          docker manifest create ${{ env.GHCR_IMAGE }}:latest \
+            ${{ env.GHCR_IMAGE }}:${TAG}-x86_64 \
+            ${{ env.GHCR_IMAGE }}:${TAG}-arm64
+          docker manifest push ${{ env.GHCR_IMAGE }}:latest
