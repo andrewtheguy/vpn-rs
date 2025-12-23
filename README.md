@@ -8,14 +8,13 @@ Tunnel-rs enables you to forward TCP and UDP traffic between machines without re
 
 **Key Features:**
 - **Full TCP and UDP support** — Seamlessly tunnel any TCP or UDP traffic
-- **Zero firewall configuration** — Automatic NAT hole punching means no port forwarding or public IPs are required in most network environments
-- **Dynamic IP independence** — Connect via stable peer identities (EndpointIds or Nostr keys) without worrying about changing public or private IP addresses (Note: Active sessions may still drop on IP change; connection migration is on the roadmap)
+- **No publicly accessible IPs or port forwarding required** — Automatic NAT hole punching and stable peer identities eliminate the need for complex firewall rules or dynamic DNS
 - **Cross-platform support** — Works on Linux, macOS, and Windows
 - **End-to-end encryption** via QUIC/TLS 1.3
 - **NAT traversal** with multiple strategies (relay fallback, STUN, full ICE)
-- **Minimal configuration** for automatic peer discovery (iroh-default mode; EndpointId required)
-- **Serverless options** with manual signaling (iroh-manual, custom) or Nostr relay signaling (nostr mode)
-- **High performance** with QUIC multiplexing
+- **Minimal configuration** — Automatic peer discovery using simple, shareable identities
+- **Flexible signaling** — Supports multiple connection methods, from automated discovery to manual exchange
+- **High performance** — Optimized for low latency using QUIC stream multiplexing
 
 **Common Use Cases:**
 - **SSH access** to machines behind NAT/firewalls
