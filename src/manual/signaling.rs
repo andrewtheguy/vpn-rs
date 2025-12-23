@@ -72,6 +72,9 @@ pub struct ManualRequest {
     pub timestamp: u64,
 }
 
+/// Rejection response from sender when it cannot accept a session (for nostr mode).
+/// Sent when sender is at capacity or otherwise unable to handle the request.
+/// The session_id is echoed from the original request so the receiver can match it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ManualReject {
     pub version: u16,

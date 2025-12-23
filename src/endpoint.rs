@@ -19,8 +19,10 @@ pub const RELAY_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 ///
 /// Active connections send pings at this interval to prevent idle timeout.
 /// This value matches iroh's relay ping interval (15s), which is designed to be
-/// well under half the typical QUIC idle timeout (30s default) to ensure
-/// connections survive temporary network issues.
+/// well under half common QUIC idle timeout defaults (30s is typical in many
+/// implementations and protocol discussions). This codebase uses a more generous
+/// [`QUIC_IDLE_TIMEOUT`] of 300s for long-running tunnels, but 15s keep-alive
+/// remains appropriate for NAT traversal and prompt dead-connection detection.
 ///
 /// For long-running tunnels, 15s is a good balance between:
 /// - Keeping NAT mappings alive (most NAT timeouts are 30-120s)

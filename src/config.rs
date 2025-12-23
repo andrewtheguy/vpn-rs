@@ -44,6 +44,7 @@ pub struct NostrConfig {
     pub nsec: Option<String>,
     pub peer_npub: Option<String>,
     pub stun_servers: Option<Vec<String>>,
+    pub max_sessions: Option<usize>,
 }
 
 /// Unified sender configuration.

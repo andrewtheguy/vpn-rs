@@ -511,7 +511,7 @@ async fn main() -> Result<()> {
                             nostr_cfg.and_then(|c| c.relays.clone()).unwrap_or_default(),
                             10, // default republish interval
                             120, // default max wait
-                            10, // default max sessions
+                            nostr_cfg.and_then(|c| c.max_sessions).unwrap_or(10),
                         ),
                     };
 
