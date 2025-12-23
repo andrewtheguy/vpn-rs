@@ -1780,34 +1780,71 @@ const STREAM_OPEN_MAX_RETRIES: u32 = 3;
 /// Base delay for exponential backoff (doubles each retry)
 const STREAM_OPEN_BASE_DELAY_MS: u64 = 100;
 
-/// Open a QUIC bidirectional stream with retry and exponential backoff.
-/// Returns the stream pair on success, or an error after all retries are exhausted.
-async fn open_bi_with_retry(
-    conn: &quinn::Connection,
-) -> Result<(quinn::SendStream, quinn::RecvStream)> {
-    let mut last_error = None;
+/// Generic retry helper with exponential backoff.
+///
+/// Retries an async operation up to `max_retries` times with exponential backoff.
+/// The delay doubles each retry starting from `base_delay_ms`.
+///
+/// # Arguments
+/// * `operation` - Async closure returning `Result<T, E>` to retry
+/// * `max_retries` - Maximum number of attempts before giving up
+/// * `base_delay_ms` - Initial delay in milliseconds (doubles each retry)
+/// * `operation_name` - Name for logging (e.g., "open QUIC stream")
+///
+/// # Returns
+/// The successful result, or an `anyhow::Error` after all retries are exhausted.
+async fn retry_with_backoff<T, E, F, Fut>(
+    operation: F,
+    max_retries: u32,
+    base_delay_ms: u64,
+    operation_name: &str,
+) -> Result<T>
+where
+    E: std::fmt::Display,
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = Result<T, E>>,
+{
+    let mut last_error_msg = None;
 
-    for attempt in 0..STREAM_OPEN_MAX_RETRIES {
-        match conn.open_bi().await {
-            Ok(streams) => return Ok(streams),
+    for attempt in 0..max_retries {
+        match operation().await {
+            Ok(result) => return Ok(result),
             Err(e) => {
-                let delay_ms = STREAM_OPEN_BASE_DELAY_MS * (1 << attempt);
+                let delay_ms = base_delay_ms * (1 << attempt);
                 eprintln!(
-                    "Failed to open QUIC stream (attempt {}/{}): {}. Retrying in {}ms...",
+                    "Failed to {} (attempt {}/{}): {}. Retrying in {}ms...",
+                    operation_name,
                     attempt + 1,
-                    STREAM_OPEN_MAX_RETRIES,
+                    max_retries,
                     e,
                     delay_ms
                 );
-                last_error = Some(e);
+                last_error_msg = Some(e.to_string());
                 tokio::time::sleep(Duration::from_millis(delay_ms)).await;
             }
         }
     }
 
-    Err(last_error
-        .map(|e| anyhow::anyhow!("Failed to open QUIC stream after {} attempts: {}", STREAM_OPEN_MAX_RETRIES, e))
-        .unwrap_or_else(|| anyhow::anyhow!("Failed to open QUIC stream")))
+    Err(anyhow::anyhow!(
+        "Failed to {} after {} attempts: {}",
+        operation_name,
+        max_retries,
+        last_error_msg.unwrap_or_else(|| "unknown error".to_string())
+    ))
+}
+
+/// Open a QUIC bidirectional stream with retry and exponential backoff.
+/// Returns the stream pair on success, or an error after all retries are exhausted.
+async fn open_bi_with_retry(
+    conn: &quinn::Connection,
+) -> Result<(quinn::SendStream, quinn::RecvStream)> {
+    retry_with_backoff(
+        || conn.open_bi(),
+        STREAM_OPEN_MAX_RETRIES,
+        STREAM_OPEN_BASE_DELAY_MS,
+        "open QUIC stream",
+    )
+    .await
 }
 
 async fn handle_tcp_receiver_connection_quic(
@@ -1984,29 +2021,13 @@ async fn forward_stream_to_udp_receiver_quic(
 async fn open_bi_with_retry_iroh(
     conn: &iroh::endpoint::Connection,
 ) -> Result<(iroh::endpoint::SendStream, iroh::endpoint::RecvStream)> {
-    let mut last_error = None;
-
-    for attempt in 0..STREAM_OPEN_MAX_RETRIES {
-        match conn.open_bi().await {
-            Ok(streams) => return Ok(streams),
-            Err(e) => {
-                let delay_ms = STREAM_OPEN_BASE_DELAY_MS * (1 << attempt);
-                eprintln!(
-                    "Failed to open QUIC stream (attempt {}/{}): {}. Retrying in {}ms...",
-                    attempt + 1,
-                    STREAM_OPEN_MAX_RETRIES,
-                    e,
-                    delay_ms
-                );
-                last_error = Some(e);
-                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-            }
-        }
-    }
-
-    Err(last_error
-        .map(|e| anyhow::anyhow!("Failed to open QUIC stream after {} attempts: {}", STREAM_OPEN_MAX_RETRIES, e))
-        .unwrap_or_else(|| anyhow::anyhow!("Failed to open QUIC stream")))
+    retry_with_backoff(
+        || conn.open_bi(),
+        STREAM_OPEN_MAX_RETRIES,
+        STREAM_OPEN_BASE_DELAY_MS,
+        "open QUIC stream",
+    )
+    .await
 }
 
 async fn handle_tcp_receiver_connection(

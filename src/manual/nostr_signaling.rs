@@ -351,13 +351,27 @@ impl NostrSignaling {
 
     /// Wait for an offer from the peer, also checking for rejections.
     ///
-    /// Returns:
+    /// # Receiver Strategy: Persistent (Mutex-locked)
+    ///
+    /// This method uses the persistent `self.notifications` receiver which is protected
+    /// by a Mutex. This receiver was created when `NostrSignaling` was constructed and
+    /// never misses messages sent after construction.
+    ///
+    /// **Trade-offs:**
+    /// - **Guaranteed reception**: Messages are never missed because the receiver exists
+    ///   from the start of the signaling session.
+    /// - **Serialized access**: The Mutex ensures only one task can wait at a time,
+    ///   preventing message consumption conflicts.
+    /// - **Blocking**: Other tasks needing this receiver must wait for the lock.
+    ///
+    /// Use this method when you need guaranteed message reception and can tolerate
+    /// serialized access (e.g., receiver waiting for offers from a single sender).
+    ///
+    /// # Returns
     /// - `Ok(Some(offer))` if an offer matching `session_id` is received
     /// - `Ok(None)` on timeout
     /// - `Err(OfferWaitError::Rejected(reject))` if a rejection matching `session_id` is received
     /// - `Err(OfferWaitError::ChannelClosed)` if the notification channel was closed
-    ///
-    /// This prevents rejections from being discarded while waiting for offers.
     pub async fn try_wait_for_offer_or_rejection(
         &self,
         session_id: &str,
@@ -454,29 +468,37 @@ impl NostrSignaling {
         }
     }
 
-    /// Wait for an answer from the peer with custom timeout, returns None on timeout.
-    /// Use this variant for re-publish loops where timeout is expected and not an error.
-    ///
-    /// **Warning**: In multi-session mode, this method may consume answers meant for
-    /// other sessions. Use `try_wait_for_answer_with_session_id` instead for concurrent
-    /// session handling.
-    pub async fn try_wait_for_answer_timeout(&self, timeout_secs: u64) -> Option<ManualAnswer> {
-        self.wait_for_message_optional(SIGNALING_TYPE_ANSWER, timeout_secs)
-            .await
-    }
-
     /// Wait for an answer matching a specific session ID using a fresh receiver.
     ///
-    /// Unlike methods using the shared persistent receiver, this creates a NEW
-    /// broadcast receiver for this call. This allows multiple concurrent session
-    /// tasks to each wait for their own answers without consuming each other's messages.
+    /// # Receiver Strategy: Fresh (per-call)
     ///
-    /// Returns:
+    /// This method creates a NEW broadcast receiver via `self.client.notifications()`
+    /// each time it is called. Each receiver gets its own independent copy of messages
+    /// from the broadcast channel.
+    ///
+    /// **Trade-offs:**
+    /// - **Concurrent waiting**: Multiple tasks can wait simultaneously without blocking
+    ///   each other or consuming each other's messages.
+    /// - **May miss messages**: Messages sent before this method is called are not received
+    ///   because the receiver didn't exist yet.
+    /// - **No mutex contention**: Callers don't need to wait for a lock.
+    ///
+    /// Use this method when multiple concurrent sessions need to wait for their own
+    /// answers independently (e.g., sender handling multiple receiver sessions).
+    /// Always call this AFTER publishing the offer to ensure the answer is received.
+    ///
+    /// # Comparison with `try_wait_for_offer_or_rejection`
+    ///
+    /// | Aspect | This method | `try_wait_for_offer_or_rejection` |
+    /// |--------|-------------|-----------------------------------|
+    /// | Receiver | Fresh per-call | Persistent (Mutex-locked) |
+    /// | Concurrency | Parallel waiting OK | Serialized (one at a time) |
+    /// | Message loss | May miss early messages | Never misses |
+    /// | Use case | Multi-session sender | Single-session receiver |
+    ///
+    /// # Returns
     /// - `Some(answer)` if an answer matching `session_id` is received
     /// - `None` on timeout or channel closed
-    ///
-    /// Note: Messages sent before this method is called may be missed. Call this
-    /// AFTER publishing the offer to ensure the answer is received.
     pub async fn try_wait_for_answer_with_session_id(
         &self,
         session_id: &str,
@@ -495,120 +517,63 @@ impl NostrSignaling {
 
             match tokio::time::timeout(wait_duration, notifications.recv()).await {
                 Ok(Ok(RelayPoolNotification::Event { event, .. })) => {
-                    if let Some(answer) =
-                        self.try_parse_event::<ManualAnswer>(&event, SIGNALING_TYPE_ANSWER)
-                    {
-                        // Only return if session_id matches
-                        if answer.session_id.as_ref() == Some(&session_id.to_string()) {
-                            println!("Received {} from peer", SIGNALING_TYPE_ANSWER);
-                            return Some(answer);
-                        }
-                        // Answer for different session - ignore (other tasks have their own receivers)
-                        println!("Ignoring answer with mismatched session ID (stale event)");
+                    if let Some(answer) = self.check_event_for_answer(&event, session_id) {
+                        return Some(answer);
                     }
                 }
                 Ok(Ok(_)) => continue,
                 Ok(Err(recv_err)) => match recv_err {
-                    RecvError::Closed => return None,
-                    RecvError::Lagged(_) => continue,
+                    RecvError::Closed => {
+                        eprintln!("Error: Notification channel closed while waiting for answer");
+                        return None;
+                    }
+                    RecvError::Lagged(skipped) => {
+                        eprintln!(
+                            "Warning: Notification receiver lagged, skipped {} messages; draining buffer...",
+                            skipped
+                        );
+                        // Drain buffered messages and check for matching answer
+                        if let Some(answer) = self.drain_and_find_answer(&mut notifications, session_id) {
+                            return Some(answer);
+                        }
+                        // No matching answer found in buffer, continue waiting
+                    }
                 },
                 Err(_) => continue, // Timeout elapsed, loop again
             }
         }
     }
 
-    /// Wait for a specific message type with timeout, returns None on timeout or channel closed.
-    ///
-    /// If the notification receiver lags behind, this will drain buffered messages
-    /// and check each one for the expected type before continuing to wait.
-    async fn wait_for_message_optional<T: for<'de> serde::Deserialize<'de>>(
-        &self,
-        expected_type: &str,
-        timeout_secs: u64,
-    ) -> Option<T> {
-        self.wait_for_message_inner(expected_type, timeout_secs)
-            .await
-    }
-
-    /// Internal helper that waits for a message, returning None on timeout or channel closed.
-    ///
-    /// Uses the persistent notification receiver to avoid missing messages.
-    async fn wait_for_message_inner<T: for<'de> serde::Deserialize<'de>>(
-        &self,
-        expected_type: &str,
-        timeout_secs: u64,
-    ) -> Option<T> {
-        let mut notifications = self.notifications.lock().await;
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_secs);
-
-        loop {
-            // Compute remaining time until deadline
-            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-            if remaining.is_zero() {
-                return None; // Timeout
+    /// Check a single event for an answer matching the session ID.
+    fn check_event_for_answer(&self, event: &Event, session_id: &str) -> Option<ManualAnswer> {
+        if let Some(answer) = self.try_parse_event::<ManualAnswer>(event, SIGNALING_TYPE_ANSWER) {
+            if answer.session_id.as_ref() == Some(&session_id.to_string()) {
+                println!("Received {} from peer", SIGNALING_TYPE_ANSWER);
+                return Some(answer);
             }
-            let wait_duration = remaining.min(Duration::from_secs(1));
-
-            match tokio::time::timeout(wait_duration, notifications.recv()).await {
-                Ok(Ok(RelayPoolNotification::Event { event, .. })) => {
-                    if let Some(payload) = self.try_parse_event::<T>(&event, expected_type) {
-                        println!("Received {} from peer", expected_type);
-                        return Some(payload);
-                    }
-                }
-                Ok(Ok(_)) => continue,
-                Ok(Err(recv_err)) => {
-                    match recv_err {
-                        RecvError::Closed => {
-                            eprintln!(
-                                "Error: Notification channel closed while waiting for {}",
-                                expected_type
-                            );
-                            return None;
-                        }
-                        RecvError::Lagged(skipped) => {
-                            eprintln!(
-                                "Warning: Notification receiver lagged, skipped {} messages; draining buffer...",
-                                skipped
-                            );
-                            // Drain buffered messages and check each one
-                            if let Some(payload) =
-                                self.drain_and_find::<T>(&mut notifications, expected_type)
-                            {
-                                return Some(payload);
-                            }
-                        }
-                    }
-                }
-                Err(_) => continue, // tokio::time::timeout elapsed, try again
-            }
+            // Answer for different session - ignore (other tasks have their own receivers)
+            println!("Ignoring answer with mismatched session ID (stale event)");
         }
+        None
     }
 
-    /// Drain buffered messages from the notification channel and return the first matching payload.
-    fn drain_and_find<T: for<'de> serde::Deserialize<'de>>(
+    /// Drain buffered messages looking for an answer matching the session ID.
+    fn drain_and_find_answer(
         &self,
         notifications: &mut tokio::sync::broadcast::Receiver<RelayPoolNotification>,
-        expected_type: &str,
-    ) -> Option<T> {
+        session_id: &str,
+    ) -> Option<ManualAnswer> {
         loop {
             match notifications.try_recv() {
                 Ok(RelayPoolNotification::Event { event, .. }) => {
-                    if let Some(payload) = self.try_parse_event::<T>(&event, expected_type) {
-                        println!(
-                            "Received {} from peer (found in drained messages)",
-                            expected_type
-                        );
-                        return Some(payload);
+                    if let Some(answer) = self.check_event_for_answer(&event, session_id) {
+                        return Some(answer);
                     }
                 }
                 Ok(_) => continue,
                 Err(TryRecvError::Empty) => return None,
                 Err(TryRecvError::Closed) => {
-                    eprintln!(
-                        "Error: Notification channel closed while draining for {}",
-                        expected_type
-                    );
+                    eprintln!("Error: Notification channel closed while draining for answer");
                     return None;
                 }
                 Err(TryRecvError::Lagged(more_skipped)) => {
