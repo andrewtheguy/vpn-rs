@@ -198,8 +198,8 @@ enum Command {
         #[command(subcommand)]
         mode: Option<ReceiverMode>,
     },
-    /// Generate a new secret key file (for automation/setup)
-    GenerateSecret {
+    /// Generate a new iroh secret key file (for automation/setup)
+    GenerateIrohKey {
         /// Path where to save the secret key file
         #[arg(short, long)]
         output: PathBuf,
@@ -208,8 +208,8 @@ enum Command {
         #[arg(long)]
         force: bool,
     },
-    /// Show the EndpointId (node ID) for an existing secret key file
-    ShowId {
+    /// Show the iroh node ID (EndpointId) for an existing secret key file
+    ShowIrohNodeId {
         /// Path to the secret key file
         #[arg(short, long)]
         secret_file: PathBuf,
@@ -852,8 +852,8 @@ async fn main() -> Result<()> {
                 _ => anyhow::bail!("Invalid mode '{}'. Use: iroh-default, iroh-manual, custom, or nostr", effective_mode),
             }
         }
-        Command::GenerateSecret { output, force } => secret::generate_secret(output, force),
-        Command::ShowId { secret_file } => secret::show_id(secret_file),
+        Command::GenerateIrohKey { output, force } => secret::generate_secret(output, force),
+        Command::ShowIrohNodeId { secret_file } => secret::show_id(secret_file),
         Command::ShowNpub { nsec_file } => secret::show_npub(nsec_file),
         Command::GenerateNostrKey { output, force } => secret::generate_nostr_key(output, force),
     }

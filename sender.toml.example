@@ -22,7 +22,7 @@ mode = "iroh-default"  # or "iroh-manual", "custom", or "nostr"
 # secret = "base64..."
 #
 # Path to secret key file for persistent identity (use either secret or secret_file)
-# Generate with: tunnel-rs generate-secret --output sender.key
+# Generate with: tunnel-rs generate-iroh-key --output sender.key
 # secret_file = "./sender.key"
 
 # Custom relay server URL(s) for failover

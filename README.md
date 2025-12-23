@@ -294,21 +294,17 @@ tunnel-rs receiver -c ./my-receiver.toml
 By default, a new EndpointId is generated each run. For long-running setups, use persistent identity:
 
 ```bash
-# First run: generates and saves key
-tunnel-rs sender iroh-default --source tcp://127.0.0.1:22 --secret-file ./sender.key
-
-# Subsequent runs: loads existing key
-tunnel-rs sender iroh-default --source tcp://127.0.0.1:22 --secret-file ./sender.key
-```
-
-### Pre-generating Keys
-
-```bash
 # Generate key and output EndpointId
-tunnel-rs generate-secret --output ./sender.key
+tunnel-rs generate-iroh-key --output ./sender.key
 
 # Show EndpointId for existing key
-tunnel-rs show-id --secret-file ./sender.key
+tunnel-rs show-iroh-node-id --secret-file ./sender.key
+```
+
+Then use the key for the sender:
+
+```bash
+tunnel-rs sender iroh-default --source tcp://127.0.0.1:22 --secret-file ./sender.key
 ```
 
 ## Custom Relay Server
@@ -697,26 +693,18 @@ Output:
 npub1...
 ```
 
-## generate-secret
+## generate-iroh-key
 
 *For iroh-default mode only.*
 
-Generate a new secret key for persistent identity:
-
 ```bash
-# Save to file and output EndpointId
-tunnel-rs generate-secret --output ./sender.key
-
-# Overwrite existing file
-tunnel-rs generate-secret --output ./sender.key --force
+tunnel-rs generate-iroh-key --output ./sender.key
 ```
 
-## show-id
-
-Display the EndpointId for an existing secret key:
+## show-iroh-node-id
 
 ```bash
-tunnel-rs show-id --secret-file ./sender.key
+tunnel-rs show-iroh-node-id --secret-file ./sender.key
 ```
 
 ## show-npub

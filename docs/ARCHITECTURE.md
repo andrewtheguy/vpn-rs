@@ -1290,7 +1290,7 @@ sequenceDiagram
     participant FS as File System
     
     alt Generate New Secret
-        User->>CLI: generate-secret --output key.file
+        User->>CLI: generate-iroh-key --output key.file
         CLI->>Secret: Generate Ed25519 key
         Secret->>Secret: Derive EndpointId
         Secret->>FS: Write with 0600 permissions
@@ -1309,7 +1309,7 @@ sequenceDiagram
     end
     
     alt Show EndpointId
-        User->>CLI: show-id --secret-file key.file
+        User->>CLI: show-iroh-node-id --secret-file key.file
         CLI->>FS: Read key file
         FS-->>Secret: Key bytes
         Secret->>Secret: Derive EndpointId
