@@ -111,7 +111,12 @@ fn build_client_config(expected_fingerprint: &str) -> Result<ClientConfig> {
         .context("Failed to build QUIC client config")?;
 
     let mut client_config = ClientConfig::new(Arc::new(quic_cfg));
-    client_config.transport_config(Arc::new(create_base_transport_config()));
+
+    let mut transport = create_base_transport_config();
+    // Client only uses bidirectional streams for tunnel data; disable
+    // unidirectional streams since this protocol doesn't use them.
+    transport.max_concurrent_uni_streams(0_u8.into());
+    client_config.transport_config(Arc::new(transport));
 
     Ok(client_config)
 }

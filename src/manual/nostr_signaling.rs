@@ -157,11 +157,12 @@ impl NostrSignaling {
 
         client.connect().await;
 
-        // Wait for relay connections to be fully established.
-        // TODO: Replace with explicit relay readiness check when nostr-sdk supports it.
-        // This delay ensures relays are ready before we attempt to send/receive messages.
-        const RELAY_CONNECT_DELAY_SECS: u64 = 2;
-        tokio::time::sleep(Duration::from_secs(RELAY_CONNECT_DELAY_SECS)).await;
+        // Wait for relay connections to be established with timeout.
+        // This ensures relays are ready before we attempt to send/receive messages.
+        const RELAY_CONNECT_TIMEOUT_SECS: u64 = 10;
+        client
+            .wait_for_connection(Duration::from_secs(RELAY_CONNECT_TIMEOUT_SECS))
+            .await;
 
         Ok(Self {
             client,
@@ -375,12 +376,14 @@ impl NostrSignaling {
                                 skipped
                             );
                             // Drain buffered messages and check for fresh request
-                            if let Some(request) =
-                                self.drain_and_find_fresh_request(&mut notifications, max_age_secs)
-                            {
-                                return Ok(request);
+                            match self.drain_and_find_fresh_request(&mut notifications, max_age_secs) {
+                                Ok(Some(request)) => return Ok(request),
+                                Ok(None) => {} // No matching request found, continue waiting
+                                Err(SignalingError::ChannelClosed) => {
+                                    return Err(SignalingError::ChannelClosed.into());
+                                }
+                                Err(e) => return Err(e.into()),
                             }
-                            // No matching request found in buffer, continue waiting
                         }
                     }
                 }
@@ -418,24 +421,28 @@ impl NostrSignaling {
     }
 
     /// Drain buffered messages looking for a fresh request.
+    ///
+    /// Returns:
+    /// - `Ok(Some(request))` if a fresh request is found
+    /// - `Ok(None)` if buffer is empty (no match found)
+    /// - `Err(SignalingError::ChannelClosed)` if the channel was closed
     fn drain_and_find_fresh_request(
         &self,
         notifications: &mut tokio::sync::broadcast::Receiver<RelayPoolNotification>,
         max_age_secs: u64,
-    ) -> Option<ManualRequest> {
+    ) -> Result<Option<ManualRequest>, SignalingError> {
         loop {
             match notifications.try_recv() {
                 Ok(RelayPoolNotification::Event { event, .. }) => {
                     if let Some(request) = self.check_event_for_fresh_request(&event, max_age_secs)
                     {
-                        return Some(request);
+                        return Ok(Some(request));
                     }
                 }
                 Ok(_) => continue,
-                Err(TryRecvError::Empty) => return None,
+                Err(TryRecvError::Empty) => return Ok(None),
                 Err(TryRecvError::Closed) => {
-                    eprintln!("Error: Notification channel closed while draining for request");
-                    return None;
+                    return Err(SignalingError::ChannelClosed);
                 }
                 Err(TryRecvError::Lagged(more_skipped)) => {
                     eprintln!(

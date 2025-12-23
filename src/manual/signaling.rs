@@ -99,10 +99,12 @@ impl ManualReject {
     /// Create a new rejection with the given session ID and reason.
     /// The reason will be truncated if it exceeds [`MAX_REJECT_REASON_LENGTH`].
     pub fn new(session_id: String, reason: String) -> Self {
+        const TRUNCATION_SUFFIX: &str = "...";
         let reason = if reason.len() > MAX_REJECT_REASON_LENGTH {
-            // Truncate at a valid UTF-8 boundary
-            let truncated = &reason[..reason.floor_char_boundary(MAX_REJECT_REASON_LENGTH)];
-            format!("{}...", truncated)
+            // Reserve space for suffix, then truncate at a valid UTF-8 boundary
+            let max_content_len = MAX_REJECT_REASON_LENGTH.saturating_sub(TRUNCATION_SUFFIX.len());
+            let truncated = &reason[..reason.floor_char_boundary(max_content_len)];
+            format!("{}{}", truncated, TRUNCATION_SUFFIX)
         } else {
             reason
         };
