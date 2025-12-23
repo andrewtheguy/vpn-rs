@@ -24,6 +24,37 @@ const SIGNALING_TYPE_OFFER: &str = "tunnel-offer";
 const SIGNALING_TYPE_ANSWER: &str = "tunnel-answer";
 const SIGNALING_TYPE_REJECT: &str = "tunnel-reject";
 
+/// Errors that can occur during Nostr signaling operations.
+#[derive(Debug)]
+pub enum SignalingError {
+    /// The notification channel was closed (client disconnected).
+    ChannelClosed,
+    /// Timeout waiting for a message from the peer.
+    Timeout,
+}
+
+impl SignalingError {
+    /// Returns `true` if this error indicates the notification channel was closed.
+    pub fn is_channel_closed(&self) -> bool {
+        matches!(self, SignalingError::ChannelClosed)
+    }
+}
+
+impl std::fmt::Display for SignalingError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SignalingError::ChannelClosed => {
+                write!(f, "Notification channel closed")
+            }
+            SignalingError::Timeout => {
+                write!(f, "Timeout waiting for message from peer")
+            }
+        }
+    }
+}
+
+impl std::error::Error for SignalingError {}
+
 
 /// Nostr signaling client for ICE exchange.
 ///
@@ -246,9 +277,7 @@ impl NostrSignaling {
             let wait_duration = if let Some(d) = deadline {
                 let remaining = d.saturating_duration_since(tokio::time::Instant::now());
                 if remaining.is_zero() {
-                    return Err(anyhow::anyhow!(
-                        "Timeout waiting for fresh request from peer"
-                    ));
+                    return Err(SignalingError::Timeout.into());
                 }
                 remaining.min(Duration::from_secs(1))
             } else {
@@ -281,9 +310,7 @@ impl NostrSignaling {
                 Ok(Err(recv_err)) => {
                     match recv_err {
                         RecvError::Closed => {
-                            return Err(anyhow::anyhow!(
-                                "Notification channel closed while waiting for request"
-                            ));
+                            return Err(SignalingError::ChannelClosed.into());
                         }
                         RecvError::Lagged(skipped) => {
                             eprintln!(

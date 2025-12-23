@@ -19,7 +19,7 @@ use crate::endpoint::{
     validate_relay_only, TCP_ALPN, UDP_ALPN,
 };
 use crate::manual::ice::{IceEndpoint, IceRole};
-use crate::manual::nostr_signaling::NostrSignaling;
+use crate::manual::nostr_signaling::{NostrSignaling, SignalingError};
 use crate::manual::quic;
 use crate::manual::signaling::{
     display_answer, display_iroh_answer, display_iroh_offer, display_offer,
@@ -1016,9 +1016,11 @@ async fn run_nostr_sender_loop(
         let request = match signaling.wait_for_fresh_request_forever(MAX_REQUEST_AGE_SECS).await {
             Ok(req) => req,
             Err(e) => {
-                let err_str = e.to_string();
-                // Fatal error: notification channel closed (client disconnected)
-                if err_str.contains("channel closed") {
+                // Check for fatal error: notification channel closed (client disconnected)
+                if e.downcast_ref::<SignalingError>()
+                    .map(|se| se.is_channel_closed())
+                    .unwrap_or(false)
+                {
                     return Err(e.context("Nostr signaling channel closed"));
                 }
                 // Transient error: log and retry
