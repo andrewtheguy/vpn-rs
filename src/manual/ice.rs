@@ -1,6 +1,7 @@
 //! Manual ICE gathering and connectivity using str0m.
 
 use anyhow::{anyhow, Context, Result};
+use log::{debug, info, warn};
 use get_if_addrs::get_if_addrs;
 use std::collections::HashMap;
 use std::fmt;
@@ -106,7 +107,7 @@ impl IceEndpoint {
         for sock in &sockets {
             if let Ok(candidate) = str0m::Candidate::host(sock.local_addr, "udp") {
                 if let Some(added) = ice.add_local_candidate(candidate) {
-                    println!("Host candidate: {}", sock.local_addr);
+                    info!("Host candidate: {}", sock.local_addr);
                     local_candidates.push(added.to_sdp_string());
                     candidate_types.insert(sock.local_addr, CandidateType::Host);
                 }
@@ -140,7 +141,7 @@ impl IceEndpoint {
                 let stun_socket = match std::net::UdpSocket::bind(bind_addr) {
                     Ok(s) => s,
                     Err(e) => {
-                        eprintln!("Failed to bind STUN socket for {}: {}", server, e);
+                        warn!("Failed to bind STUN socket for {}: {}", server, e);
                         continue;
                     }
                 };
@@ -151,7 +152,7 @@ impl IceEndpoint {
                 let tokio_socket = match UdpSocket::from_std(stun_socket) {
                     Ok(s) => Arc::new(s),
                     Err(e) => {
-                        eprintln!("Failed to create tokio socket for STUN: {}", e);
+                        warn!("Failed to create tokio socket for STUN: {}", e);
                         continue;
                     }
                 };
@@ -172,7 +173,7 @@ impl IceEndpoint {
                             if let Some(added) = ice.add_local_candidate(candidate) {
                                 local_candidates.push(added.to_sdp_string());
                                 candidate_types.insert(local_addr, CandidateType::ServerReflexive);
-                                println!("STUN: {} -> external {}", local_addr, external);
+                                info!("STUN: {} -> external {}", local_addr, external);
                             }
                         }
 
@@ -196,7 +197,7 @@ impl IceEndpoint {
                         }
                     }
                     Err(e) => {
-                        eprintln!("STUN query failed for {} ({}): {}", stun, server, e);
+                        warn!("STUN query failed for {} ({}): {}", stun, server, e);
                     }
                 }
             }
@@ -231,9 +232,9 @@ impl IceEndpoint {
         self.ice.set_controlling(matches!(role, IceRole::Controlling));
         self.ice.set_remote_credentials(remote_creds);
 
-        println!("Adding {} remote candidates:", remote_candidates.len());
+        debug!("Adding {} remote candidates:", remote_candidates.len());
         for candidate in remote_candidates {
-            println!("  Remote: {}", candidate);
+            debug!("  Remote: {}", candidate);
             let parsed = str0m::Candidate::from_sdp_string(&candidate)
                 .with_context(|| format!("Invalid ICE candidate: {}", candidate))?;
             self.ice.add_remote_candidate(parsed);
@@ -347,9 +348,9 @@ impl IceEndpoint {
                             .get(&source)
                             .copied()
                             .unwrap_or(CandidateType::Host);
-                        println!("ICE connection established!");
-                        println!("   Connection: {}", conn_type);
-                        println!("   Local: {} -> Remote: {}", source, destination);
+                        info!("ICE connection established!");
+                        info!("   Connection: {}", conn_type);
+                        info!("   Local: {} -> Remote: {}", source, destination);
 
                         return Ok(IceConnection {
                             socket: demux_socket,
@@ -433,7 +434,7 @@ async fn drain_transmit(
         let udp = match sockets.get(&source) {
             Some(sock) => sock,
             None => {
-                eprintln!("ICE warning: no socket for source {}", source);
+                warn!("ICE warning: no socket for source {}", source);
                 continue;
             }
         };
@@ -455,9 +456,9 @@ fn drain_events(
     while let Some(event) = ice.poll_event() {
         match event {
             IceAgentEvent::IceConnectionStateChange(state) => {
-                println!("ICE state: {:?}", state);
+                info!("ICE state: {:?}", state);
                 if state == IceConnectionState::Disconnected {
-                    println!("ICE disconnected");
+                    info!("ICE disconnected");
                 }
             }
             IceAgentEvent::NominatedSend {

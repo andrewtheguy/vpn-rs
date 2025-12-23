@@ -3,6 +3,7 @@
 use anyhow::{Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use iroh::SecretKey;
+use log::info;
 use nostr_sdk::{Keys, ToBech32};
 use std::path::PathBuf;
 
@@ -42,7 +43,7 @@ fn write_secret_to_output(
         std::fs::set_permissions(output, perms)?;
     }
 
-    eprintln!("{} saved to: {}", secret_label, output.display());
+    info!("{} saved to: {}", secret_label, output.display());
     println!("{}", public_info);
 
     Ok(())

@@ -1,6 +1,7 @@
 //! Common endpoint helpers for iroh tunnel connections.
 
 use anyhow::{Context, Result};
+use log::{info, warn};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use iroh::{
     discovery::{dns::DnsDiscovery, mdns::MdnsDiscovery, pkarr::{PkarrPublisher, PkarrResolver}},
@@ -99,13 +100,13 @@ pub fn validate_relay_only(relay_only: bool, relay_urls: &[String]) -> Result<()
 pub fn print_relay_status(relay_urls: &[String], relay_only: bool, using_custom_relay: bool) {
     if using_custom_relay {
         if relay_urls.len() == 1 {
-            println!("Using custom relay server");
+            info!("Using custom relay server");
         } else {
-            println!("Using {} custom relay servers (with failover)", relay_urls.len());
+            info!("Using {} custom relay servers (with failover)", relay_urls.len());
         }
     }
     if relay_only {
-        println!("Relay-only mode: all traffic will go through the relay server");
+        info!("Relay-only mode: all traffic will go through the relay server");
     }
 }
 
@@ -141,7 +142,7 @@ pub fn create_endpoint_builder(
             (Some(dns_url), Some(secret)) => {
                 // Custom DNS server with publishing and resolving via HTTP (pkarr)
                 let pkarr_url: Url = dns_url.parse().context("Invalid DNS server URL")?;
-                println!("Using custom DNS server: {}", dns_url);
+                info!("Using custom DNS server: {}", dns_url);
                 builder = builder
                     .discovery(PkarrPublisher::builder(pkarr_url.clone()).build(secret.clone()))
                     .discovery(PkarrResolver::builder(pkarr_url));
@@ -149,7 +150,7 @@ pub fn create_endpoint_builder(
             (Some(dns_url), None) => {
                 // Custom DNS server, resolve only via HTTP (no secret = can't publish)
                 let pkarr_url: Url = dns_url.parse().context("Invalid DNS server URL")?;
-                println!("Using custom DNS server (resolve only): {}", dns_url);
+                info!("Using custom DNS server (resolve only): {}", dns_url);
                 builder = builder.discovery(PkarrResolver::builder(pkarr_url));
             }
             (None, _) => {
@@ -193,7 +194,10 @@ pub async fn create_sender_endpoint(
     let endpoint = builder.bind().await.context("Failed to create iroh endpoint")?;
 
     // Wait for endpoint to come online with timeout
-    println!("Waiting for endpoint to come online (timeout: {}s)...", RELAY_CONNECT_TIMEOUT.as_secs());
+    info!(
+        "Waiting for endpoint to come online (timeout: {}s)...",
+        RELAY_CONNECT_TIMEOUT.as_secs()
+    );
     match tokio::time::timeout(RELAY_CONNECT_TIMEOUT, endpoint.online()).await {
         Ok(()) => {}
         Err(_) => anyhow::bail!("Endpoint failed to come online after {}s - check relay server connectivity", RELAY_CONNECT_TIMEOUT.as_secs()),
@@ -217,7 +221,10 @@ pub async fn create_receiver_endpoint(
     let endpoint = builder.bind().await.context("Failed to create iroh endpoint")?;
 
     // Wait for endpoint to come online with timeout
-    println!("Waiting for endpoint to come online (timeout: {}s)...", RELAY_CONNECT_TIMEOUT.as_secs());
+    info!(
+        "Waiting for endpoint to come online (timeout: {}s)...",
+        RELAY_CONNECT_TIMEOUT.as_secs()
+    );
     match tokio::time::timeout(RELAY_CONNECT_TIMEOUT, endpoint.online()).await {
         Ok(()) => {}
         Err(_) => anyhow::bail!("Endpoint failed to come online after {}s - check relay server connectivity", RELAY_CONNECT_TIMEOUT.as_secs()),
@@ -234,7 +241,7 @@ pub async fn connect_to_sender(
     relay_only: bool,
     alpn: &[u8],
 ) -> Result<iroh::endpoint::Connection> {
-    println!("Connecting to sender {}...", sender_id);
+    info!("Connecting to sender {}...", sender_id);
 
     if relay_only {
         // Try each relay URL until one works
@@ -242,22 +249,26 @@ pub async fn connect_to_sender(
         for relay_url_str in relay_urls {
             let relay_url: RelayUrl = relay_url_str.parse().context("Invalid relay URL")?;
             let endpoint_addr = EndpointAddr::new(sender_id).with_relay_url(relay_url.clone());
-            println!("Trying relay: {} (timeout: {}s)", relay_url, RELAY_CONNECT_TIMEOUT.as_secs());
+            info!(
+                "Trying relay: {} (timeout: {}s)",
+                relay_url,
+                RELAY_CONNECT_TIMEOUT.as_secs()
+            );
 
             match tokio::time::timeout(
                 RELAY_CONNECT_TIMEOUT,
                 endpoint.connect(endpoint_addr, alpn),
             ).await {
                 Ok(Ok(conn)) => {
-                    println!("Connected via relay: {}", relay_url);
+                    info!("Connected via relay: {}", relay_url);
                     return Ok(conn);
                 }
                 Ok(Err(e)) => {
-                    eprintln!("Failed to connect via {}: {}", relay_url, e);
+                    warn!("Failed to connect via {}: {}", relay_url, e);
                     last_error = Some(e.to_string());
                 }
                 Err(_) => {
-                    eprintln!("Connection to {} timed out", relay_url);
+                    warn!("Connection to {} timed out", relay_url);
                     last_error = Some(format!("Connection to {} timed out", relay_url));
                 }
             }
@@ -268,7 +279,10 @@ pub async fn connect_to_sender(
         )
     } else {
         let endpoint_addr = EndpointAddr::new(sender_id);
-        println!("Connecting (timeout: {}s)...", RELAY_CONNECT_TIMEOUT.as_secs());
+        info!(
+            "Connecting (timeout: {}s)...",
+            RELAY_CONNECT_TIMEOUT.as_secs()
+        );
         match tokio::time::timeout(
             RELAY_CONNECT_TIMEOUT,
             endpoint.connect(endpoint_addr, alpn),
@@ -284,6 +298,6 @@ pub async fn connect_to_sender(
 pub fn print_connection_type(endpoint: &Endpoint, remote_id: EndpointId) {
     if let Some(mut conn_type_watcher) = endpoint.conn_type(remote_id) {
         let conn_type = conn_type_watcher.get();
-        println!("Connection type: {:?}", conn_type);
+        info!("Connection type: {:?}", conn_type);
     }
 }

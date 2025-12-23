@@ -4,6 +4,7 @@
 //! eliminating the need for manual copy-paste signaling.
 
 use anyhow::{Context, Result};
+use log::{info, warn};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use nostr_sdk::prelude::*;
@@ -151,7 +152,7 @@ impl NostrSignaling {
         // Add and connect to relays
         for relay_url in &relay_urls {
             if let Err(e) = client.add_relay(relay_url).await {
-                eprintln!("Warning: Failed to add relay {}: {}", relay_url, e);
+                warn!("Failed to add relay {}: {}", relay_url, e);
             }
         }
 
@@ -162,14 +163,14 @@ impl NostrSignaling {
         // Note: wait_for_connection returns () and continues after timeout even if
         // connections fail. Connection failures will surface as signaling errors later.
         const RELAY_CONNECT_TIMEOUT_SECS: u64 = 10;
-        println!(
+        info!(
             "Waiting for Nostr relay connections (timeout: {}s)...",
             RELAY_CONNECT_TIMEOUT_SECS
         );
         client
             .wait_for_connection(Duration::from_secs(RELAY_CONNECT_TIMEOUT_SECS))
             .await;
-        println!("Nostr relay connection wait complete");
+        info!("Nostr relay connection wait complete");
 
         Ok(Self {
             client,
@@ -248,7 +249,7 @@ impl NostrSignaling {
             .await
             .context("Failed to publish ICE offer")?;
 
-        println!("Published ICE offer to Nostr relays");
+        info!("Published ICE offer to Nostr relays");
         Ok(())
     }
 
@@ -264,7 +265,7 @@ impl NostrSignaling {
             .await
             .context("Failed to publish ICE answer")?;
 
-        println!("Published ICE answer to Nostr relays");
+        info!("Published ICE answer to Nostr relays");
         Ok(())
     }
 
@@ -280,7 +281,7 @@ impl NostrSignaling {
             .await
             .context("Failed to publish ICE request")?;
 
-        println!("Published ICE request to Nostr relays");
+        info!("Published ICE request to Nostr relays");
         Ok(())
     }
 
@@ -296,7 +297,7 @@ impl NostrSignaling {
             .await
             .context("Failed to publish session rejection")?;
 
-        println!(
+        info!(
             "Published session rejection to Nostr relays (session: {})",
             reject.session_id
         );
@@ -320,11 +321,11 @@ impl NostrSignaling {
         timeout_secs: Option<u64>,
     ) -> Result<ManualRequest> {
         match timeout_secs {
-            Some(t) => println!(
+            Some(t) => info!(
                 "Waiting for {} from peer (timeout: {}s, max age: {}s)...",
                 SIGNALING_TYPE_REQUEST, t, max_age_secs
             ),
-            None => println!(
+            None => info!(
                 "Waiting for {} from peer (max age: {}s)...",
                 SIGNALING_TYPE_REQUEST, max_age_secs
             ),
@@ -361,10 +362,10 @@ impl NostrSignaling {
                             .as_secs();
                         let age = now.saturating_sub(request.timestamp);
                         if age <= max_age_secs {
-                            println!("Received fresh {} from peer (age: {}s)", SIGNALING_TYPE_REQUEST, age);
+                            info!("Received fresh {} from peer (age: {}s)", SIGNALING_TYPE_REQUEST, age);
                             return Ok(request);
                         } else {
-                            println!(
+                            info!(
                                 "Ignoring stale request (age: {}s > max {}s)",
                                 age, max_age_secs
                             );
@@ -378,7 +379,7 @@ impl NostrSignaling {
                             return Err(SignalingError::ChannelClosed.into());
                         }
                         RecvError::Lagged(skipped) => {
-                            eprintln!(
+                            log::warn!(
                                 "Warning: Notification receiver lagged, skipped {} messages; draining buffer...",
                                 skipped
                             );
@@ -413,13 +414,13 @@ impl NostrSignaling {
                 .as_secs();
             let age = now.saturating_sub(request.timestamp);
             if age <= max_age_secs {
-                println!(
+                info!(
                     "Received fresh {} from peer (age: {}s)",
                     SIGNALING_TYPE_REQUEST, age
                 );
                 return Some(request);
             }
-            println!(
+            info!(
                 "Ignoring stale request (age: {}s > max {}s)",
                 age, max_age_secs
             );
@@ -452,7 +453,7 @@ impl NostrSignaling {
                     return Err(SignalingError::ChannelClosed);
                 }
                 Err(TryRecvError::Lagged(more_skipped)) => {
-                    eprintln!(
+                    log::warn!(
                         "Warning: Additional {} messages skipped while draining",
                         more_skipped
                     );
@@ -512,7 +513,7 @@ impl NostrSignaling {
                         return Err(OfferWaitError::ChannelClosed);
                     }
                     RecvError::Lagged(skipped) => {
-                        eprintln!(
+                        log::warn!(
                             "Warning: Notification receiver lagged, skipped {} messages; draining buffer...",
                             skipped
                         );
@@ -539,18 +540,18 @@ impl NostrSignaling {
         // Check for offer first
         if let Some(offer) = self.try_parse_event::<ManualOffer>(event, SIGNALING_TYPE_OFFER) {
             if offer.session_id.as_deref() == Some(session_id) {
-                println!("Received {} from peer", SIGNALING_TYPE_OFFER);
+                info!("Received {} from peer", SIGNALING_TYPE_OFFER);
                 return Some(Ok(Some(offer)));
             }
-            println!("Ignoring offer with mismatched session ID (stale event)");
+            info!("Ignoring offer with mismatched session ID (stale event)");
         }
         // Check for rejection
         if let Some(reject) = self.try_parse_event::<ManualReject>(event, SIGNALING_TYPE_REJECT) {
             if reject.session_id == session_id {
-                println!("Received {} from peer", SIGNALING_TYPE_REJECT);
+                info!("Received {} from peer", SIGNALING_TYPE_REJECT);
                 return Some(Err(OfferWaitError::Rejected(reject)));
             }
-            println!("Ignoring reject with mismatched session ID (stale event)");
+            info!("Ignoring reject with mismatched session ID (stale event)");
         }
         None
     }
@@ -574,7 +575,7 @@ impl NostrSignaling {
                     return Some(Err(OfferWaitError::ChannelClosed));
                 }
                 Err(TryRecvError::Lagged(more_skipped)) => {
-                    eprintln!(
+                    log::warn!(
                         "Warning: Additional {} messages skipped while draining",
                         more_skipped
                     );
@@ -640,11 +641,11 @@ impl NostrSignaling {
                 Ok(Ok(_)) => continue,
                 Ok(Err(recv_err)) => match recv_err {
                     RecvError::Closed => {
-                        eprintln!("Error: Notification channel closed while waiting for answer");
+                        log::warn!("Error: Notification channel closed while waiting for answer");
                         return None;
                     }
                     RecvError::Lagged(skipped) => {
-                        eprintln!(
+                        log::warn!(
                             "Warning: Notification receiver lagged, skipped {} messages; draining buffer...",
                             skipped
                         );
@@ -664,11 +665,11 @@ impl NostrSignaling {
     fn check_event_for_answer(&self, event: &Event, session_id: &str) -> Option<ManualAnswer> {
         if let Some(answer) = self.try_parse_event::<ManualAnswer>(event, SIGNALING_TYPE_ANSWER) {
             if answer.session_id.as_deref() == Some(session_id) {
-                println!("Received {} from peer", SIGNALING_TYPE_ANSWER);
+                info!("Received {} from peer", SIGNALING_TYPE_ANSWER);
                 return Some(answer);
             }
             // Answer for different session - ignore (other tasks have their own receivers)
-            println!("Ignoring answer with mismatched session ID (stale event)");
+            info!("Ignoring answer with mismatched session ID (stale event)");
         }
         None
     }
@@ -689,11 +690,11 @@ impl NostrSignaling {
                 Ok(_) => continue,
                 Err(TryRecvError::Empty) => return None,
                 Err(TryRecvError::Closed) => {
-                    eprintln!("Error: Notification channel closed while draining for answer");
+                    log::warn!("Error: Notification channel closed while draining for answer");
                     return None;
                 }
                 Err(TryRecvError::Lagged(more_skipped)) => {
-                    eprintln!(
+                    log::warn!(
                         "Warning: Additional {} messages skipped while draining",
                         more_skipped
                     );
