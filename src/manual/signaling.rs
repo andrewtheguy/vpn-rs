@@ -70,6 +70,10 @@ pub struct ManualRequest {
     pub session_id: String,
     /// Unix timestamp (seconds) when request was created
     pub timestamp: u64,
+    /// Requested source endpoint (e.g., "tcp://127.0.0.1:22")
+    /// If None, sender uses its default source
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
 }
 
 /// Maximum length for rejection reason to prevent excessively large messages.

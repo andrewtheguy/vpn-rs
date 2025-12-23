@@ -75,3 +75,19 @@ relay_only = false
 #     "stun1.l.google.com:19302",
 #     "stun.services.mozilla.com:3478",
 # ]
+#
+# # Maximum concurrent sessions (default: 10)
+# max_sessions = 10
+#
+# # Allowed source networks that receivers can request (CIDR notation)
+# # Separate lists for TCP and UDP protocols
+# # Supports IPv4 and IPv6 CIDR notation
+# [nostr.allowed_sources]
+# tcp = [
+#     "127.0.0.0/8",      # localhost
+#     "192.168.0.0/16",   # private network
+#     "::1/128",          # IPv6 localhost
+# ]
+# udp = [
+#     "10.0.0.0/8",       # private network
+# ]

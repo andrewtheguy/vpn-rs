@@ -60,6 +60,57 @@ fn short_session_id(session_id: &str) -> &str {
     &session_id[..8.min(session_id.len())]
 }
 
+/// Check if a source address is allowed by any network in the CIDR list.
+///
+/// The source format is `protocol://host:port` (e.g., `tcp://192.168.1.100:22`).
+/// The allowed_networks list contains CIDR notation (e.g., `192.168.0.0/16`, `::1/128`).
+///
+/// Returns true if:
+/// - allowed_networks is empty (no restrictions, caller should handle default)
+/// - The source IP is contained in any of the allowed networks
+fn is_source_allowed(source: &str, allowed_networks: &[String]) -> bool {
+    if allowed_networks.is_empty() {
+        return true; // No restrictions
+    }
+
+    // Extract host from source (protocol://host:port)
+    let Some(host) = extract_host_from_source(source) else {
+        return false;
+    };
+
+    // Parse source host as IP address
+    let Ok(source_ip) = host.parse::<std::net::IpAddr>() else {
+        return false; // Can't validate non-IP hostnames against CIDR
+    };
+
+    // Check against each allowed network
+    for network_str in allowed_networks {
+        if let Ok(network) = network_str.parse::<ipnet::IpNet>() {
+            if network.contains(&source_ip) {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
+/// Extract host from a source URL (protocol://host:port).
+/// Handles both IPv4 and IPv6 (with brackets).
+fn extract_host_from_source(source: &str) -> Option<&str> {
+    // Skip protocol prefix
+    let addr = source.split("://").nth(1)?;
+
+    if addr.starts_with('[') {
+        // IPv6: [host]:port
+        let bracket_end = addr.find(']')?;
+        Some(&addr[1..bracket_end])
+    } else {
+        // IPv4 or hostname: host:port
+        Some(addr.rsplit(':').nth(1).unwrap_or(addr))
+    }
+}
+
 /// Get current Unix timestamp in seconds.
 fn current_timestamp() -> u64 {
     std::time::SystemTime::now()
@@ -969,11 +1020,12 @@ pub async fn run_manual_udp_receiver(listen: String, stun_servers: Vec<String>) 
 // ============================================================================
 
 /// Session handler function signature for nostr sender modes.
-/// Takes signaling client, request, target address, STUN servers, and timing params.
+/// Takes signaling client, request, default target address, allowed sources, STUN servers, and timing params.
 type SessionHandler = fn(
     signaling: Arc<NostrSignaling>,
     request: ManualRequest,
-    target_addr: SocketAddr,
+    default_target: SocketAddr,
+    allowed_networks: Vec<String>,
     stun_servers: Vec<String>,
     republish_interval_secs: u64,
     max_wait_secs: u64,
@@ -994,7 +1046,8 @@ type SessionHandler = fn(
 /// - Tracking active sessions and cleaning up completed ones
 async fn run_nostr_sender_loop(
     protocol_name: &str,
-    target_addr: SocketAddr,
+    default_target: SocketAddr,
+    allowed_networks: Vec<String>,
     signaling: Arc<NostrSignaling>,
     stun_servers: Vec<String>,
     republish_interval_secs: u64,
@@ -1103,6 +1156,7 @@ async fn run_nostr_sender_loop(
 
         let sig = signaling.clone();
         let stun = stun_servers.clone();
+        let allowed = allowed_networks.clone();
         let limit_str_clone = limit_str.clone();
         let sem_clone = session_semaphore.clone();
         let max_sessions_copy = max_sessions;
@@ -1114,7 +1168,8 @@ async fn run_nostr_sender_loop(
             let result = session_handler(
                 sig,
                 request,
-                target_addr,
+                default_target,
+                allowed,
                 stun,
                 republish_interval_secs,
                 max_wait_secs,
@@ -1148,7 +1203,8 @@ async fn run_nostr_sender_loop(
 fn handle_nostr_tcp_session(
     signaling: Arc<NostrSignaling>,
     request: ManualRequest,
-    target_addr: SocketAddr,
+    default_target: SocketAddr,
+    allowed_networks: Vec<String>,
     stun_servers: Vec<String>,
     republish_interval_secs: u64,
     max_wait_secs: u64,
@@ -1156,7 +1212,8 @@ fn handle_nostr_tcp_session(
     Box::pin(handle_nostr_tcp_session_impl(
         signaling,
         request,
-        target_addr,
+        default_target,
+        allowed_networks,
         stun_servers,
         republish_interval_secs,
         max_wait_secs,
@@ -1167,7 +1224,8 @@ fn handle_nostr_tcp_session(
 async fn handle_nostr_tcp_session_impl(
     signaling: Arc<NostrSignaling>,
     request: ManualRequest,
-    target_addr: SocketAddr,
+    default_target: SocketAddr,
+    allowed_networks: Vec<String>,
     stun_servers: Vec<String>,
     republish_interval_secs: u64,
     max_wait_secs: u64,
@@ -1175,6 +1233,28 @@ async fn handle_nostr_tcp_session_impl(
     let session_id = request.session_id.clone();
     let short_id = short_session_id(&session_id);
     println!("[{}] Starting TCP session...", short_id);
+
+    // Determine target address: use requested source if provided and allowed
+    let target_addr = if let Some(ref requested_source) = request.source {
+        // Validate against allowed networks (CIDR)
+        if !is_source_allowed(requested_source, &allowed_networks) {
+            let reject = ManualReject::new(
+                session_id.clone(),
+                format!("Requested source '{}' not in allowed networks", requested_source),
+            );
+            if let Err(e) = signaling.publish_reject(&reject).await {
+                eprintln!("[{}] Failed to send rejection: {}", short_id, e);
+            }
+            anyhow::bail!("[{}] Rejected: source '{}' not allowed", short_id, requested_source);
+        }
+        // Resolve the requested source
+        println!("[{}] Using requested source: {}", short_id, requested_source);
+        resolve_target_addr(requested_source)
+            .await
+            .with_context(|| format!("Invalid requested source '{}'", requested_source))?
+    } else {
+        default_target
+    };
 
     // Gather ICE candidates
     let ice = IceEndpoint::gather(&stun_servers).await?;
@@ -1261,6 +1341,7 @@ async fn handle_nostr_tcp_session_impl(
 
 pub async fn run_nostr_tcp_sender(
     target: String,
+    allowed_networks: Vec<String>,
     stun_servers: Vec<String>,
     nsec: String,
     peer_npub: String,
@@ -1286,6 +1367,9 @@ pub async fn run_nostr_tcp_sender(
     println!("Your pubkey: {}", signaling.public_key_bech32());
     println!("Transfer ID: {}", signaling.transfer_id());
     println!("Relays: {:?}", signaling.relay_urls());
+    if !allowed_networks.is_empty() {
+        println!("Allowed networks: {:?}", allowed_networks);
+    }
 
     // Subscribe to incoming events
     signaling.subscribe().await?;
@@ -1294,6 +1378,7 @@ pub async fn run_nostr_tcp_sender(
     run_nostr_sender_loop(
         "TCP",
         target_addr,
+        allowed_networks,
         signaling,
         stun_servers,
         republish_interval_secs,
@@ -1306,6 +1391,7 @@ pub async fn run_nostr_tcp_sender(
 
 pub async fn run_nostr_tcp_receiver(
     listen: String,
+    source: Option<String>,
     stun_servers: Vec<String>,
     nsec: String,
     peer_npub: String,
@@ -1330,6 +1416,9 @@ pub async fn run_nostr_tcp_receiver(
     println!("Your pubkey: {}", signaling.public_key_bech32());
     println!("Transfer ID: {}", signaling.transfer_id());
     println!("Relays: {:?}", signaling.relay_urls());
+    if let Some(ref src) = source {
+        println!("Requesting source: {}", src);
+    }
 
     // Subscribe to incoming events
     signaling.subscribe().await?;
@@ -1351,6 +1440,7 @@ pub async fn run_nostr_tcp_receiver(
         candidates: local_candidates.clone(),
         session_id: session_id.clone(),
         timestamp: current_timestamp(),
+        source,
     };
 
     // Publish request and wait for offer (re-publish periodically)
@@ -1461,7 +1551,8 @@ pub async fn run_nostr_tcp_receiver(
 fn handle_nostr_udp_session(
     signaling: Arc<NostrSignaling>,
     request: ManualRequest,
-    target_addr: SocketAddr,
+    default_target: SocketAddr,
+    allowed_networks: Vec<String>,
     stun_servers: Vec<String>,
     republish_interval_secs: u64,
     max_wait_secs: u64,
@@ -1469,7 +1560,8 @@ fn handle_nostr_udp_session(
     Box::pin(handle_nostr_udp_session_impl(
         signaling,
         request,
-        target_addr,
+        default_target,
+        allowed_networks,
         stun_servers,
         republish_interval_secs,
         max_wait_secs,
@@ -1480,7 +1572,8 @@ fn handle_nostr_udp_session(
 async fn handle_nostr_udp_session_impl(
     signaling: Arc<NostrSignaling>,
     request: ManualRequest,
-    target_addr: SocketAddr,
+    default_target: SocketAddr,
+    allowed_networks: Vec<String>,
     stun_servers: Vec<String>,
     republish_interval_secs: u64,
     max_wait_secs: u64,
@@ -1488,6 +1581,28 @@ async fn handle_nostr_udp_session_impl(
     let session_id = request.session_id.clone();
     let short_id = short_session_id(&session_id);
     println!("[{}] Starting UDP session...", short_id);
+
+    // Determine target address: use requested source if provided and allowed
+    let target_addr = if let Some(ref requested_source) = request.source {
+        // Validate against allowed networks (CIDR)
+        if !is_source_allowed(requested_source, &allowed_networks) {
+            let reject = ManualReject::new(
+                session_id.clone(),
+                format!("Requested source '{}' not in allowed networks", requested_source),
+            );
+            if let Err(e) = signaling.publish_reject(&reject).await {
+                eprintln!("[{}] Failed to send rejection: {}", short_id, e);
+            }
+            anyhow::bail!("[{}] Rejected: source '{}' not allowed", short_id, requested_source);
+        }
+        // Resolve the requested source
+        println!("[{}] Using requested source: {}", short_id, requested_source);
+        resolve_target_addr(requested_source)
+            .await
+            .with_context(|| format!("Invalid requested source '{}'", requested_source))?
+    } else {
+        default_target
+    };
 
     // Gather ICE candidates
     let ice = IceEndpoint::gather(&stun_servers).await?;
@@ -1580,6 +1695,7 @@ async fn handle_nostr_udp_session_impl(
 
 pub async fn run_nostr_udp_sender(
     target: String,
+    allowed_networks: Vec<String>,
     stun_servers: Vec<String>,
     nsec: String,
     peer_npub: String,
@@ -1605,6 +1721,9 @@ pub async fn run_nostr_udp_sender(
     println!("Your pubkey: {}", signaling.public_key_bech32());
     println!("Transfer ID: {}", signaling.transfer_id());
     println!("Relays: {:?}", signaling.relay_urls());
+    if !allowed_networks.is_empty() {
+        println!("Allowed networks: {:?}", allowed_networks);
+    }
 
     // Subscribe to incoming events
     signaling.subscribe().await?;
@@ -1613,6 +1732,7 @@ pub async fn run_nostr_udp_sender(
     run_nostr_sender_loop(
         "UDP",
         target_addr,
+        allowed_networks,
         signaling,
         stun_servers,
         republish_interval_secs,
@@ -1625,6 +1745,7 @@ pub async fn run_nostr_udp_sender(
 
 pub async fn run_nostr_udp_receiver(
     listen: String,
+    source: Option<String>,
     stun_servers: Vec<String>,
     nsec: String,
     peer_npub: String,
@@ -1649,6 +1770,9 @@ pub async fn run_nostr_udp_receiver(
     println!("Your pubkey: {}", signaling.public_key_bech32());
     println!("Transfer ID: {}", signaling.transfer_id());
     println!("Relays: {:?}", signaling.relay_urls());
+    if let Some(ref src) = source {
+        println!("Requesting source: {}", src);
+    }
 
     // Subscribe to incoming events
     signaling.subscribe().await?;
@@ -1670,6 +1794,7 @@ pub async fn run_nostr_udp_receiver(
         candidates: local_candidates.clone(),
         session_id: session_id.clone(),
         timestamp: current_timestamp(),
+        source,
     };
 
     // Publish request and wait for offer (re-publish periodically)

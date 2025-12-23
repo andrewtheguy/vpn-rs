@@ -4656,6 +4656,7 @@ dependencies = [
  "dirs",
  "get_if_addrs",
  "hex",
+ "ipnet",
  "iroh",
  "nostr-sdk",
  "quinn",

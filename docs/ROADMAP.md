@@ -20,9 +20,25 @@ All modes support TCP and UDP tunneling with end-to-end encryption via QUIC/TLS 
 
 #### Receiver-Requested Source for Nostr Mode
 
-**Status:** Planned
+**Status:** Implemented
 
-Enable receivers to request specific source endpoints, similar to SSH's `-R` flag for reverse tunnels. Currently, the sender specifies the source at startup. This feature allows receivers to dynamically request which local service to tunnel.
+Receivers can request specific source endpoints, similar to SSH's `-R` flag for reverse tunnels. Senders can restrict allowed networks via `--allowed-tcp` / `--allowed-udp` flags or config file.
+
+**Usage:**
+```bash
+# Sender: allow networks via CIDR (separate flags for TCP and UDP)
+tunnel-rs nostr sender --nsec <key> \
+  --allowed-tcp 127.0.0.0/8 \
+  --allowed-tcp 192.168.0.0/16 \
+  --allowed-udp 10.0.0.0/8
+
+# Receiver: request a specific source
+tunnel-rs nostr receiver --npub <key> -t 127.0.0.1:2222 --source tcp://127.0.0.1:22
+```
+
+**Network Patterns (CIDR):**
+- IPv4: `127.0.0.0/8`, `192.168.0.0/16`, `10.0.0.0/8`
+- IPv6: `::1/128`, `fe80::/10`
 
 **Use Cases:**
 - SSH-style reverse tunneling: receiver requests `tcp://127.0.0.1:22`

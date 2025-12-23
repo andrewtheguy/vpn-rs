@@ -37,6 +37,18 @@ pub struct CustomConfig {
     pub stun_servers: Option<Vec<String>>,
 }
 
+/// Allowed source networks for receiver-requested source feature.
+/// Separate CIDR lists for TCP and UDP protocols.
+#[derive(Deserialize, Default, Clone)]
+pub struct AllowedSources {
+    /// Allowed TCP source networks (CIDR notation, e.g., "127.0.0.0/8", "::1/128")
+    #[serde(default)]
+    pub tcp: Vec<String>,
+    /// Allowed UDP source networks (CIDR notation)
+    #[serde(default)]
+    pub udp: Vec<String>,
+}
+
 /// nostr mode configuration.
 #[derive(Deserialize, Default, Clone)]
 pub struct NostrConfig {
@@ -45,6 +57,10 @@ pub struct NostrConfig {
     pub peer_npub: Option<String>,
     pub stun_servers: Option<Vec<String>>,
     pub max_sessions: Option<usize>,
+    /// Allowed source networks that receivers can request (sender only)
+    pub allowed_sources: Option<AllowedSources>,
+    /// Source address to request from sender (receiver only)
+    pub source: Option<String>,
 }
 
 /// Unified sender configuration.
