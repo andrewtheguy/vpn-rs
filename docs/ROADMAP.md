@@ -18,47 +18,42 @@ All modes support TCP and UDP tunneling with end-to-end encryption via QUIC/TLS 
 
 ### High Priority
 
-#### Multi-Session Support for Manual Signaling Modes
+#### Receiver-Requested Source for Nostr Mode
 
-**Status:** Partial (Nostr mode complete, others planned)
+**Status:** Planned
+
+Enable receivers to request specific source endpoints, similar to SSH's `-R` flag for reverse tunnels. Currently, the sender specifies the source at startup. This feature allows receivers to dynamically request which local service to tunnel.
+
+**Use Cases:**
+- SSH-style reverse tunneling: receiver requests `tcp://127.0.0.1:22`
+- Dynamic service access without sender reconfiguration
+- Multi-service tunneling from a single sender
+
+---
+
+### Medium Priority
+
+#### Multi-Session Support
+
+**Status:** Partial
 
 | Mode | Multi-Session |
 |------|---------------|
+| `iroh-default` | **Implemented** - unlimited concurrent receivers |
 | `nostr` | **Implemented** - use `--max-sessions` (default: 10) |
-| `iroh-manual` | Planned |
-| `custom` | Planned |
 
-**Nostr Mode Usage:**
-```bash
-# Accept up to 5 concurrent sessions
-tunnel-rs sender nostr -s tcp://127.0.0.1:22 --nsec <KEY> --peer-npub <NPUB> --max-sessions 5
-
-# Unlimited sessions
-tunnel-rs sender nostr -s tcp://127.0.0.1:22 --nsec <KEY> --peer-npub <NPUB> --max-sessions 0
-```
-
-**Implementation Details (Nostr):**
+**Implementation Details:**
 - Each session gets independent ICE/QUIC stack
 - Session IDs prevent cross-session interference
 - Automatic cleanup when receivers disconnect
-- Shared NostrSignaling client for efficient relay usage
-
-**Remaining Work (iroh-manual, custom):**
-- Manual copy-paste signaling is the bottleneck
-- Would require rethinking the signaling UX
 
 ---
 
 #### Relay Fallback for Custom/Nostr Modes
 
-**Status:** Planned
+**Status:** Idea
 
 Custom and nostr modes use full ICE but have no relay fallback for symmetric NAT scenarios where direct connectivity fails.
-
-**Options:**
-- Integrate TURN server support into ICE
-- Add optional iroh relay fallback
-- Implement custom relay protocol
 
 ---
 
@@ -66,99 +61,50 @@ Custom and nostr modes use full ICE but have no relay fallback for symmetric NAT
 
 **Status:** Partial
 
-Resilience features for handling connection failures:
-
 | Feature | Status |
 |---------|--------|
 | QUIC keepalive (15s interval) | **Implemented** |
 | Stream retry with backoff | **Implemented** |
-| Connection-level auto-reconnect | Planned |
+| Connection-level auto-reconnect | Idea |
 
-**Current Implementation:**
-- QUIC sends periodic PING frames to detect dead connections
-- Failed `open_bi()` calls retry 3 times with exponential backoff (100ms → 200ms → 400ms)
+**iroh-default mode (Moderate complexity):**
+- Add receiver-side connection retry loop with exponential backoff
+- Iroh's discovery automatically re-resolves sender's new IP/relay address
 
-**Planned (Connection-level reconnect):**
-- Detect when QUIC connection is dead (not just stream failures)
-- For nostr mode: Re-signal via Nostr relays and re-establish ICE/QUIC
-- For iroh-default: Leverage iroh's built-in reconnection
-- Seamlessly resume accepting local connections after reconnect
+**nostr mode (Higher complexity):**
+- Re-signal via Nostr relays and re-establish ICE/QUIC
 
 ---
 
-### Medium Priority
-
 #### Connection Migration (Resilience to IP Changes)
 
-**Status:** Research
+**Status:** Idea
 
-While tunnel-rs handles dynamic IPs for *establishing* connections (via identity-based discovery), **active sessions may currently drop** if a peer's IP address changes due to a network transition (e.g., switching from WiFi to 4G). 
-
-QUIC natively supports **connection migration**, which allows a session to continue even as the underlying network path changes. We plan to implement this to improve resilience.
-
-**Current Behavior:**
-- IP changes during an active session will likely cause the QUIC connection to time out.
-- For most modes, you would need to re-initiate the connection.
-- For `nostr` mode, automated re-signaling is also planned (see [Automatic Reconnection](#automatic-reconnection)).
-
-**Use Cases:**
-- Mobile device switching between WiFi and cellular
-- ISP dynamic IP re-assignment during long-running tunnels
-- Network interface changes (e.g., connecting/disconnecting a VPN)
+QUIC natively supports connection migration, allowing sessions to continue when network path changes. Currently, active sessions may drop if a peer's IP changes.
 
 ---
 
 #### Performance Metrics
 
-**Status:** Planned
+**Status:** Idea
 
-Built-in monitoring for:
-- Connection latency (RTT)
-- Throughput (bytes/second)
-- Packet loss statistics
-- Connection uptime
-
-**Output Options:**
-- Console display
-- JSON export
-- Prometheus metrics endpoint
+Built-in monitoring for connection latency, throughput, packet loss, and uptime.
 
 ---
 
 #### Multi-path Support
 
-**Status:** Research
+**Status:** Idea
 
 Utilize multiple network paths simultaneously for increased throughput or redundancy.
 
-**Approaches:**
-- QUIC multipath extension (when standardized)
-- Application-level path bonding
-
 ---
-
-### Low Priority
 
 #### Web UI
 
 **Status:** Idea
 
-Browser-based interface for:
-- Configuration management
-- Connection monitoring
-- Key/identity management
-- Log viewing
-
----
-
-#### Mobile Support
-
-**Status:** Idea
-
-Native support for mobile platforms:
-- iOS app
-- Android app
-- Background service mode
+Browser-based interface for configuration, monitoring, and key management.
 
 ---
 
