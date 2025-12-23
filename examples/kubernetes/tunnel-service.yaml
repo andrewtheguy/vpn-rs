@@ -52,7 +52,7 @@ spec:
     spec:
       containers:
         - name: tunnel
-          image: ghcr.io/andrewtheguy/tunnel-rs:0.1.14
+          image: ghcr.io/andrewtheguy/tunnel-rs:latest
           command: ["/bin/sh", "-c"]
           args:
             - |
@@ -93,7 +93,7 @@ spec:
     spec:
       containers:
         - name: tunnel
-          image: ghcr.io/andrewtheguy/tunnel-rs:0.1.14
+          image: ghcr.io/andrewtheguy/tunnel-rs:latest
           args:
             - sender
             - nostr

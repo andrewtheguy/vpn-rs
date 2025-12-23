@@ -37,7 +37,7 @@ services:
 
   # tunnel-rs sender for web service
   tunnel-web:
-    image: ghcr.io/andrewtheguy/tunnel-rs:0.1.14
+    image: ghcr.io/andrewtheguy/tunnel-rs:latest
     command:
       - sender
       - nostr
@@ -52,7 +52,7 @@ services:
 
   # tunnel-rs sender for postgres
   tunnel-postgres:
-    image: ghcr.io/andrewtheguy/tunnel-rs:0.1.14
+    image: ghcr.io/andrewtheguy/tunnel-rs:latest
     command:
       - sender
       - nostr

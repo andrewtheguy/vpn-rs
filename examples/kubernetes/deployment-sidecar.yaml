@@ -47,7 +47,7 @@ spec:
 
         # tunnel-rs sidecar
         - name: tunnel-sender
-          image: ghcr.io/andrewtheguy/tunnel-rs:0.1.14
+          image: ghcr.io/andrewtheguy/tunnel-rs:latest
           args:
             - sender
             - iroh-default
