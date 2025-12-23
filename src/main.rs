@@ -144,6 +144,7 @@ fn resolve_nostr_nsec(
             if trimmed.is_empty() {
                 anyhow::bail!("nsec is empty. Provide a valid nsec or hex private key.");
             }
+            log::info!("Loaded nsec from inline value");
             Ok(Some(trimmed.to_string()))
         }
         (None, Some(path)) => {
@@ -153,6 +154,7 @@ fn resolve_nostr_nsec(
             if trimmed.is_empty() {
                 anyhow::bail!("nsec file is empty: {}", path.display());
             }
+            log::info!("Loaded nsec from file: {}", path.display());
             Ok(Some(trimmed.to_string()))
         }
         (None, None) => Ok(None),
@@ -477,6 +479,9 @@ fn resolve_receiver_config(
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn"))
+        .filter_module("tunnel_rs", log::LevelFilter::Info)
+        .try_init();
     let args = Args::parse();
 
     match args.command {
