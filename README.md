@@ -7,12 +7,13 @@ Tunnel-rs enables you to forward TCP and UDP traffic between machines without re
 > **Project Goal:** The project's primary goal is to provide a convenient way to connect to different networks for development or homelab purposes without the hassle and security risk of opening a port. It is **not** meant for production setups or designed to be performant at scale.
 
 **Key Features:**
+- **Full TCP and UDP support** — Seamlessly tunnel any TCP or UDP traffic
+- **Zero firewall configuration** — Automatic NAT hole punching means no port forwarding or public IPs are required in most network environments
 - **Cross-platform support** — Works on Linux, macOS, and Windows
 - **End-to-end encryption** via QUIC/TLS 1.3
 - **NAT traversal** with multiple strategies (relay fallback, STUN, full ICE)
 - **Minimal configuration** for automatic peer discovery (iroh-default mode; EndpointId required)
 - **Serverless options** with manual signaling (iroh-manual, custom) or Nostr relay signaling (nostr mode)
-- **Protocol support** for both TCP and UDP tunneling
 - **High performance** with QUIC multiplexing
 
 **Common Use Cases:**
