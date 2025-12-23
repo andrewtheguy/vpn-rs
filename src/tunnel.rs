@@ -95,11 +95,17 @@ fn is_source_allowed(source: &str, allowed_networks: &[String]) -> bool {
     false
 }
 
+/// Extract address (host:port) from a source URL (protocol://host:port).
+/// Returns the part after "://" without the protocol prefix.
+fn extract_addr_from_source(source: &str) -> Option<&str> {
+    source.split("://").nth(1)
+}
+
 /// Extract host from a source URL (protocol://host:port).
 /// Handles both IPv4 and IPv6 (with brackets).
 fn extract_host_from_source(source: &str) -> Option<&str> {
     // Skip protocol prefix
-    let addr = source.split("://").nth(1)?;
+    let addr = extract_addr_from_source(source)?;
 
     if addr.starts_with('[') {
         // IPv6: [host]:port
@@ -1314,8 +1320,12 @@ async fn handle_nostr_tcp_session_impl(
     let requested_source = request.source.as_ref()
         .ok_or_else(|| anyhow::anyhow!("[{}] Missing source", short_id))?;
 
+    // Extract host:port from source URL (strip protocol prefix)
+    let target_hostport = extract_addr_from_source(requested_source)
+        .ok_or_else(|| anyhow::anyhow!("[{}] Invalid source format '{}'", short_id, requested_source))?;
+
     println!("[{}] Forwarding to: {}", short_id, requested_source);
-    let target_addr = resolve_target_addr(requested_source)
+    let target_addr = resolve_target_addr(target_hostport)
         .await
         .with_context(|| format!("Invalid source '{}'", requested_source))?;
 
@@ -1626,8 +1636,12 @@ async fn handle_nostr_udp_session_impl(
     let requested_source = request.source.as_ref()
         .ok_or_else(|| anyhow::anyhow!("[{}] Missing source", short_id))?;
 
+    // Extract host:port from source URL (strip protocol prefix)
+    let target_hostport = extract_addr_from_source(requested_source)
+        .ok_or_else(|| anyhow::anyhow!("[{}] Invalid source format '{}'", short_id, requested_source))?;
+
     println!("[{}] Forwarding to: {}", short_id, requested_source);
-    let target_addr = resolve_target_addr(requested_source)
+    let target_addr = resolve_target_addr(target_hostport)
         .await
         .with_context(|| format!("Invalid source '{}'", requested_source))?;
 
