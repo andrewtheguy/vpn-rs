@@ -88,16 +88,23 @@ Resilience features for handling connection failures:
 
 ### Medium Priority
 
-#### Connection Migration
+#### Connection Migration (Resilience to IP Changes)
 
 **Status:** Research
 
-QUIC supports connection migration when IP addresses change. This would improve resilience for mobile users or network transitions.
+While tunnel-rs handles dynamic IPs for *establishing* connections (via identity-based discovery), **active sessions may currently drop** if a peer's IP address changes due to a network transition (e.g., switching from WiFi to 4G). 
+
+QUIC natively supports **connection migration**, which allows a session to continue even as the underlying network path changes. We plan to implement this to improve resilience.
+
+**Current Behavior:**
+- IP changes during an active session will likely cause the QUIC connection to time out.
+- For most modes, you would need to re-initiate the connection.
+- For `nostr` mode, automated re-signaling is also planned (see [Automatic Reconnection](#automatic-reconnection)).
 
 **Use Cases:**
 - Mobile device switching between WiFi and cellular
-- VPN connect/disconnect scenarios
-- Network interface changes
+- ISP dynamic IP re-assignment during long-running tunnels
+- Network interface changes (e.g., connecting/disconnecting a VPN)
 
 ---
 
