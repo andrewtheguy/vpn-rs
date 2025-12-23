@@ -12,19 +12,20 @@ use tokio::net::{lookup_host, TcpListener, TcpStream, UdpSocket};
 use tokio::sync::Mutex;
 
 use std::sync::atomic::{AtomicBool, Ordering};
+use tokio::task::JoinSet;
 
 use crate::endpoint::{
     connect_to_sender, create_receiver_endpoint, create_sender_endpoint, print_connection_type,
     validate_relay_only, TCP_ALPN, UDP_ALPN,
 };
 use crate::manual::ice::{IceEndpoint, IceRole};
-use crate::manual::nostr_signaling::NostrSignaling;
+use crate::manual::nostr_signaling::{NostrSignaling, OfferWaitError, SignalingError};
 use crate::manual::quic;
 use crate::manual::signaling::{
     display_answer, display_iroh_answer, display_iroh_offer, display_offer,
     read_answer_from_stdin, read_iroh_answer_from_stdin, read_iroh_offer_from_stdin,
     read_offer_from_stdin, IrohManualAnswer, IrohManualOffer, ManualAnswer, ManualOffer,
-    ManualRequest, IROH_SIGNAL_VERSION, MANUAL_SIGNAL_VERSION,
+    ManualReject, ManualRequest, IROH_SIGNAL_VERSION, MANUAL_SIGNAL_VERSION,
 };
 
 /// Timeout for QUIC connection (matches webrtc crate's 180 second connection timeout)
@@ -32,6 +33,12 @@ const QUIC_CONNECTION_TIMEOUT: Duration = Duration::from_secs(180);
 
 /// Maximum age for accepting incoming requests (seconds).
 /// Requests older than this are considered stale and ignored.
+///
+/// Set to 60s to accommodate:
+/// - Nostr relay propagation delays (can take several seconds across relays)
+/// - Clock skew between sender and receiver (up to ~30s is common)
+/// - Network latency and retransmission timing
+/// - Receiver re-publish intervals (typically 5-10s)
 const MAX_REQUEST_AGE_SECS: u64 = 60;
 
 async fn resolve_target_addr(target: &str) -> Result<SocketAddr> {
@@ -48,6 +55,11 @@ fn generate_session_id() -> String {
     hex::encode(random_bytes)
 }
 
+/// Get a short prefix of a session ID for logging (first 8 chars or less).
+fn short_session_id(session_id: &str) -> &str {
+    &session_id[..8.min(session_id.len())]
+}
+
 /// Get current Unix timestamp in seconds.
 fn current_timestamp() -> u64 {
     std::time::SystemTime::now()
@@ -59,9 +71,10 @@ fn current_timestamp() -> u64 {
 /// Publish offer and wait for answer with periodic re-publishing.
 ///
 /// This helper implements the nostr signaling offer/answer exchange with:
-/// - Periodic re-publishing of the offer at `republish_interval_secs`
+/// - Periodic re-publishing of the offer with exponential backoff
 /// - Overall timeout of `max_wait_secs`
 /// - Session ID validation to filter stale answers
+/// - Per-session receiver to support concurrent multi-session mode
 async fn publish_offer_and_wait_for_answer(
     signaling: &NostrSignaling,
     offer: &ManualOffer,
@@ -71,22 +84,28 @@ async fn publish_offer_and_wait_for_answer(
 ) -> Result<ManualAnswer> {
     let start_time = std::time::Instant::now();
 
+    // Exponential backoff: start at base interval, double each time, cap at 60s
+    let mut current_interval = republish_interval_secs;
+    const MAX_INTERVAL: u64 = 60;
+
+    // Create receiver BEFORE publishing to avoid race where answer arrives
+    // between publish and starting to listen.
+    let mut receiver = signaling.create_notification_receiver();
+
     signaling.publish_offer(offer).await?;
     println!(
-        "Waiting for answer (re-publishing every {}s, max {}s)...",
+        "Waiting for answer (re-publishing with backoff, starting {}s, max {}s)...",
         republish_interval_secs, max_wait_secs
     );
 
     loop {
+        // Use session-specific waiting to support concurrent multi-session mode.
+        // Each session gets its own receiver so answers aren't consumed by other sessions.
         if let Some(ans) = signaling
-            .try_wait_for_answer_timeout(republish_interval_secs)
+            .try_wait_for_answer_with_session_id(&mut receiver, session_id, current_interval)
             .await
         {
-            // Verify session ID matches
-            if ans.session_id.as_ref() == Some(&session_id.to_string()) {
-                return Ok(ans);
-            }
-            println!("Ignoring answer with mismatched session ID (stale event)");
+            return Ok(ans);
         }
 
         // Check overall timeout
@@ -97,18 +116,24 @@ async fn publish_offer_and_wait_for_answer(
             );
         }
 
-        // Re-publish offer
-        println!("Re-publishing offer...");
+        // Exponential backoff
+        let next_interval = (current_interval * 2).min(MAX_INTERVAL);
+
+        // Re-publish offer with backoff
+        println!("Re-publishing offer (next wait: {}s)...", next_interval);
         signaling.publish_offer(offer).await?;
+
+        current_interval = next_interval;
     }
 }
 
 /// Publish request and wait for offer with periodic re-publishing.
 ///
 /// This helper implements the nostr signaling request/offer exchange with:
-/// - Periodic re-publishing of the request at `republish_interval_secs`
+/// - Periodic re-publishing of the request with exponential backoff
 /// - Overall timeout of `max_wait_secs`
 /// - Session ID validation to filter stale offers
+/// - Inline rejection detection (rejections are checked while waiting for offers)
 async fn publish_request_and_wait_for_offer(
     signaling: &NostrSignaling,
     request: &ManualRequest,
@@ -118,22 +143,32 @@ async fn publish_request_and_wait_for_offer(
     let start_time = std::time::Instant::now();
     let session_id = &request.session_id;
 
+    // Exponential backoff: start at base interval, double each time, cap at 60s
+    let mut current_interval = republish_interval_secs;
+    const MAX_INTERVAL: u64 = 60;
+
     signaling.publish_request(request).await?;
     println!(
-        "Waiting for offer (re-publishing request every {}s, max {}s)...",
+        "Waiting for offer (re-publishing with backoff, starting {}s, max {}s)...",
         republish_interval_secs, max_wait_secs
     );
 
     loop {
-        if let Some(offer) = signaling
-            .try_wait_for_offer_timeout(republish_interval_secs)
+        // Wait for offer, also checking for rejections inline
+        match signaling
+            .try_wait_for_offer_or_rejection(session_id, current_interval)
             .await
         {
-            // Verify session ID matches
-            if offer.session_id.as_ref() == Some(session_id) {
-                return Ok(offer);
+            Ok(Some(offer)) => return Ok(offer),
+            Err(OfferWaitError::Rejected(reject)) => {
+                anyhow::bail!("Session rejected by sender: {}", reject.reason);
             }
-            println!("Ignoring offer with mismatched session ID (stale event)");
+            Err(OfferWaitError::ChannelClosed) => {
+                anyhow::bail!("Nostr signaling channel closed while waiting for offer");
+            }
+            Ok(None) => {
+                // Timeout - continue to re-publish
+            }
         }
 
         // Check overall timeout
@@ -144,9 +179,14 @@ async fn publish_request_and_wait_for_offer(
             );
         }
 
-        // Re-publish request
-        println!("Re-publishing request...");
+        // Exponential backoff
+        let next_interval = (current_interval * 2).min(MAX_INTERVAL);
+
+        // Re-publish request with backoff
+        println!("Re-publishing request (next wait: {}s)...", next_interval);
         signaling.publish_request(request).await?;
+
+        current_interval = next_interval;
     }
 }
 
@@ -250,7 +290,7 @@ pub async fn run_udp_receiver(
     println!("Connected to sender!");
     print_connection_type(&endpoint, conn.remote_id());
 
-    let (send_stream, recv_stream) = conn.open_bi().await.context("Failed to open stream")?;
+    let (send_stream, recv_stream) = open_bi_with_retry_iroh(&conn).await?;
 
     let udp_socket = Arc::new(
         UdpSocket::bind(listen_addr)
@@ -888,7 +928,7 @@ pub async fn run_manual_udp_receiver(listen: String, stun_servers: Vec<String>) 
         .context("Failed to connect to sender")?;
     println!("Connected to sender over QUIC.");
 
-    let (send_stream, recv_stream) = conn.open_bi().await.context("Failed to open stream")?;
+    let (send_stream, recv_stream) = open_bi_with_retry(&conn).await?;
 
     let udp_socket = Arc::new(
         UdpSocket::bind(listen_addr)
@@ -925,59 +965,222 @@ pub async fn run_manual_udp_receiver(listen: String, stun_servers: Vec<String>) 
 }
 
 // ============================================================================
+// Nostr Sender Loop (shared session management for TCP/UDP)
+// ============================================================================
+
+/// Session handler function signature for nostr sender modes.
+/// Takes signaling client, request, target address, STUN servers, and timing params.
+type SessionHandler = fn(
+    signaling: Arc<NostrSignaling>,
+    request: ManualRequest,
+    target_addr: SocketAddr,
+    stun_servers: Vec<String>,
+    republish_interval_secs: u64,
+    max_wait_secs: u64,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>>;
+
+/// Generic nostr sender loop that handles session management for both TCP and UDP.
+///
+/// # Long-running
+///
+/// This function runs an infinite loop and **never returns `Ok(())`**. It only
+/// returns `Err(...)` if a fatal error occurs (e.g., the notification channel closes).
+/// Callers should treat any return as an error condition requiring restart or termination.
+///
+/// This function encapsulates the common logic for:
+/// - Waiting for incoming session requests
+/// - Checking session limits and rejecting when at capacity (using semaphore)
+/// - Spawning session handler tasks
+/// - Tracking active sessions and cleaning up completed ones
+async fn run_nostr_sender_loop(
+    protocol_name: &str,
+    target_addr: SocketAddr,
+    signaling: Arc<NostrSignaling>,
+    stun_servers: Vec<String>,
+    republish_interval_secs: u64,
+    max_wait_secs: u64,
+    max_sessions: usize,
+    session_handler: SessionHandler,
+) -> Result<()> {
+    // Session limit enforcement via semaphore (None = unlimited)
+    let session_semaphore: Option<Arc<tokio::sync::Semaphore>> = if max_sessions > 0 {
+        Some(Arc::new(tokio::sync::Semaphore::new(max_sessions)))
+    } else {
+        None
+    };
+
+    let mut session_tasks: JoinSet<Result<()>> = JoinSet::new();
+
+    let limit_str = if max_sessions == 0 {
+        "unlimited".to_string()
+    } else {
+        max_sessions.to_string()
+    };
+    println!("Waiting for tunnel requests (max sessions: {})...", limit_str);
+
+    loop {
+        // Clean up completed tasks without blocking
+        while let Some(result) = session_tasks.try_join_next() {
+            if let Err(e) = result {
+                eprintln!("Session task panicked: {:?}", e);
+            }
+        }
+
+        // Wait for fresh request from receiver (no timeout for multi-session mode)
+        let request = match signaling.wait_for_fresh_request_forever(MAX_REQUEST_AGE_SECS).await {
+            Ok(req) => req,
+            Err(e) => {
+                // Check for fatal error: notification channel closed (client disconnected)
+                if e.downcast_ref::<SignalingError>()
+                    .map(|se| se.is_channel_closed())
+                    .unwrap_or(false)
+                {
+                    return Err(e.context("Nostr signaling channel closed"));
+                }
+                // Transient error: log and retry
+                eprintln!("Error waiting for request: {}", e);
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                continue;
+            }
+        };
+
+        if request.version != MANUAL_SIGNAL_VERSION {
+            eprintln!(
+                "Ignoring request with version mismatch (expected {}, got {})",
+                MANUAL_SIGNAL_VERSION, request.version
+            );
+            continue;
+        }
+
+        let session_id = request.session_id.clone();
+        println!(
+            "Received {} request for session {}",
+            protocol_name,
+            short_session_id(&session_id)
+        );
+
+        // Acquire session permit (if limited) - held for task lifetime
+        let permit = if let Some(ref sem) = session_semaphore {
+            match sem.clone().try_acquire_owned() {
+                Ok(permit) => Some(permit),
+                Err(_) => {
+                    // At capacity - reject immediately
+                    let active = max_sessions - sem.available_permits();
+                    println!(
+                        "Rejecting session {} - at capacity ({}/{})",
+                        short_session_id(&session_id),
+                        active,
+                        max_sessions
+                    );
+
+                    let reject = ManualReject::new(
+                        session_id.clone(),
+                        format!("Sender at capacity ({}/{})", active, max_sessions),
+                    );
+                    if let Err(e) = signaling.publish_reject(&reject).await {
+                        eprintln!("Failed to send rejection: {}", e);
+                    } else {
+                        println!(
+                            "Sent rejection for session {}",
+                            short_session_id(&session_id)
+                        );
+                    }
+                    continue;
+                }
+            }
+        } else {
+            None // Unlimited mode
+        };
+
+        // Log active session count
+        // In limited mode: permit already acquired, count includes current session
+        // In unlimited mode: task not yet spawned, so add 1 for current session
+        let active_count = session_semaphore
+            .as_ref()
+            .map(|sem| max_sessions - sem.available_permits())
+            .unwrap_or(session_tasks.len() + 1);
+        println!("Active sessions: {}/{}", active_count, limit_str);
+
+        let sig = signaling.clone();
+        let stun = stun_servers.clone();
+        let limit_str_clone = limit_str.clone();
+        let sem_clone = session_semaphore.clone();
+        let max_sessions_copy = max_sessions;
+
+        session_tasks.spawn(async move {
+            // Permit is moved into this task and dropped when task completes
+            let _permit = permit;
+
+            let result = session_handler(
+                sig,
+                request,
+                target_addr,
+                stun,
+                republish_interval_secs,
+                max_wait_secs,
+            )
+            .await;
+
+            // Log remaining sessions (permit will be released after this block)
+            // In unlimited mode (sem_clone is None), we don't track count inside the task
+            if let Some(ref sem) = sem_clone {
+                let remaining = max_sessions_copy
+                    .saturating_sub(sem.available_permits())
+                    .saturating_sub(1);
+                println!("Session ended. Active sessions: {}/{}", remaining, limit_str_clone);
+            } else {
+                println!("Session ended.");
+            }
+
+            if let Err(ref e) = result {
+                eprintln!("Session error: {}", e);
+            }
+            result
+        });
+    }
+}
+
+// ============================================================================
 // Nostr TCP Tunnel Implementation (ICE + QUIC with Nostr signaling)
 // ============================================================================
 
-pub async fn run_nostr_tcp_sender(
-    target: String,
+/// Wrapper function for handle_nostr_tcp_session_impl that returns a boxed future.
+fn handle_nostr_tcp_session(
+    signaling: Arc<NostrSignaling>,
+    request: ManualRequest,
+    target_addr: SocketAddr,
     stun_servers: Vec<String>,
-    nsec: String,
-    peer_npub: String,
-    relays: Vec<String>,
+    republish_interval_secs: u64,
+    max_wait_secs: u64,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>> {
+    Box::pin(handle_nostr_tcp_session_impl(
+        signaling,
+        request,
+        target_addr,
+        stun_servers,
+        republish_interval_secs,
+        max_wait_secs,
+    ))
+}
+
+/// Handle a single nostr TCP session from request to connection closure.
+async fn handle_nostr_tcp_session_impl(
+    signaling: Arc<NostrSignaling>,
+    request: ManualRequest,
+    target_addr: SocketAddr,
+    stun_servers: Vec<String>,
     republish_interval_secs: u64,
     max_wait_secs: u64,
 ) -> Result<()> {
-    // Ensure crypto provider is installed before nostr-sdk uses rustls
-    quic::ensure_crypto_provider();
-
-    let target_addr = resolve_target_addr(&target)
-        .await
-        .with_context(|| format!("Invalid target address or hostname '{}'", target))?;
-
-    println!("Nostr TCP Tunnel - Sender Mode");
-    println!("==============================");
-
-    // Create Nostr signaling client
-    let relay_list = if relays.is_empty() { None } else { Some(relays) };
-    let signaling = NostrSignaling::new(&nsec, &peer_npub, relay_list).await?;
-
-    println!("Your pubkey: {}", signaling.public_key_bech32());
-    println!("Transfer ID: {}", signaling.transfer_id());
-    println!("Relays: {:?}", signaling.relay_urls());
-
-    // Subscribe to incoming events
-    signaling.subscribe().await?;
-
-    // Wait for fresh request from receiver (reject stale requests)
-    println!("Waiting for request from receiver...");
-    let request = signaling.wait_for_fresh_request(MAX_REQUEST_AGE_SECS).await?;
-
-    if request.version != MANUAL_SIGNAL_VERSION {
-        anyhow::bail!(
-            "Manual signaling version mismatch (expected {}, got {})",
-            MANUAL_SIGNAL_VERSION,
-            request.version
-        );
-    }
-
-    // Use session ID from the request (generated by receiver)
     let session_id = request.session_id.clone();
-    println!("Session ID: {} (from receiver)", session_id);
+    let short_id = short_session_id(&session_id);
+    println!("[{}] Starting TCP session...", short_id);
 
-    // Now gather our ICE candidates
+    // Gather ICE candidates
     let ice = IceEndpoint::gather(&stun_servers).await?;
     let local_creds = ice.local_credentials();
     let local_candidates = ice.local_candidates();
+    println!("[{}] Gathered {} ICE candidates", short_id, local_candidates.len());
 
     let quic_identity = quic::generate_server_identity()?;
 
@@ -990,7 +1193,7 @@ pub async fn run_nostr_tcp_sender(
         session_id: Some(session_id.clone()),
     };
 
-    // Publish offer via Nostr and wait for answer (re-publish periodically)
+    // Publish offer and wait for answer
     let answer = publish_offer_and_wait_for_answer(
         &signaling,
         &offer,
@@ -1002,16 +1205,14 @@ pub async fn run_nostr_tcp_sender(
 
     if answer.version != MANUAL_SIGNAL_VERSION {
         anyhow::bail!(
-            "Manual signaling version mismatch (expected {}, got {})",
+            "[{}] Manual signaling version mismatch (expected {}, got {})",
+            short_id,
             MANUAL_SIGNAL_VERSION,
             answer.version
         );
     }
 
-    // Disconnect from Nostr (signaling complete)
-    signaling.disconnect().await;
-
-    // Use receiver's ICE credentials from the REQUEST (not answer)
+    // Use receiver's ICE credentials from the REQUEST
     let remote_creds = str0m::IceCreds {
         ufrag: request.ice_ufrag,
         pass: request.ice_pwd,
@@ -1020,15 +1221,12 @@ pub async fn run_nostr_tcp_sender(
     let ice_conn = ice
         .connect(IceRole::Controlling, remote_creds, request.candidates)
         .await?;
+    println!("[{}] ICE connection established", short_id);
 
-    // Spawn the ICE keeper to handle STUN packets in the background
+    // Spawn the ICE keeper
     tokio::spawn(ice_conn.ice_keeper.run());
 
     let endpoint = quic::make_server_endpoint(ice_conn.socket, quic_identity.server_config)?;
-    println!(
-        "Waiting for receiver QUIC connection (timeout: {:?})...",
-        QUIC_CONNECTION_TIMEOUT
-    );
 
     let connecting = tokio::time::timeout(QUIC_CONNECTION_TIMEOUT, endpoint.accept())
         .await
@@ -1038,27 +1236,72 @@ pub async fn run_nostr_tcp_sender(
         .await
         .context("Timeout during QUIC handshake")?
         .context("Failed to accept QUIC connection")?;
-    println!("Receiver connected over QUIC.");
+    println!("[{}] QUIC connected, forwarding to {}", short_id, target_addr);
 
     loop {
         let (send_stream, recv_stream) = match conn.accept_bi().await {
             Ok(streams) => streams,
             Err(e) => {
-                println!("Receiver disconnected: {}", e);
+                println!("[{}] Session ended: {}", short_id, e);
                 break;
             }
         };
 
-        println!("New TCP connection request received");
         let target = target_addr;
+        let sid = short_id.to_string();
         tokio::spawn(async move {
             if let Err(e) = handle_tcp_sender_stream_quic(send_stream, recv_stream, target).await {
-                eprintln!("TCP connection error: {}", e);
+                eprintln!("[{}] TCP connection error: {}", sid, e);
             }
         });
     }
 
     Ok(())
+}
+
+pub async fn run_nostr_tcp_sender(
+    target: String,
+    stun_servers: Vec<String>,
+    nsec: String,
+    peer_npub: String,
+    relays: Vec<String>,
+    republish_interval_secs: u64,
+    max_wait_secs: u64,
+    max_sessions: usize,
+) -> Result<()> {
+    // Ensure crypto provider is installed before nostr-sdk uses rustls
+    quic::ensure_crypto_provider();
+
+    let target_addr = resolve_target_addr(&target)
+        .await
+        .with_context(|| format!("Invalid target address or hostname '{}'", target))?;
+
+    println!("Nostr TCP Tunnel - Sender Mode (Multi-Session)");
+    println!("===============================================");
+
+    // Create Nostr signaling client
+    let relay_list = if relays.is_empty() { None } else { Some(relays) };
+    let signaling = Arc::new(NostrSignaling::new(&nsec, &peer_npub, relay_list).await?);
+
+    println!("Your pubkey: {}", signaling.public_key_bech32());
+    println!("Transfer ID: {}", signaling.transfer_id());
+    println!("Relays: {:?}", signaling.relay_urls());
+
+    // Subscribe to incoming events
+    signaling.subscribe().await?;
+
+    // Run the session management loop
+    run_nostr_sender_loop(
+        "TCP",
+        target_addr,
+        signaling,
+        stun_servers,
+        republish_interval_secs,
+        max_wait_secs,
+        max_sessions,
+        handle_nostr_tcp_session,
+    )
+    .await
 }
 
 pub async fn run_nostr_tcp_receiver(
@@ -1214,56 +1457,43 @@ pub async fn run_nostr_tcp_receiver(
 // Nostr UDP Tunnel Implementation (ICE + QUIC with Nostr signaling)
 // ============================================================================
 
-pub async fn run_nostr_udp_sender(
-    target: String,
+/// Wrapper function for handle_nostr_udp_session_impl that returns a boxed future.
+fn handle_nostr_udp_session(
+    signaling: Arc<NostrSignaling>,
+    request: ManualRequest,
+    target_addr: SocketAddr,
     stun_servers: Vec<String>,
-    nsec: String,
-    peer_npub: String,
-    relays: Vec<String>,
+    republish_interval_secs: u64,
+    max_wait_secs: u64,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>> {
+    Box::pin(handle_nostr_udp_session_impl(
+        signaling,
+        request,
+        target_addr,
+        stun_servers,
+        republish_interval_secs,
+        max_wait_secs,
+    ))
+}
+
+/// Handle a single nostr UDP session from request to connection closure.
+async fn handle_nostr_udp_session_impl(
+    signaling: Arc<NostrSignaling>,
+    request: ManualRequest,
+    target_addr: SocketAddr,
+    stun_servers: Vec<String>,
     republish_interval_secs: u64,
     max_wait_secs: u64,
 ) -> Result<()> {
-    // Ensure crypto provider is installed before nostr-sdk uses rustls
-    quic::ensure_crypto_provider();
-
-    let target_addr = resolve_target_addr(&target)
-        .await
-        .with_context(|| format!("Invalid target address or hostname '{}'", target))?;
-
-    println!("Nostr UDP Tunnel - Sender Mode");
-    println!("==============================");
-
-    // Create Nostr signaling client
-    let relay_list = if relays.is_empty() { None } else { Some(relays) };
-    let signaling = NostrSignaling::new(&nsec, &peer_npub, relay_list).await?;
-
-    println!("Your pubkey: {}", signaling.public_key_bech32());
-    println!("Transfer ID: {}", signaling.transfer_id());
-    println!("Relays: {:?}", signaling.relay_urls());
-
-    // Subscribe to incoming events
-    signaling.subscribe().await?;
-
-    // Wait for fresh request from receiver (reject stale requests)
-    println!("Waiting for request from receiver...");
-    let request = signaling.wait_for_fresh_request(MAX_REQUEST_AGE_SECS).await?;
-
-    if request.version != MANUAL_SIGNAL_VERSION {
-        anyhow::bail!(
-            "Manual signaling version mismatch (expected {}, got {})",
-            MANUAL_SIGNAL_VERSION,
-            request.version
-        );
-    }
-
-    // Use session ID from the request (generated by receiver)
     let session_id = request.session_id.clone();
-    println!("Session ID: {} (from receiver)", session_id);
+    let short_id = short_session_id(&session_id);
+    println!("[{}] Starting UDP session...", short_id);
 
-    // Now gather our ICE candidates
+    // Gather ICE candidates
     let ice = IceEndpoint::gather(&stun_servers).await?;
     let local_creds = ice.local_credentials();
     let local_candidates = ice.local_candidates();
+    println!("[{}] Gathered {} ICE candidates", short_id, local_candidates.len());
 
     let quic_identity = quic::generate_server_identity()?;
 
@@ -1276,7 +1506,7 @@ pub async fn run_nostr_udp_sender(
         session_id: Some(session_id.clone()),
     };
 
-    // Publish offer via Nostr and wait for answer (re-publish periodically)
+    // Publish offer and wait for answer
     let answer = publish_offer_and_wait_for_answer(
         &signaling,
         &offer,
@@ -1288,16 +1518,14 @@ pub async fn run_nostr_udp_sender(
 
     if answer.version != MANUAL_SIGNAL_VERSION {
         anyhow::bail!(
-            "Manual signaling version mismatch (expected {}, got {})",
+            "[{}] Manual signaling version mismatch (expected {}, got {})",
+            short_id,
             MANUAL_SIGNAL_VERSION,
             answer.version
         );
     }
 
-    // Disconnect from Nostr (signaling complete)
-    signaling.disconnect().await;
-
-    // Use receiver's ICE credentials from the REQUEST (not answer)
+    // Use receiver's ICE credentials from the REQUEST
     let remote_creds = str0m::IceCreds {
         ufrag: request.ice_ufrag,
         pass: request.ice_pwd,
@@ -1306,15 +1534,12 @@ pub async fn run_nostr_udp_sender(
     let ice_conn = ice
         .connect(IceRole::Controlling, remote_creds, request.candidates)
         .await?;
+    println!("[{}] ICE connection established", short_id);
 
-    // Spawn the ICE keeper to handle STUN packets in the background
+    // Spawn the ICE keeper
     tokio::spawn(ice_conn.ice_keeper.run());
 
     let endpoint = quic::make_server_endpoint(ice_conn.socket, quic_identity.server_config)?;
-    println!(
-        "Waiting for receiver QUIC connection (timeout: {:?})...",
-        QUIC_CONNECTION_TIMEOUT
-    );
 
     let connecting = tokio::time::timeout(QUIC_CONNECTION_TIMEOUT, endpoint.accept())
         .await
@@ -1324,14 +1549,14 @@ pub async fn run_nostr_udp_sender(
         .await
         .context("Timeout during QUIC handshake")?
         .context("Failed to accept QUIC connection")?;
-    println!("Receiver connected over QUIC.");
+    println!("[{}] QUIC connected", short_id);
 
     let (send_stream, recv_stream) = conn
         .accept_bi()
         .await
         .context("Failed to accept stream from receiver")?;
 
-    println!("Forwarding UDP traffic to {}", target_addr);
+    println!("[{}] Forwarding UDP traffic to {}", short_id, target_addr);
 
     // Bind to the same address family as the target
     let bind_addr: SocketAddr = if target_addr.is_ipv6() {
@@ -1348,9 +1573,54 @@ pub async fn run_nostr_udp_sender(
     forward_stream_to_udp_sender_quic(recv_stream, send_stream, udp_socket, target_addr).await?;
 
     conn.close(0u32.into(), b"done");
-    println!("Connection closed.");
+    println!("[{}] UDP session closed", short_id);
 
     Ok(())
+}
+
+pub async fn run_nostr_udp_sender(
+    target: String,
+    stun_servers: Vec<String>,
+    nsec: String,
+    peer_npub: String,
+    relays: Vec<String>,
+    republish_interval_secs: u64,
+    max_wait_secs: u64,
+    max_sessions: usize,
+) -> Result<()> {
+    // Ensure crypto provider is installed before nostr-sdk uses rustls
+    quic::ensure_crypto_provider();
+
+    let target_addr = resolve_target_addr(&target)
+        .await
+        .with_context(|| format!("Invalid target address or hostname '{}'", target))?;
+
+    println!("Nostr UDP Tunnel - Sender Mode (Multi-Session)");
+    println!("===============================================");
+
+    // Create Nostr signaling client
+    let relay_list = if relays.is_empty() { None } else { Some(relays) };
+    let signaling = Arc::new(NostrSignaling::new(&nsec, &peer_npub, relay_list).await?);
+
+    println!("Your pubkey: {}", signaling.public_key_bech32());
+    println!("Transfer ID: {}", signaling.transfer_id());
+    println!("Relays: {:?}", signaling.relay_urls());
+
+    // Subscribe to incoming events
+    signaling.subscribe().await?;
+
+    // Run the session management loop
+    run_nostr_sender_loop(
+        "UDP",
+        target_addr,
+        signaling,
+        stun_servers,
+        republish_interval_secs,
+        max_wait_secs,
+        max_sessions,
+        handle_nostr_udp_session,
+    )
+    .await
 }
 
 pub async fn run_nostr_udp_receiver(
@@ -1465,7 +1735,7 @@ pub async fn run_nostr_udp_receiver(
         .context("Failed to connect to sender")?;
     println!("Connected to sender over QUIC.");
 
-    let (send_stream, recv_stream) = conn.open_bi().await.context("Failed to open stream")?;
+    let (send_stream, recv_stream) = open_bi_with_retry(&conn).await?;
 
     let udp_socket = Arc::new(
         UdpSocket::bind(listen_addr)
@@ -1524,13 +1794,110 @@ async fn handle_tcp_sender_stream_quic(
 /// the STREAM frame is immediately sent to the peer.
 const STREAM_OPEN_MARKER: u8 = 0x00;
 
+/// Maximum attempts for opening QUIC streams
+const STREAM_OPEN_MAX_ATTEMPTS: u32 = 3;
+
+/// Base delay for exponential backoff (doubles each attempt)
+const STREAM_OPEN_BASE_DELAY_MS: u64 = 100;
+
+/// Maximum multiplier for exponential backoff to keep delays bounded.
+/// With base delay of 100ms, this caps max delay at ~102 seconds.
+const BACKOFF_MAX_MULTIPLIER: u64 = 1024;
+
+/// Generic retry helper with exponential backoff.
+///
+/// Attempts an async operation up to `max_attempts` times with exponential backoff.
+/// The delay doubles each attempt starting from `base_delay_ms`.
+///
+/// # Arguments
+/// * `operation` - Async closure returning `Result<T, E>` to attempt
+/// * `max_attempts` - Maximum number of attempts before giving up
+/// * `base_delay_ms` - Initial delay in milliseconds (doubles each attempt)
+/// * `operation_name` - Name for logging (e.g., "open QUIC stream")
+///
+/// # Returns
+/// The successful result, or an `anyhow::Error` after all attempts are exhausted.
+async fn retry_with_backoff<T, E, F, Fut>(
+    operation: F,
+    max_attempts: u32,
+    base_delay_ms: u64,
+    operation_name: &str,
+) -> Result<T>
+where
+    E: std::fmt::Display,
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = Result<T, E>>,
+{
+    if max_attempts == 0 {
+        return Err(anyhow::anyhow!(
+            "max_attempts must be > 0 for {}",
+            operation_name
+        ));
+    }
+    debug_assert!(max_attempts > 0, "max_attempts must be > 0");
+
+    for attempt in 0..max_attempts {
+        match operation().await {
+            Ok(result) => return Ok(result),
+            Err(e) => {
+                let is_last_attempt = attempt + 1 >= max_attempts;
+                if is_last_attempt {
+                    // Final attempt failed - return error immediately without sleeping
+                    return Err(anyhow::anyhow!(
+                        "Failed to {} after {} attempts: {}",
+                        operation_name,
+                        max_attempts,
+                        e
+                    ));
+                }
+                // More attempts remaining - log attempt message and sleep
+                // Use saturating arithmetic and cap multiplier to keep delays bounded
+                let multiplier = 1u64
+                    .checked_shl(attempt)
+                    .unwrap_or(BACKOFF_MAX_MULTIPLIER)
+                    .min(BACKOFF_MAX_MULTIPLIER);
+                let delay_ms = base_delay_ms.saturating_mul(multiplier);
+                eprintln!(
+                    "Failed to {} (attempt {}/{}): {}. Next attempt in {}ms...",
+                    operation_name,
+                    attempt + 1,
+                    max_attempts,
+                    e,
+                    delay_ms
+                );
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+            }
+        }
+    }
+
+    // This should be unreachable if max_attempts > 0, but handle edge case
+    Err(anyhow::anyhow!(
+        "Failed to {} with no attempts",
+        operation_name
+    ))
+}
+
+/// Open a QUIC bidirectional stream with retry and exponential backoff.
+/// Returns the stream pair on success, or an error after all retries are exhausted.
+async fn open_bi_with_retry(
+    conn: &quinn::Connection,
+) -> Result<(quinn::SendStream, quinn::RecvStream)> {
+    retry_with_backoff(
+        || conn.open_bi(),
+        STREAM_OPEN_MAX_ATTEMPTS,
+        STREAM_OPEN_BASE_DELAY_MS,
+        "open QUIC stream",
+    )
+    .await
+}
+
 async fn handle_tcp_receiver_connection_quic(
     conn: Arc<quinn::Connection>,
     tcp_stream: TcpStream,
     peer_addr: SocketAddr,
     tunnel_established: Arc<AtomicBool>,
 ) -> Result<()> {
-    let (mut send_stream, recv_stream) = conn.open_bi().await.context("Failed to open QUIC stream")?;
+    let (mut send_stream, recv_stream) = open_bi_with_retry(&conn).await?;
 
     // Write a marker byte to ensure the STREAM frame is sent to the peer.
     // QUIC defers sending STREAM frames until actual data is written,
@@ -1694,13 +2061,26 @@ async fn forward_stream_to_udp_receiver_quic(
 
 // no longer used: multiline payloads are read via markers in signaling.rs
 
+/// Open an iroh QUIC bidirectional stream with retry and exponential backoff.
+async fn open_bi_with_retry_iroh(
+    conn: &iroh::endpoint::Connection,
+) -> Result<(iroh::endpoint::SendStream, iroh::endpoint::RecvStream)> {
+    retry_with_backoff(
+        || conn.open_bi(),
+        STREAM_OPEN_MAX_ATTEMPTS,
+        STREAM_OPEN_BASE_DELAY_MS,
+        "open QUIC stream",
+    )
+    .await
+}
+
 async fn handle_tcp_receiver_connection(
     conn: Arc<iroh::endpoint::Connection>,
     tcp_stream: TcpStream,
     peer_addr: SocketAddr,
     tunnel_established: Arc<AtomicBool>,
 ) -> Result<()> {
-    let (send_stream, recv_stream) = conn.open_bi().await.context("Failed to open QUIC stream")?;
+    let (send_stream, recv_stream) = open_bi_with_retry_iroh(&conn).await?;
 
     // Print success message only on first successful stream
     if !tunnel_established.swap(true, Ordering::Relaxed) {
@@ -1765,8 +2145,12 @@ where
 async fn create_iroh_manual_endpoint(alpn: &[u8]) -> Result<(Endpoint, Arc<StaticProvider>)> {
     let discovery = Arc::new(StaticProvider::new());
 
+    // Configure transport: 5 minute idle timeout with 15s keepalive.
+    // Active connections send pings every 15s, so idle timeout only triggers
+    // for truly dead/unresponsive connections.
     let mut transport_config = iroh::endpoint::TransportConfig::default();
-    transport_config.max_idle_timeout(None);
+    transport_config.max_idle_timeout(Some(Duration::from_secs(300).try_into().unwrap()));
+    transport_config.keep_alive_interval(Some(Duration::from_secs(15)));
 
     let endpoint = Endpoint::empty_builder(RelayMode::Disabled)
         .transport_config(transport_config)
@@ -2252,7 +2636,7 @@ pub async fn run_iroh_manual_udp_receiver(listen: String, stun_servers: Vec<Stri
 
     println!("Peer connected: {}", conn.remote_id());
 
-    let (send_stream, recv_stream) = conn.open_bi().await.context("Failed to open stream")?;
+    let (send_stream, recv_stream) = open_bi_with_retry_iroh(&conn).await?;
 
     let udp_socket = Arc::new(
         UdpSocket::bind(listen_addr)

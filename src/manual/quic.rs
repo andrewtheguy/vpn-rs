@@ -1,8 +1,9 @@
 //! QUIC setup helpers for manual mode.
 
 use anyhow::{Context, Result};
-use quinn::{AsyncUdpSocket, ClientConfig, Endpoint, EndpointConfig, Runtime, ServerConfig};
+use quinn::{AsyncUdpSocket, ClientConfig, Endpoint, EndpointConfig, IdleTimeout, Runtime, ServerConfig};
 use quinn::crypto::rustls::QuicClientConfig;
+use std::time::Duration;
 use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer, ServerName, UnixTime};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
@@ -13,6 +14,21 @@ pub fn ensure_crypto_provider() {
     // Install aws-lc-rs as the default crypto provider for rustls.
     // This is separate from str0m's crypto provider.
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+}
+
+/// Create base transport config with common settings for both server and client.
+///
+/// Configures 5 minute idle timeout with 15s keepalive. Active connections send
+/// pings every 15s, so idle timeout only triggers for truly dead/unresponsive
+/// connections.
+fn create_base_transport_config() -> quinn::TransportConfig {
+    let mut transport = quinn::TransportConfig::default();
+    transport.max_idle_timeout(Some(
+        IdleTimeout::try_from(Duration::from_secs(300))
+            .expect("300s is a valid IdleTimeout duration"),
+    ));
+    transport.keep_alive_interval(Some(Duration::from_secs(15)));
+    transport
 }
 
 pub struct QuicServerIdentity {
@@ -35,9 +51,12 @@ pub fn generate_server_identity() -> Result<QuicServerIdentity> {
 
     let mut server_config =
         ServerConfig::with_single_cert(cert_chain, key.into()).context("Invalid TLS config")?;
-    if let Some(transport) = Arc::get_mut(&mut server_config.transport) {
-        transport.max_concurrent_uni_streams(0_u8.into());
-    }
+
+    let mut transport = create_base_transport_config();
+    // Server only accepts bidirectional streams for tunnel data; disable
+    // unidirectional streams since this protocol doesn't use them.
+    transport.max_concurrent_uni_streams(0_u8.into());
+    server_config.transport_config(Arc::new(transport));
 
     Ok(QuicServerIdentity {
         server_config,
@@ -90,7 +109,16 @@ fn build_client_config(expected_fingerprint: &str) -> Result<ClientConfig> {
 
     let quic_cfg = QuicClientConfig::try_from(rustls_config)
         .context("Failed to build QUIC client config")?;
-    Ok(ClientConfig::new(Arc::new(quic_cfg)))
+
+    let mut client_config = ClientConfig::new(Arc::new(quic_cfg));
+
+    let mut transport = create_base_transport_config();
+    // Client only uses bidirectional streams for tunnel data; disable
+    // unidirectional streams since this protocol doesn't use them.
+    transport.max_concurrent_uni_streams(0_u8.into());
+    client_config.transport_config(Arc::new(transport));
+
+    Ok(client_config)
 }
 
 fn cert_fingerprint_hex(cert_der: &[u8]) -> String {

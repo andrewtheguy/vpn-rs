@@ -1,8 +1,8 @@
 # tunnel-rs
 
-**Cross-platform Secure peer-to-peer TCP/UDP port forwarding with NAT traversal.**
+**Cross-platform Secure Peer-to-Peer TCP/UDP port forwarding with NAT traversal.**
 
-tunnel-rs enables you to forward TCP and UDP traffic between machines without requiring public IP addresses, port forwarding, or VPN infrastructure. It establishes direct encrypted connections between peers using modern P2P networking techniques.
+Tunnel-rs enables you to forward TCP and UDP traffic between machines without requiring public IP addresses, port forwarding, or VPN infrastructure. It establishes direct encrypted connections between peers using modern P2P networking techniques.
 
 **Key Features:**
 - **Cross-platform support** — Works on Linux, macOS, and Windows
@@ -640,13 +640,29 @@ When no relays are specified, these public relays are used:
 - Full ICE provides best NAT traversal (same as custom mode)
 - **Receiver-first protocol:** The receiver initiates the connection by publishing a request first; sender waits for a request before publishing its offer
 
-## Current Limitations (All Manual Signaling Modes)
+## Current Limitations
 
-> **Note:** These limitations apply to `iroh-manual`, `custom`, and `nostr` modes. The `iroh-default` mode supports multiple simultaneous receivers.
+### Multi-Session Support
 
-**Single Session:** The sender handles one tunnel session at a time. Each signaling exchange (offer/answer or request/offer/answer) establishes exactly one tunnel. For multiple simultaneous tunnels:
+| Mode | Multi-Session Support |
+|------|----------------------|
+| `iroh-default` | **Yes** - supports multiple simultaneous receivers |
+| `nostr` | **Yes** - use `--max-sessions` (default: 10) |
+| `iroh-manual` | No - single session per sender |
+| `custom` | No - single session per sender |
+
+**Nostr Multi-Session Usage:**
+```bash
+# Accept up to 5 concurrent sessions from the same peer
+tunnel-rs sender nostr -s tcp://127.0.0.1:22 --nsec <KEY> --peer-npub <NPUB> --max-sessions 5
+
+# Unlimited concurrent sessions
+tunnel-rs sender nostr -s tcp://127.0.0.1:22 --nsec <KEY> --peer-npub <NPUB> --max-sessions 0
+```
+
+**For single-session modes (`iroh-manual`, `custom`):**
 - Use different keypairs/instances for each tunnel
-- Or use `iroh-default` mode which supports multiple receivers
+- Or use `iroh-default` or `nostr` mode which support multiple receivers
 - Future: Multi-session support planned (see [Roadmap](docs/ROADMAP.md))
 
 ---
