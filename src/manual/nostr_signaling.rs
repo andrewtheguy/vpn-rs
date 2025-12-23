@@ -422,7 +422,7 @@ impl NostrSignaling {
     ) -> Option<Result<Option<ManualOffer>, OfferWaitError>> {
         // Check for offer first
         if let Some(offer) = self.try_parse_event::<ManualOffer>(event, SIGNALING_TYPE_OFFER) {
-            if offer.session_id.as_ref() == Some(&session_id.to_string()) {
+            if offer.session_id.as_deref() == Some(session_id) {
                 println!("Received {} from peer", SIGNALING_TYPE_OFFER);
                 return Some(Ok(Some(offer)));
             }
@@ -547,7 +547,7 @@ impl NostrSignaling {
     /// Check a single event for an answer matching the session ID.
     fn check_event_for_answer(&self, event: &Event, session_id: &str) -> Option<ManualAnswer> {
         if let Some(answer) = self.try_parse_event::<ManualAnswer>(event, SIGNALING_TYPE_ANSWER) {
-            if answer.session_id.as_ref() == Some(&session_id.to_string()) {
+            if answer.session_id.as_deref() == Some(session_id) {
                 println!("Received {} from peer", SIGNALING_TYPE_ANSWER);
                 return Some(answer);
             }
