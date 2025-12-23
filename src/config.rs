@@ -23,7 +23,9 @@ use std::path::{Path, PathBuf};
 pub struct IrohDefaultConfig {
     /// Path to secret key file for persistent identity (sender only)
     pub secret_file: Option<PathBuf>,
-    /// Base64-encoded secret key for persistent identity (sender only)
+    /// Base64-encoded secret key for persistent identity (sender only).
+    /// Prefer `secret_file` in production; inline secrets are best kept to testing or
+    /// special cases due to VCS/log exposure risk. Secret files should be 0600 on Unix.
     pub secret: Option<String>,
     pub relay_urls: Option<Vec<String>>,
     pub relay_only: Option<bool>,
@@ -329,6 +331,15 @@ impl ReceiverConfig {
         }
 
         // Mode-specific validation
+        if expected_mode == "iroh-default" {
+            if let Some(ref iroh) = self.iroh_default {
+                if iroh.secret.is_some() || iroh.secret_file.is_some() {
+                    anyhow::bail!(
+                        "[iroh-default] 'secret' and 'secret_file' are sender-only fields."
+                    );
+                }
+            }
+        }
         if expected_mode == "nostr" {
             if let Some(ref nostr) = self.nostr {
                 if nostr.nsec.is_some() && nostr.nsec_file.is_some() {
