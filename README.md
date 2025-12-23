@@ -16,13 +16,17 @@ Tunnel-rs enables you to forward TCP and UDP traffic between machines without re
 - **High performance** with QUIC multiplexing
 
 **Common Use Cases:**
-- SSH access to machines behind NAT/firewalls
-- WireGuard VPN tunneling over P2P connections
-- General UDP tunneling (in addition to TCP; e.g., game servers, VoIP, custom UDP services)
-- Remote desktop access without port forwarding
-- Secure service exposure without public infrastructure
-- Development and testing across network boundaries
-- Cross-platform tunneling (including Windows endpoints)
+- **SSH access** to machines behind NAT/firewalls
+- **UDP Tunneling** — A key advantage over AWS SSM and `kubectl port-forward` which typically lack UDP support. Ideal for:
+  - WireGuard VPNs over P2P
+  - Game servers (Valheim, Minecraft Bedrock, etc.)
+  - VoIP applications and WebRTC
+  - Accessing UDP services in Kubernetes (bypassing the [7+ year old limitation in `kubectl`](https://github.com/kubernetes/kubernetes/issues/47862) without complex sidecar workarounds)
+- **Simpler Alternative to SSM For Staging Environment Access Purposes** — Great for ad-hoc access without configuring AWS agents or IAM users. **Note:** Not intended for production; it is not battle-tested for enterprise use and lacks integration with cloud security policies (IAM, auditing).
+- **Remote Desktop** access (RDP/VNC over TCP) without port forwarding
+- **Secure Service Exposure** (HTTP servers, databases, etc.) without public infrastructure
+- **Development and Testing** of TCP/UDP services across network boundaries
+- **Cross-platform Tunneling** for both TCP and UDP workflows (including Windows endpoints)
 
 ## Overview
 
