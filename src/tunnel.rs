@@ -61,19 +61,94 @@ async fn resolve_all_target_addrs(target: &str) -> Result<Vec<SocketAddr>> {
     Ok(addrs)
 }
 
-/// Try to connect to any of the given addresses, returning the first successful connection.
-/// This handles mixed IPv4/IPv6 environments where the service may only be on one address family.
+/// Delay between starting connection attempts (Happy Eyeballs style).
+const CONNECTION_ATTEMPT_DELAY: Duration = Duration::from_millis(250);
+
+/// Try to connect to any of the given addresses using Happy Eyeballs algorithm (RFC 8305).
+/// - Prefers IPv6 addresses (tried first)
+/// - Interleaves IPv6 and IPv4 attempts
+/// - Staggers connection attempts with a small delay
+/// - Returns first successful connection, cancels remaining attempts
 async fn try_connect_tcp(addrs: &[SocketAddr]) -> Result<TcpStream> {
-    let mut last_error = None;
-    for addr in addrs {
-        match TcpStream::connect(addr).await {
-            Ok(stream) => return Ok(stream),
-            Err(e) => last_error = Some(e),
+    use tokio::sync::mpsc;
+
+    if addrs.is_empty() {
+        anyhow::bail!("No addresses to connect to");
+    }
+
+    // Separate addresses by family, preferring IPv6
+    let (ipv6, ipv4): (Vec<SocketAddr>, Vec<SocketAddr>) = addrs.iter().copied().partition(|a| a.is_ipv6());
+
+    // Interleave addresses: IPv6 first, then alternate
+    let mut ordered = Vec::with_capacity(addrs.len());
+    let mut v6_iter = ipv6.into_iter();
+    let mut v4_iter = ipv4.into_iter();
+
+    // Start with IPv6 if available
+    while ordered.len() < addrs.len() {
+        if let Some(addr) = v6_iter.next() {
+            ordered.push(addr);
+        }
+        if let Some(addr) = v4_iter.next() {
+            ordered.push(addr);
         }
     }
-    Err(last_error
-        .map(|e| anyhow::anyhow!("Failed to connect to any address: {}", e))
-        .unwrap_or_else(|| anyhow::anyhow!("No addresses to connect to")))
+
+    // Channel for connection results
+    let (tx, mut rx) = mpsc::channel::<(SocketAddr, Result<TcpStream, std::io::Error>)>(ordered.len());
+
+    // Spawn staggered connection attempts
+    let mut handles = Vec::with_capacity(ordered.len());
+    for (i, addr) in ordered.into_iter().enumerate() {
+        let tx = tx.clone();
+        let handle = tokio::spawn(async move {
+            // Stagger attempts: first immediately, then with delay
+            if i > 0 {
+                tokio::time::sleep(CONNECTION_ATTEMPT_DELAY * i as u32).await;
+            }
+            let result = TcpStream::connect(addr).await;
+            // Ignore send error (receiver may have closed on success)
+            let _ = tx.send((addr, result)).await;
+        });
+        handles.push(handle);
+    }
+    drop(tx); // Close sender so rx completes when all attempts finish
+
+    // Collect errors for reporting if all fail
+    let mut errors: Vec<(SocketAddr, std::io::Error)> = Vec::new();
+
+    // Wait for first success or all failures
+    while let Some((addr, result)) = rx.recv().await {
+        match result {
+            Ok(stream) => {
+                // Success! Cancel remaining attempts
+                for handle in handles {
+                    handle.abort();
+                }
+                return Ok(stream);
+            }
+            Err(e) => {
+                errors.push((addr, e));
+            }
+        }
+    }
+
+    // All attempts failed - build error message
+    if errors.is_empty() {
+        anyhow::bail!("No addresses to connect to");
+    } else if errors.len() == 1 {
+        let (addr, e) = errors.remove(0);
+        anyhow::bail!("Failed to connect to {}: {}", addr, e);
+    } else {
+        let error_details: Vec<String> = errors
+            .iter()
+            .map(|(addr, e)| format!("{}: {}", addr, e))
+            .collect();
+        anyhow::bail!(
+            "Failed to connect to any address:\n  {}",
+            error_details.join("\n  ")
+        );
+    }
 }
 
 /// Generate a random session ID for nostr signaling.
