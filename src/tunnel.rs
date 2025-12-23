@@ -77,6 +77,10 @@ async fn publish_offer_and_wait_for_answer(
     let mut current_interval = republish_interval_secs;
     const MAX_INTERVAL: u64 = 60;
 
+    // Create receiver BEFORE publishing to avoid race where answer arrives
+    // between publish and starting to listen.
+    let mut receiver = signaling.create_notification_receiver();
+
     signaling.publish_offer(offer).await?;
     println!(
         "Waiting for answer (re-publishing with backoff, starting {}s, max {}s)...",
@@ -87,7 +91,7 @@ async fn publish_offer_and_wait_for_answer(
         // Use session-specific waiting to support concurrent multi-session mode.
         // Each session gets its own receiver so answers aren't consumed by other sessions.
         if let Some(ans) = signaling
-            .try_wait_for_answer_with_session_id(session_id, current_interval)
+            .try_wait_for_answer_with_session_id(&mut receiver, session_id, current_interval)
             .await
         {
             return Ok(ans);

@@ -125,7 +125,10 @@ pub fn create_endpoint_builder(
     // Configure transport with keep-alive and idle timeout.
     // See QUIC_KEEP_ALIVE_INTERVAL and QUIC_IDLE_TIMEOUT constants for rationale.
     let mut transport_config = iroh::endpoint::TransportConfig::default();
-    transport_config.max_idle_timeout(Some(QUIC_IDLE_TIMEOUT.try_into().unwrap()));
+    let idle_timeout = QUIC_IDLE_TIMEOUT
+        .try_into()
+        .context("converting QUIC_IDLE_TIMEOUT to IdleTimeout")?;
+    transport_config.max_idle_timeout(Some(idle_timeout));
     transport_config.keep_alive_interval(Some(QUIC_KEEP_ALIVE_INTERVAL));
 
     let mut builder = Endpoint::empty_builder(relay_mode)

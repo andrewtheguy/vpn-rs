@@ -14,6 +14,11 @@ use tokio::sync::Mutex;
 
 use super::signaling::{ManualAnswer, ManualOffer, ManualReject, ManualRequest};
 
+/// Type alias for the notification receiver from the Nostr client.
+/// Callers can obtain a receiver via [`NostrSignaling::create_notification_receiver`]
+/// before publishing to avoid missing messages.
+pub type NotificationReceiver = tokio::sync::broadcast::Receiver<RelayPoolNotification>;
+
 /// Custom event kind for tunnel-rs signaling (ephemeral range)
 fn tunnel_signaling_kind() -> Kind {
     Kind::from_u16(24242)
@@ -184,6 +189,22 @@ impl NostrSignaling {
     /// Get the relay URLs we're connected to
     pub fn relay_urls(&self) -> &[String] {
         &self.relay_urls
+    }
+
+    /// Create a fresh notification receiver for receiving messages.
+    ///
+    /// Use this to obtain a receiver BEFORE publishing a message when you need
+    /// to wait for a response. This eliminates the race condition where a response
+    /// could arrive between publishing and starting to listen.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let mut receiver = signaling.create_notification_receiver();
+    /// signaling.publish_offer(&offer).await?;
+    /// let answer = signaling.wait_for_answer_with_receiver(&mut receiver, session_id, timeout).await;
+    /// ```
+    pub fn create_notification_receiver(&self) -> NotificationReceiver {
+        self.client.notifications()
     }
 
     /// Subscribe to incoming signaling events for our pubkey
@@ -545,32 +566,33 @@ impl NostrSignaling {
         }
     }
 
-    /// Wait for an answer matching a specific session ID using a fresh receiver.
+    /// Wait for an answer matching a specific session ID using a caller-provided receiver.
     ///
-    /// # Receiver Strategy: Fresh (per-call)
+    /// # Receiver Strategy: Caller-provided
     ///
-    /// This method creates a NEW broadcast receiver via `self.client.notifications()`
-    /// each time it is called. Each receiver gets its own independent copy of messages
-    /// from the broadcast channel.
+    /// The caller must create a receiver via [`create_notification_receiver`](Self::create_notification_receiver)
+    /// BEFORE publishing the offer. This eliminates the race condition where an answer
+    /// could arrive between publishing and starting to listen.
     ///
     /// **Trade-offs:**
-    /// - **Concurrent waiting**: Multiple tasks can wait simultaneously without blocking
-    ///   each other or consuming each other's messages.
-    /// - **May miss messages**: Messages sent before this method is called are not received
-    ///   because the receiver didn't exist yet.
+    /// - **No message loss**: Receiver exists before publish, so answers are captured.
+    /// - **Concurrent waiting**: Multiple tasks can wait with their own receivers.
     /// - **No mutex contention**: Callers don't need to wait for a lock.
     ///
-    /// Use this method when multiple concurrent sessions need to wait for their own
-    /// answers independently (e.g., sender handling multiple receiver sessions).
-    /// Always call this AFTER publishing the offer to ensure the answer is received.
+    /// # Example
+    /// ```ignore
+    /// let mut receiver = signaling.create_notification_receiver();
+    /// signaling.publish_offer(&offer).await?;
+    /// let answer = signaling.try_wait_for_answer_with_session_id(&mut receiver, session_id, timeout).await;
+    /// ```
     ///
     /// # Comparison with `try_wait_for_offer_or_rejection`
     ///
     /// | Aspect | This method | `try_wait_for_offer_or_rejection` |
     /// |--------|-------------|-----------------------------------|
-    /// | Receiver | Fresh per-call | Persistent (Mutex-locked) |
+    /// | Receiver | Caller-provided | Persistent (Mutex-locked) |
     /// | Concurrency | Parallel waiting OK | Serialized (one at a time) |
-    /// | Message loss | May miss early messages | Never misses |
+    /// | Message loss | None (if created before publish) | Never misses |
     /// | Use case | Multi-session sender | Single-session receiver |
     ///
     /// # Returns
@@ -578,11 +600,10 @@ impl NostrSignaling {
     /// - `None` on timeout or channel closed
     pub async fn try_wait_for_answer_with_session_id(
         &self,
+        receiver: &mut NotificationReceiver,
         session_id: &str,
         timeout_secs: u64,
     ) -> Option<ManualAnswer> {
-        // Create a fresh receiver for this session - allows concurrent waiting
-        let mut notifications = self.client.notifications();
         let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_secs);
 
         loop {
@@ -592,7 +613,7 @@ impl NostrSignaling {
             }
             let wait_duration = remaining.min(Duration::from_secs(1));
 
-            match tokio::time::timeout(wait_duration, notifications.recv()).await {
+            match tokio::time::timeout(wait_duration, receiver.recv()).await {
                 Ok(Ok(RelayPoolNotification::Event { event, .. })) => {
                     if let Some(answer) = self.check_event_for_answer(&event, session_id) {
                         return Some(answer);
@@ -610,7 +631,7 @@ impl NostrSignaling {
                             skipped
                         );
                         // Drain buffered messages and check for matching answer
-                        if let Some(answer) = self.drain_and_find_answer(&mut notifications, session_id) {
+                        if let Some(answer) = self.drain_and_find_answer(receiver, session_id) {
                             return Some(answer);
                         }
                         // No matching answer found in buffer, continue waiting
