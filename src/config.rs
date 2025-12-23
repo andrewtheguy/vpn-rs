@@ -129,22 +129,22 @@ fn validate_cidr(cidr: &str) -> Result<()> {
     Ok(())
 }
 
-/// Validate that a string is a valid source URL (tcp://host:port or udp://host:port).
-fn validate_source_url(source: &str) -> Result<()> {
-    let url = url::Url::parse(source)
-        .with_context(|| format!("Invalid source URL '{}'. Expected format: tcp://host:port or udp://host:port", source))?;
+/// Validate that a string is a valid tcp:// or udp:// URL with host and port.
+fn validate_tcp_udp_url(value: &str, field_name: &str) -> Result<()> {
+    let url = url::Url::parse(value)
+        .with_context(|| format!("Invalid {} '{}'. Expected format: tcp://host:port or udp://host:port", field_name, value))?;
 
     let scheme = url.scheme();
     if scheme != "tcp" && scheme != "udp" {
-        anyhow::bail!("Invalid source URL scheme '{}'. Must be 'tcp' or 'udp'", scheme);
+        anyhow::bail!("Invalid {} scheme '{}'. Must be 'tcp' or 'udp'", field_name, scheme);
     }
 
     if url.host_str().is_none() {
-        anyhow::bail!("Source URL '{}' missing host", source);
+        anyhow::bail!("{} '{}' missing host", field_name, value);
     }
 
     if url.port().is_none() {
-        anyhow::bail!("Source URL '{}' missing port", source);
+        anyhow::bail!("{} '{}' missing port", field_name, value);
     }
 
     Ok(())
@@ -247,7 +247,7 @@ impl SenderConfig {
         } else {
             // Non-nostr modes: validate source URL format if present
             if let Some(ref source) = self.source {
-                validate_source_url(source)?;
+                validate_tcp_udp_url(source, "source")?;
             }
         }
 
@@ -329,14 +329,14 @@ impl ReceiverConfig {
                 }
                 // Validate request_source URL format
                 if let Some(ref source) = nostr.request_source {
-                    validate_source_url(source)?;
+                    validate_tcp_udp_url(source, "request_source")?;
                 }
             }
         }
 
         // Validate target URL format if present
         if let Some(ref target) = self.target {
-            validate_source_url(target)?;
+            validate_tcp_udp_url(target, "target")?;
         }
 
         Ok(())

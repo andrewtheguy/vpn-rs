@@ -60,6 +60,20 @@ fn short_session_id(session_id: &str) -> &str {
     &session_id[..8.min(session_id.len())]
 }
 
+/// Validate that all entries in allowed_networks are valid CIDR notation.
+/// Returns an error with context if any entry fails to parse.
+fn validate_allowed_networks(allowed_networks: &[String], label: &str) -> Result<()> {
+    for network_str in allowed_networks {
+        network_str.parse::<ipnet::IpNet>().with_context(|| {
+            format!(
+                "Invalid CIDR '{}' in {}. Expected format: 192.168.0.0/16 or ::1/128",
+                network_str, label
+            )
+        })?;
+    }
+    Ok(())
+}
+
 /// Check if a source address is allowed by any network in the CIDR list.
 ///
 /// The source format is `protocol://host:port` (e.g., `tcp://192.168.1.100:22`).
@@ -83,20 +97,12 @@ fn is_source_allowed(source: &str, allowed_networks: &[String]) -> bool {
         return false; // Can't validate non-IP hostnames against CIDR
     };
 
-    // Check against each allowed network
+    // Check against each allowed network (pre-validated at startup)
     for network_str in allowed_networks {
-        match network_str.parse::<ipnet::IpNet>() {
-            Ok(network) => {
-                if network.contains(&source_ip) {
-                    return true;
-                }
-            }
-            Err(e) => {
-                eprintln!(
-                    "Warning: Invalid CIDR '{}' in allowed_networks: {}",
-                    network_str, e
-                );
-            }
+        // unwrap is safe: networks are validated at startup by validate_allowed_networks
+        let network: ipnet::IpNet = network_str.parse().unwrap();
+        if network.contains(&source_ip) {
+            return true;
         }
     }
 
@@ -1439,6 +1445,10 @@ pub async fn run_nostr_sender(
 ) -> Result<()> {
     // Ensure crypto provider is installed before nostr-sdk uses rustls
     quic::ensure_crypto_provider();
+
+    // Validate CIDR networks upfront (fail fast on misconfiguration)
+    validate_allowed_networks(&allowed_tcp, "--allowed-tcp")?;
+    validate_allowed_networks(&allowed_udp, "--allowed-udp")?;
 
     println!("Nostr Tunnel - Sender Mode (Multi-Session)");
     println!("==========================================");
