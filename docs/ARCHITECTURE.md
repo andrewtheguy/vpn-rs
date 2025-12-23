@@ -118,7 +118,7 @@ graph TD
     subgraph "iroh-default"
         A1[Discovery: Automatic]
         A2[NAT: Relay Fallback]
-        A3[Setup: Minimal (EndpointId required)]
+        A3[Setup: Minimal - EndpointId required]
         A4[Infrastructure: Required]
     end
     
