@@ -152,38 +152,6 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: Dockerfile.build
-          target: runtime-prebuilt
-          push: false
-          outputs: type=oci,dest=/tmp/image-${{ matrix.arch }}.tar
-          cache-from: type=gha,scope=docker-${{ matrix.arch }}
-          cache-to: type=gha,mode=max,scope=docker-${{ matrix.arch }}
-
-      - name: Upload OCI image
-        uses: actions/upload-artifact@v4
-        with:
-          name: docker-image-${{ matrix.arch }}
-          path: /tmp/image-${{ matrix.arch }}.tar
-
-  docker-push:
-    needs: [setup, docker-build]
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Download OCI images
-        uses: actions/download-artifact@v4
-        with:
-          path: images
-          pattern: docker-image-*
-          merge-multiple: true
-
-      - name: Install skopeo
-        run: sudo apt-get update && sudo apt-get install -y skopeo
-
       - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
@@ -191,15 +159,34 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Push arch images and create manifest
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.build
+          target: runtime-prebuilt
+          push: true
+          tags: ${{ env.GHCR_IMAGE }}:${{ needs.setup.outputs.release_tag }}-${{ matrix.arch }}
+          provenance: false
+          cache-from: type=gha,scope=docker-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=docker-${{ matrix.arch }}
+
+  docker-manifest:
+    needs: [setup, docker-build]
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create and push multi-arch manifest
         run: |
           TAG=${{ needs.setup.outputs.release_tag }}
 
-          # Push OCI archives to registry with arch-specific tags
-          skopeo copy --all oci-archive:images/image-amd64.tar docker://${{ env.GHCR_IMAGE }}:${TAG}-amd64
-          skopeo copy --all oci-archive:images/image-arm64.tar docker://${{ env.GHCR_IMAGE }}:${TAG}-arm64
-
-          # Create and push multi-arch manifest
           docker manifest create ${{ env.GHCR_IMAGE }}:${TAG} \
             ${{ env.GHCR_IMAGE }}:${TAG}-amd64 \
             ${{ env.GHCR_IMAGE }}:${TAG}-arm64
