@@ -1,6 +1,6 @@
 # tunnel-rs Architecture
 
-This document provides a comprehensive overview of the tunnel-rs architecture, including detailed diagrams of all three operational modes, component interactions, data flows, and security considerations.
+This document provides a comprehensive overview of the tunnel-rs architecture, including detailed diagrams of all four operational modes, component interactions, data flows, and security considerations.
 
 ## Table of Contents
 
@@ -13,6 +13,7 @@ This document provides a comprehensive overview of the tunnel-rs architecture, i
 - [Configuration System](#configuration-system)
 - [Security Model](#security-model)
 - [Protocol Support](#protocol-support)
+- [Mode Capabilities](#mode-capabilities)
 - [Current Limitations](#current-limitations)
 
 ---
@@ -872,6 +873,21 @@ graph TB
 
 Nostr mode combines the full ICE implementation from custom mode with automated signaling via Nostr relays. Instead of manual copy-paste, ICE credentials are exchanged through Nostr events using static keypairs.
 
+### Receiver-Initiated Dynamic Source
+
+Unlike other modes where the sender specifies a fixed `--source`, nostr mode uses a **receiver-initiated** model:
+
+- **Sender**: Whitelists allowed networks with `--allowed-tcp`/`--allowed-udp` (CIDR notation)
+- **Receiver**: Specifies which service to tunnel with `--source` (hostname:port)
+
+This is similar to SSH's `-L` flag for local port forwarding, where the client (receiver) chooses the destination.
+
+```
+Sender: --allowed-tcp 10.0.0.0/8           # Whitelist networks (no ports)
+Receiver: --source tcp://postgres:5432    # Request specific service
+          --target tcp://127.0.0.1:5432   # Local listen address
+```
+
 ### Architecture Overview
 
 ```mermaid
@@ -881,7 +897,7 @@ graph TB
         B[ICE Agent<br/>str0m]
         C[QUIC Endpoint<br/>quinn]
         D[Nostr Client]
-        E[Target Service]
+        E[Target Service<br/>receiver-specified]
     end
 
     subgraph "Nostr Relays"
@@ -901,7 +917,7 @@ graph TB
     A --> B
     B --> C
     A --> D
-    C --> E
+    C -.->|--source| E
 
     I --> J
     J --> K
@@ -922,6 +938,7 @@ graph TB
     style J fill:#FFE0B2
     style D fill:#E1BEE7
     style L fill:#E1BEE7
+    style E fill:#FFF9C4
 ```
 
 ### Receiver-First Signaling Flow
@@ -946,12 +963,13 @@ sequenceDiagram
     STUN-->>R: Server reflexive addresses
 
     Note over R: Create Request
-    R->>R: Encode ufrag, pwd, candidates, session_id, timestamp
+    R->>R: Encode ufrag, pwd, candidates, session_id, timestamp, source
     R->>NR: Publish Request (kind 24242)
 
     NR-->>S: Deliver Request
     S->>S: Validate timestamp (reject stale)
-    S->>S: Extract session_id
+    S->>S: Extract session_id + source
+    S->>S: Validate source against --allowed-tcp/udp
 
     Note over S: Gather ICE candidates
     S->>STUN: STUN queries
@@ -994,6 +1012,7 @@ graph TB
         A[session_id: random 16 hex chars]
         B[timestamp: Unix seconds]
         C[ICE credentials + candidates]
+        C2[source: requested service]
     end
 
     subgraph "Sender Validation"
@@ -1544,13 +1563,25 @@ graph TB
 
 ---
 
+## Mode Capabilities
+
+| Mode | Multi-Session | Dynamic Source | Description |
+|------|---------------|----------------|-------------|
+| `iroh-default` | **Yes** | No | Multiple receivers, fixed `--source` on sender |
+| `nostr` | **Yes** | **Yes** | Multiple receivers, receiver specifies `--source` |
+| `iroh-manual` | No | No | Single session, fixed `--source` on sender |
+| `custom` | No | No | Single session, fixed `--source` on sender |
+
+**Multi-Session** = Multiple concurrent connections to the same sender
+**Dynamic Source** = Receiver specifies which service to tunnel (via `--source`)
+
+---
+
 ## Current Limitations
 
 ### Single Session (Manual Signaling Modes)
 
 The `iroh-manual` and `custom` modes currently support only one tunnel session at a time per sender instance. Each signaling exchange establishes exactly one tunnel.
-
-> **Note:** `iroh-default` and `nostr` modes support multi-session. See [Mode Capabilities](#mode-capabilities) below.
 
 ```mermaid
 graph TB
@@ -1582,19 +1613,6 @@ graph TB
 - Use different keypairs for independent tunnels
 
 See [Roadmap](ROADMAP.md) for planned multi-session support.
-
----
-
-## Future Enhancements
-
-Potential areas for improvement:
-
-1. **Multi-Session Support**: Accept multiple simultaneous receivers in manual signaling modes
-2. **Relay Support for Custom/Nostr Mode**: Add optional relay fallback for symmetric NAT scenarios
-3. **Connection Migration**: Support for IP address changes (QUIC feature)
-4. **Multi-path**: Utilize multiple network paths simultaneously
-5. **Performance Metrics**: Built-in latency and throughput monitoring
-6. **Web UI**: Browser-based configuration and monitoring interface
 
 ---
 
