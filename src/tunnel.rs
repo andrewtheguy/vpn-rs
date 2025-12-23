@@ -1774,28 +1774,28 @@ async fn handle_tcp_sender_stream_quic(
 /// the STREAM frame is immediately sent to the peer.
 const STREAM_OPEN_MARKER: u8 = 0x00;
 
-/// Maximum retry attempts for opening QUIC streams
-const STREAM_OPEN_MAX_RETRIES: u32 = 3;
+/// Maximum attempts for opening QUIC streams
+const STREAM_OPEN_MAX_ATTEMPTS: u32 = 3;
 
-/// Base delay for exponential backoff (doubles each retry)
+/// Base delay for exponential backoff (doubles each attempt)
 const STREAM_OPEN_BASE_DELAY_MS: u64 = 100;
 
 /// Generic retry helper with exponential backoff.
 ///
-/// Retries an async operation up to `max_retries` times with exponential backoff.
-/// The delay doubles each retry starting from `base_delay_ms`.
+/// Attempts an async operation up to `max_attempts` times with exponential backoff.
+/// The delay doubles each attempt starting from `base_delay_ms`.
 ///
 /// # Arguments
-/// * `operation` - Async closure returning `Result<T, E>` to retry
-/// * `max_retries` - Maximum number of attempts before giving up
-/// * `base_delay_ms` - Initial delay in milliseconds (doubles each retry)
+/// * `operation` - Async closure returning `Result<T, E>` to attempt
+/// * `max_attempts` - Maximum number of attempts before giving up
+/// * `base_delay_ms` - Initial delay in milliseconds (doubles each attempt)
 /// * `operation_name` - Name for logging (e.g., "open QUIC stream")
 ///
 /// # Returns
-/// The successful result, or an `anyhow::Error` after all retries are exhausted.
+/// The successful result, or an `anyhow::Error` after all attempts are exhausted.
 async fn retry_with_backoff<T, E, F, Fut>(
     operation: F,
-    max_retries: u32,
+    max_attempts: u32,
     base_delay_ms: u64,
     operation_name: &str,
 ) -> Result<T>
@@ -1804,27 +1804,27 @@ where
     F: Fn() -> Fut,
     Fut: std::future::Future<Output = Result<T, E>>,
 {
-    for attempt in 0..max_retries {
+    for attempt in 0..max_attempts {
         match operation().await {
             Ok(result) => return Ok(result),
             Err(e) => {
-                let is_last_attempt = attempt + 1 >= max_retries;
+                let is_last_attempt = attempt + 1 >= max_attempts;
                 if is_last_attempt {
                     // Final attempt failed - return error immediately without sleeping
                     return Err(anyhow::anyhow!(
                         "Failed to {} after {} attempts: {}",
                         operation_name,
-                        max_retries,
+                        max_attempts,
                         e
                     ));
                 }
-                // More attempts remaining - log retry message and sleep
+                // More attempts remaining - log attempt message and sleep
                 let delay_ms = base_delay_ms * (1 << attempt);
                 eprintln!(
-                    "Failed to {} (attempt {}/{}): {}. Retrying in {}ms...",
+                    "Failed to {} (attempt {}/{}): {}. Next attempt in {}ms...",
                     operation_name,
                     attempt + 1,
-                    max_retries,
+                    max_attempts,
                     e,
                     delay_ms
                 );
@@ -1833,7 +1833,7 @@ where
         }
     }
 
-    // This should be unreachable if max_retries > 0, but handle edge case
+    // This should be unreachable if max_attempts > 0, but handle edge case
     Err(anyhow::anyhow!(
         "Failed to {} with no attempts",
         operation_name
@@ -1847,7 +1847,7 @@ async fn open_bi_with_retry(
 ) -> Result<(quinn::SendStream, quinn::RecvStream)> {
     retry_with_backoff(
         || conn.open_bi(),
-        STREAM_OPEN_MAX_RETRIES,
+        STREAM_OPEN_MAX_ATTEMPTS,
         STREAM_OPEN_BASE_DELAY_MS,
         "open QUIC stream",
     )
@@ -2030,7 +2030,7 @@ async fn open_bi_with_retry_iroh(
 ) -> Result<(iroh::endpoint::SendStream, iroh::endpoint::RecvStream)> {
     retry_with_backoff(
         || conn.open_bi(),
-        STREAM_OPEN_MAX_RETRIES,
+        STREAM_OPEN_MAX_ATTEMPTS,
         STREAM_OPEN_BASE_DELAY_MS,
         "open QUIC stream",
     )
