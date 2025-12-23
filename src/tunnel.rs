@@ -96,25 +96,22 @@ fn is_source_allowed(source: &str, allowed_networks: &[String]) -> bool {
 }
 
 /// Extract address (host:port) from a source URL (protocol://host:port).
-/// Returns the part after "://" without the protocol prefix.
-fn extract_addr_from_source(source: &str) -> Option<&str> {
-    source.split("://").nth(1)
+fn extract_addr_from_source(source: &str) -> Option<String> {
+    let url = url::Url::parse(source).ok()?;
+    let host = url.host_str()?;
+    let port = url.port()?;
+    // Re-add brackets for IPv6 addresses
+    if host.contains(':') {
+        Some(format!("[{}]:{}", host, port))
+    } else {
+        Some(format!("{}:{}", host, port))
+    }
 }
 
 /// Extract host from a source URL (protocol://host:port).
-/// Handles both IPv4 and IPv6 (with brackets).
-fn extract_host_from_source(source: &str) -> Option<&str> {
-    // Skip protocol prefix
-    let addr = extract_addr_from_source(source)?;
-
-    if addr.starts_with('[') {
-        // IPv6: [host]:port
-        let bracket_end = addr.find(']')?;
-        Some(&addr[1..bracket_end])
-    } else {
-        // IPv4 or hostname: host:port
-        Some(addr.rsplit(':').nth(1).unwrap_or(addr))
-    }
+fn extract_host_from_source(source: &str) -> Option<String> {
+    let url = url::Url::parse(source).ok()?;
+    url.host_str().map(|s| s.to_string())
 }
 
 /// Get current Unix timestamp in seconds.
@@ -1325,7 +1322,7 @@ async fn handle_nostr_tcp_session_impl(
         .ok_or_else(|| anyhow::anyhow!("[{}] Invalid source format '{}'", short_id, requested_source))?;
 
     println!("[{}] Forwarding to: {}", short_id, requested_source);
-    let target_addr = resolve_target_addr(target_hostport)
+    let target_addr = resolve_target_addr(&target_hostport)
         .await
         .with_context(|| format!("Invalid source '{}'", requested_source))?;
 
@@ -1641,7 +1638,7 @@ async fn handle_nostr_udp_session_impl(
         .ok_or_else(|| anyhow::anyhow!("[{}] Invalid source format '{}'", short_id, requested_source))?;
 
     println!("[{}] Forwarding to: {}", short_id, requested_source);
-    let target_addr = resolve_target_addr(target_hostport)
+    let target_addr = resolve_target_addr(&target_hostport)
         .await
         .with_context(|| format!("Invalid source '{}'", requested_source))?;
 
