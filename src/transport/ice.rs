@@ -122,7 +122,14 @@ impl IceEndpoint {
         let mut got_ipv6_stun = false;
 
         for stun in stun_servers {
-            for server in resolve_stun_addrs(stun) {
+            let servers = match resolve_stun_addrs(stun).await {
+                Ok(addrs) => addrs,
+                Err(e) => {
+                    warn!("Failed to resolve STUN server '{}': {}", stun, e);
+                    continue;
+                }
+            };
+            for server in servers {
                 // Skip if we already have STUN for this address family
                 let is_ipv4 = server.is_ipv4();
                 if is_ipv4 && got_ipv4_stun {
@@ -399,7 +406,11 @@ impl IceEndpoint {
 
 async fn detect_local_ip(stun_servers: &[String]) -> Option<IpAddr> {
     for server in stun_servers {
-        for addr in resolve_stun_addrs(server) {
+        let addrs = match resolve_stun_addrs(server).await {
+            Ok(addrs) => addrs,
+            Err(_) => continue,
+        };
+        for addr in addrs {
             if let Ok(ip) = local_ip_for_target(addr).await {
                 return Some(ip);
             }

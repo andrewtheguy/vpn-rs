@@ -6,7 +6,7 @@
 //! - Retry logic with exponential backoff
 
 use anyhow::{Context, Result};
-use std::net::{SocketAddr, ToSocketAddrs};
+use std::net::SocketAddr;
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{lookup_host, TcpStream};
@@ -66,16 +66,19 @@ pub async fn resolve_all_target_addrs(target: &str) -> Result<Vec<SocketAddr>> {
     Ok(addrs)
 }
 
-/// Resolve a STUN server address synchronously.
+/// Resolve a STUN server address asynchronously.
 ///
-/// Returns all resolved socket addresses, or an empty Vec on failure.
-/// Uses blocking DNS resolution since STUN servers are typically resolved
-/// once at startup.
-pub fn resolve_stun_addrs(stun: &str) -> Vec<SocketAddr> {
-    match stun.to_socket_addrs() {
-        Ok(iter) => iter.collect(),
-        Err(_) => Vec::new(),
+/// Returns all resolved socket addresses for the STUN server.
+/// The input should be in "host:port" format (e.g., "stun.l.google.com:19302").
+pub async fn resolve_stun_addrs(stun: &str) -> Result<Vec<SocketAddr>> {
+    let addrs: Vec<SocketAddr> = lookup_host(stun)
+        .await
+        .with_context(|| format!("Failed to resolve STUN server '{}'", stun))?
+        .collect();
+    if addrs.is_empty() {
+        anyhow::bail!("No addresses found for STUN server '{}'", stun);
     }
+    Ok(addrs)
 }
 
 // ============================================================================

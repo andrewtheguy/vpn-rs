@@ -670,7 +670,14 @@ async fn get_direct_addresses(endpoint: &Endpoint, stun_servers: &[String]) -> V
         let mut got_ipv6_stun = false;
 
         for stun in stun_servers {
-            for server in resolve_stun_addrs(stun) {
+            let servers = match resolve_stun_addrs(stun).await {
+                Ok(addrs) => addrs,
+                Err(e) => {
+                    log::warn!("Failed to resolve STUN server '{}': {}", stun, e);
+                    continue;
+                }
+            };
+            for server in servers {
                 // Skip if we already have STUN for this address family
                 let is_ipv4 = server.is_ipv4();
                 if is_ipv4 && got_ipv4_stun {
