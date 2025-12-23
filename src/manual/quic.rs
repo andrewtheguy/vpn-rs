@@ -16,6 +16,21 @@ pub fn ensure_crypto_provider() {
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 }
 
+/// Create base transport config with common settings for both server and client.
+///
+/// Configures 5 minute idle timeout with 15s keepalive. Active connections send
+/// pings every 15s, so idle timeout only triggers for truly dead/unresponsive
+/// connections.
+fn create_base_transport_config() -> quinn::TransportConfig {
+    let mut transport = quinn::TransportConfig::default();
+    transport.max_idle_timeout(Some(
+        IdleTimeout::try_from(Duration::from_secs(300))
+            .expect("300s is a valid IdleTimeout duration"),
+    ));
+    transport.keep_alive_interval(Some(Duration::from_secs(15)));
+    transport
+}
+
 pub struct QuicServerIdentity {
     pub server_config: ServerConfig,
     pub fingerprint: String,
@@ -37,15 +52,10 @@ pub fn generate_server_identity() -> Result<QuicServerIdentity> {
     let mut server_config =
         ServerConfig::with_single_cert(cert_chain, key.into()).context("Invalid TLS config")?;
 
-    // Configure transport: 5 minute idle timeout with 15s keepalive.
-    // Active connections send pings every 15s, so idle timeout only triggers
-    // for truly dead/unresponsive connections.
-    let mut transport = quinn::TransportConfig::default();
+    let mut transport = create_base_transport_config();
+    // Server only accepts bidirectional streams for tunnel data; disable
+    // unidirectional streams since this protocol doesn't use them.
     transport.max_concurrent_uni_streams(0_u8.into());
-    transport.max_idle_timeout(Some(
-        IdleTimeout::try_from(Duration::from_secs(300)).unwrap(),
-    ));
-    transport.keep_alive_interval(Some(Duration::from_secs(15)));
     server_config.transport_config(Arc::new(transport));
 
     Ok(QuicServerIdentity {
@@ -101,16 +111,7 @@ fn build_client_config(expected_fingerprint: &str) -> Result<ClientConfig> {
         .context("Failed to build QUIC client config")?;
 
     let mut client_config = ClientConfig::new(Arc::new(quic_cfg));
-
-    // Configure transport: 5 minute idle timeout with 15s keepalive.
-    // Active connections send pings every 15s, so idle timeout only triggers
-    // for truly dead/unresponsive connections.
-    let mut transport = quinn::TransportConfig::default();
-    transport.max_idle_timeout(Some(
-        IdleTimeout::try_from(Duration::from_secs(300)).unwrap(),
-    ));
-    transport.keep_alive_interval(Some(Duration::from_secs(15)));
-    client_config.transport_config(Arc::new(transport));
+    client_config.transport_config(Arc::new(create_base_transport_config()));
 
     Ok(client_config)
 }
