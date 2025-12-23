@@ -1071,17 +1071,18 @@ pub async fn run_nostr_udp_receiver(
     let udp_clone = udp_socket.clone();
     let client_clone = client_addr.clone();
 
-    tokio::select! {
-        result = forward_udp_to_stream(udp_clone, send_stream, client_clone) => {
-            if let Err(e) = result {
-                log::warn!("UDP to stream error: {}", e);
-            }
-        }
-        result = forward_stream_to_udp_receiver(recv_stream, udp_socket, client_addr) => {
-            if let Err(e) = result {
-                log::warn!("Stream to UDP error: {}", e);
-            }
-        }
+    // Use join! instead of select! to allow both tasks to complete and flush buffers
+    let (udp_to_stream_result, stream_to_udp_result) = tokio::join!(
+        forward_udp_to_stream(udp_clone, send_stream, client_clone),
+        forward_stream_to_udp_receiver(recv_stream, udp_socket, client_addr)
+    );
+
+    // Log errors from both tasks
+    if let Err(e) = udp_to_stream_result {
+        log::warn!("UDP to stream error: {}", e);
+    }
+    if let Err(e) = stream_to_udp_result {
+        log::warn!("Stream to UDP error: {}", e);
     }
 
     conn.close(0u32.into(), b"done");

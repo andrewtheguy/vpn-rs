@@ -371,47 +371,8 @@ pub async fn run_iroh_manual_tcp_sender(target: String, stun_servers: Vec<String
     let node_id = endpoint.id();
     let direct_addrs = get_direct_addresses(&endpoint, &stun_servers).await;
 
-    let offer = IrohManualOffer {
-        version: IROH_SIGNAL_VERSION,
-        node_id: node_id.to_string(),
-        direct_addresses: direct_addrs,
-    };
-
-    log::info!("\nIroh Manual Offer (copy to receiver):");
-    display_iroh_offer(&offer)?;
-
-    log::info!("Paste receiver answer (include BEGIN/END markers), then press Enter:");
-    let answer = read_iroh_answer_from_stdin()?;
-    if answer.version != IROH_SIGNAL_VERSION {
-        anyhow::bail!(
-            "Iroh signaling version mismatch (expected {}, got {})",
-            IROH_SIGNAL_VERSION,
-            answer.version
-        );
-    }
-
-    // Parse and add remote peer info
-    let remote_id: EndpointId = answer
-        .node_id
-        .parse()
-        .context("Invalid remote NodeId format")?;
-    let remote_addrs: Vec<SocketAddr> = answer
-        .direct_addresses
-        .iter()
-        .filter_map(|s| s.parse().ok())
-        .collect();
-
-    let remote_addr =
-        EndpointAddr::new(remote_id).with_addrs(remote_addrs.into_iter().map(TransportAddr::Ip));
-    discovery.add_endpoint_info(remote_addr);
-    log::info!(
-        "Added remote peer: {} ({} addresses)",
-        remote_id,
-        answer.direct_addresses.len()
-    );
-
-    // Race connect vs accept for NAT hole punching
-    let conn = race_connect_accept(&endpoint, remote_id, TCP_ALPN).await?;
+    let conn =
+        negotiate_manual_sender(&endpoint, &discovery, node_id, direct_addrs, TCP_ALPN).await?;
 
     log::info!("Peer connected: {}", conn.remote_id());
     log::info!("Forwarding TCP connections to {}", target_addr);
@@ -454,47 +415,8 @@ pub async fn run_iroh_manual_tcp_receiver(listen: String, stun_servers: Vec<Stri
     let node_id = endpoint.id();
     let direct_addrs = get_direct_addresses(&endpoint, &stun_servers).await;
 
-    log::info!("Paste sender offer (include BEGIN/END markers), then press Enter:");
-    let offer = read_iroh_offer_from_stdin()?;
-    if offer.version != IROH_SIGNAL_VERSION {
-        anyhow::bail!(
-            "Iroh signaling version mismatch (expected {}, got {})",
-            IROH_SIGNAL_VERSION,
-            offer.version
-        );
-    }
-
-    let answer = IrohManualAnswer {
-        version: IROH_SIGNAL_VERSION,
-        node_id: node_id.to_string(),
-        direct_addresses: direct_addrs,
-    };
-
-    log::info!("\nIroh Manual Answer (copy to sender):");
-    display_iroh_answer(&answer)?;
-
-    // Parse and add remote peer info
-    let remote_id: EndpointId = offer
-        .node_id
-        .parse()
-        .context("Invalid remote NodeId format")?;
-    let remote_addrs: Vec<SocketAddr> = offer
-        .direct_addresses
-        .iter()
-        .filter_map(|s| s.parse().ok())
-        .collect();
-
-    let remote_addr =
-        EndpointAddr::new(remote_id).with_addrs(remote_addrs.into_iter().map(TransportAddr::Ip));
-    discovery.add_endpoint_info(remote_addr);
-    log::info!(
-        "Added remote peer: {} ({} addresses)",
-        remote_id,
-        offer.direct_addresses.len()
-    );
-
-    // Race connect vs accept for NAT hole punching
-    let conn = race_connect_accept(&endpoint, remote_id, TCP_ALPN).await?;
+    let conn =
+        negotiate_manual_receiver(&endpoint, &discovery, node_id, direct_addrs, TCP_ALPN).await?;
 
     log::info!("Peer connected: {}", conn.remote_id());
 
@@ -554,47 +476,8 @@ pub async fn run_iroh_manual_udp_sender(target: String, stun_servers: Vec<String
     let node_id = endpoint.id();
     let direct_addrs = get_direct_addresses(&endpoint, &stun_servers).await;
 
-    let offer = IrohManualOffer {
-        version: IROH_SIGNAL_VERSION,
-        node_id: node_id.to_string(),
-        direct_addresses: direct_addrs,
-    };
-
-    log::info!("\nIroh Manual Offer (copy to receiver):");
-    display_iroh_offer(&offer)?;
-
-    log::info!("Paste receiver answer (include BEGIN/END markers), then press Enter:");
-    let answer = read_iroh_answer_from_stdin()?;
-    if answer.version != IROH_SIGNAL_VERSION {
-        anyhow::bail!(
-            "Iroh signaling version mismatch (expected {}, got {})",
-            IROH_SIGNAL_VERSION,
-            answer.version
-        );
-    }
-
-    // Parse and add remote peer info
-    let remote_id: EndpointId = answer
-        .node_id
-        .parse()
-        .context("Invalid remote NodeId format")?;
-    let remote_addrs: Vec<SocketAddr> = answer
-        .direct_addresses
-        .iter()
-        .filter_map(|s| s.parse().ok())
-        .collect();
-
-    let remote_addr =
-        EndpointAddr::new(remote_id).with_addrs(remote_addrs.into_iter().map(TransportAddr::Ip));
-    discovery.add_endpoint_info(remote_addr);
-    log::info!(
-        "Added remote peer: {} ({} addresses)",
-        remote_id,
-        answer.direct_addresses.len()
-    );
-
-    // Race connect vs accept for NAT hole punching
-    let conn = race_connect_accept(&endpoint, remote_id, UDP_ALPN).await?;
+    let conn =
+        negotiate_manual_sender(&endpoint, &discovery, node_id, direct_addrs, UDP_ALPN).await?;
 
     log::info!("Peer connected: {}", conn.remote_id());
 
@@ -640,47 +523,8 @@ pub async fn run_iroh_manual_udp_receiver(listen: String, stun_servers: Vec<Stri
     let node_id = endpoint.id();
     let direct_addrs = get_direct_addresses(&endpoint, &stun_servers).await;
 
-    log::info!("Paste sender offer (include BEGIN/END markers), then press Enter:");
-    let offer = read_iroh_offer_from_stdin()?;
-    if offer.version != IROH_SIGNAL_VERSION {
-        anyhow::bail!(
-            "Iroh signaling version mismatch (expected {}, got {})",
-            IROH_SIGNAL_VERSION,
-            offer.version
-        );
-    }
-
-    let answer = IrohManualAnswer {
-        version: IROH_SIGNAL_VERSION,
-        node_id: node_id.to_string(),
-        direct_addresses: direct_addrs,
-    };
-
-    log::info!("\nIroh Manual Answer (copy to sender):");
-    display_iroh_answer(&answer)?;
-
-    // Parse and add remote peer info
-    let remote_id: EndpointId = offer
-        .node_id
-        .parse()
-        .context("Invalid remote NodeId format")?;
-    let remote_addrs: Vec<SocketAddr> = offer
-        .direct_addresses
-        .iter()
-        .filter_map(|s| s.parse().ok())
-        .collect();
-
-    let remote_addr =
-        EndpointAddr::new(remote_id).with_addrs(remote_addrs.into_iter().map(TransportAddr::Ip));
-    discovery.add_endpoint_info(remote_addr);
-    log::info!(
-        "Added remote peer: {} ({} addresses)",
-        remote_id,
-        offer.direct_addresses.len()
-    );
-
-    // Race connect vs accept for NAT hole punching
-    let conn = race_connect_accept(&endpoint, remote_id, UDP_ALPN).await?;
+    let conn =
+        negotiate_manual_receiver(&endpoint, &discovery, node_id, direct_addrs, UDP_ALPN).await?;
 
     log::info!("Peer connected: {}", conn.remote_id());
 
@@ -905,6 +749,114 @@ async fn race_connect_accept(
     }
 }
 
+/// Complete manual signaling handshake for sender mode.
+///
+/// Creates and displays offer, reads answer, validates version,
+/// adds peer to discovery, and establishes connection via race connect/accept.
+async fn negotiate_manual_sender(
+    endpoint: &Endpoint,
+    discovery: &Arc<StaticProvider>,
+    node_id: EndpointId,
+    direct_addrs: Vec<String>,
+    alpn: &[u8],
+) -> Result<iroh::endpoint::Connection> {
+    let offer = IrohManualOffer {
+        version: IROH_SIGNAL_VERSION,
+        node_id: node_id.to_string(),
+        direct_addresses: direct_addrs,
+    };
+
+    log::info!("\nIroh Manual Offer (copy to receiver):");
+    display_iroh_offer(&offer)?;
+
+    log::info!("Paste receiver answer (include BEGIN/END markers), then press Enter:");
+    let answer = read_iroh_answer_from_stdin()?;
+    if answer.version != IROH_SIGNAL_VERSION {
+        anyhow::bail!(
+            "Iroh signaling version mismatch (expected {}, got {})",
+            IROH_SIGNAL_VERSION,
+            answer.version
+        );
+    }
+
+    // Parse and add remote peer info
+    let remote_id: EndpointId = answer
+        .node_id
+        .parse()
+        .context("Invalid remote NodeId format")?;
+    let remote_addrs: Vec<SocketAddr> = answer
+        .direct_addresses
+        .iter()
+        .filter_map(|s| s.parse().ok())
+        .collect();
+
+    let remote_addr =
+        EndpointAddr::new(remote_id).with_addrs(remote_addrs.into_iter().map(TransportAddr::Ip));
+    discovery.add_endpoint_info(remote_addr);
+    log::info!(
+        "Added remote peer: {} ({} addresses)",
+        remote_id,
+        answer.direct_addresses.len()
+    );
+
+    // Race connect vs accept for NAT hole punching
+    race_connect_accept(endpoint, remote_id, alpn).await
+}
+
+/// Complete manual signaling handshake for receiver mode.
+///
+/// Reads offer, validates version, creates and displays answer,
+/// adds peer to discovery, and establishes connection via race connect/accept.
+async fn negotiate_manual_receiver(
+    endpoint: &Endpoint,
+    discovery: &Arc<StaticProvider>,
+    node_id: EndpointId,
+    direct_addrs: Vec<String>,
+    alpn: &[u8],
+) -> Result<iroh::endpoint::Connection> {
+    log::info!("Paste sender offer (include BEGIN/END markers), then press Enter:");
+    let offer = read_iroh_offer_from_stdin()?;
+    if offer.version != IROH_SIGNAL_VERSION {
+        anyhow::bail!(
+            "Iroh signaling version mismatch (expected {}, got {})",
+            IROH_SIGNAL_VERSION,
+            offer.version
+        );
+    }
+
+    let answer = IrohManualAnswer {
+        version: IROH_SIGNAL_VERSION,
+        node_id: node_id.to_string(),
+        direct_addresses: direct_addrs,
+    };
+
+    log::info!("\nIroh Manual Answer (copy to sender):");
+    display_iroh_answer(&answer)?;
+
+    // Parse and add remote peer info
+    let remote_id: EndpointId = offer
+        .node_id
+        .parse()
+        .context("Invalid remote NodeId format")?;
+    let remote_addrs: Vec<SocketAddr> = offer
+        .direct_addresses
+        .iter()
+        .filter_map(|s| s.parse().ok())
+        .collect();
+
+    let remote_addr =
+        EndpointAddr::new(remote_id).with_addrs(remote_addrs.into_iter().map(TransportAddr::Ip));
+    discovery.add_endpoint_info(remote_addr);
+    log::info!(
+        "Added remote peer: {} ({} addresses)",
+        remote_id,
+        offer.direct_addresses.len()
+    );
+
+    // Race connect vs accept for NAT hole punching
+    race_connect_accept(endpoint, remote_id, alpn).await
+}
+
 // ============================================================================
 // Iroh Stream Helpers
 // ============================================================================
@@ -930,18 +882,15 @@ async fn bridge_streams(
 ) -> Result<()> {
     let (mut tcp_read, mut tcp_write) = tcp_stream.into_split();
 
-    let quic_to_tcp = async { copy_stream(&mut quic_recv, &mut tcp_write).await };
-    let tcp_to_quic = async { copy_stream(&mut tcp_read, &mut quic_send).await };
-
     tokio::select! {
-        result = quic_to_tcp => {
+        result = copy_stream(&mut quic_recv, &mut tcp_write) => {
             if let Err(e) = result {
                 if !e.to_string().contains("reset") {
                     log::warn!("QUIC->TCP error: {}", e);
                 }
             }
         }
-        result = tcp_to_quic => {
+        result = copy_stream(&mut tcp_read, &mut quic_send) => {
             if let Err(e) = result {
                 if !e.to_string().contains("reset") {
                     log::warn!("TCP->QUIC error: {}", e);
@@ -949,6 +898,9 @@ async fn bridge_streams(
             }
         }
     }
+
+    // Signal EOF on the QUIC send stream for graceful shutdown
+    let _ = quic_send.finish();
 
     Ok(())
 }
@@ -1008,8 +960,16 @@ async fn forward_stream_to_udp_sender(
 
     loop {
         let mut len_buf = [0u8; 2];
-        if recv_stream.read_exact(&mut len_buf).await.is_err() {
-            break;
+        match recv_stream.read_exact(&mut len_buf).await {
+            Ok(()) => {}
+            Err(iroh::endpoint::ReadExactError::FinishedEarly(_)) => {
+                // Clean EOF - stream finished at frame boundary
+                break;
+            }
+            Err(e) => {
+                log::warn!("Failed to read frame length: {}", e);
+                break;
+            }
         }
         let len = u16::from_be_bytes(len_buf) as usize;
 
@@ -1039,8 +999,16 @@ async fn forward_stream_to_udp_receiver(
 ) -> Result<()> {
     loop {
         let mut len_buf = [0u8; 2];
-        if recv_stream.read_exact(&mut len_buf).await.is_err() {
-            break;
+        match recv_stream.read_exact(&mut len_buf).await {
+            Ok(()) => {}
+            Err(iroh::endpoint::ReadExactError::FinishedEarly(_)) => {
+                // Clean EOF - stream finished at frame boundary
+                break;
+            }
+            Err(e) => {
+                log::warn!("Failed to read frame length: {}", e);
+                break;
+            }
         }
         let len = u16::from_be_bytes(len_buf) as usize;
 
