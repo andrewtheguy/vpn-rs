@@ -1108,7 +1108,7 @@ async fn run_nostr_sender_loop(
             // Log remaining sessions (permit will be released after this block)
             let remaining = sem_clone
                 .as_ref()
-                .map(|sem| max_sessions_copy - sem.available_permits() - 1)
+                .map(|sem| max_sessions_copy.saturating_sub(sem.available_permits()).saturating_sub(1))
                 .unwrap_or(0);
             println!("Session ended. Active sessions: {}/{}", remaining, limit_str_clone);
 
