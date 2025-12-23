@@ -8,12 +8,12 @@ Usage:
 Options:
     -n, --num NUM    Number of ports/sessions (default: 3)
     -c, --conns NUM  Connections per port (default: 1)
-    --port PORT      Base port (default: 7001)
+    --port PORT      Base port (default: 17001)
     --stream SECS    Stream for SECS seconds (default: ping mode)
     --loop           Repeat continuously
 
 Examples:
-    python3 test_tunnel.py                 # Ping 3 ports (7001-7003)
+    python3 test_tunnel.py                 # Ping 3 ports (17001-17003)
     python3 test_tunnel.py -n 5            # Ping 5 ports
     python3 test_tunnel.py -c 3            # 3 connections per port (9 total)
     python3 test_tunnel.py --stream 10     # Stream for 10s
@@ -54,7 +54,7 @@ def parse_args():
                 conns_per_port = int(args[idx + 1])
             break
 
-    base_port = 7001
+    base_port = 17001
     if '--port' in args:
         idx = args.index('--port')
         if idx + 1 < len(args):

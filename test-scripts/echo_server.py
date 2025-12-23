@@ -2,10 +2,14 @@
 """
 Simple multi-connection TCP echo server for testing tunnels.
 
+This is the source service that the sender forwards traffic to.
+In receiver-initiated mode, traffic flows:
+  Test Client -> Receiver -> Sender -> Echo Server
+
 Usage:
     python3 echo_server.py [PORT]
 
-Each connection gets a unique ID and echoes back with prefix.
+Each connection gets a unique ID and echoes back data.
 """
 
 import socket
@@ -13,7 +17,7 @@ import threading
 import sys
 from datetime import datetime
 
-PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 9999
+PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 19999
 connection_count = 0
 lock = threading.Lock()
 

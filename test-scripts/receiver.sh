@@ -1,13 +1,16 @@
 #!/bin/bash
-# Start tunnel receiver(s)
-# Usage: ./scripts/receiver.sh [NUM_SESSIONS] [BASE_PORT]
+# Start tunnel receiver(s) - receiver-initiated mode
+# Usage: ./test-scripts/receiver.sh [NUM_SESSIONS] [BASE_PORT]
+#
+# In receiver-initiated mode, the receiver initiates the connection
+# to the sender and exposes the tunneled service on local target ports.
 
 set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/keys.sh"
 
 NUM_SESSIONS="${1:-1}"
-BASE_PORT="${2:-7001}"
+BASE_PORT="${2:-17001}"
 TUNNEL_BIN="$SCRIPT_DIR/../target/release/tunnel-rs"
 
 [ ! -f "$TUNNEL_BIN" ] && cargo build --release --manifest-path="$SCRIPT_DIR/../Cargo.toml"
@@ -28,7 +31,7 @@ for i in $(seq 1 $NUM_SESSIONS); do
     echo "[$i] Starting receiver on port $PORT..."
     "$TUNNEL_BIN" receiver nostr \
         --target "tcp://127.0.0.1:$PORT" \
-        --nsec "$RECEIVER_NSEC" \
+        --nsec-file "$RECEIVER_NSEC_FILE" \
         --peer-npub "$SENDER_NPUB" &
     PIDS+=($!)
     [ $NUM_SESSIONS -gt 1 ] && sleep 2  # Stagger for rate limits
@@ -36,6 +39,6 @@ done
 
 echo ""
 echo "=== Ready ==="
-echo "Test with: python3 scripts/test_tunnel.py $BASE_PORT $NUM_SESSIONS --loop"
+echo "Test with: python3 test-scripts/test_tunnel.py -n $NUM_SESSIONS --port $BASE_PORT --loop"
 echo "Press Ctrl+C to stop"
 wait
