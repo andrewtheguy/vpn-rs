@@ -11,7 +11,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{lookup_host, TcpListener, TcpStream, UdpSocket};
 use tokio::sync::Mutex;
 
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::task::JoinSet;
 
 use crate::endpoint::{
@@ -151,7 +151,7 @@ async fn publish_request_and_wait_for_offer(
         }
 
         // Check for rejection
-        if let Some(reject) = signaling.try_check_for_rejection() {
+        if let Some(reject) = signaling.try_check_for_rejection().await {
             if reject.session_id == *session_id {
                 anyhow::bail!("Session rejected by sender: {}", reject.reason);
             }
@@ -967,9 +967,15 @@ type SessionHandler = fn(
 
 /// Generic nostr sender loop that handles session management for both TCP and UDP.
 ///
+/// # Long-running
+///
+/// This function runs an infinite loop and **never returns `Ok(())`**. It only
+/// returns `Err(...)` if a fatal error occurs (e.g., the notification channel closes).
+/// Callers should treat any return as an error condition requiring restart or termination.
+///
 /// This function encapsulates the common logic for:
 /// - Waiting for incoming session requests
-/// - Checking session limits and rejecting when at capacity
+/// - Checking session limits and rejecting when at capacity (using semaphore)
 /// - Spawning session handler tasks
 /// - Tracking active sessions and cleaning up completed ones
 async fn run_nostr_sender_loop(
@@ -982,8 +988,13 @@ async fn run_nostr_sender_loop(
     max_sessions: usize,
     session_handler: SessionHandler,
 ) -> Result<()> {
-    // Session tracking
-    let active_sessions = Arc::new(AtomicUsize::new(0));
+    // Session limit enforcement via semaphore (None = unlimited)
+    let session_semaphore: Option<Arc<tokio::sync::Semaphore>> = if max_sessions > 0 {
+        Some(Arc::new(tokio::sync::Semaphore::new(max_sessions)))
+    } else {
+        None
+    };
+
     let mut session_tasks: JoinSet<Result<()>> = JoinSet::new();
 
     let limit_str = if max_sessions == 0 {
@@ -1005,8 +1016,13 @@ async fn run_nostr_sender_loop(
         let request = match signaling.wait_for_fresh_request_forever(MAX_REQUEST_AGE_SECS).await {
             Ok(req) => req,
             Err(e) => {
+                let err_str = e.to_string();
+                // Fatal error: notification channel closed (client disconnected)
+                if err_str.contains("channel closed") {
+                    return Err(e.context("Nostr signaling channel closed"));
+                }
+                // Transient error: log and retry
                 eprintln!("Error waiting for request: {}", e);
-                // Brief delay before retrying
                 tokio::time::sleep(Duration::from_secs(1)).await;
                 continue;
             }
@@ -1021,59 +1037,63 @@ async fn run_nostr_sender_loop(
         }
 
         let session_id = request.session_id.clone();
-        println!("Received {} request for session {}", protocol_name, &session_id[..8.min(session_id.len())]);
+        println!(
+            "Received {} request for session {}",
+            protocol_name,
+            &session_id[..8.min(session_id.len())]
+        );
 
-        // Check session limit - if at capacity, wait briefly for dead sessions to be cleaned up
-        if max_sessions > 0 && active_sessions.load(Ordering::Relaxed) >= max_sessions {
-            println!(
-                "At capacity ({}/{}), checking for dead sessions...",
-                active_sessions.load(Ordering::Relaxed),
-                max_sessions
-            );
+        // Acquire session permit (if limited) - held for task lifetime
+        let permit = if let Some(ref sem) = session_semaphore {
+            match sem.clone().try_acquire_owned() {
+                Ok(permit) => Some(permit),
+                Err(_) => {
+                    // At capacity - reject immediately
+                    let active = max_sessions - sem.available_permits();
+                    println!(
+                        "Rejecting session {} - at capacity ({}/{})",
+                        &session_id[..8.min(session_id.len())],
+                        active,
+                        max_sessions
+                    );
 
-            // Wait briefly for any dying connections to complete, then clean up
-            tokio::time::sleep(Duration::from_millis(100)).await;
-            while let Some(result) = session_tasks.try_join_next() {
-                if let Err(e) = result {
-                    eprintln!("Session task panicked: {:?}", e);
+                    let reject = ManualReject {
+                        version: MANUAL_SIGNAL_VERSION,
+                        session_id: session_id.clone(),
+                        reason: format!("Sender at capacity ({}/{})", max_sessions, max_sessions),
+                    };
+                    if let Err(e) = signaling.publish_reject(&reject).await {
+                        eprintln!("Failed to send rejection: {}", e);
+                    } else {
+                        println!(
+                            "Sent rejection for session {}",
+                            &session_id[..8.min(session_id.len())]
+                        );
+                    }
+                    continue;
                 }
             }
+        } else {
+            None // Unlimited mode
+        };
 
-            // Recheck after cleanup
-            if active_sessions.load(Ordering::Relaxed) >= max_sessions {
-                println!(
-                    "Rejecting session {} - at capacity ({}/{})",
-                    &session_id[..8.min(session_id.len())],
-                    active_sessions.load(Ordering::Relaxed),
-                    max_sessions
-                );
-
-                // Send explicit rejection to receiver
-                let reject = ManualReject {
-                    version: MANUAL_SIGNAL_VERSION,
-                    session_id: session_id.clone(),
-                    reason: format!("Sender at capacity ({}/{})", max_sessions, max_sessions),
-                };
-                if let Err(e) = signaling.publish_reject(&reject).await {
-                    eprintln!("Failed to send rejection: {}", e);
-                } else {
-                    println!("Sent rejection for session {}", &session_id[..8.min(session_id.len())]);
-                }
-                continue;
-            }
-            println!("Slot freed up, accepting session");
-        }
-
-        // Spawn session handler
-        let current = active_sessions.fetch_add(1, Ordering::Relaxed) + 1;
-        println!("Active sessions: {}/{}", current, limit_str);
+        // Log active session count
+        let active_count = session_semaphore
+            .as_ref()
+            .map(|sem| max_sessions - sem.available_permits())
+            .unwrap_or(session_tasks.len() + 1);
+        println!("Active sessions: {}/{}", active_count, limit_str);
 
         let sig = signaling.clone();
-        let active = active_sessions.clone();
         let stun = stun_servers.clone();
         let limit_str_clone = limit_str.clone();
+        let sem_clone = session_semaphore.clone();
+        let max_sessions_copy = max_sessions;
 
         session_tasks.spawn(async move {
+            // Permit is moved into this task and dropped when task completes
+            let _permit = permit;
+
             let result = session_handler(
                 sig,
                 request,
@@ -1084,7 +1104,11 @@ async fn run_nostr_sender_loop(
             )
             .await;
 
-            let remaining = active.fetch_sub(1, Ordering::Relaxed) - 1;
+            // Log remaining sessions (permit will be released after this block)
+            let remaining = sem_clone
+                .as_ref()
+                .map(|sem| max_sessions_copy - sem.available_permits() - 1)
+                .unwrap_or(0);
             println!("Session ended. Active sessions: {}/{}", remaining, limit_str_clone);
 
             if let Err(ref e) = result {

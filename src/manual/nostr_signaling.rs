@@ -10,6 +10,7 @@ use nostr_sdk::prelude::*;
 use sha2::{Digest, Sha256};
 use std::time::Duration;
 use tokio::sync::broadcast::error::{RecvError, TryRecvError};
+use tokio::sync::Mutex;
 
 use super::signaling::{ManualAnswer, ManualOffer, ManualReject, ManualRequest};
 
@@ -31,6 +32,9 @@ pub struct NostrSignaling {
     peer_pubkey: PublicKey,
     transfer_id: String,
     relay_urls: Vec<String>,
+    /// Persistent notification receiver to avoid missing messages.
+    /// Created once after subscription and reused for all receive operations.
+    notifications: Mutex<tokio::sync::broadcast::Receiver<RelayPoolNotification>>,
 }
 
 impl NostrSignaling {
@@ -77,12 +81,17 @@ impl NostrSignaling {
         // Wait for relay connections
         tokio::time::sleep(Duration::from_secs(2)).await;
 
+        // Create persistent notification receiver early to avoid missing messages.
+        // This receiver will buffer messages until they're consumed.
+        let notifications = Mutex::new(client.notifications());
+
         Ok(Self {
             client,
             keys,
             peer_pubkey,
             transfer_id,
             relay_urls,
+            notifications,
         })
     }
 
@@ -197,6 +206,8 @@ impl NostrSignaling {
 
     /// Inner implementation for waiting for fresh requests.
     /// If `timeout_secs` is None, waits indefinitely.
+    ///
+    /// Uses the persistent notification receiver to avoid missing messages.
     async fn wait_for_fresh_request_inner(
         &self,
         max_age_secs: u64,
@@ -214,7 +225,7 @@ impl NostrSignaling {
         }
 
         let deadline = timeout_secs.map(|t| tokio::time::Instant::now() + Duration::from_secs(t));
-        let mut notifications = self.client.notifications();
+        let mut notifications = self.notifications.lock().await;
 
         loop {
             // Compute wait duration: min(remaining until deadline, 1s), or 1s if no deadline
@@ -288,8 +299,10 @@ impl NostrSignaling {
     }
 
     /// Check for a rejection from the peer (non-blocking).
-    pub fn try_check_for_rejection(&self) -> Option<ManualReject> {
-        let mut notifications = self.client.notifications();
+    ///
+    /// Uses the persistent notification receiver to avoid missing messages.
+    pub async fn try_check_for_rejection(&self) -> Option<ManualReject> {
+        let mut notifications = self.notifications.lock().await;
         loop {
             match notifications.try_recv() {
                 Ok(RelayPoolNotification::Event { event, .. }) => {
@@ -322,12 +335,14 @@ impl NostrSignaling {
     }
 
     /// Internal helper that waits for a message, returning None on timeout or channel closed.
+    ///
+    /// Uses the persistent notification receiver to avoid missing messages.
     async fn wait_for_message_inner<T: for<'de> serde::Deserialize<'de>>(
         &self,
         expected_type: &str,
         timeout_secs: u64,
     ) -> Option<T> {
-        let mut notifications = self.client.notifications();
+        let mut notifications = self.notifications.lock().await;
         let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_secs);
 
         loop {
