@@ -26,6 +26,7 @@ Tunnel-rs enables you to forward TCP and UDP traffic between machines without re
 - **Remote Desktop** access (RDP/VNC over TCP) without port forwarding
 - **Secure Service Exposure** (HTTP servers, databases, etc.) without public infrastructure
 - **Development and Testing** of TCP/UDP services across network boundaries
+- **Homelab Networking** — Connecting distributed homelab nodes or accessing local services remotely without complex VPN setups or public IP requirements
 - **Cross-platform Tunneling** for both TCP and UDP workflows (including Windows endpoints)
 
 ## Overview
