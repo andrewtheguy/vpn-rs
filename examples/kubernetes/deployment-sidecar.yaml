@@ -1,0 +1,73 @@
+# Kubernetes example: tunnel-rs as a sidecar
+#
+# This deploys tunnel-rs alongside your application to expose it
+# to remote peers without a LoadBalancer or Ingress.
+#
+# Usage:
+#   1. Create secret with sender key (optional, for stable EndpointId):
+#      tunnel-rs generate-iroh-key --output - | \
+#        kubectl create secret generic tunnel-sender-key --from-file=sender.key=/dev/stdin
+#
+#   2. Apply this manifest:
+#      kubectl apply -f deployment-sidecar.yaml
+#
+#   3. Get the EndpointId:
+#      kubectl logs -l app=myapp -c tunnel-sender | grep EndpointId
+#
+#   4. On remote machine, connect:
+#      tunnel-rs receiver iroh-default --node-id <ENDPOINT_ID> --target tcp://127.0.0.1:8080
+#
+# This is useful for:
+#   - Accessing staging/dev services without exposing them publicly
+#   - Debugging services in the cluster
+#   - Ad-hoc access to internal APIs
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: myapp
+  labels:
+    app: myapp
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: myapp
+  template:
+    metadata:
+      labels:
+        app: myapp
+    spec:
+      containers:
+        # Your application
+        - name: app
+          image: nginx:alpine
+          ports:
+            - containerPort: 80
+
+        # tunnel-rs sidecar
+        - name: tunnel-sender
+          image: ghcr.io/andrewtheguy/tunnel-rs:0.1.14
+          args:
+            - sender
+            - iroh-default
+            - --source
+            - tcp://127.0.0.1:80
+          # Optional: use persistent key for stable EndpointId
+          # args:
+          #   - sender
+          #   - iroh-default
+          #   - --source
+          #   - tcp://127.0.0.1:80
+          #   - --secret-file
+          #   - /secrets/sender.key
+          # volumeMounts:
+          #   - name: sender-key
+          #     mountPath: /secrets
+          #     readOnly: true
+
+      # Optional: mount secret for persistent key
+      # volumes:
+      #   - name: sender-key
+      #     secret:
+      #       secretName: tunnel-sender-key

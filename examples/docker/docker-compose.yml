@@ -1,0 +1,46 @@
+# Docker Compose example: Expose internal services via tunnel-rs
+#
+# This example shows how to use tunnel-rs to expose services running in Docker
+# to a remote peer without opening ports on the host.
+#
+# Usage:
+#   1. Generate a persistent key (optional, for stable endpoint ID):
+#      docker run --rm ghcr.io/andrewtheguy/tunnel-rs:0.1.14 generate-iroh-key --output - > sender.key
+#
+#   2. Start the services:
+#      docker compose up -d
+#
+#   3. Get the EndpointId from logs:
+#      docker compose logs tunnel-sender
+#
+#   4. On the remote machine, connect:
+#      tunnel-rs receiver iroh-default --node-id <ENDPOINT_ID> --target tcp://127.0.0.1:8080
+#
+#   5. Access the web service at http://127.0.0.1:8080
+
+services:
+  # Example web service (replace with your actual service)
+  web:
+    image: nginx:alpine
+    # No ports exposed - only accessible within Docker network
+
+  # tunnel-rs sender - exposes the web service to remote peers
+  tunnel-sender:
+    image: ghcr.io/andrewtheguy/tunnel-rs:0.1.14
+    command:
+      - sender
+      - iroh-default
+      - --source
+      - tcp://web:80
+    depends_on:
+      - web
+    # Optional: mount a persistent key for stable EndpointId
+    # volumes:
+    #   - ./sender.key:/app/sender.key:ro
+    # command:
+    #   - sender
+    #   - iroh-default
+    #   - --source
+    #   - tcp://web:80
+    #   - --secret-file
+    #   - /app/sender.key

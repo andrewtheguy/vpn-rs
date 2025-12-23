@@ -1,0 +1,66 @@
+# Docker Compose example: Expose internal services via tunnel-rs (Nostr mode)
+#
+# Nostr mode provides automated signaling with static keys - no need to
+# manually exchange EndpointIds each time.
+#
+# Setup:
+#   1. Generate keypairs for sender and receiver:
+#      tunnel-rs generate-nostr-key --output sender.nsec
+#      tunnel-rs generate-nostr-key --output receiver.nsec
+#
+#   2. Exchange public keys (npub) between peers
+#
+#   3. Create .env file with keys:
+#      SENDER_NSEC=nsec1...
+#      RECEIVER_NPUB=npub1...
+#
+#   4. Start services:
+#      docker compose -f docker-compose-nostr.yml up -d
+#
+#   5. On remote machine, run receiver:
+#      tunnel-rs receiver nostr \
+#        --target tcp://127.0.0.1:8080 \
+#        --nsec <RECEIVER_NSEC> \
+#        --peer-npub <SENDER_NPUB>
+
+services:
+  # Example web service
+  web:
+    image: nginx:alpine
+
+  # Example database (accessible via tunnel)
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_PASSWORD: devpassword
+      POSTGRES_DB: myapp
+
+  # tunnel-rs sender for web service
+  tunnel-web:
+    image: ghcr.io/andrewtheguy/tunnel-rs:0.1.14
+    command:
+      - sender
+      - nostr
+      - --source
+      - tcp://web:80
+      - --nsec
+      - ${SENDER_NSEC}
+      - --peer-npub
+      - ${RECEIVER_NPUB}
+    depends_on:
+      - web
+
+  # tunnel-rs sender for postgres
+  tunnel-postgres:
+    image: ghcr.io/andrewtheguy/tunnel-rs:0.1.14
+    command:
+      - sender
+      - nostr
+      - --source
+      - tcp://postgres:5432
+      - --nsec
+      - ${SENDER_NSEC_PG}
+      - --peer-npub
+      - ${RECEIVER_NPUB}
+    depends_on:
+      - postgres
