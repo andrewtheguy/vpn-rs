@@ -8,5 +8,3 @@
 pub mod ice;
 pub mod mux;
 pub mod quic;
-
-// Re-exports available for use (currently accessed directly via submodules)

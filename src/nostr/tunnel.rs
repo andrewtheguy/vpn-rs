@@ -851,29 +851,44 @@ pub async fn run_nostr_tcp_receiver(
     );
 
     loop {
-        let (tcp_stream, peer_addr) = match listener.accept().await {
-            Ok(result) => result,
-            Err(e) => {
-                log::warn!("Failed to accept TCP connection: {}", e);
-                continue;
-            }
-        };
+        tokio::select! {
+            accept_result = listener.accept() => {
+                let (tcp_stream, peer_addr) = match accept_result {
+                    Ok(result) => result,
+                    Err(e) => {
+                        log::warn!("Failed to accept TCP connection: {}", e);
+                        continue;
+                    }
+                };
 
-        log::info!("New local connection from {}", peer_addr);
-        let conn_clone = conn.clone();
-        let established = tunnel_established.clone();
+                log::info!("New local connection from {}", peer_addr);
+                let conn_clone = conn.clone();
+                let established = tunnel_established.clone();
 
-        tokio::spawn(async move {
-            match handle_tcp_receiver_connection(conn_clone, tcp_stream, peer_addr, established)
-                .await
-            {
-                Ok(()) => {}
-                Err(e) => {
-                    log::warn!("TCP tunnel error for {}: {}", peer_addr, e);
-                }
+                tokio::spawn(async move {
+                    match handle_tcp_receiver_connection(conn_clone, tcp_stream, peer_addr, established)
+                        .await
+                    {
+                        Ok(()) => {}
+                        Err(e) => {
+                            // Connection closed errors are expected when tunnel shuts down
+                            let err_str = e.to_string();
+                            if !err_str.contains("closed") && !err_str.contains("reset") {
+                                log::warn!("TCP tunnel error for {}: {}", peer_addr, e);
+                            }
+                        }
+                    }
+                });
             }
-        });
+            error = conn.closed() => {
+                log::info!("QUIC connection closed: {}", error);
+                break;
+            }
+        }
     }
+
+    log::info!("TCP receiver stopped.");
+    Ok(())
 }
 
 pub async fn run_nostr_udp_receiver(

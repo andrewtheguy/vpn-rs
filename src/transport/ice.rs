@@ -145,7 +145,13 @@ impl IceEndpoint {
                         continue;
                     }
                 };
-                stun_socket.set_nonblocking(true).ok();
+                if let Err(e) = stun_socket.set_nonblocking(true) {
+                    warn!(
+                        "Failed to set non-blocking mode on STUN socket for {}: {}",
+                        server, e
+                    );
+                    continue;
+                }
 
                 // Create tokio socket - DON'T clone, use the original
                 // We'll drop this after STUN query and create a fresh one for ICE

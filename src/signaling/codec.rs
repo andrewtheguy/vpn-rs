@@ -242,10 +242,24 @@ fn crc32(bytes: &[u8]) -> u32 {
     hasher.finalize()
 }
 
+/// Wrap a string into lines of at most `width` characters.
+///
+/// # Precondition
+/// The input string `s` must contain only ASCII characters (as is the case for
+/// base64-encoded payloads with ASCII prefix/checksum). This function chunks by
+/// bytes for efficiency, which is safe for ASCII but would split multi-byte UTF-8
+/// codepoints. The function will panic if given non-ASCII input.
 pub(crate) fn wrap_lines(s: &str, width: usize) -> String {
+    debug_assert!(
+        s.is_ascii(),
+        "wrap_lines requires ASCII input; got non-ASCII characters"
+    );
     s.as_bytes()
         .chunks(width)
-        .map(|chunk| std::str::from_utf8(chunk).unwrap_or(""))
+        .map(|chunk| {
+            std::str::from_utf8(chunk)
+                .expect("wrap_lines: chunk is not valid UTF-8; input must be ASCII")
+        })
         .collect::<Vec<_>>()
         .join("\n")
 }
