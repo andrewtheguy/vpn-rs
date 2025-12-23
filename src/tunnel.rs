@@ -1821,7 +1821,7 @@ where
                 // More attempts remaining - log attempt message and sleep
                 let delay_ms = base_delay_ms * (1 << attempt);
                 eprintln!(
-                    "Failed to {} (attempt {}/{}): {}. Retrying in {}ms...",
+                    "Failed to {} (attempt {}/{}): {}. Next attempt in {}ms...",
                     operation_name,
                     attempt + 1,
                     max_attempts,
