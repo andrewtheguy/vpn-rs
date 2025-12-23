@@ -287,7 +287,7 @@ async fn publish_offer_and_wait_for_answer(
     let mut receiver = signaling.create_notification_receiver();
 
     signaling.publish_offer(offer).await?;
-    println!(
+    log::info!(
         "Waiting for answer (re-publishing with backoff, starting {}s, max {}s)...",
         republish_interval_secs, max_wait_secs
     );
@@ -314,7 +314,7 @@ async fn publish_offer_and_wait_for_answer(
         let next_interval = (current_interval * 2).min(MAX_INTERVAL);
 
         // Re-publish offer with backoff
-        println!("Re-publishing offer (next wait: {}s)...", next_interval);
+        log::info!("Re-publishing offer (next wait: {}s)...", next_interval);
         signaling.publish_offer(offer).await?;
 
         current_interval = next_interval;
@@ -342,7 +342,7 @@ async fn publish_request_and_wait_for_offer(
     const MAX_INTERVAL: u64 = 60;
 
     signaling.publish_request(request).await?;
-    println!(
+    log::info!(
         "Waiting for offer (re-publishing with backoff, starting {}s, max {}s)...",
         republish_interval_secs, max_wait_secs
     );
@@ -377,7 +377,7 @@ async fn publish_request_and_wait_for_offer(
         let next_interval = (current_interval * 2).min(MAX_INTERVAL);
 
         // Re-publish request with backoff
-        println!("Re-publishing request (next wait: {}s)...", next_interval);
+        log::info!("Re-publishing request (next wait: {}s)...", next_interval);
         signaling.publish_request(request).await?;
 
         current_interval = next_interval;
@@ -401,22 +401,22 @@ pub async fn run_udp_sender(
         .await
         .with_context(|| format!("Invalid target address or hostname '{}'", target))?;
 
-    println!("UDP Tunnel - Sender Mode");
-    println!("========================");
-    println!("Creating iroh endpoint...");
+    log::info!("UDP Tunnel - Sender Mode");
+    log::info!("========================");
+    log::info!("Creating iroh endpoint...");
 
     let endpoint =
         create_sender_endpoint(&relay_urls, relay_only, secret, dns_server.as_deref(), UDP_ALPN).await?;
 
     let endpoint_id = endpoint.id();
     let target_port = target_addr.port();
-    println!("\nEndpointId: {}", endpoint_id);
-    println!("\nOn the receiver side, run:");
-    println!(
+    log::info!("\nEndpointId: {}", endpoint_id);
+    log::info!("\nOn the receiver side, run:");
+    log::info!(
         "  tunnel-rs receiver --node-id {} --target udp://0.0.0.0:{}\n",
         endpoint_id, target_port
     );
-    println!("Waiting for receiver to connect...");
+    log::info!("Waiting for receiver to connect...");
 
     let conn = endpoint
         .accept()
@@ -426,14 +426,14 @@ pub async fn run_udp_sender(
         .context("Failed to accept connection")?;
 
     let remote_id = conn.remote_id();
-    println!("Receiver connected from: {}", remote_id);
+    log::info!("Receiver connected from: {}", remote_id);
 
     let (send_stream, recv_stream) = conn
         .accept_bi()
         .await
         .context("Failed to accept stream from receiver")?;
 
-    println!("Forwarding UDP traffic to {}", target_addr);
+    log::info!("Forwarding UDP traffic to {}", target_addr);
 
     // Bind to the same address family as the target
     let bind_addr: SocketAddr = if target_addr.is_ipv6() {
@@ -451,7 +451,7 @@ pub async fn run_udp_sender(
 
     conn.close(0u32.into(), b"done");
     endpoint.close().await;
-    println!("Connection closed.");
+    log::info!("Connection closed.");
 
     Ok(())
 }
@@ -473,15 +473,15 @@ pub async fn run_udp_receiver(
         .parse()
         .context("Invalid EndpointId format. Should be a 52-character base32 string.")?;
 
-    println!("UDP Tunnel - Receiver Mode");
-    println!("==========================");
-    println!("Creating iroh endpoint...");
+    log::info!("UDP Tunnel - Receiver Mode");
+    log::info!("==========================");
+    log::info!("Creating iroh endpoint...");
 
     let endpoint = create_receiver_endpoint(&relay_urls, relay_only, dns_server.as_deref()).await?;
 
     let conn = connect_to_sender(&endpoint, sender_id, &relay_urls, relay_only, UDP_ALPN).await?;
 
-    println!("Connected to sender!");
+    log::info!("Connected to sender!");
     print_connection_type(&endpoint, conn.remote_id());
 
     let (send_stream, recv_stream) = open_bi_with_retry_iroh(&conn).await?;
@@ -491,7 +491,7 @@ pub async fn run_udp_receiver(
             .await
             .context("Failed to bind UDP socket")?,
     );
-    println!(
+    log::info!(
         "Listening on UDP {} - configure your client to connect here",
         listen_addr
     );
@@ -504,19 +504,19 @@ pub async fn run_udp_receiver(
     tokio::select! {
         result = forward_udp_to_stream(udp_clone, send_stream, client_clone) => {
             if let Err(e) = result {
-                eprintln!("UDP to stream error: {}", e);
+                log::warn!("UDP to stream error: {}", e);
             }
         }
         result = forward_stream_to_udp_receiver(recv_stream, udp_socket, client_addr) => {
             if let Err(e) = result {
-                eprintln!("Stream to UDP error: {}", e);
+                log::warn!("Stream to UDP error: {}", e);
             }
         }
     }
 
     conn.close(0u32.into(), b"done");
     endpoint.close().await;
-    println!("Connection closed.");
+    log::info!("Connection closed.");
 
     Ok(())
 }
@@ -547,7 +547,7 @@ async fn forward_udp_to_stream(
             .await
             .context("Failed to write frame payload")?;
 
-        println!("-> Forwarded {} bytes from {}", len, addr);
+        log::debug!("-> Forwarded {} bytes from {}", len, addr);
     }
 }
 
@@ -570,7 +570,7 @@ async fn forward_stream_to_udp_sender(
             if send_stream.write_all(&buf[..len]).await.is_err() {
                 break;
             }
-            println!("-> Sent {} bytes back to receiver", len);
+            log::debug!("-> Sent {} bytes back to receiver", len);
         }
     });
 
@@ -592,7 +592,7 @@ async fn forward_stream_to_udp_sender(
             .await
             .context("Failed to send UDP packet")?;
 
-        println!("<- Forwarded {} bytes to {}", len, target_addr);
+        log::debug!("<- Forwarded {} bytes to {}", len, target_addr);
     }
 
     response_task.abort();
@@ -623,9 +623,9 @@ async fn forward_stream_to_udp_receiver(
                 .send_to(&buf, addr)
                 .await
                 .context("Failed to send UDP packet to client")?;
-            println!("<- Forwarded {} bytes to client {}", len, addr);
+            log::debug!("<- Forwarded {} bytes to client {}", len, addr);
         } else {
-            println!("<- Received {} bytes but no client connected yet", len);
+            log::debug!("<- Received {} bytes but no client connected yet", len);
         }
     }
 
@@ -649,41 +649,41 @@ pub async fn run_tcp_sender(
         .await
         .with_context(|| format!("Invalid target address or hostname '{}'", target))?;
 
-    println!("TCP Tunnel - Sender Mode");
-    println!("========================");
-    println!("Creating iroh endpoint...");
+    log::info!("TCP Tunnel - Sender Mode");
+    log::info!("========================");
+    log::info!("Creating iroh endpoint...");
 
     let endpoint =
         create_sender_endpoint(&relay_urls, relay_only, secret, dns_server.as_deref(), TCP_ALPN).await?;
 
     let endpoint_id = endpoint.id();
     let target_port = target_addr.port();
-    println!("\nEndpointId: {}", endpoint_id);
-    println!("\nOn the receiver side, run:");
-    println!(
+    log::info!("\nEndpointId: {}", endpoint_id);
+    log::info!("\nOn the receiver side, run:");
+    log::info!(
         "  tunnel-rs receiver --node-id {} --target tcp://127.0.0.1:{}\n",
         endpoint_id, target_port
     );
-    println!("Waiting for receiver to connect...");
+    log::info!("Waiting for receiver to connect...");
 
     loop {
         let conn = match endpoint.accept().await {
             Some(incoming) => match incoming.await {
                 Ok(conn) => conn,
                 Err(e) => {
-                    eprintln!("Failed to accept connection: {}", e);
+                    log::warn!("Failed to accept connection: {}", e);
                     continue;
                 }
             },
             None => {
-                println!("Endpoint closed");
+                log::info!("Endpoint closed");
                 break;
             }
         };
 
         let remote_id = conn.remote_id();
-        println!("Receiver connected from: {}", remote_id);
-        println!("Forwarding TCP connections to {}", target_addr);
+        log::info!("Receiver connected from: {}", remote_id);
+        log::info!("Forwarding TCP connections to {}", target_addr);
 
         let target = target_addr;
         tokio::spawn(async move {
@@ -691,26 +691,26 @@ pub async fn run_tcp_sender(
                 let (send_stream, recv_stream) = match conn.accept_bi().await {
                     Ok(streams) => streams,
                     Err(e) => {
-                        println!("Receiver disconnected: {}", e);
+                        log::info!("Receiver disconnected: {}", e);
                         break;
                     }
                 };
 
-                println!("New TCP connection request received");
+                log::info!("New TCP connection request received");
 
                 tokio::spawn(async move {
                     if let Err(e) = handle_tcp_sender_stream(send_stream, recv_stream, target).await
                     {
-                        eprintln!("TCP connection error: {}", e);
+                        log::warn!("TCP connection error: {}", e);
                     }
                 });
             }
 
             conn.close(0u32.into(), b"done");
-            println!("Receiver connection closed.");
+            log::info!("Receiver connection closed.");
         });
 
-        println!("Waiting for next receiver to connect...");
+        log::info!("Waiting for next receiver to connect...");
     }
 
     endpoint.close().await;
@@ -726,11 +726,11 @@ async fn handle_tcp_sender_stream(
         .await
         .context("Failed to connect to target TCP service")?;
 
-    println!("-> Connected to target {}", target_addr);
+    log::info!("-> Connected to target {}", target_addr);
 
     bridge_streams(recv_stream, send_stream, tcp_stream).await?;
 
-    println!("<- TCP connection to {} closed", target_addr);
+    log::info!("<- TCP connection to {} closed", target_addr);
     Ok(())
 }
 
@@ -751,9 +751,9 @@ pub async fn run_tcp_receiver(
         .parse()
         .context("Invalid EndpointId format. Should be a 52-character base32 string.")?;
 
-    println!("TCP Tunnel - Receiver Mode");
-    println!("==========================");
-    println!("Creating iroh endpoint...");
+    log::info!("TCP Tunnel - Receiver Mode");
+    log::info!("==========================");
+    log::info!("Creating iroh endpoint...");
 
     let endpoint = create_receiver_endpoint(&relay_urls, relay_only, dns_server.as_deref()).await?;
 
@@ -767,7 +767,7 @@ pub async fn run_tcp_receiver(
     let listener = TcpListener::bind(listen_addr)
         .await
         .context("Failed to bind TCP listener")?;
-    println!(
+    log::info!(
         "Listening on TCP {} - configure your client to connect here",
         listen_addr
     );
@@ -776,12 +776,12 @@ pub async fn run_tcp_receiver(
         let (tcp_stream, peer_addr) = match listener.accept().await {
             Ok(result) => result,
             Err(e) => {
-                eprintln!("Failed to accept TCP connection: {}", e);
+                log::warn!("Failed to accept TCP connection: {}", e);
                 continue;
             }
         };
 
-        println!("New local connection from {}", peer_addr);
+        log::info!("New local connection from {}", peer_addr);
 
         let conn_clone = conn.clone();
         let established = tunnel_established.clone();
@@ -790,7 +790,7 @@ pub async fn run_tcp_receiver(
             match handle_tcp_receiver_connection(conn_clone, tcp_stream, peer_addr, established).await {
                 Ok(()) => {}
                 Err(e) => {
-                    eprintln!("TCP tunnel error for {}: {}", peer_addr, e);
+                    log::warn!("TCP tunnel error for {}: {}", peer_addr, e);
                 }
             }
         });
@@ -806,8 +806,8 @@ pub async fn run_manual_tcp_sender(target: String, stun_servers: Vec<String>) ->
         .await
         .with_context(|| format!("Invalid target address or hostname '{}'", target))?);
 
-    println!("Manual TCP Tunnel - Sender Mode");
-    println!("================================");
+    log::info!("Manual TCP Tunnel - Sender Mode");
+    log::info!("================================");
 
     let ice = IceEndpoint::gather(&stun_servers).await?;
     let local_creds = ice.local_credentials();
@@ -824,10 +824,10 @@ pub async fn run_manual_tcp_sender(target: String, stun_servers: Vec<String>) ->
         session_id: None,
     };
 
-    println!("\nManual Offer (copy to receiver):");
+    log::info!("\nManual Offer (copy to receiver):");
     display_offer(&offer)?;
 
-    println!("Paste receiver answer (include BEGIN/END markers), then press Enter:");
+    log::info!("Paste receiver answer (include BEGIN/END markers), then press Enter:");
     let answer = read_answer_from_stdin()?;
     if answer.version != MANUAL_SIGNAL_VERSION {
         anyhow::bail!(
@@ -850,7 +850,7 @@ pub async fn run_manual_tcp_sender(target: String, stun_servers: Vec<String>) ->
     tokio::spawn(ice_conn.ice_keeper.run());
 
     let endpoint = quic::make_server_endpoint(ice_conn.socket, quic_identity.server_config)?;
-    println!("Waiting for receiver QUIC connection (timeout: {:?})...", QUIC_CONNECTION_TIMEOUT);
+    log::info!("Waiting for receiver QUIC connection (timeout: {:?})...", QUIC_CONNECTION_TIMEOUT);
 
     let connecting = tokio::time::timeout(QUIC_CONNECTION_TIMEOUT, endpoint.accept())
         .await
@@ -860,22 +860,22 @@ pub async fn run_manual_tcp_sender(target: String, stun_servers: Vec<String>) ->
         .await
         .context("Timeout during QUIC handshake")?
         .context("Failed to accept QUIC connection")?;
-    println!("Receiver connected over QUIC.");
+    log::info!("Receiver connected over QUIC.");
 
     loop {
         let (send_stream, recv_stream) = match conn.accept_bi().await {
             Ok(streams) => streams,
             Err(e) => {
-                println!("Receiver disconnected: {}", e);
+                log::info!("Receiver disconnected: {}", e);
                 break;
             }
         };
 
-        println!("New TCP connection request received");
+        log::info!("New TCP connection request received");
         let target = Arc::clone(&target_addrs);
         tokio::spawn(async move {
             if let Err(e) = handle_tcp_sender_stream_quic(send_stream, recv_stream, target).await {
-                eprintln!("TCP connection error: {}", e);
+                log::warn!("TCP connection error: {}", e);
             }
         });
     }
@@ -888,14 +888,14 @@ pub async fn run_manual_tcp_receiver(listen: String, stun_servers: Vec<String>) 
         .parse()
         .context("Invalid listen address format. Use format like 127.0.0.1:2222 or [::]:2222")?;
 
-    println!("Manual TCP Tunnel - Receiver Mode");
-    println!("=================================");
+    log::info!("Manual TCP Tunnel - Receiver Mode");
+    log::info!("=================================");
 
     let ice = IceEndpoint::gather(&stun_servers).await?;
     let local_creds = ice.local_credentials();
     let local_candidates = ice.local_candidates();
 
-    println!("Paste sender offer (include BEGIN/END markers), then press Enter:");
+    log::info!("Paste sender offer (include BEGIN/END markers), then press Enter:");
     let offer = read_offer_from_stdin()?;
     if offer.version != MANUAL_SIGNAL_VERSION {
         anyhow::bail!(
@@ -913,7 +913,7 @@ pub async fn run_manual_tcp_receiver(listen: String, stun_servers: Vec<String>) 
         session_id: None,
     };
 
-    println!("\nManual Answer (copy to sender):");
+    log::info!("\nManual Answer (copy to sender):");
     display_answer(&answer)?;
 
     let remote_creds = str0m::IceCreds {
@@ -929,7 +929,7 @@ pub async fn run_manual_tcp_receiver(listen: String, stun_servers: Vec<String>) 
     tokio::spawn(ice_conn.ice_keeper.run());
 
     let endpoint = quic::make_client_endpoint(ice_conn.socket, &offer.quic_fingerprint)?;
-    println!("Connecting to sender via QUIC (timeout: {:?})...", QUIC_CONNECTION_TIMEOUT);
+    log::info!("Connecting to sender via QUIC (timeout: {:?})...", QUIC_CONNECTION_TIMEOUT);
     let connecting = endpoint
         .connect(ice_conn.remote_addr, "manual")
         .context("Failed to start QUIC connection")?;
@@ -937,7 +937,7 @@ pub async fn run_manual_tcp_receiver(listen: String, stun_servers: Vec<String>) 
         .await
         .context("Timeout during QUIC connection")?
         .context("Failed to connect to sender")?;
-    println!("Connected to sender over QUIC.");
+    log::info!("Connected to sender over QUIC.");
 
     let conn = Arc::new(conn);
     let tunnel_established = Arc::new(AtomicBool::new(false));
@@ -945,7 +945,7 @@ pub async fn run_manual_tcp_receiver(listen: String, stun_servers: Vec<String>) 
     let listener = TcpListener::bind(listen_addr)
         .await
         .context("Failed to bind TCP listener")?;
-    println!(
+    log::info!(
         "Listening on TCP {} - configure your client to connect here",
         listen_addr
     );
@@ -954,12 +954,12 @@ pub async fn run_manual_tcp_receiver(listen: String, stun_servers: Vec<String>) 
         let (tcp_stream, peer_addr) = match listener.accept().await {
             Ok(result) => result,
             Err(e) => {
-                eprintln!("Failed to accept TCP connection: {}", e);
+                log::warn!("Failed to accept TCP connection: {}", e);
                 continue;
             }
         };
 
-        println!("New local connection from {}", peer_addr);
+        log::info!("New local connection from {}", peer_addr);
         let conn_clone = conn.clone();
         let established = tunnel_established.clone();
 
@@ -967,7 +967,7 @@ pub async fn run_manual_tcp_receiver(listen: String, stun_servers: Vec<String>) 
             match handle_tcp_receiver_connection_quic(conn_clone, tcp_stream, peer_addr, established).await {
                 Ok(()) => {}
                 Err(e) => {
-                    eprintln!("TCP tunnel error for {}: {}", peer_addr, e);
+                    log::warn!("TCP tunnel error for {}: {}", peer_addr, e);
                 }
             }
         });
@@ -983,8 +983,8 @@ pub async fn run_manual_udp_sender(target: String, stun_servers: Vec<String>) ->
         .await
         .with_context(|| format!("Invalid target address or hostname '{}'", target))?;
 
-    println!("Manual UDP Tunnel - Sender Mode");
-    println!("================================");
+    log::info!("Manual UDP Tunnel - Sender Mode");
+    log::info!("================================");
 
     let ice = IceEndpoint::gather(&stun_servers).await?;
     let local_creds = ice.local_credentials();
@@ -1001,10 +1001,10 @@ pub async fn run_manual_udp_sender(target: String, stun_servers: Vec<String>) ->
         session_id: None,
     };
 
-    println!("\nManual Offer (copy to receiver):");
+    log::info!("\nManual Offer (copy to receiver):");
     display_offer(&offer)?;
 
-    println!("Paste receiver answer (include BEGIN/END markers), then press Enter:");
+    log::info!("Paste receiver answer (include BEGIN/END markers), then press Enter:");
     let answer = read_answer_from_stdin()?;
     if answer.version != MANUAL_SIGNAL_VERSION {
         anyhow::bail!(
@@ -1027,7 +1027,7 @@ pub async fn run_manual_udp_sender(target: String, stun_servers: Vec<String>) ->
     tokio::spawn(ice_conn.ice_keeper.run());
 
     let endpoint = quic::make_server_endpoint(ice_conn.socket, quic_identity.server_config)?;
-    println!("Waiting for receiver QUIC connection (timeout: {:?})...", QUIC_CONNECTION_TIMEOUT);
+    log::info!("Waiting for receiver QUIC connection (timeout: {:?})...", QUIC_CONNECTION_TIMEOUT);
 
     let connecting = tokio::time::timeout(QUIC_CONNECTION_TIMEOUT, endpoint.accept())
         .await
@@ -1037,14 +1037,14 @@ pub async fn run_manual_udp_sender(target: String, stun_servers: Vec<String>) ->
         .await
         .context("Timeout during QUIC handshake")?
         .context("Failed to accept QUIC connection")?;
-    println!("Receiver connected over QUIC.");
+    log::info!("Receiver connected over QUIC.");
 
     let (send_stream, recv_stream) = conn
         .accept_bi()
         .await
         .context("Failed to accept stream from receiver")?;
 
-    println!("Forwarding UDP traffic to {}", target_addr);
+    log::info!("Forwarding UDP traffic to {}", target_addr);
 
     // Bind to the same address family as the target
     let bind_addr: SocketAddr = if target_addr.is_ipv6() {
@@ -1061,7 +1061,7 @@ pub async fn run_manual_udp_sender(target: String, stun_servers: Vec<String>) ->
     forward_stream_to_udp_sender_quic(recv_stream, send_stream, udp_socket, target_addr).await?;
 
     conn.close(0u32.into(), b"done");
-    println!("Connection closed.");
+    log::info!("Connection closed.");
 
     Ok(())
 }
@@ -1071,14 +1071,14 @@ pub async fn run_manual_udp_receiver(listen: String, stun_servers: Vec<String>) 
         .parse()
         .context("Invalid listen address format. Use format like 127.0.0.1:51820 or [::]:51820")?;
 
-    println!("Manual UDP Tunnel - Receiver Mode");
-    println!("=================================");
+    log::info!("Manual UDP Tunnel - Receiver Mode");
+    log::info!("=================================");
 
     let ice = IceEndpoint::gather(&stun_servers).await?;
     let local_creds = ice.local_credentials();
     let local_candidates = ice.local_candidates();
 
-    println!("Paste sender offer (include BEGIN/END markers), then press Enter:");
+    log::info!("Paste sender offer (include BEGIN/END markers), then press Enter:");
     let offer = read_offer_from_stdin()?;
     if offer.version != MANUAL_SIGNAL_VERSION {
         anyhow::bail!(
@@ -1096,7 +1096,7 @@ pub async fn run_manual_udp_receiver(listen: String, stun_servers: Vec<String>) 
         session_id: None,
     };
 
-    println!("\nManual Answer (copy to sender):");
+    log::info!("\nManual Answer (copy to sender):");
     display_answer(&answer)?;
 
     let remote_creds = str0m::IceCreds {
@@ -1112,7 +1112,7 @@ pub async fn run_manual_udp_receiver(listen: String, stun_servers: Vec<String>) 
     tokio::spawn(ice_conn.ice_keeper.run());
 
     let endpoint = quic::make_client_endpoint(ice_conn.socket, &offer.quic_fingerprint)?;
-    println!("Connecting to sender via QUIC (timeout: {:?})...", QUIC_CONNECTION_TIMEOUT);
+    log::info!("Connecting to sender via QUIC (timeout: {:?})...", QUIC_CONNECTION_TIMEOUT);
     let connecting = endpoint
         .connect(ice_conn.remote_addr, "manual")
         .context("Failed to start QUIC connection")?;
@@ -1120,7 +1120,7 @@ pub async fn run_manual_udp_receiver(listen: String, stun_servers: Vec<String>) 
         .await
         .context("Timeout during QUIC connection")?
         .context("Failed to connect to sender")?;
-    println!("Connected to sender over QUIC.");
+    log::info!("Connected to sender over QUIC.");
 
     let (send_stream, recv_stream) = open_bi_with_retry(&conn).await?;
 
@@ -1129,7 +1129,7 @@ pub async fn run_manual_udp_receiver(listen: String, stun_servers: Vec<String>) 
             .await
             .context("Failed to bind UDP socket")?,
     );
-    println!(
+    log::info!(
         "Listening on UDP {} - configure your client to connect here",
         listen_addr
     );
@@ -1142,18 +1142,18 @@ pub async fn run_manual_udp_receiver(listen: String, stun_servers: Vec<String>) 
     tokio::select! {
         result = forward_udp_to_stream_quic(udp_clone, send_stream, client_clone) => {
             if let Err(e) = result {
-                eprintln!("UDP to stream error: {}", e);
+                log::warn!("UDP to stream error: {}", e);
             }
         }
         result = forward_stream_to_udp_receiver_quic(recv_stream, udp_socket, client_addr) => {
             if let Err(e) = result {
-                eprintln!("Stream to UDP error: {}", e);
+                log::warn!("Stream to UDP error: {}", e);
             }
         }
     }
 
     conn.close(0u32.into(), b"done");
-    println!("Connection closed.");
+    log::info!("Connection closed.");
 
     Ok(())
 }
@@ -1216,13 +1216,13 @@ async fn run_nostr_sender_loop(
     } else {
         max_sessions.to_string()
     };
-    println!("Waiting for tunnel requests (max sessions: {})...", limit_str);
+    log::info!("Waiting for tunnel requests (max sessions: {})...", limit_str);
 
     loop {
         // Clean up completed tasks without blocking
         while let Some(result) = session_tasks.try_join_next() {
             if let Err(e) = result {
-                eprintln!("Session task panicked: {:?}", e);
+                log::warn!("Session task panicked: {:?}", e);
             }
         }
 
@@ -1238,14 +1238,14 @@ async fn run_nostr_sender_loop(
                     return Err(e.context("Nostr signaling channel closed"));
                 }
                 // Transient error: log and retry
-                eprintln!("Error waiting for request: {}", e);
+                log::warn!("Error waiting for request: {}", e);
                 tokio::time::sleep(Duration::from_secs(1)).await;
                 continue;
             }
         };
 
         if request.version != MANUAL_SIGNAL_VERSION {
-            eprintln!(
+            log::warn!(
                 "Ignoring request with version mismatch (expected {}, got {})",
                 MANUAL_SIGNAL_VERSION, request.version
             );
@@ -1256,7 +1256,7 @@ async fn run_nostr_sender_loop(
         let protocol = request.source.as_ref()
             .and_then(|s| s.split("://").next())
             .unwrap_or("unknown");
-        println!(
+        log::info!(
             "Received {} request for session {}",
             protocol.to_uppercase(),
             short_session_id(&session_id)
@@ -1269,7 +1269,7 @@ async fn run_nostr_sender_loop(
                 Err(_) => {
                     // At capacity - reject immediately
                     let active = max_sessions - sem.available_permits();
-                    println!(
+                    log::info!(
                         "Rejecting session {} - at capacity ({}/{})",
                         short_session_id(&session_id),
                         active,
@@ -1281,9 +1281,9 @@ async fn run_nostr_sender_loop(
                         format!("Sender at capacity ({}/{})", active, max_sessions),
                     );
                     if let Err(e) = signaling.publish_reject(&reject).await {
-                        eprintln!("Failed to send rejection: {}", e);
+                        log::warn!("Failed to send rejection: {}", e);
                     } else {
-                        println!(
+                        log::info!(
                             "Sent rejection for session {}",
                             short_session_id(&session_id)
                         );
@@ -1302,7 +1302,7 @@ async fn run_nostr_sender_loop(
             .as_ref()
             .map(|sem| max_sessions - sem.available_permits())
             .unwrap_or(session_tasks.len() + 1);
-        println!("Active sessions: {}/{}", active_count, limit_str);
+        log::info!("Active sessions: {}/{}", active_count, limit_str);
 
         let sig = signaling.clone();
         let stun = stun_servers.clone();
@@ -1333,13 +1333,13 @@ async fn run_nostr_sender_loop(
                 let remaining = max_sessions_copy
                     .saturating_sub(sem.available_permits())
                     .saturating_sub(1);
-                println!("Session ended. Active sessions: {}/{}", remaining, limit_str_clone);
+                log::info!("Session ended. Active sessions: {}/{}", remaining, limit_str_clone);
             } else {
-                println!("Session ended.");
+                log::info!("Session ended.");
             }
 
             if let Err(ref e) = result {
-                eprintln!("Session error: {}", e);
+                log::warn!("Session error: {}", e);
             }
             result
         });
@@ -1402,7 +1402,7 @@ async fn handle_nostr_session_impl(
                     format!("TCP source '{}' not in allowed networks", requested_source),
                 );
                 if let Err(e) = signaling.publish_reject(&reject).await {
-                    eprintln!("[{}] Failed to publish reject: {}", short_id, e);
+                    log::warn!("[{}] Failed to publish reject: {}", short_id, e);
                 }
                 anyhow::bail!("[{}] Rejected: TCP source not allowed", short_id);
             }
@@ -1422,7 +1422,7 @@ async fn handle_nostr_session_impl(
                     format!("UDP source '{}' not in allowed networks", requested_source),
                 );
                 if let Err(e) = signaling.publish_reject(&reject).await {
-                    eprintln!("[{}] Failed to publish reject: {}", short_id, e);
+                    log::warn!("[{}] Failed to publish reject: {}", short_id, e);
                 }
                 anyhow::bail!("[{}] Rejected: UDP source not allowed", short_id);
             }
@@ -1440,7 +1440,7 @@ async fn handle_nostr_session_impl(
                 format!("Unknown protocol in source '{}'. Use tcp:// or udp://", requested_source),
             );
             if let Err(e) = signaling.publish_reject(&reject).await {
-                eprintln!("[{}] Failed to publish reject: {}", short_id, e);
+                log::warn!("[{}] Failed to publish reject: {}", short_id, e);
             }
             anyhow::bail!("[{}] Unknown protocol: {}", short_id, protocol)
         }
@@ -1458,7 +1458,7 @@ async fn handle_nostr_tcp_session_impl(
 ) -> Result<()> {
     let session_id = request.session_id.clone();
     let short_id = short_session_id(&session_id);
-    println!("[{}] Starting TCP session...", short_id);
+    log::info!("[{}] Starting TCP session...", short_id);
 
     // Source is required - already validated by handle_nostr_session_impl
     let requested_source = request.source.as_ref()
@@ -1468,7 +1468,7 @@ async fn handle_nostr_tcp_session_impl(
     let target_hostport = extract_addr_from_source(requested_source)
         .ok_or_else(|| anyhow::anyhow!("[{}] Invalid source format '{}'", short_id, requested_source))?;
 
-    println!("[{}] Forwarding to: {}", short_id, requested_source);
+    log::info!("[{}] Forwarding to: {}", short_id, requested_source);
     let target_addrs = Arc::new(resolve_all_target_addrs(&target_hostport)
         .await
         .with_context(|| format!("Invalid source '{}'", requested_source))?);
@@ -1477,7 +1477,7 @@ async fn handle_nostr_tcp_session_impl(
     let ice = IceEndpoint::gather(&stun_servers).await?;
     let local_creds = ice.local_credentials();
     let local_candidates = ice.local_candidates();
-    println!("[{}] Gathered {} ICE candidates", short_id, local_candidates.len());
+    log::info!("[{}] Gathered {} ICE candidates", short_id, local_candidates.len());
 
     let quic_identity = quic::generate_server_identity()?;
 
@@ -1518,7 +1518,7 @@ async fn handle_nostr_tcp_session_impl(
     let ice_conn = ice
         .connect(IceRole::Controlling, remote_creds, request.candidates)
         .await?;
-    println!("[{}] ICE connection established", short_id);
+    log::info!("[{}] ICE connection established", short_id);
 
     // Spawn the ICE keeper
     tokio::spawn(ice_conn.ice_keeper.run());
@@ -1533,13 +1533,13 @@ async fn handle_nostr_tcp_session_impl(
         .await
         .context("Timeout during QUIC handshake")?
         .context("Failed to accept QUIC connection")?;
-    println!("[{}] QUIC connected, forwarding to {:?}", short_id, target_addrs.as_slice());
+    log::info!("[{}] QUIC connected, forwarding to {:?}", short_id, target_addrs.as_slice());
 
     loop {
         let (send_stream, recv_stream) = match conn.accept_bi().await {
             Ok(streams) => streams,
             Err(e) => {
-                println!("[{}] Session ended: {}", short_id, e);
+                log::info!("[{}] Session ended: {}", short_id, e);
                 break;
             }
         };
@@ -1548,7 +1548,7 @@ async fn handle_nostr_tcp_session_impl(
         let sid = short_id.to_string();
         tokio::spawn(async move {
             if let Err(e) = handle_tcp_sender_stream_quic(send_stream, recv_stream, target).await {
-                eprintln!("[{}] TCP connection error: {}", sid, e);
+                log::warn!("[{}] TCP connection error: {}", sid, e);
             }
         });
     }
@@ -1576,21 +1576,21 @@ pub async fn run_nostr_sender(
     validate_allowed_networks(&allowed_tcp, "--allowed-tcp")?;
     validate_allowed_networks(&allowed_udp, "--allowed-udp")?;
 
-    println!("Nostr Tunnel - Sender Mode (Multi-Session)");
-    println!("==========================================");
+    log::info!("Nostr Tunnel - Sender Mode (Multi-Session)");
+    log::info!("==========================================");
 
     // Create Nostr signaling client
     let relay_list = if relays.is_empty() { None } else { Some(relays) };
     let signaling = Arc::new(NostrSignaling::new(&nsec, &peer_npub, relay_list).await?);
 
-    println!("Your pubkey: {}", signaling.public_key_bech32());
-    println!("Transfer ID: {}", signaling.transfer_id());
-    println!("Relays: {:?}", signaling.relay_urls());
+    log::info!("Your pubkey: {}", signaling.public_key_bech32());
+    log::info!("Transfer ID: {}", signaling.transfer_id());
+    log::info!("Relays: {:?}", signaling.relay_urls());
     if !allowed_tcp.is_empty() {
-        println!("Allowed TCP networks: {:?}", allowed_tcp);
+        log::info!("Allowed TCP networks: {:?}", allowed_tcp);
     }
     if !allowed_udp.is_empty() {
-        println!("Allowed UDP networks: {:?}", allowed_udp);
+        log::info!("Allowed UDP networks: {:?}", allowed_udp);
     }
 
     // Subscribe to incoming events
@@ -1643,24 +1643,24 @@ pub async fn run_nostr_tcp_receiver(
         .parse()
         .context("Invalid listen address format. Use format like 127.0.0.1:2222 or [::]:2222")?;
 
-    println!("Nostr TCP Tunnel - Receiver Mode");
-    println!("================================");
+    log::info!("Nostr TCP Tunnel - Receiver Mode");
+    log::info!("================================");
 
     // Create Nostr signaling client
     let relay_list = if relays.is_empty() { None } else { Some(relays) };
     let signaling = NostrSignaling::new(&nsec, &peer_npub, relay_list).await?;
 
-    println!("Your pubkey: {}", signaling.public_key_bech32());
-    println!("Transfer ID: {}", signaling.transfer_id());
-    println!("Relays: {:?}", signaling.relay_urls());
-    println!("Requesting source: {}", source);
+    log::info!("Your pubkey: {}", signaling.public_key_bech32());
+    log::info!("Transfer ID: {}", signaling.transfer_id());
+    log::info!("Relays: {:?}", signaling.relay_urls());
+    log::info!("Requesting source: {}", source);
 
     // Subscribe to incoming events
     signaling.subscribe().await?;
 
     // Generate session ID to filter stale events
     let session_id = generate_session_id();
-    println!("Session ID: {}", session_id);
+    log::info!("Session ID: {}", session_id);
 
     // Gather ICE candidates first (before sending request)
     let ice = IceEndpoint::gather(&stun_servers).await?;
@@ -1709,7 +1709,7 @@ pub async fn run_nostr_tcp_receiver(
     signaling.publish_answer(&answer).await?;
 
     // Brief delay to allow answer to propagate to relays
-    println!("Waiting briefly for answer to propagate...");
+    log::info!("Waiting briefly for answer to propagate...");
     tokio::time::sleep(Duration::from_secs(3)).await;
 
     // Disconnect from Nostr (signaling complete)
@@ -1728,7 +1728,7 @@ pub async fn run_nostr_tcp_receiver(
     tokio::spawn(ice_conn.ice_keeper.run());
 
     let endpoint = quic::make_client_endpoint(ice_conn.socket, &offer.quic_fingerprint)?;
-    println!(
+    log::info!(
         "Connecting to sender via QUIC (timeout: {:?})...",
         QUIC_CONNECTION_TIMEOUT
     );
@@ -1739,7 +1739,7 @@ pub async fn run_nostr_tcp_receiver(
         .await
         .context("Timeout during QUIC connection")?
         .context("Failed to connect to sender")?;
-    println!("Connected to sender over QUIC.");
+    log::info!("Connected to sender over QUIC.");
 
     let conn = Arc::new(conn);
     let tunnel_established = Arc::new(AtomicBool::new(false));
@@ -1747,7 +1747,7 @@ pub async fn run_nostr_tcp_receiver(
     let listener = TcpListener::bind(listen_addr)
         .await
         .context("Failed to bind TCP listener")?;
-    println!(
+    log::info!(
         "Listening on TCP {} - configure your client to connect here",
         listen_addr
     );
@@ -1756,12 +1756,12 @@ pub async fn run_nostr_tcp_receiver(
         let (tcp_stream, peer_addr) = match listener.accept().await {
             Ok(result) => result,
             Err(e) => {
-                eprintln!("Failed to accept TCP connection: {}", e);
+                log::warn!("Failed to accept TCP connection: {}", e);
                 continue;
             }
         };
 
-        println!("New local connection from {}", peer_addr);
+        log::info!("New local connection from {}", peer_addr);
         let conn_clone = conn.clone();
         let established = tunnel_established.clone();
 
@@ -1771,7 +1771,7 @@ pub async fn run_nostr_tcp_receiver(
             {
                 Ok(()) => {}
                 Err(e) => {
-                    eprintln!("TCP tunnel error for {}: {}", peer_addr, e);
+                    log::warn!("TCP tunnel error for {}: {}", peer_addr, e);
                 }
             }
         });
@@ -1793,7 +1793,7 @@ async fn handle_nostr_udp_session_impl(
 ) -> Result<()> {
     let session_id = request.session_id.clone();
     let short_id = short_session_id(&session_id);
-    println!("[{}] Starting UDP session...", short_id);
+    log::info!("[{}] Starting UDP session...", short_id);
 
     // Source is required - already validated by handle_nostr_session_impl
     let requested_source = request.source.as_ref()
@@ -1803,7 +1803,7 @@ async fn handle_nostr_udp_session_impl(
     let target_hostport = extract_addr_from_source(requested_source)
         .ok_or_else(|| anyhow::anyhow!("[{}] Invalid source format '{}'", short_id, requested_source))?;
 
-    println!("[{}] Forwarding to: {}", short_id, requested_source);
+    log::info!("[{}] Forwarding to: {}", short_id, requested_source);
     let target_addr = resolve_target_addr(&target_hostport)
         .await
         .with_context(|| format!("Invalid source '{}'", requested_source))?;
@@ -1812,7 +1812,7 @@ async fn handle_nostr_udp_session_impl(
     let ice = IceEndpoint::gather(&stun_servers).await?;
     let local_creds = ice.local_credentials();
     let local_candidates = ice.local_candidates();
-    println!("[{}] Gathered {} ICE candidates", short_id, local_candidates.len());
+    log::debug!("[{}] Gathered {} ICE candidates", short_id, local_candidates.len());
 
     let quic_identity = quic::generate_server_identity()?;
 
@@ -1853,7 +1853,7 @@ async fn handle_nostr_udp_session_impl(
     let ice_conn = ice
         .connect(IceRole::Controlling, remote_creds, request.candidates)
         .await?;
-    println!("[{}] ICE connection established", short_id);
+    log::info!("[{}] ICE connection established", short_id);
 
     // Spawn the ICE keeper
     tokio::spawn(ice_conn.ice_keeper.run());
@@ -1868,14 +1868,14 @@ async fn handle_nostr_udp_session_impl(
         .await
         .context("Timeout during QUIC handshake")?
         .context("Failed to accept QUIC connection")?;
-    println!("[{}] QUIC connected", short_id);
+    log::info!("[{}] QUIC connected", short_id);
 
     let (send_stream, recv_stream) = conn
         .accept_bi()
         .await
         .context("Failed to accept stream from receiver")?;
 
-    println!("[{}] Forwarding UDP traffic to {}", short_id, target_addr);
+    log::info!("[{}] Forwarding UDP traffic to {}", short_id, target_addr);
 
     // Bind to the same address family as the target
     let bind_addr: SocketAddr = if target_addr.is_ipv6() {
@@ -1892,7 +1892,7 @@ async fn handle_nostr_udp_session_impl(
     forward_stream_to_udp_sender_quic(recv_stream, send_stream, udp_socket, target_addr).await?;
 
     conn.close(0u32.into(), b"done");
-    println!("[{}] UDP session closed", short_id);
+    log::info!("[{}] UDP session closed", short_id);
 
     Ok(())
 }
@@ -1930,24 +1930,24 @@ pub async fn run_nostr_udp_receiver(
         .parse()
         .context("Invalid listen address format. Use format like 127.0.0.1:51820 or [::]:51820")?;
 
-    println!("Nostr UDP Tunnel - Receiver Mode");
-    println!("================================");
+    log::info!("Nostr UDP Tunnel - Receiver Mode");
+    log::info!("================================");
 
     // Create Nostr signaling client
     let relay_list = if relays.is_empty() { None } else { Some(relays) };
     let signaling = NostrSignaling::new(&nsec, &peer_npub, relay_list).await?;
 
-    println!("Your pubkey: {}", signaling.public_key_bech32());
-    println!("Transfer ID: {}", signaling.transfer_id());
-    println!("Relays: {:?}", signaling.relay_urls());
-    println!("Requesting source: {}", source);
+    log::info!("Your pubkey: {}", signaling.public_key_bech32());
+    log::info!("Transfer ID: {}", signaling.transfer_id());
+    log::info!("Relays: {:?}", signaling.relay_urls());
+    log::info!("Requesting source: {}", source);
 
     // Subscribe to incoming events
     signaling.subscribe().await?;
 
     // Generate session ID to filter stale events
     let session_id = generate_session_id();
-    println!("Session ID: {}", session_id);
+    log::info!("Session ID: {}", session_id);
 
     // Gather ICE candidates first (before sending request)
     let ice = IceEndpoint::gather(&stun_servers).await?;
@@ -1996,7 +1996,7 @@ pub async fn run_nostr_udp_receiver(
     signaling.publish_answer(&answer).await?;
 
     // Brief delay to allow answer to propagate to relays
-    println!("Waiting briefly for answer to propagate...");
+    log::info!("Waiting briefly for answer to propagate...");
     tokio::time::sleep(Duration::from_secs(3)).await;
 
     // Disconnect from Nostr (signaling complete)
@@ -2015,7 +2015,7 @@ pub async fn run_nostr_udp_receiver(
     tokio::spawn(ice_conn.ice_keeper.run());
 
     let endpoint = quic::make_client_endpoint(ice_conn.socket, &offer.quic_fingerprint)?;
-    println!(
+    log::info!(
         "Connecting to sender via QUIC (timeout: {:?})...",
         QUIC_CONNECTION_TIMEOUT
     );
@@ -2026,7 +2026,7 @@ pub async fn run_nostr_udp_receiver(
         .await
         .context("Timeout during QUIC connection")?
         .context("Failed to connect to sender")?;
-    println!("Connected to sender over QUIC.");
+    log::info!("Connected to sender over QUIC.");
 
     let (send_stream, recv_stream) = open_bi_with_retry(&conn).await?;
 
@@ -2035,7 +2035,7 @@ pub async fn run_nostr_udp_receiver(
             .await
             .context("Failed to bind UDP socket")?,
     );
-    println!(
+    log::info!(
         "Listening on UDP {} - configure your client to connect here",
         listen_addr
     );
@@ -2048,18 +2048,18 @@ pub async fn run_nostr_udp_receiver(
     tokio::select! {
         result = forward_udp_to_stream_quic(udp_clone, send_stream, client_clone) => {
             if let Err(e) = result {
-                eprintln!("UDP to stream error: {}", e);
+                log::warn!("UDP to stream error: {}", e);
             }
         }
         result = forward_stream_to_udp_receiver_quic(recv_stream, udp_socket, client_addr) => {
             if let Err(e) = result {
-                eprintln!("Stream to UDP error: {}", e);
+                log::warn!("Stream to UDP error: {}", e);
             }
         }
     }
 
     conn.close(0u32.into(), b"done");
-    println!("Connection closed.");
+    log::info!("Connection closed.");
 
     Ok(())
 }
@@ -2078,9 +2078,9 @@ async fn handle_tcp_sender_stream_quic(
         .context("Failed to connect to target TCP service")?;
 
     let local_addr = tcp_stream.peer_addr().ok();
-    println!("-> Connected to target {:?}", local_addr);
+    log::info!("-> Connected to target {:?}", local_addr);
     bridge_quinn_streams(recv_stream, send_stream, tcp_stream).await?;
-    println!("<- TCP connection to {:?} closed", local_addr);
+    log::info!("<- TCP connection to {:?} closed", local_addr);
     Ok(())
 }
 
@@ -2151,7 +2151,7 @@ where
                     .unwrap_or(BACKOFF_MAX_MULTIPLIER)
                     .min(BACKOFF_MAX_MULTIPLIER);
                 let delay_ms = base_delay_ms.saturating_mul(multiplier);
-                eprintln!(
+                log::warn!(
                     "Failed to {} (attempt {}/{}): {}. Next attempt in {}ms...",
                     operation_name,
                     attempt + 1,
@@ -2199,12 +2199,12 @@ async fn handle_tcp_receiver_connection_quic(
     send_stream.write_all(&[STREAM_OPEN_MARKER]).await.context("Failed to write stream marker")?;
 
     if !tunnel_established.swap(true, Ordering::Relaxed) {
-        println!("Tunnel to sender established!");
+        log::info!("Tunnel to sender established!");
     }
-    println!("-> Opened tunnel for {}", peer_addr);
+    log::info!("-> Opened tunnel for {}", peer_addr);
 
     bridge_quinn_streams(recv_stream, send_stream, tcp_stream).await?;
-    println!("<- Connection from {} closed", peer_addr);
+    log::info!("<- Connection from {} closed", peer_addr);
     Ok(())
 }
 
@@ -2222,14 +2222,14 @@ async fn bridge_quinn_streams(
         result = quic_to_tcp => {
             if let Err(e) = result {
                 if !e.to_string().contains("reset") {
-                    eprintln!("QUIC->TCP error: {}", e);
+                    log::warn!("QUIC->TCP error: {}", e);
                 }
             }
         }
         result = tcp_to_quic => {
             if let Err(e) = result {
                 if !e.to_string().contains("reset") {
-                    eprintln!("TCP->QUIC error: {}", e);
+                    log::warn!("TCP->QUIC error: {}", e);
                 }
             }
         }
@@ -2268,7 +2268,7 @@ async fn forward_udp_to_stream_quic(
             .await
             .context("Failed to write frame payload")?;
 
-        println!("-> Forwarded {} bytes from {}", len, addr);
+        log::debug!("-> Forwarded {} bytes from {}", len, addr);
     }
 }
 
@@ -2291,7 +2291,7 @@ async fn forward_stream_to_udp_sender_quic(
             if send_stream.write_all(&buf[..len]).await.is_err() {
                 break;
             }
-            println!("-> Sent {} bytes back to receiver", len);
+            log::debug!("-> Sent {} bytes back to receiver", len);
         }
     });
 
@@ -2313,7 +2313,7 @@ async fn forward_stream_to_udp_sender_quic(
             .await
             .context("Failed to send UDP packet")?;
 
-        println!("<- Forwarded {} bytes to {}", len, target_addr);
+        log::debug!("<- Forwarded {} bytes to {}", len, target_addr);
     }
 
     response_task.abort();
@@ -2344,9 +2344,9 @@ async fn forward_stream_to_udp_receiver_quic(
                 .send_to(&buf, addr)
                 .await
                 .context("Failed to send UDP packet to client")?;
-            println!("<- Forwarded {} bytes to client {}", len, addr);
+            log::debug!("<- Forwarded {} bytes to client {}", len, addr);
         } else {
-            println!("<- Received {} bytes but no client connected yet", len);
+            log::debug!("<- Received {} bytes but no client connected yet", len);
         }
     }
 
@@ -2378,13 +2378,13 @@ async fn handle_tcp_receiver_connection(
 
     // Print success message only on first successful stream
     if !tunnel_established.swap(true, Ordering::Relaxed) {
-        println!("Tunnel to sender established!");
+        log::info!("Tunnel to sender established!");
     }
-    println!("-> Opened tunnel for {}", peer_addr);
+    log::info!("-> Opened tunnel for {}", peer_addr);
 
     bridge_streams(recv_stream, send_stream, tcp_stream).await?;
 
-    println!("<- Connection from {} closed", peer_addr);
+    log::info!("<- Connection from {} closed", peer_addr);
     Ok(())
 }
 
@@ -2403,14 +2403,14 @@ async fn bridge_streams(
         result = quic_to_tcp => {
             if let Err(e) = result {
                 if !e.to_string().contains("reset") {
-                    eprintln!("QUIC->TCP error: {}", e);
+                    log::warn!("QUIC->TCP error: {}", e);
                 }
             }
         }
         result = tcp_to_quic => {
             if let Err(e) = result {
                 if !e.to_string().contains("reset") {
-                    eprintln!("TCP->QUIC error: {}", e);
+                    log::warn!("TCP->QUIC error: {}", e);
                 }
             }
         }
@@ -2484,7 +2484,7 @@ async fn get_direct_addresses(endpoint: &Endpoint, stun_servers: &[String]) -> V
 
     // Step 1: Get STUN-discovered public addresses (for NAT traversal)
     if !stun_servers.is_empty() {
-        println!("Discovering public addresses via STUN...");
+        log::info!("Discovering public addresses via STUN...");
         let mut got_ipv4_stun = false;
         let mut got_ipv6_stun = false;
 
@@ -2527,7 +2527,7 @@ async fn get_direct_addresses(endpoint: &Endpoint, stun_servers: &[String]) -> V
                             let addr = SocketAddr::new(external.ip(), port);
                             let addr_str = addr.to_string();
                             if seen.insert(addr_str.clone()) {
-                                println!("  STUN: {} (via {})", addr, stun);
+                                log::info!("  STUN: {} (via {})", addr, stun);
                                 addrs.push(addr_str);
                             }
                         }
@@ -2539,7 +2539,7 @@ async fn get_direct_addresses(endpoint: &Endpoint, stun_servers: &[String]) -> V
                         }
                     }
                     Err(e) => {
-                        eprintln!("  STUN query failed for {} ({}): {}", stun, server, e);
+                        log::warn!("  STUN query failed for {} ({}): {}", stun, server, e);
                     }
                 }
             }
@@ -2547,7 +2547,7 @@ async fn get_direct_addresses(endpoint: &Endpoint, stun_servers: &[String]) -> V
     }
 
     // Step 2: Get local network interface addresses (for LAN connections)
-    println!("Local addresses:");
+    log::info!("Local addresses:");
     if let Ok(interfaces) = get_if_addrs::get_if_addrs() {
         for iface in interfaces {
             // Skip loopback interfaces
@@ -2562,7 +2562,7 @@ async fn get_direct_addresses(endpoint: &Endpoint, stun_servers: &[String]) -> V
                 let addr = SocketAddr::new(ip, port);
                 let addr_str = addr.to_string();
                 if seen.insert(addr_str.clone()) {
-                    println!("  - {}", addr);
+                    log::info!("  - {}", addr);
                     addrs.push(addr_str);
                 }
             }
@@ -2583,7 +2583,7 @@ async fn race_connect_accept(
 
     let connect_timeout = Duration::from_secs(30);
 
-    println!("Racing connect vs accept for NAT hole punching...");
+    log::info!("Racing connect vs accept for NAT hole punching...");
 
     // Race both operations with a timeout
     tokio::select! {
@@ -2594,7 +2594,7 @@ async fn race_connect_accept(
         }) => {
             match result {
                 Ok(Ok(conn)) => {
-                    println!("Connected via outbound connection");
+                    log::info!("Connected via outbound connection");
                     Ok(conn)
                 }
                 Ok(Err(e)) => Err(anyhow::anyhow!("Connect failed: {}", e)),
@@ -2609,7 +2609,7 @@ async fn race_connect_accept(
         }) => {
             match result {
                 Ok(Ok(conn)) => {
-                    println!("Connected via inbound connection");
+                    log::info!("Connected via inbound connection");
                     Ok(conn)
                 }
                 Ok(Err(e)) => Err(e),
@@ -2624,9 +2624,9 @@ pub async fn run_iroh_manual_tcp_sender(target: String, stun_servers: Vec<String
         .await
         .with_context(|| format!("Invalid target address or hostname '{}'", target))?;
 
-    println!("Iroh Manual TCP Tunnel - Sender Mode");
-    println!("=====================================");
-    println!("Creating iroh endpoint (no relay)...");
+    log::info!("Iroh Manual TCP Tunnel - Sender Mode");
+    log::info!("=====================================");
+    log::info!("Creating iroh endpoint (no relay)...");
 
     let (endpoint, discovery) = create_iroh_manual_endpoint(TCP_ALPN).await?;
 
@@ -2639,10 +2639,10 @@ pub async fn run_iroh_manual_tcp_sender(target: String, stun_servers: Vec<String
         direct_addresses: direct_addrs,
     };
 
-    println!("\nIroh Manual Offer (copy to receiver):");
+    log::info!("\nIroh Manual Offer (copy to receiver):");
     display_iroh_offer(&offer)?;
 
-    println!("Paste receiver answer (include BEGIN/END markers), then press Enter:");
+    log::info!("Paste receiver answer (include BEGIN/END markers), then press Enter:");
     let answer = read_iroh_answer_from_stdin()?;
     if answer.version != IROH_SIGNAL_VERSION {
         anyhow::bail!(
@@ -2666,29 +2666,29 @@ pub async fn run_iroh_manual_tcp_sender(target: String, stun_servers: Vec<String
     let remote_addr = EndpointAddr::new(remote_id)
         .with_addrs(remote_addrs.into_iter().map(TransportAddr::Ip));
     discovery.add_endpoint_info(remote_addr);
-    println!("Added remote peer: {} ({} addresses)", remote_id, answer.direct_addresses.len());
+    log::info!("Added remote peer: {} ({} addresses)", remote_id, answer.direct_addresses.len());
 
     // Race connect vs accept for NAT hole punching
     let conn = race_connect_accept(&endpoint, remote_id, TCP_ALPN).await?;
 
     let remote_id = conn.remote_id();
-    println!("Peer connected: {}", remote_id);
-    println!("Forwarding TCP connections to {}", target_addr);
+    log::info!("Peer connected: {}", remote_id);
+    log::info!("Forwarding TCP connections to {}", target_addr);
 
     loop {
         let (send_stream, recv_stream) = match conn.accept_bi().await {
             Ok(streams) => streams,
             Err(e) => {
-                println!("Peer disconnected: {}", e);
+                log::info!("Peer disconnected: {}", e);
                 break;
             }
         };
 
-        println!("New TCP connection request received");
+        log::info!("New TCP connection request received");
         let target = target_addr;
         tokio::spawn(async move {
             if let Err(e) = handle_tcp_sender_stream(send_stream, recv_stream, target).await {
-                eprintln!("TCP connection error: {}", e);
+                log::warn!("TCP connection error: {}", e);
             }
         });
     }
@@ -2703,16 +2703,16 @@ pub async fn run_iroh_manual_tcp_receiver(listen: String, stun_servers: Vec<Stri
         .parse()
         .context("Invalid listen address format. Use format like 127.0.0.1:2222 or [::]:2222")?;
 
-    println!("Iroh Manual TCP Tunnel - Receiver Mode");
-    println!("======================================");
-    println!("Creating iroh endpoint (no relay)...");
+    log::info!("Iroh Manual TCP Tunnel - Receiver Mode");
+    log::info!("======================================");
+    log::info!("Creating iroh endpoint (no relay)...");
 
     let (endpoint, discovery) = create_iroh_manual_endpoint(TCP_ALPN).await?;
 
     let node_id = endpoint.id();
     let direct_addrs = get_direct_addresses(&endpoint, &stun_servers).await;
 
-    println!("Paste sender offer (include BEGIN/END markers), then press Enter:");
+    log::info!("Paste sender offer (include BEGIN/END markers), then press Enter:");
     let offer = read_iroh_offer_from_stdin()?;
     if offer.version != IROH_SIGNAL_VERSION {
         anyhow::bail!(
@@ -2728,7 +2728,7 @@ pub async fn run_iroh_manual_tcp_receiver(listen: String, stun_servers: Vec<Stri
         direct_addresses: direct_addrs,
     };
 
-    println!("\nIroh Manual Answer (copy to sender):");
+    log::info!("\nIroh Manual Answer (copy to sender):");
     display_iroh_answer(&answer)?;
 
     // Parse and add remote peer info
@@ -2745,12 +2745,12 @@ pub async fn run_iroh_manual_tcp_receiver(listen: String, stun_servers: Vec<Stri
     let remote_addr = EndpointAddr::new(remote_id)
         .with_addrs(remote_addrs.into_iter().map(TransportAddr::Ip));
     discovery.add_endpoint_info(remote_addr);
-    println!("Added remote peer: {} ({} addresses)", remote_id, offer.direct_addresses.len());
+    log::info!("Added remote peer: {} ({} addresses)", remote_id, offer.direct_addresses.len());
 
     // Race connect vs accept for NAT hole punching
     let conn = race_connect_accept(&endpoint, remote_id, TCP_ALPN).await?;
 
-    println!("Peer connected: {}", conn.remote_id());
+    log::info!("Peer connected: {}", conn.remote_id());
 
     let conn = Arc::new(conn);
     let tunnel_established = Arc::new(AtomicBool::new(false));
@@ -2758,7 +2758,7 @@ pub async fn run_iroh_manual_tcp_receiver(listen: String, stun_servers: Vec<Stri
     let listener = TcpListener::bind(listen_addr)
         .await
         .context("Failed to bind TCP listener")?;
-    println!(
+    log::info!(
         "Listening on TCP {} - configure your client to connect here",
         listen_addr
     );
@@ -2767,12 +2767,12 @@ pub async fn run_iroh_manual_tcp_receiver(listen: String, stun_servers: Vec<Stri
         let (tcp_stream, peer_addr) = match listener.accept().await {
             Ok(result) => result,
             Err(e) => {
-                eprintln!("Failed to accept TCP connection: {}", e);
+                log::warn!("Failed to accept TCP connection: {}", e);
                 continue;
             }
         };
 
-        println!("New local connection from {}", peer_addr);
+        log::info!("New local connection from {}", peer_addr);
 
         let conn_clone = conn.clone();
         let established = tunnel_established.clone();
@@ -2783,7 +2783,7 @@ pub async fn run_iroh_manual_tcp_receiver(listen: String, stun_servers: Vec<Stri
             {
                 Ok(()) => {}
                 Err(e) => {
-                    eprintln!("TCP tunnel error for {}: {}", peer_addr, e);
+                    log::warn!("TCP tunnel error for {}: {}", peer_addr, e);
                 }
             }
         });
@@ -2799,9 +2799,9 @@ pub async fn run_iroh_manual_udp_sender(target: String, stun_servers: Vec<String
         .await
         .with_context(|| format!("Invalid target address or hostname '{}'", target))?;
 
-    println!("Iroh Manual UDP Tunnel - Sender Mode");
-    println!("=====================================");
-    println!("Creating iroh endpoint (no relay)...");
+    log::info!("Iroh Manual UDP Tunnel - Sender Mode");
+    log::info!("=====================================");
+    log::info!("Creating iroh endpoint (no relay)...");
 
     let (endpoint, discovery) = create_iroh_manual_endpoint(UDP_ALPN).await?;
 
@@ -2814,10 +2814,10 @@ pub async fn run_iroh_manual_udp_sender(target: String, stun_servers: Vec<String
         direct_addresses: direct_addrs,
     };
 
-    println!("\nIroh Manual Offer (copy to receiver):");
+    log::info!("\nIroh Manual Offer (copy to receiver):");
     display_iroh_offer(&offer)?;
 
-    println!("Paste receiver answer (include BEGIN/END markers), then press Enter:");
+    log::info!("Paste receiver answer (include BEGIN/END markers), then press Enter:");
     let answer = read_iroh_answer_from_stdin()?;
     if answer.version != IROH_SIGNAL_VERSION {
         anyhow::bail!(
@@ -2841,19 +2841,19 @@ pub async fn run_iroh_manual_udp_sender(target: String, stun_servers: Vec<String
     let remote_addr = EndpointAddr::new(remote_id)
         .with_addrs(remote_addrs.into_iter().map(TransportAddr::Ip));
     discovery.add_endpoint_info(remote_addr);
-    println!("Added remote peer: {} ({} addresses)", remote_id, answer.direct_addresses.len());
+    log::info!("Added remote peer: {} ({} addresses)", remote_id, answer.direct_addresses.len());
 
     // Race connect vs accept for NAT hole punching
     let conn = race_connect_accept(&endpoint, remote_id, UDP_ALPN).await?;
 
-    println!("Peer connected: {}", conn.remote_id());
+    log::info!("Peer connected: {}", conn.remote_id());
 
     let (send_stream, recv_stream) = conn
         .accept_bi()
         .await
         .context("Failed to accept stream from receiver")?;
 
-    println!("Forwarding UDP traffic to {}", target_addr);
+    log::info!("Forwarding UDP traffic to {}", target_addr);
 
     // Bind to the same address family as the target
     let bind_addr: SocketAddr = if target_addr.is_ipv6() {
@@ -2871,7 +2871,7 @@ pub async fn run_iroh_manual_udp_sender(target: String, stun_servers: Vec<String
 
     conn.close(0u32.into(), b"done");
     endpoint.close().await;
-    println!("Connection closed.");
+    log::info!("Connection closed.");
 
     Ok(())
 }
@@ -2881,16 +2881,16 @@ pub async fn run_iroh_manual_udp_receiver(listen: String, stun_servers: Vec<Stri
         .parse()
         .context("Invalid listen address format. Use format like 127.0.0.1:51820 or [::]:51820")?;
 
-    println!("Iroh Manual UDP Tunnel - Receiver Mode");
-    println!("======================================");
-    println!("Creating iroh endpoint (no relay)...");
+    log::info!("Iroh Manual UDP Tunnel - Receiver Mode");
+    log::info!("======================================");
+    log::info!("Creating iroh endpoint (no relay)...");
 
     let (endpoint, discovery) = create_iroh_manual_endpoint(UDP_ALPN).await?;
 
     let node_id = endpoint.id();
     let direct_addrs = get_direct_addresses(&endpoint, &stun_servers).await;
 
-    println!("Paste sender offer (include BEGIN/END markers), then press Enter:");
+    log::info!("Paste sender offer (include BEGIN/END markers), then press Enter:");
     let offer = read_iroh_offer_from_stdin()?;
     if offer.version != IROH_SIGNAL_VERSION {
         anyhow::bail!(
@@ -2906,7 +2906,7 @@ pub async fn run_iroh_manual_udp_receiver(listen: String, stun_servers: Vec<Stri
         direct_addresses: direct_addrs,
     };
 
-    println!("\nIroh Manual Answer (copy to sender):");
+    log::info!("\nIroh Manual Answer (copy to sender):");
     display_iroh_answer(&answer)?;
 
     // Parse and add remote peer info
@@ -2923,12 +2923,12 @@ pub async fn run_iroh_manual_udp_receiver(listen: String, stun_servers: Vec<Stri
     let remote_addr = EndpointAddr::new(remote_id)
         .with_addrs(remote_addrs.into_iter().map(TransportAddr::Ip));
     discovery.add_endpoint_info(remote_addr);
-    println!("Added remote peer: {} ({} addresses)", remote_id, offer.direct_addresses.len());
+    log::info!("Added remote peer: {} ({} addresses)", remote_id, offer.direct_addresses.len());
 
     // Race connect vs accept for NAT hole punching
     let conn = race_connect_accept(&endpoint, remote_id, UDP_ALPN).await?;
 
-    println!("Peer connected: {}", conn.remote_id());
+    log::info!("Peer connected: {}", conn.remote_id());
 
     let (send_stream, recv_stream) = open_bi_with_retry_iroh(&conn).await?;
 
@@ -2937,7 +2937,7 @@ pub async fn run_iroh_manual_udp_receiver(listen: String, stun_servers: Vec<Stri
             .await
             .context("Failed to bind UDP socket")?,
     );
-    println!(
+    log::info!(
         "Listening on UDP {} - configure your client to connect here",
         listen_addr
     );
@@ -2950,19 +2950,19 @@ pub async fn run_iroh_manual_udp_receiver(listen: String, stun_servers: Vec<Stri
     tokio::select! {
         result = forward_udp_to_stream(udp_clone, send_stream, client_clone) => {
             if let Err(e) = result {
-                eprintln!("UDP to stream error: {}", e);
+                log::warn!("UDP to stream error: {}", e);
             }
         }
         result = forward_stream_to_udp_receiver(recv_stream, udp_socket, client_addr) => {
             if let Err(e) = result {
-                eprintln!("Stream to UDP error: {}", e);
+                log::warn!("Stream to UDP error: {}", e);
             }
         }
     }
 
     conn.close(0u32.into(), b"done");
     endpoint.close().await;
-    println!("Connection closed.");
+    log::info!("Connection closed.");
 
     Ok(())
 }

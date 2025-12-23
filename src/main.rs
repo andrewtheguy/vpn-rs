@@ -116,15 +116,15 @@ fn resolve_iroh_secret(
             let secret = load_secret_from_string(trimmed)
                 .context("Invalid inline secret key (expected base64)")?;
             let endpoint_id = secret_to_endpoint_id(&secret);
-            println!("Loaded identity from inline secret");
-            println!("EndpointId: {}", endpoint_id);
+            log::info!("Loaded identity from inline secret");
+            log::info!("EndpointId: {}", endpoint_id);
             Ok(Some(secret))
         }
         (None, Some(path)) => {
             let secret = load_secret(&path)?;
             let endpoint_id = secret_to_endpoint_id(&secret);
-            println!("Loaded identity from: {}", path.display());
-            println!("EndpointId: {}", endpoint_id);
+            log::info!("Loaded identity from: {}", path.display());
+            log::info!("EndpointId: {}", endpoint_id);
             Ok(Some(secret))
         }
         (None, None) => Ok(None),
