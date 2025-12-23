@@ -1804,12 +1804,21 @@ where
     F: Fn() -> Fut,
     Fut: std::future::Future<Output = Result<T, E>>,
 {
-    let mut last_error_msg = None;
-
     for attempt in 0..max_retries {
         match operation().await {
             Ok(result) => return Ok(result),
             Err(e) => {
+                let is_last_attempt = attempt + 1 >= max_retries;
+                if is_last_attempt {
+                    // Final attempt failed - return error immediately without sleeping
+                    return Err(anyhow::anyhow!(
+                        "Failed to {} after {} attempts: {}",
+                        operation_name,
+                        max_retries,
+                        e
+                    ));
+                }
+                // More attempts remaining - log retry message and sleep
                 let delay_ms = base_delay_ms * (1 << attempt);
                 eprintln!(
                     "Failed to {} (attempt {}/{}): {}. Retrying in {}ms...",
@@ -1819,17 +1828,15 @@ where
                     e,
                     delay_ms
                 );
-                last_error_msg = Some(e.to_string());
                 tokio::time::sleep(Duration::from_millis(delay_ms)).await;
             }
         }
     }
 
+    // This should be unreachable if max_retries > 0, but handle edge case
     Err(anyhow::anyhow!(
-        "Failed to {} after {} attempts: {}",
-        operation_name,
-        max_retries,
-        last_error_msg.unwrap_or_else(|| "unknown error".to_string())
+        "Failed to {} with no attempts",
+        operation_name
     ))
 }
 
