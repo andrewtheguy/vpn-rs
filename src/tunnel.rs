@@ -1777,22 +1777,22 @@ const STREAM_OPEN_MARKER: u8 = 0x00;
 /// Maximum attempts for opening QUIC streams
 const STREAM_OPEN_MAX_ATTEMPTS: u32 = 3;
 
-/// Base delay for exponential backoff (doubles each retry)
+/// Base delay for exponential backoff (doubles each attempt)
 const STREAM_OPEN_BASE_DELAY_MS: u64 = 100;
 
 /// Generic retry helper with exponential backoff.
 ///
-/// Retries an async operation up to `max_attempts` times with exponential backoff.
-/// The delay doubles each retry starting from `base_delay_ms`.
+/// Attempts an async operation up to `max_attempts` times with exponential backoff.
+/// The delay doubles each attempt starting from `base_delay_ms`.
 ///
 /// # Arguments
-/// * `operation` - Async closure returning `Result<T, E>` to retry
+/// * `operation` - Async closure returning `Result<T, E>` to attempt
 /// * `max_attempts` - Maximum number of attempts before giving up
-/// * `base_delay_ms` - Initial delay in milliseconds (doubles each retry)
+/// * `base_delay_ms` - Initial delay in milliseconds (doubles each attempt)
 /// * `operation_name` - Name for logging (e.g., "open QUIC stream")
 ///
 /// # Returns
-/// The successful result, or an `anyhow::Error` after all retries are exhausted.
+/// The successful result, or an `anyhow::Error` after all attempts are exhausted.
 async fn retry_with_backoff<T, E, F, Fut>(
     operation: F,
     max_attempts: u32,
@@ -1818,7 +1818,7 @@ where
                         e
                     ));
                 }
-                // More attempts remaining - log retry message and sleep
+                // More attempts remaining - log attempt message and sleep
                 let delay_ms = base_delay_ms * (1 << attempt);
                 eprintln!(
                     "Failed to {} (attempt {}/{}): {}. Retrying in {}ms...",
