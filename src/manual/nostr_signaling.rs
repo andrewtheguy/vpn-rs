@@ -25,7 +25,21 @@ const SIGNALING_TYPE_ANSWER: &str = "tunnel-answer";
 const SIGNALING_TYPE_REJECT: &str = "tunnel-reject";
 
 
-/// Nostr signaling client for ICE exchange
+/// Nostr signaling client for ICE exchange.
+///
+/// # Single-Consumer Constraint
+///
+/// This struct uses a persistent [`tokio::sync::broadcast::Receiver`] to avoid missing
+/// messages between checks. The receiver is protected by a [`Mutex`], which means only
+/// one task may read notifications at a time.
+///
+/// **Callers must not attempt concurrent waiting operations.** For example, do not call
+/// [`try_check_for_rejection`](Self::try_check_for_rejection) and
+/// [`try_wait_for_offer_timeout`](Self::try_wait_for_offer_timeout) from different tasks
+/// simultaneously—one will block waiting for the other to release the lock.
+///
+/// In practice, signaling methods should be called sequentially from a single task
+/// (e.g., the session handler loop).
 pub struct NostrSignaling {
     client: Client,
     keys: Keys,
