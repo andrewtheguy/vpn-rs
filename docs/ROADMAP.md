@@ -5,7 +5,7 @@ This document outlines planned features and improvements for tunnel-rs.
 ## Current Status
 
 tunnel-rs currently supports four operational modes:
-- **iroh-default**: Production-ready with automatic discovery and relay fallback
+- **iroh-default**: Persistent identity support with automatic discovery and relay fallback
 - **iroh-manual**: Serverless with manual signaling
 - **custom**: Full ICE with manual signaling
 - **nostr**: Full ICE with automated Nostr relay signaling
