@@ -19,7 +19,7 @@ use crate::endpoint::{
     validate_relay_only, TCP_ALPN, UDP_ALPN,
 };
 use crate::manual::ice::{IceEndpoint, IceRole};
-use crate::manual::nostr_signaling::{NostrSignaling, SignalingError};
+use crate::manual::nostr_signaling::{NostrSignaling, OfferWaitError, SignalingError};
 use crate::manual::quic;
 use crate::manual::signaling::{
     display_answer, display_iroh_answer, display_iroh_offer, display_offer,
@@ -145,8 +145,11 @@ async fn publish_request_and_wait_for_offer(
             .await
         {
             Ok(Some(offer)) => return Ok(offer),
-            Err(reject) => {
+            Err(OfferWaitError::Rejected(reject)) => {
                 anyhow::bail!("Session rejected by sender: {}", reject.reason);
+            }
+            Err(OfferWaitError::ChannelClosed) => {
+                anyhow::bail!("Nostr signaling channel closed while waiting for offer");
             }
             Ok(None) => {
                 // Timeout - continue to re-publish

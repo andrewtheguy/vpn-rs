@@ -55,6 +55,30 @@ impl std::fmt::Display for SignalingError {
 
 impl std::error::Error for SignalingError {}
 
+/// Errors that can occur while waiting for an offer.
+#[derive(Debug)]
+pub enum OfferWaitError {
+    /// The session was rejected by the sender.
+    Rejected(ManualReject),
+    /// The notification channel was closed (client disconnected).
+    ChannelClosed,
+}
+
+impl std::fmt::Display for OfferWaitError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            OfferWaitError::Rejected(reject) => {
+                write!(f, "Session rejected: {}", reject.reason)
+            }
+            OfferWaitError::ChannelClosed => {
+                write!(f, "Notification channel closed")
+            }
+        }
+    }
+}
+
+impl std::error::Error for OfferWaitError {}
+
 
 /// Nostr signaling client for ICE exchange.
 ///
@@ -330,14 +354,15 @@ impl NostrSignaling {
     /// Returns:
     /// - `Ok(Some(offer))` if an offer matching `session_id` is received
     /// - `Ok(None)` on timeout
-    /// - `Err(reject)` if a rejection matching `session_id` is received
+    /// - `Err(OfferWaitError::Rejected(reject))` if a rejection matching `session_id` is received
+    /// - `Err(OfferWaitError::ChannelClosed)` if the notification channel was closed
     ///
     /// This prevents rejections from being discarded while waiting for offers.
     pub async fn try_wait_for_offer_or_rejection(
         &self,
         session_id: &str,
         timeout_secs: u64,
-    ) -> Result<Option<ManualOffer>, ManualReject> {
+    ) -> Result<Option<ManualOffer>, OfferWaitError> {
         let mut notifications = self.notifications.lock().await;
         let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_secs);
 
@@ -350,33 +375,81 @@ impl NostrSignaling {
 
             match tokio::time::timeout(wait_duration, notifications.recv()).await {
                 Ok(Ok(RelayPoolNotification::Event { event, .. })) => {
-                    // Check for offer first
-                    if let Some(offer) =
-                        self.try_parse_event::<ManualOffer>(&event, SIGNALING_TYPE_OFFER)
-                    {
-                        if offer.session_id.as_ref() == Some(&session_id.to_string()) {
-                            println!("Received {} from peer", SIGNALING_TYPE_OFFER);
-                            return Ok(Some(offer));
-                        }
-                        println!("Ignoring offer with mismatched session ID (stale event)");
-                    }
-                    // Check for rejection
-                    if let Some(reject) =
-                        self.try_parse_event::<ManualReject>(&event, SIGNALING_TYPE_REJECT)
-                    {
-                        if reject.session_id == session_id {
-                            println!("Received {} from peer", SIGNALING_TYPE_REJECT);
-                            return Err(reject);
-                        }
-                        // Rejection for different session - ignore
+                    if let Some(result) = self.check_event_for_offer_or_rejection(&event, session_id) {
+                        return result;
                     }
                 }
                 Ok(Ok(_)) => continue,
                 Ok(Err(recv_err)) => match recv_err {
-                    RecvError::Closed => return Ok(None),
-                    RecvError::Lagged(_) => continue,
+                    RecvError::Closed => {
+                        return Err(OfferWaitError::ChannelClosed);
+                    }
+                    RecvError::Lagged(skipped) => {
+                        eprintln!(
+                            "Warning: Notification receiver lagged, skipped {} messages; draining buffer...",
+                            skipped
+                        );
+                        // Drain buffered messages and check for offer/rejection
+                        if let Some(result) = self.drain_and_find_offer_or_rejection(&mut notifications, session_id) {
+                            return result;
+                        }
+                    }
                 },
                 Err(_) => continue, // Timeout elapsed, loop again
+            }
+        }
+    }
+
+    /// Check a single event for an offer or rejection matching the session ID.
+    fn check_event_for_offer_or_rejection(
+        &self,
+        event: &Event,
+        session_id: &str,
+    ) -> Option<Result<Option<ManualOffer>, OfferWaitError>> {
+        // Check for offer first
+        if let Some(offer) = self.try_parse_event::<ManualOffer>(event, SIGNALING_TYPE_OFFER) {
+            if offer.session_id.as_ref() == Some(&session_id.to_string()) {
+                println!("Received {} from peer", SIGNALING_TYPE_OFFER);
+                return Some(Ok(Some(offer)));
+            }
+            println!("Ignoring offer with mismatched session ID (stale event)");
+        }
+        // Check for rejection
+        if let Some(reject) = self.try_parse_event::<ManualReject>(event, SIGNALING_TYPE_REJECT) {
+            if reject.session_id == session_id {
+                println!("Received {} from peer", SIGNALING_TYPE_REJECT);
+                return Some(Err(OfferWaitError::Rejected(reject)));
+            }
+            // Rejection for different session - ignore
+        }
+        None
+    }
+
+    /// Drain buffered messages looking for an offer or rejection matching the session ID.
+    fn drain_and_find_offer_or_rejection(
+        &self,
+        notifications: &mut tokio::sync::broadcast::Receiver<RelayPoolNotification>,
+        session_id: &str,
+    ) -> Option<Result<Option<ManualOffer>, OfferWaitError>> {
+        loop {
+            match notifications.try_recv() {
+                Ok(RelayPoolNotification::Event { event, .. }) => {
+                    if let Some(result) = self.check_event_for_offer_or_rejection(&event, session_id) {
+                        return Some(result);
+                    }
+                }
+                Ok(_) => continue,
+                Err(TryRecvError::Empty) => return None,
+                Err(TryRecvError::Closed) => {
+                    return Some(Err(OfferWaitError::ChannelClosed));
+                }
+                Err(TryRecvError::Lagged(more_skipped)) => {
+                    eprintln!(
+                        "Warning: Additional {} messages skipped while draining",
+                        more_skipped
+                    );
+                    continue;
+                }
             }
         }
     }
