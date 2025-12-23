@@ -1088,6 +1088,8 @@ async fn run_nostr_sender_loop(
         };
 
         // Log active session count
+        // In limited mode: permit already acquired, count includes current session
+        // In unlimited mode: task not yet spawned, so add 1 for current session
         let active_count = session_semaphore
             .as_ref()
             .map(|sem| max_sessions - sem.available_permits())
@@ -1793,6 +1795,10 @@ const STREAM_OPEN_MAX_ATTEMPTS: u32 = 3;
 /// Base delay for exponential backoff (doubles each attempt)
 const STREAM_OPEN_BASE_DELAY_MS: u64 = 100;
 
+/// Maximum multiplier for exponential backoff to keep delays bounded.
+/// With base delay of 100ms, this caps max delay at ~102 seconds.
+const BACKOFF_MAX_MULTIPLIER: u64 = 1024;
+
 /// Generic retry helper with exponential backoff.
 ///
 /// Attempts an async operation up to `max_attempts` times with exponential backoff.
@@ -1817,6 +1823,8 @@ where
     F: Fn() -> Fut,
     Fut: std::future::Future<Output = Result<T, E>>,
 {
+    debug_assert!(max_attempts > 0, "max_attempts must be > 0");
+
     for attempt in 0..max_attempts {
         match operation().await {
             Ok(result) => return Ok(result),
@@ -1832,8 +1840,11 @@ where
                     ));
                 }
                 // More attempts remaining - log attempt message and sleep
-                // Use saturating arithmetic to avoid overflow for large attempt values
-                let multiplier = 1u64.checked_shl(attempt).unwrap_or(u64::MAX);
+                // Use saturating arithmetic and cap multiplier to keep delays bounded
+                let multiplier = 1u64
+                    .checked_shl(attempt)
+                    .unwrap_or(BACKOFF_MAX_MULTIPLIER)
+                    .min(BACKOFF_MAX_MULTIPLIER);
                 let delay_ms = base_delay_ms.saturating_mul(multiplier);
                 eprintln!(
                     "Failed to {} (attempt {}/{}): {}. Next attempt in {}ms...",
