@@ -159,10 +159,17 @@ impl NostrSignaling {
 
         // Wait for relay connections to be established with timeout.
         // This ensures relays are ready before we attempt to send/receive messages.
+        // Note: wait_for_connection returns () and continues after timeout even if
+        // connections fail. Connection failures will surface as signaling errors later.
         const RELAY_CONNECT_TIMEOUT_SECS: u64 = 10;
+        println!(
+            "Waiting for Nostr relay connections (timeout: {}s)...",
+            RELAY_CONNECT_TIMEOUT_SECS
+        );
         client
             .wait_for_connection(Duration::from_secs(RELAY_CONNECT_TIMEOUT_SECS))
             .await;
+        println!("Nostr relay connection wait complete");
 
         Ok(Self {
             client,
