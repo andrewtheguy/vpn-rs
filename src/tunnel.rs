@@ -1060,7 +1060,7 @@ async fn run_nostr_sender_loop(
                     let reject = ManualReject {
                         version: MANUAL_SIGNAL_VERSION,
                         session_id: session_id.clone(),
-                        reason: format!("Sender at capacity ({}/{})", max_sessions, max_sessions),
+                        reason: format!("Sender at capacity ({}/{})", active, max_sessions),
                     };
                     if let Err(e) = signaling.publish_reject(&reject).await {
                         eprintln!("Failed to send rejection: {}", e);
