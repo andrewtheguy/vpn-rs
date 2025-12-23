@@ -400,12 +400,39 @@ impl NostrSignaling {
                     }
                     RecvError::Lagged(skipped) => {
                         eprintln!(
-                            "Warning: Notification receiver lagged, skipped {} messages; draining buffer...",
+                            "Warning: Notification receiver lagged, skipped {} messages; draining buffer (bounded)...",
                             skipped
                         );
-                        // Drain buffered messages and check for offer/rejection
-                        if let Some(result) = self.drain_and_find_offer_or_rejection(&mut notifications, session_id) {
-                            return result;
+                        // Drain a bounded number of buffered messages and check for offer/rejection
+                        const MAX_DRAIN_MESSAGES_ON_LAG: usize = 256;
+                        let mut drained = 0usize;
+                        while drained < MAX_DRAIN_MESSAGES_ON_LAG {
+                            match notifications.try_recv() {
+                                Ok(RelayPoolNotification::Event { event, .. }) => {
+                                    drained += 1;
+                                    if let Some(result) = self.check_event_for_offer_or_rejection(&event, session_id) {
+                                        return result;
+                                    }
+                                }
+                                Ok(_) => {
+                                    drained += 1;
+                                    continue;
+                                }
+                                Err(TryRecvError::Empty) => {
+                                    break;
+                                }
+                                Err(TryRecvError::Closed) => {
+                                    return Err(OfferWaitError::ChannelClosed);
+                                }
+                                Err(TryRecvError::Lagged(skipped_more)) => {
+                                    eprintln!(
+                                        "Warning: Additional lag while draining notifications, skipped {} more messages",
+                                        skipped_more
+                                    );
+                                    drained += 1;
+                                    continue;
+                                }
+                            }
                         }
                     }
                 },
