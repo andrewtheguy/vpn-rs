@@ -326,12 +326,16 @@ impl NostrSignaling {
         let mut notifications = self.notifications.lock().await;
 
         loop {
+            // Early deadline check before any other work
+            if let Some(d) = deadline {
+                if tokio::time::Instant::now() >= d {
+                    return Err(SignalingError::Timeout.into());
+                }
+            }
+
             // Compute wait duration: min(remaining until deadline, 1s), or 1s if no deadline
             let wait_duration = if let Some(d) = deadline {
                 let remaining = d.saturating_duration_since(tokio::time::Instant::now());
-                if remaining.is_zero() {
-                    return Err(SignalingError::Timeout.into());
-                }
                 remaining.min(Duration::from_secs(1))
             } else {
                 Duration::from_secs(1)

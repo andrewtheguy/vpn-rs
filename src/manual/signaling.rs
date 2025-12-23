@@ -72,16 +72,46 @@ pub struct ManualRequest {
     pub timestamp: u64,
 }
 
+/// Maximum length for rejection reason to prevent excessively large messages.
+pub const MAX_REJECT_REASON_LENGTH: usize = 512;
+
 /// Rejection response from sender when it cannot accept a session (for nostr mode).
 /// Sent when sender is at capacity or otherwise unable to handle the request.
 /// The session_id is echoed from the original request so the receiver can match it.
+///
+/// # Note on encode/decode helpers
+///
+/// Unlike [`ManualOffer`] and [`ManualAnswer`], this struct intentionally lacks
+/// `encode_reject`/`decode_reject`/`display_reject` helpers. Those helpers are
+/// designed for the manual stdin/stdout signaling mode with PEM-like markers.
+/// `ManualReject` is only used in Nostr mode, where it is serialized directly
+/// as JSON via `serde_json` before base64 encoding for transmission.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ManualReject {
     pub version: u16,
     /// Session ID echoed from request
     pub session_id: String,
-    /// Rejection reason
+    /// Rejection reason (truncated to [`MAX_REJECT_REASON_LENGTH`] bytes)
     pub reason: String,
+}
+
+impl ManualReject {
+    /// Create a new rejection with the given session ID and reason.
+    /// The reason will be truncated if it exceeds [`MAX_REJECT_REASON_LENGTH`].
+    pub fn new(session_id: String, reason: String) -> Self {
+        let reason = if reason.len() > MAX_REJECT_REASON_LENGTH {
+            // Truncate at a valid UTF-8 boundary
+            let truncated = &reason[..reason.floor_char_boundary(MAX_REJECT_REASON_LENGTH)];
+            format!("{}...", truncated)
+        } else {
+            reason
+        };
+        Self {
+            version: MANUAL_SIGNAL_VERSION,
+            session_id,
+            reason,
+        }
+    }
 }
 
 // ============================================================================
