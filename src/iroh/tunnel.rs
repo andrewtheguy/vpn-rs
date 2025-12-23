@@ -7,7 +7,7 @@
 use anyhow::{Context, Result};
 use iroh::discovery::static_provider::StaticProvider;
 use iroh::{Endpoint, EndpointAddr, EndpointId, RelayMode, SecretKey, TransportAddr};
-use std::net::{SocketAddr, ToSocketAddrs};
+use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -24,8 +24,8 @@ use crate::signaling::{
     IrohManualAnswer, IrohManualOffer, IROH_SIGNAL_VERSION,
 };
 use crate::tunnel_common::{
-    copy_stream, resolve_target_addr, retry_with_backoff, STREAM_OPEN_BASE_DELAY_MS,
-    STREAM_OPEN_MAX_ATTEMPTS,
+    copy_stream, resolve_stun_addrs, resolve_target_addr, retry_with_backoff,
+    STREAM_OPEN_BASE_DELAY_MS, STREAM_OPEN_MAX_ATTEMPTS,
 };
 
 // ============================================================================
@@ -648,14 +648,6 @@ async fn create_iroh_manual_endpoint(alpn: &[u8]) -> Result<(Endpoint, Arc<Stati
         .context("Failed to create iroh endpoint")?;
 
     Ok((endpoint, discovery))
-}
-
-/// Resolve STUN server hostname to socket addresses
-fn resolve_stun_addrs(stun: &str) -> Vec<SocketAddr> {
-    match stun.to_socket_addrs() {
-        Ok(iter) => iter.collect(),
-        Err(_) => Vec::new(),
-    }
 }
 
 /// Get direct addresses from endpoint for signaling.

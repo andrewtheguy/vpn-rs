@@ -5,7 +5,7 @@ use log::{debug, info, warn};
 use get_if_addrs::get_if_addrs;
 use std::collections::HashMap;
 use std::fmt;
-use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -18,6 +18,7 @@ use tokio::sync::mpsc;
 use tokio::time::interval;
 
 use super::mux::{DemuxSocket, IceConnection, IceKeeper};
+use crate::tunnel_common::resolve_stun_addrs;
 
 #[derive(Debug, Clone, Copy)]
 pub enum IceRole {
@@ -417,13 +418,6 @@ async fn local_ip_for_target(target: SocketAddr) -> Result<IpAddr> {
         .context("Failed to bind UDP socket for local IP lookup")?;
     socket.connect(target).context("Failed to connect UDP socket")?;
     Ok(socket.local_addr()?.ip())
-}
-
-fn resolve_stun_addrs(stun: &str) -> Vec<SocketAddr> {
-    match stun.to_socket_addrs() {
-        Ok(iter) => iter.collect(),
-        Err(_) => Vec::new(),
-    }
 }
 
 async fn drain_transmit(
