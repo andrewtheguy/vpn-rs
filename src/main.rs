@@ -322,7 +322,7 @@ enum ReceiverMode {
         target: Option<String>,
 
         /// Source address to request from sender (tcp://host:port or udp://host:port)
-        /// The sender must have this in its --allowed-source list
+        /// The sender must have this in its --allowed-tcp or --allowed-udp list
         #[arg(short, long)]
         source: Option<String>,
 
@@ -681,7 +681,7 @@ async fn main() -> Result<()> {
                     let (target, source, stun_servers, nsec, peer_npub, relays, republish_interval, max_wait) = match &mode {
                         Some(ReceiverMode::Nostr { target: t, source: src, stun_servers: ss, no_stun, nsec: n, peer_npub: p, relays: r, republish_interval: ri, max_wait: mw }) => (
                             normalize_optional_endpoint(t.clone()).or(target),
-                            normalize_optional_endpoint(src.clone()).or_else(|| nostr_cfg.and_then(|c| c.source.clone())),
+                            normalize_optional_endpoint(src.clone()).or_else(|| nostr_cfg.and_then(|c| c.request_source.clone())),
                             resolve_stun_servers(ss, nostr_cfg.and_then(|c| c.stun_servers.clone()), *no_stun)?,
                             n.clone().or_else(|| nostr_cfg.and_then(|c| c.nsec.clone())),
                             p.clone().or_else(|| nostr_cfg.and_then(|c| c.peer_npub.clone())),
@@ -691,7 +691,7 @@ async fn main() -> Result<()> {
                         ),
                         _ => (
                             target,
-                            nostr_cfg.and_then(|c| c.source.clone()),
+                            nostr_cfg.and_then(|c| c.request_source.clone()),
                             resolve_stun_servers(&[], nostr_cfg.and_then(|c| c.stun_servers.clone()), false)?,
                             nostr_cfg.and_then(|c| c.nsec.clone()),
                             nostr_cfg.and_then(|c| c.peer_npub.clone()),

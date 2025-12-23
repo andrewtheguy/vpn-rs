@@ -77,4 +77,5 @@ relay_only = false
 #
 # # Source address to request from sender (REQUIRED for nostr mode)
 # # Must be in sender's allowed_sources list (--allowed-tcp or --allowed-udp)
-# source = "tcp://127.0.0.1:22"
+# # Can also use 'source' as an alias
+# request_source = "tcp://127.0.0.1:22"

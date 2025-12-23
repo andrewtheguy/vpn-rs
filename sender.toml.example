@@ -56,6 +56,8 @@ relay_only = false
 # [nostr]
 # # NOTE: For nostr mode, do NOT set 'source' above - receivers request sources dynamically.
 # # Use allowed_sources below to restrict what receivers can request.
+# # Sender-only fields: allowed_sources, max_sessions
+# # (request_source is receiver-only and will be rejected if present here)
 #
 # # Your Nostr private key (generate with: tunnel-rs generate-nostr-key)
 # nsec = "nsec1..."
@@ -80,10 +82,10 @@ relay_only = false
 #     "stun.services.mozilla.com:3478",
 # ]
 #
-# # Maximum concurrent sessions (default: 10)
+# # Maximum concurrent sessions (sender only, default: 10)
 # max_sessions = 10
 #
-# # Allowed source networks that receivers can request (CIDR notation)
+# # Allowed source networks that receivers can request (sender only, CIDR notation)
 # # Receivers MUST specify --source which must match one of these networks
 # # Separate lists for TCP and UDP protocols
 # # Supports IPv4 and IPv6 CIDR notation

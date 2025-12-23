@@ -3,7 +3,12 @@
 //! Configuration structure:
 //! - `role` and `mode` fields for validation
 //! - Shared options at top level (source/target)
-//! - Mode-specific sections: [iroh-default], [iroh-manual], [custom]
+//! - Mode-specific sections: [iroh-default], [iroh-manual], [custom], [nostr]
+//!
+//! Role-based field semantics are enforced by `validate()` at parse time:
+//! - Sender-only fields are rejected when role=receiver
+//! - Receiver-only fields are rejected when role=sender
+//! - CIDR networks and source URLs are validated for correct format
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
@@ -50,17 +55,29 @@ pub struct AllowedSources {
 }
 
 /// nostr mode configuration.
+///
+/// Some fields are role-specific (enforced by validate()):
+/// - Sender-only: `allowed_sources`, `max_sessions`
+/// - Receiver-only: `request_source`
 #[derive(Deserialize, Default, Clone)]
 pub struct NostrConfig {
+    /// Nostr relay URLs for signaling
     pub relays: Option<Vec<String>>,
+    /// Your Nostr private key (nsec or hex)
     pub nsec: Option<String>,
+    /// Peer's Nostr public key (npub or hex)
     pub peer_npub: Option<String>,
+    /// STUN servers for ICE candidate gathering
     pub stun_servers: Option<Vec<String>>,
+    /// Maximum concurrent sessions (sender only, default: 10)
     pub max_sessions: Option<usize>,
-    /// Allowed source networks that receivers can request (sender only)
+    /// Allowed source networks in CIDR notation (sender only).
+    /// Receivers must request sources within these networks.
     pub allowed_sources: Option<AllowedSources>,
-    /// Source address to request from sender (receiver only)
-    pub source: Option<String>,
+    /// Source URL to request from sender (receiver only, required).
+    /// Format: tcp://host:port or udp://host:port
+    #[serde(alias = "source")]
+    pub request_source: Option<String>,
 }
 
 /// Unified sender configuration.
@@ -102,6 +119,49 @@ pub struct ReceiverConfig {
 }
 
 // ============================================================================
+// Validation Helpers
+// ============================================================================
+
+/// Validate that a string is a valid CIDR network (IPv4 or IPv6).
+fn validate_cidr(cidr: &str) -> Result<()> {
+    cidr.parse::<ipnet::IpNet>()
+        .with_context(|| format!("Invalid CIDR network '{}'. Expected format: 192.168.0.0/16 or ::1/128", cidr))?;
+    Ok(())
+}
+
+/// Validate that a string is a valid source URL (tcp://host:port or udp://host:port).
+fn validate_source_url(source: &str) -> Result<()> {
+    let url = url::Url::parse(source)
+        .with_context(|| format!("Invalid source URL '{}'. Expected format: tcp://host:port or udp://host:port", source))?;
+
+    let scheme = url.scheme();
+    if scheme != "tcp" && scheme != "udp" {
+        anyhow::bail!("Invalid source URL scheme '{}'. Must be 'tcp' or 'udp'", scheme);
+    }
+
+    if url.host_str().is_none() {
+        anyhow::bail!("Source URL '{}' missing host", source);
+    }
+
+    if url.port().is_none() {
+        anyhow::bail!("Source URL '{}' missing port", source);
+    }
+
+    Ok(())
+}
+
+/// Validate AllowedSources CIDR lists.
+fn validate_allowed_sources(allowed: &AllowedSources) -> Result<()> {
+    for cidr in &allowed.tcp {
+        validate_cidr(cidr).context("Invalid TCP allowed_sources")?;
+    }
+    for cidr in &allowed.udp {
+        validate_cidr(cidr).context("Invalid UDP allowed_sources")?;
+    }
+    Ok(())
+}
+
+// ============================================================================
 // Config Accessor Methods
 // ============================================================================
 
@@ -127,6 +187,13 @@ impl SenderConfig {
     }
 
     /// Validate that config matches expected role and mode.
+    ///
+    /// Enforces:
+    /// - Role must be "sender"
+    /// - Mode must match expected_mode
+    /// - Nostr mode: rejects receiver-only fields (request_source)
+    /// - Nostr mode: validates CIDR format in allowed_sources
+    /// - Non-nostr modes: validates source URL format if present
     pub fn validate(&self, expected_mode: &str) -> Result<()> {
         let role = self.role.as_deref().context(
             "Config file missing required 'role' field. Add: role = \"sender\"",
@@ -155,6 +222,35 @@ impl SenderConfig {
             _ => anyhow::bail!("Unknown mode '{}'. Valid modes: iroh-default, iroh-manual, custom, nostr", expected_mode),
         }
 
+        // Mode-specific validation
+        if expected_mode == "nostr" {
+            if let Some(ref nostr) = self.nostr {
+                // Reject receiver-only fields
+                if nostr.request_source.is_some() {
+                    anyhow::bail!(
+                        "[nostr] 'source' / 'request_source' is a receiver-only field. \
+                        Senders use 'allowed_sources' to restrict what receivers can request."
+                    );
+                }
+                // Validate CIDR format
+                if let Some(ref allowed) = nostr.allowed_sources {
+                    validate_allowed_sources(allowed)?;
+                }
+            }
+            // Sender nostr mode should not have top-level source
+            if self.source.is_some() {
+                anyhow::bail!(
+                    "Top-level 'source' is not allowed for nostr sender mode. \
+                    Use [nostr.allowed_sources] to restrict what receivers can request."
+                );
+            }
+        } else {
+            // Non-nostr modes: validate source URL format if present
+            if let Some(ref source) = self.source {
+                validate_source_url(source)?;
+            }
+        }
+
         Ok(())
     }
 }
@@ -181,6 +277,13 @@ impl ReceiverConfig {
     }
 
     /// Validate that config matches expected role and mode.
+    ///
+    /// Enforces:
+    /// - Role must be "receiver"
+    /// - Mode must match expected_mode
+    /// - Nostr mode: rejects sender-only fields (allowed_sources, max_sessions)
+    /// - Nostr mode: validates request_source URL format if present
+    /// - Non-nostr modes: validates target URL format if present
     pub fn validate(&self, expected_mode: &str) -> Result<()> {
         let role = self.role.as_deref().context(
             "Config file missing required 'role' field. Add: role = \"receiver\"",
@@ -207,6 +310,33 @@ impl ReceiverConfig {
         match expected_mode {
             "iroh-default" | "iroh-manual" | "custom" | "nostr" => {}
             _ => anyhow::bail!("Unknown mode '{}'. Valid modes: iroh-default, iroh-manual, custom, nostr", expected_mode),
+        }
+
+        // Mode-specific validation
+        if expected_mode == "nostr" {
+            if let Some(ref nostr) = self.nostr {
+                // Reject sender-only fields
+                if nostr.allowed_sources.is_some() {
+                    anyhow::bail!(
+                        "[nostr] 'allowed_sources' is a sender-only field. \
+                        Receivers use 'source' to specify what to request from sender."
+                    );
+                }
+                if nostr.max_sessions.is_some() {
+                    anyhow::bail!(
+                        "[nostr] 'max_sessions' is a sender-only field."
+                    );
+                }
+                // Validate request_source URL format
+                if let Some(ref source) = nostr.request_source {
+                    validate_source_url(source)?;
+                }
+            }
+        }
+
+        // Validate target URL format if present
+        if let Some(ref target) = self.target {
+            validate_source_url(target)?;
         }
 
         Ok(())
