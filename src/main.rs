@@ -28,7 +28,6 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use config::{default_stun_servers, load_receiver_config, load_sender_config, ReceiverConfig, SenderConfig};
 use iroh::SecretKey;
-use nostr_sdk::ToBech32;
 use std::fs;
 use std::path::PathBuf;
 use crate::endpoint::{load_secret, load_secret_from_string, secret_to_endpoint_id};
@@ -216,7 +215,15 @@ enum Command {
         secret_file: PathBuf,
     },
     /// Generate a Nostr keypair for use with nostr mode
-    GenerateNostrKey,
+    GenerateNostrKey {
+        /// Path where to save the nsec key file
+        #[arg(short, long)]
+        output: PathBuf,
+
+        /// Overwrite existing file if it exists
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -841,25 +848,6 @@ async fn main() -> Result<()> {
         }
         Command::GenerateSecret { output, force } => secret::generate_secret(output, force),
         Command::ShowId { secret_file } => secret::show_id(secret_file),
-        Command::GenerateNostrKey => {
-            use crate::manual::nostr_signaling::generate_keypair;
-            let keys = generate_keypair();
-            let nsec = keys.secret_key().to_bech32().context("Failed to encode nsec")?;
-            let npub = keys.public_key().to_bech32().context("Failed to encode npub")?;
-            println!("Nostr Keypair Generated");
-            println!("========================");
-            println!("Private key (nsec): {}", nsec);
-            println!("Public key (npub):  {}", npub);
-            println!();
-            println!("Add to config file:");
-            println!("[nostr]");
-            println!("nsec = \"{}\"", nsec);
-            println!("peer_npub = \"<peer's npub>\"");
-            println!();
-            println!("Or use CLI arguments:");
-            println!("  --nsec {} \\", nsec);
-            println!("  --peer-npub <peer's npub>");
-            Ok(())
-        }
+        Command::GenerateNostrKey { output, force } => secret::generate_nostr_key(output, force),
     }
 }

@@ -542,12 +542,12 @@ Each peer needs their own keypair:
 
 ```bash
 # On sender machine
-tunnel-rs generate-nostr-key
-# Output: nsec1sender... / npub1sender...
+tunnel-rs generate-nostr-key --output ./sender.nsec
+# Output (stdout): npub1sender...
 
 # On receiver machine
-tunnel-rs generate-nostr-key
-# Output: nsec1receiver... / npub1receiver...
+tunnel-rs generate-nostr-key --output ./receiver.nsec
+# Output (stdout): npub1receiver...
 ```
 
 Exchange public keys (npub) between peers.
@@ -682,20 +682,19 @@ tunnel-rs sender nostr -s tcp://127.0.0.1:22 --nsec <KEY> --peer-npub <NPUB> --m
 Generate a Nostr keypair for use with nostr mode:
 
 ```bash
-tunnel-rs generate-nostr-key
+# Save nsec to file and output npub
+tunnel-rs generate-nostr-key --output ./nostr.nsec
+
+# Overwrite existing file
+tunnel-rs generate-nostr-key --output ./nostr.nsec --force
+
+# Output nsec to stdout and npub to stderr (wireguard-style)
+tunnel-rs generate-nostr-key --output -
 ```
 
 Output:
 ```
-Nostr Keypair Generated
-========================
-Private key (nsec): nsec1...
-Public key (npub):  npub1...
-
-Add to config file:
-[nostr]
-nsec = "nsec1..."
-peer_npub = "<peer's npub>"
+npub1...
 ```
 
 ## generate-secret
