@@ -250,9 +250,9 @@ pub async fn is_source_allowed(source: &str, allowed_networks: &[String]) -> boo
         return false;
     };
 
-    // Try parsing as IP first, fall back to DNS resolution
-    let source_ip = match host.parse::<std::net::IpAddr>() {
-        Ok(ip) => ip,
+    // Collect all IPs to check (either the literal IP or all resolved addresses)
+    let source_ips: Vec<std::net::IpAddr> = match host.parse::<std::net::IpAddr>() {
+        Ok(ip) => vec![ip],
         Err(_) => {
             // Not an IP - try DNS resolution
             let Some(port) = extract_port_from_source(source) else {
@@ -263,20 +263,23 @@ pub async fn is_source_allowed(source: &str, allowed_networks: &[String]) -> boo
                 Ok(addrs) => addrs,
                 Err(_) => return false,
             };
-            let resolved_ip = match addrs.into_iter().next() {
-                Some(addr) => addr.ip(),
-                None => return false,
-            };
-            resolved_ip
+            let ips: Vec<_> = addrs.map(|a| a.ip()).collect();
+            if ips.is_empty() {
+                return false;
+            }
+            ips
         }
     };
 
-    // Check against each allowed network (pre-validated at startup)
-    for network_str in allowed_networks {
-        // unwrap is safe: networks are validated at startup by validate_allowed_networks
-        let network: ipnet::IpNet = network_str.parse().unwrap();
-        if network.contains(&source_ip) {
-            return true;
+    // Check if ANY resolved IP matches ANY allowed network
+    // This handles cases like localhost resolving to both ::1 and 127.0.0.1
+    for source_ip in &source_ips {
+        for network_str in allowed_networks {
+            // unwrap is safe: networks are validated at startup by validate_allowed_networks
+            let network: ipnet::IpNet = network_str.parse().unwrap();
+            if network.contains(source_ip) {
+                return true;
+            }
         }
     }
 
