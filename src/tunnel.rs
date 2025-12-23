@@ -55,6 +55,11 @@ fn generate_session_id() -> String {
     hex::encode(random_bytes)
 }
 
+/// Get a short prefix of a session ID for logging (first 8 chars or less).
+fn short_session_id(session_id: &str) -> &str {
+    &session_id[..8.min(session_id.len())]
+}
+
 /// Get current Unix timestamp in seconds.
 fn current_timestamp() -> u64 {
     std::time::SystemTime::now()
@@ -1051,7 +1056,7 @@ async fn run_nostr_sender_loop(
         println!(
             "Received {} request for session {}",
             protocol_name,
-            &session_id[..8.min(session_id.len())]
+            short_session_id(&session_id)
         );
 
         // Acquire session permit (if limited) - held for task lifetime
@@ -1063,7 +1068,7 @@ async fn run_nostr_sender_loop(
                     let active = max_sessions - sem.available_permits();
                     println!(
                         "Rejecting session {} - at capacity ({}/{})",
-                        &session_id[..8.min(session_id.len())],
+                        short_session_id(&session_id),
                         active,
                         max_sessions
                     );
@@ -1077,7 +1082,7 @@ async fn run_nostr_sender_loop(
                     } else {
                         println!(
                             "Sent rejection for session {}",
-                            &session_id[..8.min(session_id.len())]
+                            short_session_id(&session_id)
                         );
                     }
                     continue;
@@ -1168,7 +1173,7 @@ async fn handle_nostr_tcp_session_impl(
     max_wait_secs: u64,
 ) -> Result<()> {
     let session_id = request.session_id.clone();
-    let short_id = &session_id[..8.min(session_id.len())];
+    let short_id = short_session_id(&session_id);
     println!("[{}] Starting TCP session...", short_id);
 
     // Gather ICE candidates
@@ -1481,7 +1486,7 @@ async fn handle_nostr_udp_session_impl(
     max_wait_secs: u64,
 ) -> Result<()> {
     let session_id = request.session_id.clone();
-    let short_id = &session_id[..8.min(session_id.len())];
+    let short_id = short_session_id(&session_id);
     println!("[{}] Starting UDP session...", short_id);
 
     // Gather ICE candidates
