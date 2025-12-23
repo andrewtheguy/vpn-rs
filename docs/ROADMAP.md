@@ -27,13 +27,17 @@ Receivers can request specific source endpoints, similar to SSH's `-R` flag for 
 **Usage:**
 ```bash
 # Sender: allow networks via CIDR (separate flags for TCP and UDP)
-tunnel-rs nostr sender --nsec <key> \
+tunnel-rs sender nostr --nsec-file ./sender.nsec \
+  --peer-npub npub1receiver... \
   --allowed-tcp 127.0.0.0/8 \
   --allowed-tcp 192.168.0.0/16 \
   --allowed-udp 10.0.0.0/8
 
 # Receiver: request a specific source
-tunnel-rs nostr receiver --npub <key> -t 127.0.0.1:2222 --source tcp://127.0.0.1:22
+tunnel-rs receiver nostr --nsec-file ./receiver.nsec \
+  --peer-npub npub1sender... \
+  --source tcp://127.0.0.1:22 \
+  --target tcp://127.0.0.1:2222
 ```
 
 **Network Patterns (CIDR):**
@@ -49,14 +53,19 @@ tunnel-rs nostr receiver --npub <key> -t 127.0.0.1:2222 --source tcp://127.0.0.1
 
 ### Medium Priority
 
-#### Multi-Session Support
+#### Multi-Session and Dynamic Source Support
 
-**Status:** Partial
+**Status:** Implemented
 
-| Mode | Multi-Session |
-|------|---------------|
-| `iroh-default` | **Implemented** - unlimited concurrent receivers |
-| `nostr` | **Implemented** - use `--max-sessions` (default: 10) |
+| Mode | Multi-Session | Dynamic Source |
+|------|---------------|----------------|
+| `iroh-default` | **Yes** - unlimited concurrent receivers | No - fixed `--source` |
+| `nostr` | **Yes** - use `--max-sessions` (default: 10) | **Yes** - receiver specifies `--source` |
+| `iroh-manual` | No | No |
+| `custom` | No | No |
+
+**Multi-Session** = Multiple concurrent connections to the same sender
+**Dynamic Source** = Receiver specifies which service to tunnel (only nostr)
 
 **Implementation Details:**
 - Each session gets independent ICE/QUIC stack

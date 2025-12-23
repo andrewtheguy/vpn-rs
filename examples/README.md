@@ -2,9 +2,21 @@
 
 Example configurations for running tunnel-rs in Docker and Kubernetes.
 
-## Nostr Mode Overview
+## Mode Comparison
 
-Nostr mode uses a **receiver-initiated** model similar to SSH tunneling:
+| Mode | Multi-Session | Dynamic Source | Use Case |
+|------|---------------|----------------|----------|
+| `iroh-default` | Yes | No | Fixed service, multiple clients |
+| `nostr` | Yes | **Yes** | SSH-like tunneling, receiver chooses destination |
+| `iroh-manual` | No | No | Simple one-off tunnels |
+| `custom` | No | No | Best NAT traversal, one-off tunnels |
+
+**Multi-Session** = Multiple concurrent connections
+**Dynamic Source** = Receiver specifies destination (only nostr supports this)
+
+## Nostr Mode (Dynamic Source)
+
+Nostr mode uses a **receiver-initiated** model similar to SSH `-L` tunneling:
 
 | SSH Equivalent | tunnel-rs | Description |
 |----------------|-----------|-------------|
@@ -20,6 +32,18 @@ Nostr mode uses a **receiver-initiated** model similar to SSH tunneling:
 - Uses `--source` with **hostname:port** (e.g., `tcp://postgres:5432`) to request a specific service
 - Uses `--target` to specify local listen address
 - The source must resolve to an IP within sender's allowed CIDR range
+
+## iroh-default Mode (Fixed Source)
+
+For simpler setups where the sender exposes a single fixed service:
+
+```bash
+# Sender: expose SSH on port 22
+tunnel-rs sender iroh-default --source tcp://127.0.0.1:22
+
+# Receiver: connect and expose locally
+tunnel-rs receiver iroh-default --node-id <ID> --target tcp://127.0.0.1:2222
+```
 
 ## Docker
 

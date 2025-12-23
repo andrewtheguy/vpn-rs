@@ -1,9 +1,9 @@
 #!/bin/bash
 # Start tunnel receiver(s) - receiver-initiated mode
-# Usage: ./test-scripts/receiver.sh [NUM_SESSIONS] [BASE_PORT]
+# Usage: ./test-scripts/receiver.sh [NUM_SESSIONS] [BASE_PORT] [SOURCE_PORT]
 #
-# In receiver-initiated mode, the receiver initiates the connection
-# to the sender and exposes the tunneled service on local target ports.
+# In receiver-initiated mode, the receiver specifies the source service
+# to tunnel (--source) and exposes it on local target ports (--target).
 
 set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -11,6 +11,7 @@ source "$SCRIPT_DIR/keys.sh"
 
 NUM_SESSIONS="${1:-1}"
 BASE_PORT="${2:-17001}"
+SOURCE_PORT="${3:-19999}"
 TUNNEL_BIN="$SCRIPT_DIR/../target/release/tunnel-rs"
 
 [ ! -f "$TUNNEL_BIN" ] && cargo build --release --manifest-path="$SCRIPT_DIR/../Cargo.toml"
@@ -23,13 +24,15 @@ cleanup() {
 trap cleanup EXIT
 
 echo "=== Receiver ==="
-echo "Sessions: $NUM_SESSIONS (ports $BASE_PORT-$((BASE_PORT + NUM_SESSIONS - 1)))"
+echo "Source: tcp://localhost:$SOURCE_PORT (on sender's side)"
+echo "Sessions: $NUM_SESSIONS (local ports $BASE_PORT-$((BASE_PORT + NUM_SESSIONS - 1)))"
 echo ""
 
 for i in $(seq 1 $NUM_SESSIONS); do
     PORT=$((BASE_PORT + i - 1))
     echo "[$i] Starting receiver on port $PORT..."
     "$TUNNEL_BIN" receiver nostr \
+        --source "tcp://localhost:$SOURCE_PORT" \
         --target "tcp://127.0.0.1:$PORT" \
         --nsec-file "$RECEIVER_NSEC_FILE" \
         --peer-npub "$SENDER_NPUB" &

@@ -4,12 +4,14 @@ Scripts for testing receiver-initiated multi-session nostr tunnel.
 
 ## Architecture
 
-In receiver-initiated mode, the **receiver** initiates connections to the sender.
-The sender waits for incoming connection requests and forwards traffic to the source service.
+In receiver-initiated mode:
+- **Sender** whitelists allowed networks with `--allowed-tcp` (CIDR notation)
+- **Receiver** specifies the source service with `--source` (hostname:port)
 
 ```
-[Echo Server]     [Sender]              [Receiver]        [Test Client]
-  :19999    <-->   nostr   <-- initiates --  nostr   <-->   :17001-17003
+[Echo Server]     [Sender]                      [Receiver]              [Test Client]
+  :19999    <--  --allowed-tcp 127.0.0.0/8  <--  --source localhost:19999  <-->  :17001-17003
+                  (waits for connections)       (initiates, tests DNS)
 ```
 
 ## Quick Start
@@ -38,8 +40,8 @@ python3 test-scripts/test_tunnel.py -n 3 --stream 10 --loop  # Stream 10s repeat
 
 | Script | Description |
 |--------|-------------|
-| `sender.sh [PORT] [MAX]` | Start sender pointing to source (default: port 19999, max 5 sessions) |
-| `receiver.sh [NUM] [PORT]` | Start N receivers (default: 1 receiver on port 17001) |
+| `sender.sh [MAX]` | Start sender with `--allowed-tcp 127.0.0.0/8` (default: max 5 sessions) |
+| `receiver.sh [NUM] [PORT] [SRC]` | Start N receivers requesting source SRC on local ports (default: 1 receiver, port 17001, source 19999) |
 | `test_tunnel.py` | Test tunnel connectivity and data integrity |
 | `echo_server.py [PORT]` | Multi-connection TCP echo server |
 | `keys.sh` | Key management (auto-sourced by other scripts) |

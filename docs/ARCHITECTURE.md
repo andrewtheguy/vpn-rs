@@ -1548,12 +1548,14 @@ graph TB
 
 ### Single Session (Manual Signaling Modes)
 
-The `iroh-manual`, `custom`, and `nostr` modes currently support only one tunnel session at a time per sender instance. Each signaling exchange establishes exactly one tunnel.
+The `iroh-manual` and `custom` modes currently support only one tunnel session at a time per sender instance. Each signaling exchange establishes exactly one tunnel.
+
+> **Note:** `iroh-default` and `nostr` modes support multi-session. See [Mode Capabilities](#mode-capabilities) below.
 
 ```mermaid
 graph TB
-    subgraph "Current Behavior"
-        A[Sender starts] --> B[Wait for request/offer]
+    subgraph "iroh-manual/custom Behavior"
+        A[Sender starts] --> B[Wait for offer]
         B --> C[Establish single tunnel]
         C --> D[Handle streams over this tunnel]
         D --> E[Additional receivers timeout]

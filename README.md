@@ -660,30 +660,47 @@ When no relays are specified, these public relays are used:
 - Full ICE provides best NAT traversal (same as custom mode)
 - **Receiver-first protocol:** The receiver initiates the connection by publishing a request first; sender waits for a request before publishing its offer
 
-## Current Limitations
+## Mode Capabilities
 
-### Multi-Session Support
+| Mode | Multi-Session | Dynamic Source | Description |
+|------|---------------|----------------|-------------|
+| `iroh-default` | **Yes** | No | Multiple receivers, fixed source |
+| `nostr` | **Yes** | **Yes** | Multiple receivers, receiver chooses source |
+| `iroh-manual` | No | No | Single session, fixed source |
+| `custom` | No | No | Single session, fixed source |
 
-| Mode | Multi-Session Support |
-|------|----------------------|
-| `iroh-default` | **Yes** - supports multiple simultaneous receivers |
-| `nostr` | **Yes** - use `--max-sessions` (default: 10) |
-| `iroh-manual` | No - single session per sender |
-| `custom` | No - single session per sender |
+**Multi-Session** = Multiple concurrent connections to the same sender
+**Dynamic Source** = Receiver specifies which service to tunnel (like SSH `-L`)
 
-**Nostr Multi-Session Usage:**
+### iroh-default (Multi-Session, Fixed Source)
+
+Sender specifies a fixed `--source`; multiple receivers can connect:
+
 ```bash
-# Accept up to 5 concurrent sessions from the same peer
-tunnel-rs sender nostr --allowed-tcp 127.0.0.0/8 --nsec-file ./sender.nsec --peer-npub <NPUB> --max-sessions 5
-
-# Unlimited concurrent sessions
-tunnel-rs sender nostr --allowed-tcp 127.0.0.0/8 --nsec-file ./sender.nsec --peer-npub <NPUB> --max-sessions 0
+# Sender: fixed source, multiple receivers allowed
+tunnel-rs sender iroh-default --source tcp://127.0.0.1:22
 ```
 
-**For single-session modes (`iroh-manual`, `custom`):**
-- Use different keypairs/instances for each tunnel
-- Or use `iroh-default` or `nostr` mode which support multiple receivers
-- Future: Multi-session support planned (see [Roadmap](docs/ROADMAP.md))
+### nostr (Multi-Session + Dynamic Source)
+
+Sender whitelists networks; receivers choose which service to tunnel:
+
+```bash
+# Sender: whitelist networks, receivers choose destination
+tunnel-rs sender nostr --allowed-tcp 127.0.0.0/8 --nsec-file ./sender.nsec --peer-npub <NPUB> --max-sessions 5
+
+# Receiver 1: tunnel to SSH
+tunnel-rs receiver nostr --source tcp://127.0.0.1:22 --target tcp://127.0.0.1:2222 ...
+
+# Receiver 2: tunnel to web server (same sender!)
+tunnel-rs receiver nostr --source tcp://127.0.0.1:80 --target tcp://127.0.0.1:8080 ...
+```
+
+### Single-Session Modes (iroh-manual, custom)
+
+For `iroh-manual` and `custom`, use separate instances for each tunnel:
+- Different keypairs/instances per tunnel
+- Or use `iroh-default` or `nostr` mode for multi-session support
 
 ---
 
