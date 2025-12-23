@@ -4,7 +4,7 @@
 //! eliminating the need for manual copy-paste signaling.
 
 use anyhow::{Context, Result};
-use log::{info, warn};
+use log::{error, info, warn};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use nostr_sdk::prelude::*;
@@ -379,7 +379,7 @@ impl NostrSignaling {
                             return Err(SignalingError::ChannelClosed.into());
                         }
                         RecvError::Lagged(skipped) => {
-                            log::warn!(
+                            warn!(
                                 "Warning: Notification receiver lagged, skipped {} messages; draining buffer...",
                                 skipped
                             );
@@ -453,7 +453,7 @@ impl NostrSignaling {
                     return Err(SignalingError::ChannelClosed);
                 }
                 Err(TryRecvError::Lagged(more_skipped)) => {
-                    log::warn!(
+                    warn!(
                         "Warning: Additional {} messages skipped while draining",
                         more_skipped
                     );
@@ -513,7 +513,7 @@ impl NostrSignaling {
                         return Err(OfferWaitError::ChannelClosed);
                     }
                     RecvError::Lagged(skipped) => {
-                        log::warn!(
+                        warn!(
                             "Warning: Notification receiver lagged, skipped {} messages; draining buffer...",
                             skipped
                         );
@@ -575,7 +575,7 @@ impl NostrSignaling {
                     return Some(Err(OfferWaitError::ChannelClosed));
                 }
                 Err(TryRecvError::Lagged(more_skipped)) => {
-                    log::warn!(
+                    warn!(
                         "Warning: Additional {} messages skipped while draining",
                         more_skipped
                     );
@@ -641,11 +641,11 @@ impl NostrSignaling {
                 Ok(Ok(_)) => continue,
                 Ok(Err(recv_err)) => match recv_err {
                     RecvError::Closed => {
-                        log::warn!("Error: Notification channel closed while waiting for answer");
+                        error!("Error: Notification channel closed while waiting for answer");
                         return None;
                     }
                     RecvError::Lagged(skipped) => {
-                        log::warn!(
+                        warn!(
                             "Warning: Notification receiver lagged, skipped {} messages; draining buffer...",
                             skipped
                         );
@@ -690,11 +690,11 @@ impl NostrSignaling {
                 Ok(_) => continue,
                 Err(TryRecvError::Empty) => return None,
                 Err(TryRecvError::Closed) => {
-                    log::warn!("Error: Notification channel closed while draining for answer");
+                    error!("Error: Notification channel closed while draining for answer");
                     return None;
                 }
                 Err(TryRecvError::Lagged(more_skipped)) => {
-                    log::warn!(
+                    warn!(
                         "Warning: Additional {} messages skipped while draining",
                         more_skipped
                     );

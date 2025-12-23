@@ -458,7 +458,7 @@ fn drain_events(
             IceAgentEvent::IceConnectionStateChange(state) => {
                 info!("ICE state: {:?}", state);
                 if state == IceConnectionState::Disconnected {
-                    info!("ICE disconnected");
+                    debug!("ICE disconnected");
                 }
             }
             IceAgentEvent::NominatedSend {
