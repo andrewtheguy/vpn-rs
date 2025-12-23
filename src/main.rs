@@ -213,10 +213,6 @@ enum SenderMode {
     },
     /// Full ICE with Nostr-based signaling (WireGuard-like static keys)
     Nostr {
-        /// NOT ALLOWED - receivers request sources dynamically. Use --allowed-tcp/--allowed-udp instead.
-        #[arg(short, long, hide = true)]
-        source: Option<String>,
-
         /// Allowed TCP source networks in CIDR notation (repeatable)
         /// E.g., --allowed-tcp 127.0.0.0/8 --allowed-tcp 192.168.0.0/16
         #[arg(long = "allowed-tcp")]
@@ -508,11 +504,7 @@ async fn main() -> Result<()> {
                 "nostr" => {
                     let nostr_cfg = cfg.nostr();
                     let (allowed_tcp, allowed_udp, stun_servers, nsec, peer_npub, relays, republish_interval, max_wait, max_sessions) = match &mode {
-                        Some(SenderMode::Nostr { source: s, allowed_tcp: at, allowed_udp: au, stun_servers: ss, no_stun, nsec: n, peer_npub: p, relays: r, republish_interval: ri, max_wait: mw, max_sessions: ms }) => {
-                            // source is not allowed in nostr sender mode
-                            if s.is_some() {
-                                anyhow::bail!("--source is not allowed for nostr sender mode. Receivers request sources dynamically. Use --allowed-tcp/--allowed-udp to restrict allowed networks.");
-                            }
+                        Some(SenderMode::Nostr { allowed_tcp: at, allowed_udp: au, stun_servers: ss, no_stun, nsec: n, peer_npub: p, relays: r, republish_interval: ri, max_wait: mw, max_sessions: ms }) => {
                             let cfg_allowed = nostr_cfg.and_then(|c| c.allowed_sources.clone()).unwrap_or_default();
                             (
                                 if at.is_empty() { cfg_allowed.tcp.clone() } else { at.clone() },
@@ -541,11 +533,6 @@ async fn main() -> Result<()> {
                             )
                         },
                     };
-
-                    // source from config is also not allowed
-                    if source.is_some() {
-                        anyhow::bail!("'source' in config is not allowed for nostr sender mode. Receivers request sources dynamically.");
-                    }
 
                     let nsec = nsec.context(
                         "nsec is required. Provide via --nsec or in config file. Use 'tunnel-rs generate-nostr-key' to create one.",
