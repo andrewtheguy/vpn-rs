@@ -2,9 +2,8 @@
 
 use anyhow::{Context, Result};
 use iroh::discovery::static_provider::StaticProvider;
-use iroh::{Endpoint, EndpointAddr, EndpointId, RelayMode, TransportAddr};
+use iroh::{Endpoint, EndpointAddr, EndpointId, RelayMode, SecretKey, TransportAddr};
 use std::net::{SocketAddr, ToSocketAddrs};
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -391,7 +390,7 @@ async fn publish_request_and_wait_for_offer(
 
 pub async fn run_udp_sender(
     target: String,
-    secret_file: Option<PathBuf>,
+    secret: Option<SecretKey>,
     relay_urls: Vec<String>,
     relay_only: bool,
     dns_server: Option<String>,
@@ -407,7 +406,7 @@ pub async fn run_udp_sender(
     println!("Creating iroh endpoint...");
 
     let endpoint =
-        create_sender_endpoint(&relay_urls, relay_only, secret_file.as_ref(), dns_server.as_deref(), UDP_ALPN).await?;
+        create_sender_endpoint(&relay_urls, relay_only, secret, dns_server.as_deref(), UDP_ALPN).await?;
 
     let endpoint_id = endpoint.id();
     let target_port = target_addr.port();
@@ -639,7 +638,7 @@ async fn forward_stream_to_udp_receiver(
 
 pub async fn run_tcp_sender(
     target: String,
-    secret_file: Option<PathBuf>,
+    secret: Option<SecretKey>,
     relay_urls: Vec<String>,
     relay_only: bool,
     dns_server: Option<String>,
@@ -655,7 +654,7 @@ pub async fn run_tcp_sender(
     println!("Creating iroh endpoint...");
 
     let endpoint =
-        create_sender_endpoint(&relay_urls, relay_only, secret_file.as_ref(), dns_server.as_deref(), TCP_ALPN).await?;
+        create_sender_endpoint(&relay_urls, relay_only, secret, dns_server.as_deref(), TCP_ALPN).await?;
 
     let endpoint_id = endpoint.id();
     let target_port = target_addr.port();

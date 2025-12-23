@@ -27,8 +27,10 @@ mod tunnel;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use config::{default_stun_servers, load_receiver_config, load_sender_config, ReceiverConfig, SenderConfig};
-use nostr_sdk::ToBech32;
+use iroh::SecretKey;
+use std::fs;
 use std::path::PathBuf;
+use crate::endpoint::{load_secret, load_secret_from_string, secret_to_endpoint_id};
 
 #[derive(Clone, Copy, ValueEnum, Default, Debug, PartialEq)]
 pub enum Protocol {
@@ -98,6 +100,67 @@ fn resolve_stun_servers(
     Ok(default_stun_servers())
 }
 
+fn resolve_iroh_secret(
+    secret: Option<String>,
+    secret_file: Option<PathBuf>,
+) -> Result<Option<SecretKey>> {
+    match (secret, secret_file) {
+        (Some(_), Some(_)) => {
+            anyhow::bail!("Cannot combine --secret with --secret-file (or secret and secret_file in config).");
+        }
+        (Some(secret), None) => {
+            let trimmed = secret.trim();
+            if trimmed.is_empty() {
+                anyhow::bail!("Inline secret is empty. Provide a base64-encoded secret key.");
+            }
+            let secret = load_secret_from_string(trimmed)
+                .context("Invalid inline secret key (expected base64)")?;
+            let endpoint_id = secret_to_endpoint_id(&secret);
+            println!("Loaded identity from inline secret");
+            println!("EndpointId: {}", endpoint_id);
+            Ok(Some(secret))
+        }
+        (None, Some(path)) => {
+            let secret = load_secret(&path)?;
+            let endpoint_id = secret_to_endpoint_id(&secret);
+            println!("Loaded identity from: {}", path.display());
+            println!("EndpointId: {}", endpoint_id);
+            Ok(Some(secret))
+        }
+        (None, None) => Ok(None),
+    }
+}
+
+fn resolve_nostr_nsec(
+    nsec: Option<String>,
+    nsec_file: Option<PathBuf>,
+) -> Result<Option<String>> {
+    match (nsec, nsec_file) {
+        (Some(_), Some(_)) => {
+            anyhow::bail!("Cannot combine --nsec with --nsec-file (or nsec and nsec_file in config).");
+        }
+        (Some(nsec), None) => {
+            let trimmed = nsec.trim();
+            if trimmed.is_empty() {
+                anyhow::bail!("nsec is empty. Provide a valid nsec or hex private key.");
+            }
+            log::info!("Loaded nsec from inline value");
+            Ok(Some(trimmed.to_string()))
+        }
+        (None, Some(path)) => {
+            let content = fs::read_to_string(&path)
+                .with_context(|| format!("Failed to read nsec file: {}", path.display()))?;
+            let trimmed = content.trim();
+            if trimmed.is_empty() {
+                anyhow::bail!("nsec file is empty: {}", path.display());
+            }
+            log::info!("Loaded nsec from file: {}", path.display());
+            Ok(Some(trimmed.to_string()))
+        }
+        (None, None) => Ok(None),
+    }
+}
+
 #[derive(Parser)]
 #[command(name = "tunnel-rs")]
 #[command(version)]
@@ -137,8 +200,8 @@ enum Command {
         #[command(subcommand)]
         mode: Option<ReceiverMode>,
     },
-    /// Generate a new secret key file (for automation/setup)
-    GenerateSecret {
+    /// Generate a new iroh secret key file (for automation/setup)
+    GenerateIrohKey {
         /// Path where to save the secret key file
         #[arg(short, long)]
         output: PathBuf,
@@ -147,14 +210,28 @@ enum Command {
         #[arg(long)]
         force: bool,
     },
-    /// Show the EndpointId (node ID) for an existing secret key file
-    ShowId {
+    /// Show the iroh node ID (EndpointId) for an existing secret key file
+    ShowIrohNodeId {
         /// Path to the secret key file
         #[arg(short, long)]
         secret_file: PathBuf,
     },
+    /// Show the Nostr public key (npub) for an existing nsec file
+    ShowNpub {
+        /// Path to the nsec key file
+        #[arg(short, long)]
+        nsec_file: PathBuf,
+    },
     /// Generate a Nostr keypair for use with nostr mode
-    GenerateNostrKey,
+    GenerateNostrKey {
+        /// Path where to save the nsec key file
+        #[arg(short, long)]
+        output: PathBuf,
+
+        /// Overwrite existing file if it exists
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -165,6 +242,10 @@ enum SenderMode {
         /// Source address to forward traffic to (tcp://host:port or udp://host:port)
         #[arg(short, long)]
         source: Option<String>,
+
+        /// Base64-encoded secret key for persistent identity
+        #[arg(long)]
+        secret: Option<String>,
 
         /// Path to secret key file for persistent identity
         #[arg(long)]
@@ -226,6 +307,10 @@ enum SenderMode {
         /// Your Nostr private key (nsec or hex format)
         #[arg(long)]
         nsec: Option<String>,
+
+        /// Path to file containing your Nostr private key (nsec or hex format)
+        #[arg(long)]
+        nsec_file: Option<PathBuf>,
 
         /// Peer's Nostr public key (npub or hex format)
         #[arg(long)]
@@ -326,6 +411,10 @@ enum ReceiverMode {
         #[arg(long)]
         nsec: Option<String>,
 
+        /// Path to file containing your Nostr private key (nsec or hex format)
+        #[arg(long)]
+        nsec_file: Option<PathBuf>,
+
         /// Peer's Nostr public key (npub or hex format)
         #[arg(long)]
         peer_npub: Option<String>,
@@ -390,6 +479,9 @@ fn resolve_receiver_config(
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn"))
+        .filter_module("tunnel_rs", log::LevelFilter::Info)
+        .try_init();
     let args = Args::parse();
 
     match args.command {
@@ -428,16 +520,27 @@ async fn main() -> Result<()> {
                 "iroh-default" => {
                     let iroh_cfg = cfg.iroh_default();
                     // Override with CLI values if provided
-                    let (source, secret_file, relay_urls, relay_only, dns_server) = match &mode {
-                        Some(SenderMode::IrohDefault { source: s, secret_file: sf, relay_urls: r, relay_only: ro, dns_server: d }) => (
-                            normalize_optional_endpoint(s.clone()).or(source),
-                            sf.clone().or_else(|| iroh_cfg.and_then(|c| c.secret_file.clone())),
-                            if r.is_empty() { iroh_cfg.and_then(|c| c.relay_urls.clone()).unwrap_or_default() } else { r.clone() },
-                            *ro || iroh_cfg.and_then(|c| c.relay_only).unwrap_or(false),
-                            d.clone().or_else(|| iroh_cfg.and_then(|c| c.dns_server.clone())),
-                        ),
+                    let (source, secret, secret_file, relay_urls, relay_only, dns_server) = match &mode {
+                        Some(SenderMode::IrohDefault { source: s, secret: se, secret_file: sf, relay_urls: r, relay_only: ro, dns_server: d }) => {
+                            let cfg_secret = iroh_cfg.and_then(|c| c.secret.clone());
+                            let cfg_secret_file = iroh_cfg.and_then(|c| c.secret_file.clone());
+                            let (secret, secret_file) = if se.is_some() || sf.is_some() {
+                                (se.clone(), sf.clone())
+                            } else {
+                                (cfg_secret, cfg_secret_file)
+                            };
+                            (
+                                normalize_optional_endpoint(s.clone()).or(source),
+                                secret,
+                                secret_file,
+                                if r.is_empty() { iroh_cfg.and_then(|c| c.relay_urls.clone()).unwrap_or_default() } else { r.clone() },
+                                *ro || iroh_cfg.and_then(|c| c.relay_only).unwrap_or(false),
+                                d.clone().or_else(|| iroh_cfg.and_then(|c| c.dns_server.clone())),
+                            )
+                        }
                         _ => (
                             source,
+                            iroh_cfg.and_then(|c| c.secret.clone()),
                             iroh_cfg.and_then(|c| c.secret_file.clone()),
                             iroh_cfg.and_then(|c| c.relay_urls.clone()).unwrap_or_default(),
                             iroh_cfg.and_then(|c| c.relay_only).unwrap_or(false),
@@ -448,13 +551,14 @@ async fn main() -> Result<()> {
                     let source = source.context(
                         "source is required. Provide via --source or in config file.",
                     )?;
+                    let secret = resolve_iroh_secret(secret, secret_file)?;
 
                     let (protocol, target) = parse_endpoint(&source)
                         .with_context(|| format!("Invalid sender source '{}'", source))?;
 
                     match protocol {
-                        Protocol::Udp => tunnel::run_udp_sender(target, secret_file, relay_urls, relay_only, dns_server).await,
-                        Protocol::Tcp => tunnel::run_tcp_sender(target, secret_file, relay_urls, relay_only, dns_server).await,
+                        Protocol::Udp => tunnel::run_udp_sender(target, secret, relay_urls, relay_only, dns_server).await,
+                        Protocol::Tcp => tunnel::run_tcp_sender(target, secret, relay_urls, relay_only, dns_server).await,
                     }
                 }
                 "iroh-manual" => {
@@ -503,14 +607,22 @@ async fn main() -> Result<()> {
                 }
                 "nostr" => {
                     let nostr_cfg = cfg.nostr();
-                    let (allowed_tcp, allowed_udp, stun_servers, nsec, peer_npub, relays, republish_interval, max_wait, max_sessions) = match &mode {
-                        Some(SenderMode::Nostr { allowed_tcp: at, allowed_udp: au, stun_servers: ss, no_stun, nsec: n, peer_npub: p, relays: r, republish_interval: ri, max_wait: mw, max_sessions: ms }) => {
+                    let (allowed_tcp, allowed_udp, stun_servers, nsec, nsec_file, peer_npub, relays, republish_interval, max_wait, max_sessions) = match &mode {
+                        Some(SenderMode::Nostr { allowed_tcp: at, allowed_udp: au, stun_servers: ss, no_stun, nsec: n, nsec_file: nf, peer_npub: p, relays: r, republish_interval: ri, max_wait: mw, max_sessions: ms }) => {
                             let cfg_allowed = nostr_cfg.and_then(|c| c.allowed_sources.clone()).unwrap_or_default();
+                            let cfg_nsec = nostr_cfg.and_then(|c| c.nsec.clone());
+                            let cfg_nsec_file = nostr_cfg.and_then(|c| c.nsec_file.clone());
+                            let (nsec, nsec_file) = if n.is_some() || nf.is_some() {
+                                (n.clone(), nf.clone())
+                            } else {
+                                (cfg_nsec, cfg_nsec_file)
+                            };
                             (
                                 if at.is_empty() { cfg_allowed.tcp.clone() } else { at.clone() },
                                 if au.is_empty() { cfg_allowed.udp.clone() } else { au.clone() },
                                 resolve_stun_servers(ss, nostr_cfg.and_then(|c| c.stun_servers.clone()), *no_stun)?,
-                                n.clone().or_else(|| nostr_cfg.and_then(|c| c.nsec.clone())),
+                                nsec,
+                                nsec_file,
                                 p.clone().or_else(|| nostr_cfg.and_then(|c| c.peer_npub.clone())),
                                 if r.is_empty() { nostr_cfg.and_then(|c| c.relays.clone()).unwrap_or_default() } else { r.clone() },
                                 *ri,
@@ -525,6 +637,7 @@ async fn main() -> Result<()> {
                                 cfg_allowed.udp,
                                 resolve_stun_servers(&[], nostr_cfg.and_then(|c| c.stun_servers.clone()), false)?,
                                 nostr_cfg.and_then(|c| c.nsec.clone()),
+                                nostr_cfg.and_then(|c| c.nsec_file.clone()),
                                 nostr_cfg.and_then(|c| c.peer_npub.clone()),
                                 nostr_cfg.and_then(|c| c.relays.clone()).unwrap_or_default(),
                                 10, // default republish interval
@@ -541,8 +654,8 @@ async fn main() -> Result<()> {
                         );
                     }
 
-                    let nsec = nsec.context(
-                        "nsec is required. Provide via --nsec or in config file. Use 'tunnel-rs generate-nostr-key' to create one.",
+                    let nsec = resolve_nostr_nsec(nsec, nsec_file)?.context(
+                        "nsec is required. Provide via --nsec/--nsec-file or in config file (nsec/nsec_file). Use 'tunnel-rs generate-nostr-key' to create one.",
                     )?;
                     let peer_npub = peer_npub.context(
                         "peer-npub is required. Provide via --peer-npub or in config file.",
@@ -672,22 +785,33 @@ async fn main() -> Result<()> {
                 }
                 "nostr" => {
                     let nostr_cfg = cfg.nostr();
-                    let (target, source, stun_servers, nsec, peer_npub, relays, republish_interval, max_wait) = match &mode {
-                        Some(ReceiverMode::Nostr { target: t, source: src, stun_servers: ss, no_stun, nsec: n, peer_npub: p, relays: r, republish_interval: ri, max_wait: mw }) => (
-                            normalize_optional_endpoint(t.clone()).or(target),
-                            normalize_optional_endpoint(src.clone()).or_else(|| nostr_cfg.and_then(|c| c.request_source.clone())),
-                            resolve_stun_servers(ss, nostr_cfg.and_then(|c| c.stun_servers.clone()), *no_stun)?,
-                            n.clone().or_else(|| nostr_cfg.and_then(|c| c.nsec.clone())),
-                            p.clone().or_else(|| nostr_cfg.and_then(|c| c.peer_npub.clone())),
-                            if r.is_empty() { nostr_cfg.and_then(|c| c.relays.clone()).unwrap_or_default() } else { r.clone() },
-                            *ri,
-                            *mw,
-                        ),
+                    let (target, source, stun_servers, nsec, nsec_file, peer_npub, relays, republish_interval, max_wait) = match &mode {
+                        Some(ReceiverMode::Nostr { target: t, source: src, stun_servers: ss, no_stun, nsec: n, nsec_file: nf, peer_npub: p, relays: r, republish_interval: ri, max_wait: mw }) => {
+                            let cfg_nsec = nostr_cfg.and_then(|c| c.nsec.clone());
+                            let cfg_nsec_file = nostr_cfg.and_then(|c| c.nsec_file.clone());
+                            let (nsec, nsec_file) = if n.is_some() || nf.is_some() {
+                                (n.clone(), nf.clone())
+                            } else {
+                                (cfg_nsec, cfg_nsec_file)
+                            };
+                            (
+                                normalize_optional_endpoint(t.clone()).or(target),
+                                normalize_optional_endpoint(src.clone()).or_else(|| nostr_cfg.and_then(|c| c.request_source.clone())),
+                                resolve_stun_servers(ss, nostr_cfg.and_then(|c| c.stun_servers.clone()), *no_stun)?,
+                                nsec,
+                                nsec_file,
+                                p.clone().or_else(|| nostr_cfg.and_then(|c| c.peer_npub.clone())),
+                                if r.is_empty() { nostr_cfg.and_then(|c| c.relays.clone()).unwrap_or_default() } else { r.clone() },
+                                *ri,
+                                *mw,
+                            )
+                        }
                         _ => (
                             target,
                             nostr_cfg.and_then(|c| c.request_source.clone()),
                             resolve_stun_servers(&[], nostr_cfg.and_then(|c| c.stun_servers.clone()), false)?,
                             nostr_cfg.and_then(|c| c.nsec.clone()),
+                            nostr_cfg.and_then(|c| c.nsec_file.clone()),
                             nostr_cfg.and_then(|c| c.peer_npub.clone()),
                             nostr_cfg.and_then(|c| c.relays.clone()).unwrap_or_default(),
                             5, // default republish interval
@@ -701,8 +825,8 @@ async fn main() -> Result<()> {
                     let source = source.context(
                         "--source is required for nostr receiver mode. Specify the source to request from sender (e.g., --source tcp://127.0.0.1:22)",
                     )?;
-                    let nsec = nsec.context(
-                        "nsec is required. Provide via --nsec or in config file. Use 'tunnel-rs generate-nostr-key' to create one.",
+                    let nsec = resolve_nostr_nsec(nsec, nsec_file)?.context(
+                        "nsec is required. Provide via --nsec/--nsec-file or in config file (nsec/nsec_file). Use 'tunnel-rs generate-nostr-key' to create one.",
                     )?;
                     let peer_npub = peer_npub.context(
                         "peer-npub is required. Provide via --peer-npub or in config file.",
@@ -733,27 +857,9 @@ async fn main() -> Result<()> {
                 _ => anyhow::bail!("Invalid mode '{}'. Use: iroh-default, iroh-manual, custom, or nostr", effective_mode),
             }
         }
-        Command::GenerateSecret { output, force } => secret::generate_secret(output, force),
-        Command::ShowId { secret_file } => secret::show_id(secret_file),
-        Command::GenerateNostrKey => {
-            use crate::manual::nostr_signaling::generate_keypair;
-            let keys = generate_keypair();
-            let nsec = keys.secret_key().to_bech32().context("Failed to encode nsec")?;
-            let npub = keys.public_key().to_bech32().context("Failed to encode npub")?;
-            println!("Nostr Keypair Generated");
-            println!("========================");
-            println!("Private key (nsec): {}", nsec);
-            println!("Public key (npub):  {}", npub);
-            println!();
-            println!("Add to config file:");
-            println!("[nostr]");
-            println!("nsec = \"{}\"", nsec);
-            println!("peer_npub = \"<peer's npub>\"");
-            println!();
-            println!("Or use CLI arguments:");
-            println!("  --nsec {} \\", nsec);
-            println!("  --peer-npub <peer's npub>");
-            Ok(())
-        }
+        Command::GenerateIrohKey { output, force } => secret::generate_secret(output, force),
+        Command::ShowIrohNodeId { secret_file } => secret::show_id(secret_file),
+        Command::ShowNpub { nsec_file } => secret::show_npub(nsec_file),
+        Command::GenerateNostrKey { output, force } => secret::generate_nostr_key(output, force),
     }
 }

@@ -294,21 +294,17 @@ tunnel-rs receiver -c ./my-receiver.toml
 By default, a new EndpointId is generated each run. For long-running setups, use persistent identity:
 
 ```bash
-# First run: generates and saves key
-tunnel-rs sender iroh-default --source tcp://127.0.0.1:22 --secret-file ./sender.key
-
-# Subsequent runs: loads existing key
-tunnel-rs sender iroh-default --source tcp://127.0.0.1:22 --secret-file ./sender.key
-```
-
-### Pre-generating Keys
-
-```bash
 # Generate key and output EndpointId
-tunnel-rs generate-secret --output ./sender.key
+tunnel-rs generate-iroh-key --output ./sender.key
 
 # Show EndpointId for existing key
-tunnel-rs show-id --secret-file ./sender.key
+tunnel-rs show-iroh-node-id --secret-file ./sender.key
+```
+
+Then use the key for the sender:
+
+```bash
+tunnel-rs sender iroh-default --source tcp://127.0.0.1:22 --secret-file ./sender.key
 ```
 
 ## Custom Relay Server
@@ -542,12 +538,12 @@ Each peer needs their own keypair:
 
 ```bash
 # On sender machine
-tunnel-rs generate-nostr-key
-# Output: nsec1sender... / npub1sender...
+tunnel-rs generate-nostr-key --output ./sender.nsec
+# Output (stdout): npub1sender...
 
 # On receiver machine
-tunnel-rs generate-nostr-key
-# Output: nsec1receiver... / npub1receiver...
+tunnel-rs generate-nostr-key --output ./receiver.nsec
+# Output (stdout): npub1receiver...
 ```
 
 Exchange public keys (npub) between peers.
@@ -682,42 +678,48 @@ tunnel-rs sender nostr -s tcp://127.0.0.1:22 --nsec <KEY> --peer-npub <NPUB> --m
 Generate a Nostr keypair for use with nostr mode:
 
 ```bash
-tunnel-rs generate-nostr-key
+# Save nsec to file and output npub
+tunnel-rs generate-nostr-key --output ./nostr.nsec
+
+# Overwrite existing file
+tunnel-rs generate-nostr-key --output ./nostr.nsec --force
+
+# Output nsec to stdout and npub to stderr (wireguard-style)
+tunnel-rs generate-nostr-key --output -
 ```
 
-Output:
-```
-Nostr Keypair Generated
-========================
-Private key (nsec): nsec1...
-Public key (npub):  npub1...
+Output (when using `--output -`):
 
-Add to config file:
-[nostr]
-nsec = "nsec1..."
-peer_npub = "<peer's npub>"
+stdout (nsec):
+```
+nsec1...
 ```
 
-## generate-secret
+stderr (npub):
+```
+npub1...
+```
+
+## generate-iroh-key
 
 *For iroh-default mode only.*
 
-Generate a new secret key for persistent identity:
-
 ```bash
-# Save to file and output EndpointId
-tunnel-rs generate-secret --output ./sender.key
-
-# Overwrite existing file
-tunnel-rs generate-secret --output ./sender.key --force
+tunnel-rs generate-iroh-key --output ./sender.key
 ```
 
-## show-id
-
-Display the EndpointId for an existing secret key:
+## show-iroh-node-id
 
 ```bash
-tunnel-rs show-id --secret-file ./sender.key
+tunnel-rs show-iroh-node-id --secret-file ./sender.key
+```
+
+## show-npub
+
+Display the npub for an existing nsec key file:
+
+```bash
+tunnel-rs show-npub --nsec-file ./nostr.nsec
 ```
 
 ---
