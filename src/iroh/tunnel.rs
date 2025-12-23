@@ -13,6 +13,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::sync::Mutex;
+use tokio::task::JoinSet;
 
 use crate::iroh::endpoint::{
     connect_to_sender, create_receiver_endpoint, create_sender_endpoint, print_connection_type,
@@ -306,31 +307,52 @@ pub async fn run_tcp_receiver(
         listen_addr
     );
 
+    let mut connection_tasks: JoinSet<()> = JoinSet::new();
+
     loop {
-        let (tcp_stream, peer_addr) = match listener.accept().await {
-            Ok(result) => result,
-            Err(e) => {
-                log::warn!("Failed to accept TCP connection: {}", e);
-                continue;
+        tokio::select! {
+            accept_result = listener.accept() => {
+                let (tcp_stream, peer_addr) = match accept_result {
+                    Ok(result) => result,
+                    Err(e) => {
+                        log::warn!("Failed to accept TCP connection: {}", e);
+                        continue;
+                    }
+                };
+
+                log::info!("New local connection from {}", peer_addr);
+
+                let conn_clone = conn.clone();
+                let established = tunnel_established.clone();
+
+                connection_tasks.spawn(async move {
+                    match handle_tcp_receiver_connection(conn_clone, tcp_stream, peer_addr, established)
+                        .await
+                    {
+                        Ok(()) => {}
+                        Err(e) => {
+                            log::warn!("TCP tunnel error for {}: {}", peer_addr, e);
+                        }
+                    }
+                });
             }
-        };
-
-        log::info!("New local connection from {}", peer_addr);
-
-        let conn_clone = conn.clone();
-        let established = tunnel_established.clone();
-
-        tokio::spawn(async move {
-            match handle_tcp_receiver_connection(conn_clone, tcp_stream, peer_addr, established)
-                .await
-            {
-                Ok(()) => {}
-                Err(e) => {
-                    log::warn!("TCP tunnel error for {}: {}", peer_addr, e);
-                }
+            error = conn.closed() => {
+                log::info!("QUIC connection closed: {}", error);
+                break;
             }
-        });
+        }
+
+        // Clean up completed tasks
+        while connection_tasks.try_join_next().is_some() {}
     }
+
+    // Abort remaining connection tasks
+    connection_tasks.shutdown().await;
+
+    conn.close(0u32.into(), b"done");
+    endpoint.close().await;
+    log::info!("TCP receiver stopped.");
+    Ok(())
 }
 
 async fn handle_tcp_receiver_connection(
@@ -431,31 +453,52 @@ pub async fn run_iroh_manual_tcp_receiver(listen: String, stun_servers: Vec<Stri
         listen_addr
     );
 
+    let mut connection_tasks: JoinSet<()> = JoinSet::new();
+
     loop {
-        let (tcp_stream, peer_addr) = match listener.accept().await {
-            Ok(result) => result,
-            Err(e) => {
-                log::warn!("Failed to accept TCP connection: {}", e);
-                continue;
+        tokio::select! {
+            accept_result = listener.accept() => {
+                let (tcp_stream, peer_addr) = match accept_result {
+                    Ok(result) => result,
+                    Err(e) => {
+                        log::warn!("Failed to accept TCP connection: {}", e);
+                        continue;
+                    }
+                };
+
+                log::info!("New local connection from {}", peer_addr);
+
+                let conn_clone = conn.clone();
+                let established = tunnel_established.clone();
+
+                connection_tasks.spawn(async move {
+                    match handle_tcp_receiver_connection(conn_clone, tcp_stream, peer_addr, established)
+                        .await
+                    {
+                        Ok(()) => {}
+                        Err(e) => {
+                            log::warn!("TCP tunnel error for {}: {}", peer_addr, e);
+                        }
+                    }
+                });
             }
-        };
-
-        log::info!("New local connection from {}", peer_addr);
-
-        let conn_clone = conn.clone();
-        let established = tunnel_established.clone();
-
-        tokio::spawn(async move {
-            match handle_tcp_receiver_connection(conn_clone, tcp_stream, peer_addr, established)
-                .await
-            {
-                Ok(()) => {}
-                Err(e) => {
-                    log::warn!("TCP tunnel error for {}: {}", peer_addr, e);
-                }
+            error = conn.closed() => {
+                log::info!("QUIC connection closed: {}", error);
+                break;
             }
-        });
+        }
+
+        // Clean up completed tasks
+        while connection_tasks.try_join_next().is_some() {}
     }
+
+    // Abort remaining connection tasks
+    connection_tasks.shutdown().await;
+
+    conn.close(0u32.into(), b"done");
+    endpoint.close().await;
+    log::info!("TCP receiver stopped.");
+    Ok(())
 }
 
 // ============================================================================

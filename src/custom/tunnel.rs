@@ -9,6 +9,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use tokio::net::{TcpListener, UdpSocket};
 use tokio::sync::Mutex;
+use tokio::task::JoinSet;
 
 use crate::signaling::{
     display_answer, display_offer, read_answer_from_stdin, read_offer_from_stdin, ManualAnswer,
@@ -191,6 +192,8 @@ pub async fn run_manual_tcp_receiver(listen: String, stun_servers: Vec<String>) 
         listen_addr
     );
 
+    let mut connection_tasks: JoinSet<()> = JoinSet::new();
+
     loop {
         tokio::select! {
             accept_result = listener.accept() => {
@@ -206,7 +209,7 @@ pub async fn run_manual_tcp_receiver(listen: String, stun_servers: Vec<String>) 
                 let conn_clone = conn.clone();
                 let established = tunnel_established.clone();
 
-                tokio::spawn(async move {
+                connection_tasks.spawn(async move {
                     match handle_tcp_receiver_connection(conn_clone, tcp_stream, peer_addr, established)
                         .await
                     {
@@ -226,7 +229,13 @@ pub async fn run_manual_tcp_receiver(listen: String, stun_servers: Vec<String>) 
                 break;
             }
         }
+
+        // Clean up completed tasks
+        while connection_tasks.try_join_next().is_some() {}
     }
+
+    // Abort remaining connection tasks
+    connection_tasks.shutdown().await;
 
     // Clean up the ICE keeper task
     ice_keeper_handle.abort();
@@ -419,18 +428,20 @@ pub async fn run_manual_udp_receiver(listen: String, stun_servers: Vec<String>) 
     let udp_clone = udp_socket.clone();
     let client_clone = client_addr.clone();
 
-    // Use join! instead of select! to allow both tasks to complete and flush buffers
-    let (udp_to_stream_result, stream_to_udp_result) = tokio::join!(
-        forward_udp_to_stream(udp_clone, send_stream, client_clone),
-        forward_stream_to_udp_receiver(recv_stream, udp_socket, client_addr)
-    );
-
-    // Log errors from both tasks
-    if let Err(e) = udp_to_stream_result {
-        log::warn!("UDP to stream error: {}", e);
-    }
-    if let Err(e) = stream_to_udp_result {
-        log::warn!("Stream to UDP error: {}", e);
+    // Use select! for UDP: forward_udp_to_stream has no exit mechanism when peer closes,
+    // so we need select! to ensure prompt shutdown. UDP is inherently unreliable, so
+    // losing buffered data on shutdown is acceptable.
+    tokio::select! {
+        result = forward_udp_to_stream(udp_clone, send_stream, client_clone) => {
+            if let Err(e) = result {
+                log::warn!("UDP to stream error: {}", e);
+            }
+        }
+        result = forward_stream_to_udp_receiver(recv_stream, udp_socket, client_addr) => {
+            if let Err(e) = result {
+                log::warn!("Stream to UDP error: {}", e);
+            }
+        }
     }
 
     conn.close(0u32.into(), b"done");
