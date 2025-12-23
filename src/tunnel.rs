@@ -63,6 +63,7 @@ fn current_timestamp() -> u64 {
 /// - Periodic re-publishing of the offer with exponential backoff
 /// - Overall timeout of `max_wait_secs`
 /// - Session ID validation to filter stale answers
+/// - Per-session receiver to support concurrent multi-session mode
 async fn publish_offer_and_wait_for_answer(
     signaling: &NostrSignaling,
     offer: &ManualOffer,
@@ -83,15 +84,13 @@ async fn publish_offer_and_wait_for_answer(
     );
 
     loop {
+        // Use session-specific waiting to support concurrent multi-session mode.
+        // Each session gets its own receiver so answers aren't consumed by other sessions.
         if let Some(ans) = signaling
-            .try_wait_for_answer_timeout(current_interval)
+            .try_wait_for_answer_with_session_id(session_id, current_interval)
             .await
         {
-            // Verify session ID matches
-            if ans.session_id.as_ref() == Some(&session_id.to_string()) {
-                return Ok(ans);
-            }
-            println!("Ignoring answer with mismatched session ID (stale event)");
+            return Ok(ans);
         }
 
         // Check overall timeout

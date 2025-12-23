@@ -383,9 +383,65 @@ impl NostrSignaling {
 
     /// Wait for an answer from the peer with custom timeout, returns None on timeout.
     /// Use this variant for re-publish loops where timeout is expected and not an error.
+    ///
+    /// **Warning**: In multi-session mode, this method may consume answers meant for
+    /// other sessions. Use `try_wait_for_answer_with_session_id` instead for concurrent
+    /// session handling.
     pub async fn try_wait_for_answer_timeout(&self, timeout_secs: u64) -> Option<ManualAnswer> {
         self.wait_for_message_optional(SIGNALING_TYPE_ANSWER, timeout_secs)
             .await
+    }
+
+    /// Wait for an answer matching a specific session ID using a fresh receiver.
+    ///
+    /// Unlike methods using the shared persistent receiver, this creates a NEW
+    /// broadcast receiver for this call. This allows multiple concurrent session
+    /// tasks to each wait for their own answers without consuming each other's messages.
+    ///
+    /// Returns:
+    /// - `Some(answer)` if an answer matching `session_id` is received
+    /// - `None` on timeout or channel closed
+    ///
+    /// Note: Messages sent before this method is called may be missed. Call this
+    /// AFTER publishing the offer to ensure the answer is received.
+    pub async fn try_wait_for_answer_with_session_id(
+        &self,
+        session_id: &str,
+        timeout_secs: u64,
+    ) -> Option<ManualAnswer> {
+        // Create a fresh receiver for this session - allows concurrent waiting
+        let mut notifications = self.client.notifications();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_secs);
+
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                return None; // Timeout
+            }
+            let wait_duration = remaining.min(Duration::from_secs(1));
+
+            match tokio::time::timeout(wait_duration, notifications.recv()).await {
+                Ok(Ok(RelayPoolNotification::Event { event, .. })) => {
+                    if let Some(answer) =
+                        self.try_parse_event::<ManualAnswer>(&event, SIGNALING_TYPE_ANSWER)
+                    {
+                        // Only return if session_id matches
+                        if answer.session_id.as_ref() == Some(&session_id.to_string()) {
+                            println!("Received {} from peer", SIGNALING_TYPE_ANSWER);
+                            return Some(answer);
+                        }
+                        // Answer for different session - ignore (other tasks have their own receivers)
+                        println!("Ignoring answer with mismatched session ID (stale event)");
+                    }
+                }
+                Ok(Ok(_)) => continue,
+                Ok(Err(recv_err)) => match recv_err {
+                    RecvError::Closed => return None,
+                    RecvError::Lagged(_) => continue,
+                },
+                Err(_) => continue, // Timeout elapsed, loop again
+            }
+        }
     }
 
     /// Wait for a specific message type with timeout, returns None on timeout or channel closed.
