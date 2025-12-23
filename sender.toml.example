@@ -13,8 +13,9 @@ role = "sender"
 mode = "iroh-default"  # or "iroh-manual", "custom", or "nostr"
 
 # Shared options
-# source is required at runtime (via config or CLI)
-source = "tcp://127.0.0.1:22"
+# source is required for non-nostr modes (iroh-default, iroh-manual, custom)
+# NOTE: source is NOT allowed for nostr mode - receivers request sources dynamically
+# source = "tcp://127.0.0.1:22"
 
 [iroh-default]
 # Path to secret key file for persistent identity
@@ -53,6 +54,9 @@ relay_only = false
 # ]
 
 # [nostr]
+# # NOTE: For nostr mode, do NOT set 'source' above - receivers request sources dynamically.
+# # Use allowed_sources below to restrict what receivers can request.
+#
 # # Your Nostr private key (generate with: tunnel-rs generate-nostr-key)
 # nsec = "nsec1..."
 #
@@ -80,6 +84,7 @@ relay_only = false
 # max_sessions = 10
 #
 # # Allowed source networks that receivers can request (CIDR notation)
+# # Receivers MUST specify --source which must match one of these networks
 # # Separate lists for TCP and UDP protocols
 # # Supports IPv4 and IPv6 CIDR notation
 # [nostr.allowed_sources]

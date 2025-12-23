@@ -12,11 +12,11 @@
 //!   tunnel-rs sender iroh-default --source tcp://127.0.0.1:22
 //!   tunnel-rs sender iroh-manual --source tcp://127.0.0.1:22
 //!   tunnel-rs sender custom --source tcp://127.0.0.1:22
-//!   tunnel-rs sender nostr --source tcp://127.0.0.1:22 --nsec <NSEC> --peer-npub <NPUB>
+//!   tunnel-rs sender nostr --allowed-tcp 127.0.0.0/8 --nsec <NSEC> --peer-npub <NPUB>
 //!   tunnel-rs receiver iroh-default --node-id <NODE_ID> --target tcp://127.0.0.1:2222
 //!   tunnel-rs receiver iroh-manual --target tcp://127.0.0.1:2222
 //!   tunnel-rs receiver custom --target tcp://127.0.0.1:2222
-//!   tunnel-rs receiver nostr --target tcp://127.0.0.1:2222 --nsec <NSEC> --peer-npub <NPUB>
+//!   tunnel-rs receiver nostr --target tcp://127.0.0.1:2222 --source tcp://127.0.0.1:22 --nsec <NSEC> --peer-npub <NPUB>
 
 mod config;
 mod endpoint;
@@ -213,9 +213,8 @@ enum SenderMode {
     },
     /// Full ICE with Nostr-based signaling (WireGuard-like static keys)
     Nostr {
-        /// Default source address to forward traffic to (tcp://host:port or udp://host:port)
-        /// Used when receiver doesn't request a specific source
-        #[arg(short, long)]
+        /// NOT ALLOWED - receivers request sources dynamically. Use --allowed-tcp/--allowed-udp instead.
+        #[arg(short, long, hide = true)]
         source: Option<String>,
 
         /// Allowed TCP source networks in CIDR notation (repeatable)
@@ -508,11 +507,14 @@ async fn main() -> Result<()> {
                 }
                 "nostr" => {
                     let nostr_cfg = cfg.nostr();
-                    let (source, allowed_tcp, allowed_udp, stun_servers, nsec, peer_npub, relays, republish_interval, max_wait, max_sessions) = match &mode {
+                    let (allowed_tcp, allowed_udp, stun_servers, nsec, peer_npub, relays, republish_interval, max_wait, max_sessions) = match &mode {
                         Some(SenderMode::Nostr { source: s, allowed_tcp: at, allowed_udp: au, stun_servers: ss, no_stun, nsec: n, peer_npub: p, relays: r, republish_interval: ri, max_wait: mw, max_sessions: ms }) => {
+                            // source is not allowed in nostr sender mode
+                            if s.is_some() {
+                                anyhow::bail!("--source is not allowed for nostr sender mode. Receivers request sources dynamically. Use --allowed-tcp/--allowed-udp to restrict allowed networks.");
+                            }
                             let cfg_allowed = nostr_cfg.and_then(|c| c.allowed_sources.clone()).unwrap_or_default();
                             (
-                                normalize_optional_endpoint(s.clone()).or(source),
                                 if at.is_empty() { cfg_allowed.tcp.clone() } else { at.clone() },
                                 if au.is_empty() { cfg_allowed.udp.clone() } else { au.clone() },
                                 resolve_stun_servers(ss, nostr_cfg.and_then(|c| c.stun_servers.clone()), *no_stun)?,
@@ -527,7 +529,6 @@ async fn main() -> Result<()> {
                         _ => {
                             let cfg_allowed = nostr_cfg.and_then(|c| c.allowed_sources.clone()).unwrap_or_default();
                             (
-                                source,
                                 cfg_allowed.tcp,
                                 cfg_allowed.udp,
                                 resolve_stun_servers(&[], nostr_cfg.and_then(|c| c.stun_servers.clone()), false)?,
@@ -541,9 +542,11 @@ async fn main() -> Result<()> {
                         },
                     };
 
-                    let source = source.context(
-                        "source is required. Provide via --source or in config file.",
-                    )?;
+                    // source from config is also not allowed
+                    if source.is_some() {
+                        anyhow::bail!("'source' in config is not allowed for nostr sender mode. Receivers request sources dynamically.");
+                    }
+
                     let nsec = nsec.context(
                         "nsec is required. Provide via --nsec or in config file. Use 'tunnel-rs generate-nostr-key' to create one.",
                     )?;
@@ -556,13 +559,8 @@ async fn main() -> Result<()> {
                         relays
                     };
 
-                    let (protocol, target) = parse_endpoint(&source)
-                        .with_context(|| format!("Invalid sender source '{}'", source))?;
-
-                    match protocol {
-                        Protocol::Udp => tunnel::run_nostr_udp_sender(target, allowed_udp, stun_servers, nsec, peer_npub, relays, republish_interval, max_wait, max_sessions).await,
-                        Protocol::Tcp => tunnel::run_nostr_tcp_sender(target, allowed_tcp, stun_servers, nsec, peer_npub, relays, republish_interval, max_wait, max_sessions).await,
-                    }
+                    // Run both TCP and UDP senders concurrently
+                    tunnel::run_nostr_sender(allowed_tcp, allowed_udp, stun_servers, nsec, peer_npub, relays, republish_interval, max_wait, max_sessions).await
                 }
                 _ => anyhow::bail!("Invalid mode '{}'. Use: iroh-default, iroh-manual, custom, or nostr", effective_mode),
             }
@@ -705,6 +703,9 @@ async fn main() -> Result<()> {
 
                     let target = target.context(
                         "target is required. Provide via --target or in config file.",
+                    )?;
+                    let source = source.context(
+                        "--source is required for nostr receiver mode. Specify the source to request from sender (e.g., --source tcp://127.0.0.1:22)",
                     )?;
                     let nsec = nsec.context(
                         "nsec is required. Provide via --nsec or in config file. Use 'tunnel-rs generate-nostr-key' to create one.",

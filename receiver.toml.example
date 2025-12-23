@@ -75,7 +75,6 @@ relay_only = false
 #     "stun.services.mozilla.com:3478",
 # ]
 #
-# # Request a specific source from sender (receiver-requested source feature)
-# # Must be in sender's allowed_sources list
-# # If not set, sender uses its default source
+# # Source address to request from sender (REQUIRED for nostr mode)
+# # Must be in sender's allowed_sources list (--allowed-tcp or --allowed-udp)
 # source = "tcp://127.0.0.1:22"
