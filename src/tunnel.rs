@@ -48,6 +48,34 @@ async fn resolve_target_addr(target: &str) -> Result<SocketAddr> {
     addrs.next().context("No addresses found for host")
 }
 
+/// Resolve a target address to all available socket addresses.
+/// Returns all IPv4 and IPv6 addresses for the hostname.
+async fn resolve_all_target_addrs(target: &str) -> Result<Vec<SocketAddr>> {
+    let addrs: Vec<SocketAddr> = lookup_host(target)
+        .await
+        .with_context(|| format!("Failed to resolve '{}'", target))?
+        .collect();
+    if addrs.is_empty() {
+        anyhow::bail!("No addresses found for host '{}'", target);
+    }
+    Ok(addrs)
+}
+
+/// Try to connect to any of the given addresses, returning the first successful connection.
+/// This handles mixed IPv4/IPv6 environments where the service may only be on one address family.
+async fn try_connect_tcp(addrs: &[SocketAddr]) -> Result<TcpStream> {
+    let mut last_error = None;
+    for addr in addrs {
+        match TcpStream::connect(addr).await {
+            Ok(stream) => return Ok(stream),
+            Err(e) => last_error = Some(e),
+        }
+    }
+    Err(last_error
+        .map(|e| anyhow::anyhow!("Failed to connect to any address: {}", e))
+        .unwrap_or_else(|| anyhow::anyhow!("No addresses to connect to")))
+}
+
 /// Generate a random session ID for nostr signaling.
 fn generate_session_id() -> String {
     use rand::Rng;
@@ -75,14 +103,17 @@ fn validate_allowed_networks(allowed_networks: &[String], label: &str) -> Result
 }
 
 /// Check if a source address is allowed by any network in the CIDR list.
+/// Supports both IP addresses and hostnames (resolved via DNS).
 ///
-/// The source format is `protocol://host:port` (e.g., `tcp://192.168.1.100:22`).
+/// The source format is `protocol://host:port` (e.g., `tcp://192.168.1.100:22` or `tcp://myserver.local:22`).
 /// The allowed_networks list contains CIDR notation (e.g., `192.168.0.0/16`, `::1/128`).
 ///
 /// Returns true if:
 /// - allowed_networks is empty (no restrictions, caller should handle default)
-/// - The source IP is contained in any of the allowed networks
-fn is_source_allowed(source: &str, allowed_networks: &[String]) -> bool {
+/// - The source IP (or resolved hostname IP) is contained in any of the allowed networks
+async fn is_source_allowed(source: &str, allowed_networks: &[String]) -> bool {
+    use tokio::net::lookup_host;
+
     if allowed_networks.is_empty() {
         return true; // No restrictions
     }
@@ -92,9 +123,25 @@ fn is_source_allowed(source: &str, allowed_networks: &[String]) -> bool {
         return false;
     };
 
-    // Parse source host as IP address
-    let Ok(source_ip) = host.parse::<std::net::IpAddr>() else {
-        return false; // Can't validate non-IP hostnames against CIDR
+    // Try parsing as IP first, fall back to DNS resolution
+    let source_ip = match host.parse::<std::net::IpAddr>() {
+        Ok(ip) => ip,
+        Err(_) => {
+            // Not an IP - try DNS resolution
+            let Some(port) = extract_port_from_source(source) else {
+                return false;
+            };
+            let lookup_target = format!("{}:{}", host, port);
+            let addrs = match lookup_host(&lookup_target).await {
+                Ok(addrs) => addrs,
+                Err(_) => return false,
+            };
+            let resolved_ip = match addrs.into_iter().next() {
+                Some(addr) => addr.ip(),
+                None => return false,
+            };
+            resolved_ip
+        }
     };
 
     // Check against each allowed network (pre-validated at startup)
@@ -126,6 +173,11 @@ fn extract_addr_from_source(source: &str) -> Option<String> {
 fn extract_host_from_source(source: &str) -> Option<String> {
     let url = url::Url::parse(source).ok()?;
     url.host_str().map(|s| s.to_string())
+}
+
+/// Extract port from a source URL (protocol://host:port).
+fn extract_port_from_source(source: &str) -> Option<u16> {
+    url::Url::parse(source).ok()?.port()
 }
 
 /// Get current Unix timestamp in seconds.
@@ -676,9 +728,9 @@ pub async fn run_tcp_receiver(
 // ============================================================================
 
 pub async fn run_manual_tcp_sender(target: String, stun_servers: Vec<String>) -> Result<()> {
-    let target_addr = resolve_target_addr(&target)
+    let target_addrs = Arc::new(resolve_all_target_addrs(&target)
         .await
-        .with_context(|| format!("Invalid target address or hostname '{}'", target))?;
+        .with_context(|| format!("Invalid target address or hostname '{}'", target))?);
 
     println!("Manual TCP Tunnel - Sender Mode");
     println!("================================");
@@ -746,7 +798,7 @@ pub async fn run_manual_tcp_sender(target: String, stun_servers: Vec<String>) ->
         };
 
         println!("New TCP connection request received");
-        let target = target_addr;
+        let target = Arc::clone(&target_addrs);
         tokio::spawn(async move {
             if let Err(e) = handle_tcp_sender_stream_quic(send_stream, recv_stream, target).await {
                 eprintln!("TCP connection error: {}", e);
@@ -1270,7 +1322,7 @@ async fn handle_nostr_session_impl(
     match protocol {
         "tcp" => {
             // Validate against TCP allowed networks
-            if !is_source_allowed(requested_source, &allowed_tcp) {
+            if !is_source_allowed(requested_source, &allowed_tcp).await {
                 let reject = ManualReject::new(
                     session_id.clone(),
                     format!("TCP source '{}' not in allowed networks", requested_source),
@@ -1290,7 +1342,7 @@ async fn handle_nostr_session_impl(
         }
         "udp" => {
             // Validate against UDP allowed networks
-            if !is_source_allowed(requested_source, &allowed_udp) {
+            if !is_source_allowed(requested_source, &allowed_udp).await {
                 let reject = ManualReject::new(
                     session_id.clone(),
                     format!("UDP source '{}' not in allowed networks", requested_source),
@@ -1343,9 +1395,9 @@ async fn handle_nostr_tcp_session_impl(
         .ok_or_else(|| anyhow::anyhow!("[{}] Invalid source format '{}'", short_id, requested_source))?;
 
     println!("[{}] Forwarding to: {}", short_id, requested_source);
-    let target_addr = resolve_target_addr(&target_hostport)
+    let target_addrs = Arc::new(resolve_all_target_addrs(&target_hostport)
         .await
-        .with_context(|| format!("Invalid source '{}'", requested_source))?;
+        .with_context(|| format!("Invalid source '{}'", requested_source))?);
 
     // Gather ICE candidates
     let ice = IceEndpoint::gather(&stun_servers).await?;
@@ -1407,7 +1459,7 @@ async fn handle_nostr_tcp_session_impl(
         .await
         .context("Timeout during QUIC handshake")?
         .context("Failed to accept QUIC connection")?;
-    println!("[{}] QUIC connected, forwarding to {}", short_id, target_addr);
+    println!("[{}] QUIC connected, forwarding to {:?}", short_id, target_addrs.as_slice());
 
     loop {
         let (send_stream, recv_stream) = match conn.accept_bi().await {
@@ -1418,7 +1470,7 @@ async fn handle_nostr_tcp_session_impl(
             }
         };
 
-        let target = target_addr;
+        let target = Arc::clone(&target_addrs);
         let sid = short_id.to_string();
         tokio::spawn(async move {
             if let Err(e) = handle_tcp_sender_stream_quic(send_stream, recv_stream, target).await {
@@ -1941,19 +1993,20 @@ pub async fn run_nostr_udp_receiver(
 async fn handle_tcp_sender_stream_quic(
     send_stream: quinn::SendStream,
     mut recv_stream: quinn::RecvStream,
-    target_addr: SocketAddr,
+    target_addrs: Arc<Vec<SocketAddr>>,
 ) -> Result<()> {
     // Read and discard the stream marker byte sent by the receiver
     let mut marker = [0u8; 1];
     recv_stream.read_exact(&mut marker).await.context("Failed to read stream marker")?;
 
-    let tcp_stream = TcpStream::connect(target_addr)
+    let tcp_stream = try_connect_tcp(&target_addrs)
         .await
         .context("Failed to connect to target TCP service")?;
 
-    println!("-> Connected to target {}", target_addr);
+    let local_addr = tcp_stream.peer_addr().ok();
+    println!("-> Connected to target {:?}", local_addr);
     bridge_quinn_streams(recv_stream, send_stream, tcp_stream).await?;
-    println!("<- TCP connection to {} closed", target_addr);
+    println!("<- TCP connection to {:?} closed", local_addr);
     Ok(())
 }
 
