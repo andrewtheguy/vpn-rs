@@ -1106,11 +1106,15 @@ async fn run_nostr_sender_loop(
             .await;
 
             // Log remaining sessions (permit will be released after this block)
-            let remaining = sem_clone
-                .as_ref()
-                .map(|sem| max_sessions_copy.saturating_sub(sem.available_permits()).saturating_sub(1))
-                .unwrap_or(0);
-            println!("Session ended. Active sessions: {}/{}", remaining, limit_str_clone);
+            // In unlimited mode (sem_clone is None), we don't track count inside the task
+            if let Some(ref sem) = sem_clone {
+                let remaining = max_sessions_copy
+                    .saturating_sub(sem.available_permits())
+                    .saturating_sub(1);
+                println!("Session ended. Active sessions: {}/{}", remaining, limit_str_clone);
+            } else {
+                println!("Session ended.");
+            }
 
             if let Err(ref e) = result {
                 eprintln!("Session error: {}", e);
@@ -1819,7 +1823,9 @@ where
                     ));
                 }
                 // More attempts remaining - log attempt message and sleep
-                let delay_ms = base_delay_ms * (1 << attempt);
+                // Use saturating arithmetic to avoid overflow for large attempt values
+                let multiplier = 1u64.checked_shl(attempt).unwrap_or(u64::MAX);
+                let delay_ms = base_delay_ms.saturating_mul(multiplier);
                 eprintln!(
                     "Failed to {} (attempt {}/{}): {}. Next attempt in {}ms...",
                     operation_name,
