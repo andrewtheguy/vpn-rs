@@ -88,10 +88,10 @@ impl std::error::Error for OfferWaitError {}
 /// messages between checks. The receiver is protected by a [`Mutex`], which means only
 /// one task may read notifications at a time.
 ///
-/// **Callers must not attempt concurrent waiting operations.** For example, do not call
-/// [`try_check_for_rejection`](Self::try_check_for_rejection) and
-/// [`try_wait_for_offer_timeout`](Self::try_wait_for_offer_timeout) from different tasks
-/// simultaneously—one will block waiting for the other to release the lock.
+/// **Callers must not attempt concurrent waiting operations on the persistent receiver.**
+/// For example, do not call [`wait_for_fresh_request_forever`](Self::wait_for_fresh_request_forever)
+/// and [`try_wait_for_offer_or_rejection`](Self::try_wait_for_offer_or_rejection) from different
+/// tasks simultaneously—one will block waiting for the other to release the lock.
 ///
 /// In practice, signaling methods should be called sequentially from a single task
 /// (e.g., the session handler loop).
