@@ -19,18 +19,24 @@
 //!   tunnel-rs receiver nostr --target tcp://127.0.0.1:2222 --source tcp://127.0.0.1:22 --nsec <NSEC> --peer-npub <NPUB>
 
 mod config;
-mod endpoint;
-mod manual;
+mod custom;
+mod iroh;
+mod nostr;
 mod secret;
-mod tunnel;
+mod signaling;
+mod transport;
+mod tunnel_common;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
-use config::{default_stun_servers, load_receiver_config, load_sender_config, ReceiverConfig, SenderConfig};
-use iroh::SecretKey;
+use config::{
+    default_stun_servers, load_receiver_config, load_sender_config, ReceiverConfig, SenderConfig,
+};
+use ::iroh::SecretKey;
 use std::fs;
 use std::path::PathBuf;
-use crate::endpoint::{load_secret, load_secret_from_string, secret_to_endpoint_id};
+
+use crate::iroh::endpoint::{load_secret, load_secret_from_string, secret_to_endpoint_id};
 
 #[derive(Clone, Copy, ValueEnum, Default, Debug, PartialEq)]
 pub enum Protocol {
@@ -557,8 +563,8 @@ async fn main() -> Result<()> {
                         .with_context(|| format!("Invalid sender source '{}'", source))?;
 
                     match protocol {
-                        Protocol::Udp => tunnel::run_udp_sender(target, secret, relay_urls, relay_only, dns_server).await,
-                        Protocol::Tcp => tunnel::run_tcp_sender(target, secret, relay_urls, relay_only, dns_server).await,
+                        Protocol::Udp => iroh::run_udp_sender(target, secret, relay_urls, relay_only, dns_server).await,
+                        Protocol::Tcp => iroh::run_tcp_sender(target, secret, relay_urls, relay_only, dns_server).await,
                     }
                 }
                 "iroh-manual" => {
@@ -579,8 +585,8 @@ async fn main() -> Result<()> {
                         .with_context(|| format!("Invalid sender source '{}'", source))?;
 
                     match protocol {
-                        Protocol::Udp => tunnel::run_iroh_manual_udp_sender(target, stun_servers).await,
-                        Protocol::Tcp => tunnel::run_iroh_manual_tcp_sender(target, stun_servers).await,
+                        Protocol::Udp => iroh::run_iroh_manual_udp_sender(target, stun_servers).await,
+                        Protocol::Tcp => iroh::run_iroh_manual_tcp_sender(target, stun_servers).await,
                     }
                 }
                 "custom" => {
@@ -601,8 +607,8 @@ async fn main() -> Result<()> {
                         .with_context(|| format!("Invalid sender source '{}'", source))?;
 
                     match protocol {
-                        Protocol::Udp => tunnel::run_manual_udp_sender(target, stun_servers).await,
-                        Protocol::Tcp => tunnel::run_manual_tcp_sender(target, stun_servers).await,
+                        Protocol::Udp => custom::run_manual_udp_sender(target, stun_servers).await,
+                        Protocol::Tcp => custom::run_manual_tcp_sender(target, stun_servers).await,
                     }
                 }
                 "nostr" => {
@@ -667,7 +673,7 @@ async fn main() -> Result<()> {
                     };
 
                     // Run both TCP and UDP senders concurrently
-                    tunnel::run_nostr_sender(allowed_tcp, allowed_udp, stun_servers, nsec, peer_npub, relays, republish_interval, max_wait, max_sessions).await
+                    nostr::run_nostr_sender(allowed_tcp, allowed_udp, stun_servers, nsec, peer_npub, relays, republish_interval, max_wait, max_sessions).await
                 }
                 _ => anyhow::bail!("Invalid mode '{}'. Use: iroh-default, iroh-manual, custom, or nostr", effective_mode),
             }
@@ -735,8 +741,8 @@ async fn main() -> Result<()> {
                         .with_context(|| format!("Invalid receiver target '{}'", target))?;
 
                     match protocol {
-                        Protocol::Udp => tunnel::run_udp_receiver(node_id, listen, relay_urls, relay_only, dns_server).await,
-                        Protocol::Tcp => tunnel::run_tcp_receiver(node_id, listen, relay_urls, relay_only, dns_server).await,
+                        Protocol::Udp => iroh::run_udp_receiver(node_id, listen, relay_urls, relay_only, dns_server).await,
+                        Protocol::Tcp => iroh::run_tcp_receiver(node_id, listen, relay_urls, relay_only, dns_server).await,
                     }
                 }
                 "iroh-manual" => {
@@ -757,8 +763,8 @@ async fn main() -> Result<()> {
                         .with_context(|| format!("Invalid receiver target '{}'", target))?;
 
                     match protocol {
-                        Protocol::Udp => tunnel::run_iroh_manual_udp_receiver(listen, stun_servers).await,
-                        Protocol::Tcp => tunnel::run_iroh_manual_tcp_receiver(listen, stun_servers).await,
+                        Protocol::Udp => iroh::run_iroh_manual_udp_receiver(listen, stun_servers).await,
+                        Protocol::Tcp => iroh::run_iroh_manual_tcp_receiver(listen, stun_servers).await,
                     }
                 }
                 "custom" => {
@@ -779,8 +785,8 @@ async fn main() -> Result<()> {
                         .with_context(|| format!("Invalid receiver target '{}'", target))?;
 
                     match protocol {
-                        Protocol::Udp => tunnel::run_manual_udp_receiver(listen, stun_servers).await,
-                        Protocol::Tcp => tunnel::run_manual_tcp_receiver(listen, stun_servers).await,
+                        Protocol::Udp => custom::run_manual_udp_receiver(listen, stun_servers).await,
+                        Protocol::Tcp => custom::run_manual_tcp_receiver(listen, stun_servers).await,
                     }
                 }
                 "nostr" => {
@@ -846,12 +852,12 @@ async fn main() -> Result<()> {
                         let (protocol, addr) = parse_endpoint(&listen)
                             .with_context(|| format!("Invalid receiver target '{}'", listen))?;
                         match protocol {
-                            Protocol::Udp => tunnel::run_nostr_udp_receiver(addr, source, stun_servers, nsec, peer_npub, relays, republish_interval, max_wait).await,
-                            Protocol::Tcp => tunnel::run_nostr_tcp_receiver(addr, source, stun_servers, nsec, peer_npub, relays, republish_interval, max_wait).await,
+                            Protocol::Udp => nostr::run_nostr_udp_receiver(addr, source, stun_servers, nsec, peer_npub, relays, republish_interval, max_wait).await,
+                            Protocol::Tcp => nostr::run_nostr_tcp_receiver(addr, source, stun_servers, nsec, peer_npub, relays, republish_interval, max_wait).await,
                         }
                     } else {
                         // Default to TCP if no protocol specified
-                        tunnel::run_nostr_tcp_receiver(listen, source, stun_servers, nsec, peer_npub, relays, republish_interval, max_wait).await
+                        nostr::run_nostr_tcp_receiver(listen, source, stun_servers, nsec, peer_npub, relays, republish_interval, max_wait).await
                     }
                 }
                 _ => anyhow::bail!("Invalid mode '{}'. Use: iroh-default, iroh-manual, custom, or nostr", effective_mode),

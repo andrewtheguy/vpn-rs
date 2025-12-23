@@ -13,7 +13,7 @@ use std::time::Duration;
 use tokio::sync::broadcast::error::{RecvError, TryRecvError};
 use tokio::sync::Mutex;
 
-use super::signaling::{ManualAnswer, ManualOffer, ManualReject, ManualRequest};
+use super::codec::{ManualAnswer, ManualOffer, ManualReject, ManualRequest};
 
 /// Type alias for the notification receiver from the Nostr client.
 /// Callers can obtain a receiver via [`NostrSignaling::create_notification_receiver`]
