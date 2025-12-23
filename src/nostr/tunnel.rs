@@ -480,7 +480,7 @@ async fn handle_nostr_tcp_session_impl(
     log::info!("[{}] ICE connection established", short_id);
 
     // Spawn the ICE keeper
-    tokio::spawn(ice_conn.ice_keeper.run());
+    let ice_keeper_handle = tokio::spawn(ice_conn.ice_keeper.run());
 
     let endpoint = quic::make_server_endpoint(ice_conn.socket, quic_identity.server_config)?;
 
@@ -514,6 +514,14 @@ async fn handle_nostr_tcp_session_impl(
                 log::warn!("[{}] TCP connection error: {}", sid, e);
             }
         });
+    }
+
+    // Clean up the ICE keeper task
+    ice_keeper_handle.abort();
+    match ice_keeper_handle.await {
+        Ok(()) => {}
+        Err(e) if e.is_cancelled() => {}
+        Err(e) => log::warn!("[{}] ICE keeper task failed: {}", short_id, e),
     }
 
     Ok(())
@@ -598,7 +606,7 @@ async fn handle_nostr_udp_session_impl(
     log::info!("[{}] ICE connection established", short_id);
 
     // Spawn the ICE keeper
-    tokio::spawn(ice_conn.ice_keeper.run());
+    let ice_keeper_handle = tokio::spawn(ice_conn.ice_keeper.run());
 
     let endpoint = quic::make_server_endpoint(ice_conn.socket, quic_identity.server_config)?;
 
@@ -635,6 +643,14 @@ async fn handle_nostr_udp_session_impl(
 
     conn.close(0u32.into(), b"done");
     log::info!("[{}] UDP session closed", short_id);
+
+    // Clean up the ICE keeper task
+    ice_keeper_handle.abort();
+    match ice_keeper_handle.await {
+        Ok(()) => {}
+        Err(e) if e.is_cancelled() => {}
+        Err(e) => log::warn!("[{}] ICE keeper task failed: {}", short_id, e),
+    }
 
     Ok(())
 }
@@ -823,7 +839,7 @@ pub async fn run_nostr_tcp_receiver(
         .await?;
 
     // Spawn the ICE keeper to handle STUN packets in the background
-    tokio::spawn(ice_conn.ice_keeper.run());
+    let ice_keeper_handle = tokio::spawn(ice_conn.ice_keeper.run());
 
     let endpoint = quic::make_client_endpoint(ice_conn.socket, &offer.quic_fingerprint)?;
     log::info!(
@@ -885,6 +901,14 @@ pub async fn run_nostr_tcp_receiver(
                 break;
             }
         }
+    }
+
+    // Clean up the ICE keeper task
+    ice_keeper_handle.abort();
+    match ice_keeper_handle.await {
+        Ok(()) => {}
+        Err(e) if e.is_cancelled() => {}
+        Err(e) => log::warn!("ICE keeper task failed: {}", e),
     }
 
     log::info!("TCP receiver stopped.");
@@ -1014,7 +1038,7 @@ pub async fn run_nostr_udp_receiver(
         .await?;
 
     // Spawn the ICE keeper to handle STUN packets in the background
-    tokio::spawn(ice_conn.ice_keeper.run());
+    let ice_keeper_handle = tokio::spawn(ice_conn.ice_keeper.run());
 
     let endpoint = quic::make_client_endpoint(ice_conn.socket, &offer.quic_fingerprint)?;
     log::info!(
@@ -1062,6 +1086,14 @@ pub async fn run_nostr_udp_receiver(
 
     conn.close(0u32.into(), b"done");
     log::info!("Connection closed.");
+
+    // Clean up the ICE keeper task
+    ice_keeper_handle.abort();
+    match ice_keeper_handle.await {
+        Ok(()) => {}
+        Err(e) if e.is_cancelled() => {}
+        Err(e) => log::warn!("ICE keeper task failed: {}", e),
+    }
 
     Ok(())
 }
