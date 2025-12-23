@@ -138,6 +138,11 @@ impl NostrSignaling {
 
         let client = Client::new(keys.clone());
 
+        // Create persistent notification receiver BEFORE connecting to relays.
+        // This ensures messages are buffered from the moment connections are established,
+        // avoiding any race where messages could be sent before we start listening.
+        let notifications = Mutex::new(client.notifications());
+
         // Add and connect to relays
         for relay_url in &relay_urls {
             if let Err(e) = client.add_relay(relay_url).await {
@@ -147,12 +152,11 @@ impl NostrSignaling {
 
         client.connect().await;
 
-        // Wait for relay connections
-        tokio::time::sleep(Duration::from_secs(2)).await;
-
-        // Create persistent notification receiver early to avoid missing messages.
-        // This receiver will buffer messages until they're consumed.
-        let notifications = Mutex::new(client.notifications());
+        // Wait for relay connections to be fully established.
+        // TODO: Replace with explicit relay readiness check when nostr-sdk supports it.
+        // This delay ensures relays are ready before we attempt to send/receive messages.
+        const RELAY_CONNECT_DELAY_SECS: u64 = 2;
+        tokio::time::sleep(Duration::from_secs(RELAY_CONNECT_DELAY_SECS)).await;
 
         Ok(Self {
             client,
@@ -263,6 +267,10 @@ impl NostrSignaling {
             .await
             .context("Failed to publish session rejection")?;
 
+        println!(
+            "Published session rejection to Nostr relays (session: {})",
+            reject.session_id
+        );
         Ok(())
     }
 
@@ -338,13 +346,79 @@ impl NostrSignaling {
                         }
                         RecvError::Lagged(skipped) => {
                             eprintln!(
-                                "Warning: Notification receiver lagged, skipped {} messages",
+                                "Warning: Notification receiver lagged, skipped {} messages; draining buffer...",
                                 skipped
                             );
+                            // Drain buffered messages and check for fresh request
+                            if let Some(request) =
+                                self.drain_and_find_fresh_request(&mut notifications, max_age_secs)
+                            {
+                                return Ok(request);
+                            }
+                            // No matching request found in buffer, continue waiting
                         }
                     }
                 }
                 Err(_) => continue,
+            }
+        }
+    }
+
+    /// Check a single event for a fresh request.
+    fn check_event_for_fresh_request(
+        &self,
+        event: &Event,
+        max_age_secs: u64,
+    ) -> Option<ManualRequest> {
+        if let Some(request) = self.try_parse_event::<ManualRequest>(event, SIGNALING_TYPE_REQUEST)
+        {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            let age = now.saturating_sub(request.timestamp);
+            if age <= max_age_secs {
+                println!(
+                    "Received fresh {} from peer (age: {}s)",
+                    SIGNALING_TYPE_REQUEST, age
+                );
+                return Some(request);
+            }
+            println!(
+                "Ignoring stale request (age: {}s > max {}s)",
+                age, max_age_secs
+            );
+        }
+        None
+    }
+
+    /// Drain buffered messages looking for a fresh request.
+    fn drain_and_find_fresh_request(
+        &self,
+        notifications: &mut tokio::sync::broadcast::Receiver<RelayPoolNotification>,
+        max_age_secs: u64,
+    ) -> Option<ManualRequest> {
+        loop {
+            match notifications.try_recv() {
+                Ok(RelayPoolNotification::Event { event, .. }) => {
+                    if let Some(request) = self.check_event_for_fresh_request(&event, max_age_secs)
+                    {
+                        return Some(request);
+                    }
+                }
+                Ok(_) => continue,
+                Err(TryRecvError::Empty) => return None,
+                Err(TryRecvError::Closed) => {
+                    eprintln!("Error: Notification channel closed while draining for request");
+                    return None;
+                }
+                Err(TryRecvError::Lagged(more_skipped)) => {
+                    eprintln!(
+                        "Warning: Additional {} messages skipped while draining",
+                        more_skipped
+                    );
+                    continue;
+                }
             }
         }
     }
@@ -400,40 +474,16 @@ impl NostrSignaling {
                     }
                     RecvError::Lagged(skipped) => {
                         eprintln!(
-                            "Warning: Notification receiver lagged, skipped {} messages; draining buffer (bounded)...",
+                            "Warning: Notification receiver lagged, skipped {} messages; draining buffer...",
                             skipped
                         );
-                        // Drain a bounded number of buffered messages and check for offer/rejection
-                        const MAX_DRAIN_MESSAGES_ON_LAG: usize = 256;
-                        let mut drained = 0usize;
-                        while drained < MAX_DRAIN_MESSAGES_ON_LAG {
-                            match notifications.try_recv() {
-                                Ok(RelayPoolNotification::Event { event, .. }) => {
-                                    drained += 1;
-                                    if let Some(result) = self.check_event_for_offer_or_rejection(&event, session_id) {
-                                        return result;
-                                    }
-                                }
-                                Ok(_) => {
-                                    drained += 1;
-                                    continue;
-                                }
-                                Err(TryRecvError::Empty) => {
-                                    break;
-                                }
-                                Err(TryRecvError::Closed) => {
-                                    return Err(OfferWaitError::ChannelClosed);
-                                }
-                                Err(TryRecvError::Lagged(skipped_more)) => {
-                                    eprintln!(
-                                        "Warning: Additional lag while draining notifications, skipped {} more messages",
-                                        skipped_more
-                                    );
-                                    drained += 1;
-                                    continue;
-                                }
-                            }
+                        // Drain buffered messages and check for offer/rejection
+                        if let Some(result) =
+                            self.drain_and_find_offer_or_rejection(&mut notifications, session_id)
+                        {
+                            return result;
                         }
+                        // No matching offer/rejection found in buffer, continue waiting
                     }
                 },
                 Err(_) => continue, // Timeout elapsed, loop again
@@ -461,7 +511,7 @@ impl NostrSignaling {
                 println!("Received {} from peer", SIGNALING_TYPE_REJECT);
                 return Some(Err(OfferWaitError::Rejected(reject)));
             }
-            // Rejection for different session - ignore
+            println!("Ignoring reject with mismatched session ID (stale event)");
         }
         None
     }
