@@ -534,6 +534,13 @@ async fn main() -> Result<()> {
                         },
                     };
 
+                    // Require at least one allowed network
+                    if allowed_tcp.is_empty() && allowed_udp.is_empty() {
+                        anyhow::bail!(
+                            "At least one of --allowed-tcp or --allowed-udp must be specified for nostr sender mode."
+                        );
+                    }
+
                     let nsec = nsec.context(
                         "nsec is required. Provide via --nsec or in config file. Use 'tunnel-rs generate-nostr-key' to create one.",
                     )?;
