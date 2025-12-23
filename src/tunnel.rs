@@ -1028,8 +1028,8 @@ pub async fn run_manual_udp_receiver(listen: String, stun_servers: Vec<String>) 
 type SessionHandler = fn(
     signaling: Arc<NostrSignaling>,
     request: ManualRequest,
-    allowed_tcp: Vec<String>,
-    allowed_udp: Vec<String>,
+    allowed_tcp: Arc<Vec<String>>,
+    allowed_udp: Arc<Vec<String>>,
     stun_servers: Vec<String>,
     republish_interval_secs: u64,
     max_wait_secs: u64,
@@ -1058,6 +1058,10 @@ async fn run_nostr_sender_loop(
     max_sessions: usize,
     session_handler: SessionHandler,
 ) -> Result<()> {
+    // Wrap allowed networks in Arc to avoid per-session Vec cloning
+    let allowed_tcp = Arc::new(allowed_tcp);
+    let allowed_udp = Arc::new(allowed_udp);
+
     // Session limit enforcement via semaphore (None = unlimited)
     let session_semaphore: Option<Arc<tokio::sync::Semaphore>> = if max_sessions > 0 {
         Some(Arc::new(tokio::sync::Semaphore::new(max_sessions)))
@@ -1162,8 +1166,8 @@ async fn run_nostr_sender_loop(
 
         let sig = signaling.clone();
         let stun = stun_servers.clone();
-        let allowed_tcp_clone = allowed_tcp.clone();
-        let allowed_udp_clone = allowed_udp.clone();
+        let allowed_tcp_clone = Arc::clone(&allowed_tcp);
+        let allowed_udp_clone = Arc::clone(&allowed_udp);
         let limit_str_clone = limit_str.clone();
         let sem_clone = session_semaphore.clone();
         let max_sessions_copy = max_sessions;
@@ -1211,8 +1215,8 @@ async fn run_nostr_sender_loop(
 fn handle_nostr_session(
     signaling: Arc<NostrSignaling>,
     request: ManualRequest,
-    allowed_tcp: Vec<String>,
-    allowed_udp: Vec<String>,
+    allowed_tcp: Arc<Vec<String>>,
+    allowed_udp: Arc<Vec<String>>,
     stun_servers: Vec<String>,
     republish_interval_secs: u64,
     max_wait_secs: u64,
@@ -1232,8 +1236,8 @@ fn handle_nostr_session(
 async fn handle_nostr_session_impl(
     signaling: Arc<NostrSignaling>,
     request: ManualRequest,
-    allowed_tcp: Vec<String>,
-    allowed_udp: Vec<String>,
+    allowed_tcp: Arc<Vec<String>>,
+    allowed_udp: Arc<Vec<String>>,
     stun_servers: Vec<String>,
     republish_interval_secs: u64,
     max_wait_secs: u64,
@@ -1257,13 +1261,14 @@ async fn handle_nostr_session_impl(
                     session_id.clone(),
                     format!("TCP source '{}' not in allowed networks", requested_source),
                 );
-                let _ = signaling.publish_reject(&reject).await;
+                if let Err(e) = signaling.publish_reject(&reject).await {
+                    eprintln!("[{}] Failed to publish reject: {}", short_id, e);
+                }
                 anyhow::bail!("[{}] Rejected: TCP source not allowed", short_id);
             }
             handle_nostr_tcp_session_impl(
                 signaling,
                 request,
-                allowed_tcp,
                 stun_servers,
                 republish_interval_secs,
                 max_wait_secs,
@@ -1276,13 +1281,14 @@ async fn handle_nostr_session_impl(
                     session_id.clone(),
                     format!("UDP source '{}' not in allowed networks", requested_source),
                 );
-                let _ = signaling.publish_reject(&reject).await;
+                if let Err(e) = signaling.publish_reject(&reject).await {
+                    eprintln!("[{}] Failed to publish reject: {}", short_id, e);
+                }
                 anyhow::bail!("[{}] Rejected: UDP source not allowed", short_id);
             }
             handle_nostr_udp_session_impl(
                 signaling,
                 request,
-                allowed_udp,
                 stun_servers,
                 republish_interval_secs,
                 max_wait_secs,
@@ -1293,7 +1299,9 @@ async fn handle_nostr_session_impl(
                 session_id.clone(),
                 format!("Unknown protocol in source '{}'. Use tcp:// or udp://", requested_source),
             );
-            let _ = signaling.publish_reject(&reject).await;
+            if let Err(e) = signaling.publish_reject(&reject).await {
+                eprintln!("[{}] Failed to publish reject: {}", short_id, e);
+            }
             anyhow::bail!("[{}] Unknown protocol: {}", short_id, protocol)
         }
     }
@@ -1304,7 +1312,6 @@ async fn handle_nostr_session_impl(
 async fn handle_nostr_tcp_session_impl(
     signaling: Arc<NostrSignaling>,
     request: ManualRequest,
-    _allowed_networks: Vec<String>, // Already validated by caller
     stun_servers: Vec<String>,
     republish_interval_secs: u64,
     max_wait_secs: u64,
@@ -1472,6 +1479,22 @@ pub async fn run_nostr_tcp_receiver(
     // Ensure crypto provider is installed before nostr-sdk uses rustls
     quic::ensure_crypto_provider();
 
+    // Validate source URL locally before publishing request
+    let source_url = url::Url::parse(&source)
+        .with_context(|| format!("Invalid source URL '{}'. Expected format: tcp://host:port", source))?;
+    if source_url.scheme() != "tcp" {
+        anyhow::bail!(
+            "Source URL must use tcp:// scheme for TCP receiver (got '{}://'). Use run_nostr_udp_receiver for udp://",
+            source_url.scheme()
+        );
+    }
+    if source_url.host_str().is_none() {
+        anyhow::bail!("Source URL '{}' missing host", source);
+    }
+    if source_url.port().is_none() {
+        anyhow::bail!("Source URL '{}' missing port", source);
+    }
+
     let listen_addr: SocketAddr = listen
         .parse()
         .context("Invalid listen address format. Use format like 127.0.0.1:2222 or [::]:2222")?;
@@ -1620,7 +1643,6 @@ pub async fn run_nostr_tcp_receiver(
 async fn handle_nostr_udp_session_impl(
     signaling: Arc<NostrSignaling>,
     request: ManualRequest,
-    _allowed_networks: Vec<String>, // Already validated by caller
     stun_servers: Vec<String>,
     republish_interval_secs: u64,
     max_wait_secs: u64,
@@ -1743,6 +1765,22 @@ pub async fn run_nostr_udp_receiver(
 ) -> Result<()> {
     // Ensure crypto provider is installed before nostr-sdk uses rustls
     quic::ensure_crypto_provider();
+
+    // Validate source URL locally before publishing request
+    let source_url = url::Url::parse(&source)
+        .with_context(|| format!("Invalid source URL '{}'. Expected format: udp://host:port", source))?;
+    if source_url.scheme() != "udp" {
+        anyhow::bail!(
+            "Source URL must use udp:// scheme for UDP receiver (got '{}://'). Use run_nostr_tcp_receiver for tcp://",
+            source_url.scheme()
+        );
+    }
+    if source_url.host_str().is_none() {
+        anyhow::bail!("Source URL '{}' missing host", source);
+    }
+    if source_url.port().is_none() {
+        anyhow::bail!("Source URL '{}' missing port", source);
+    }
 
     let listen_addr: SocketAddr = listen
         .parse()
