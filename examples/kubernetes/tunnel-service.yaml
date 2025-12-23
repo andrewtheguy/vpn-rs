@@ -1,10 +1,16 @@
 # Kubernetes example: Expose cluster services via tunnel-rs
 #
 # Deploy tunnel-rs to expose internal ClusterIP services to remote peers.
+# Uses receiver-initiated mode - one sender can serve multiple services.
+#
 # This is an alternative to kubectl port-forward that:
 #   - Supports UDP (kubectl port-forward doesn't)
 #   - Works across NAT without kubectl access
 #   - Can be left running persistently
+#   - Allows receivers to choose which service to access
+#
+# Note: Sender uses CIDR notation to whitelist allowed networks (no ports).
+#       Receiver uses hostnames with ports to specify what to connect to.
 #
 # Usage:
 #   1. Create secrets for nostr keys:
@@ -12,28 +18,24 @@
 #        --from-file=sender.nsec=./sender.nsec \
 #        --from-literal=peer-npub=npub1...
 #
-#   2. Update the SERVICE_HOST below to your target service
-#
-#   3. Apply:
+#   2. Apply:
 #      kubectl apply -f tunnel-service.yaml
 #
-#   4. On remote machine:
+#   3. On remote machine, connect to any service in allowed networks:
+#      # Access postgres (receiver specifies hostname:port)
 #      tunnel-rs receiver nostr \
+#        --source tcp://postgres.default.svc.cluster.local:5432 \
 #        --target tcp://127.0.0.1:5432 \
-#        --nsec <YOUR_NSEC> \
+#        --nsec-file ./receiver.nsec \
+#        --peer-npub <SENDER_NPUB>
+#
+#      # Access cluster DNS (UDP!)
+#      tunnel-rs receiver nostr \
+#        --source udp://kube-dns.kube-system.svc.cluster.local:53 \
+#        --target udp://127.0.0.1:5353 \
+#        --nsec-file ./receiver.nsec \
 #        --peer-npub <SENDER_NPUB>
 
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: tunnel-config
-data:
-  # Target service to expose (ClusterIP service name)
-  SERVICE_HOST: "postgres.default.svc.cluster.local"
-  SERVICE_PORT: "5432"
-  PROTOCOL: "tcp"
-
----
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -56,13 +58,12 @@ spec:
           command: ["/bin/sh", "-c"]
           args:
             - |
-              tunnel-rs sender nostr \
-                --source ${PROTOCOL}://${SERVICE_HOST}:${SERVICE_PORT} \
+              exec tunnel-rs sender nostr \
+                --allowed-tcp 10.0.0.0/8 \
+                --allowed-udp 10.0.0.0/8 \
                 --nsec-file /secrets/sender.nsec \
-                --peer-npub $(cat /secrets/peer-npub)
-          envFrom:
-            - configMapRef:
-                name: tunnel-config
+                --peer-npub "$(cat /secrets/peer-npub)" \
+                --max-sessions 20
           volumeMounts:
             - name: nostr-keys
               mountPath: /secrets
@@ -71,43 +72,3 @@ spec:
         - name: nostr-keys
           secret:
             secretName: tunnel-nostr-keys
-
----
-# Example: Expose a UDP service (e.g., WireGuard, DNS)
-# This showcases tunnel-rs's advantage over kubectl port-forward
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: tunnel-sender-udp
-  labels:
-    app: tunnel-sender-udp
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: tunnel-sender-udp
-  template:
-    metadata:
-      labels:
-        app: tunnel-sender-udp
-    spec:
-      containers:
-        - name: tunnel
-          image: ghcr.io/andrewtheguy/tunnel-rs:latest
-          args:
-            - sender
-            - nostr
-            - --source
-            - udp://coredns.kube-system.svc.cluster.local:53
-            - --nsec-file
-            - /secrets/sender.nsec
-            - --peer-npub-file
-            - /secrets/peer-npub
-          volumeMounts:
-            - name: nostr-keys
-              mountPath: /secrets
-              readOnly: true
-      volumes:
-        - name: nostr-keys
-          secret:
-            secretName: tunnel-nostr-keys-udp

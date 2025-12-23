@@ -1,26 +1,38 @@
 # Docker Compose example: Expose internal services via tunnel-rs (Nostr mode)
 #
-# Nostr mode provides automated signaling with static keys - no need to
-# manually exchange EndpointIds each time.
+# Nostr mode uses receiver-initiated connections with static keys.
+# One sender can serve multiple services - receivers choose what to tunnel.
+#
+# Note: Sender uses CIDR notation (IP ranges) to whitelist allowed networks.
+#       Receiver uses hostnames with ports to specify what to connect to.
 #
 # Setup:
-#   1. Generate keypairs for sender and receiver:
+#   1. Generate keypairs:
 #      tunnel-rs generate-nostr-key --output sender.nsec
 #      tunnel-rs generate-nostr-key --output receiver.nsec
 #
 #   2. Exchange public keys (npub) between peers
 #
-#   3. Create .env file with keys:
-#      SENDER_NSEC=nsec1...
+#   3. Create .env file:
 #      RECEIVER_NPUB=npub1...
 #
-#   4. Start services:
+#   4. Copy sender.nsec to this directory
+#
+#   5. Start services:
 #      docker compose -f docker-compose-nostr.yml up -d
 #
-#   5. On remote machine, run receiver:
+#   6. On remote machine, run receiver to access web (uses hostname:port):
 #      tunnel-rs receiver nostr \
+#        --source tcp://web:80 \
 #        --target tcp://127.0.0.1:8080 \
-#        --nsec <RECEIVER_NSEC> \
+#        --nsec-file ./receiver.nsec \
+#        --peer-npub <SENDER_NPUB>
+#
+#   7. Or access postgres:
+#      tunnel-rs receiver nostr \
+#        --source tcp://postgres:5432 \
+#        --target tcp://127.0.0.1:5432 \
+#        --nsec-file ./receiver.nsec \
 #        --peer-npub <SENDER_NPUB>
 
 services:
@@ -35,32 +47,25 @@ services:
       POSTGRES_PASSWORD: devpassword
       POSTGRES_DB: myapp
 
-  # tunnel-rs sender for web service
-  tunnel-web:
+  # Single tunnel-rs sender for all services
+  # Uses CIDR notation to allow Docker network range (no ports in CIDR)
+  # Receivers request specific services by hostname:port
+  tunnel-sender:
     image: ghcr.io/andrewtheguy/tunnel-rs:latest
     command:
       - sender
       - nostr
-      - --source
-      - tcp://web:80
-      - --nsec
-      - ${SENDER_NSEC}
+      # Allow Docker bridge network range
+      - --allowed-tcp
+      - 172.16.0.0/12
+      - --nsec-file
+      - /keys/sender.nsec
       - --peer-npub
       - ${RECEIVER_NPUB}
+      - --max-sessions
+      - "10"
+    volumes:
+      - ./sender.nsec:/keys/sender.nsec:ro
     depends_on:
       - web
-
-  # tunnel-rs sender for postgres
-  tunnel-postgres:
-    image: ghcr.io/andrewtheguy/tunnel-rs:latest
-    command:
-      - sender
-      - nostr
-      - --source
-      - tcp://postgres:5432
-      - --nsec
-      - ${SENDER_NSEC_PG}
-      - --peer-npub
-      - ${RECEIVER_NPUB}
-    depends_on:
       - postgres

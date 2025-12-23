@@ -117,6 +117,12 @@ tunnel-rs is fully supported on:
 
 All four modes (iroh-default, iroh-manual, custom, nostr) work across all platforms, enabling cross-platform P2P tunneling.
 
+### Docker & Kubernetes
+
+Container images are available at `ghcr.io/andrewtheguy/tunnel-rs:latest`.
+
+Access services running in Docker or Kubernetes remotely — without opening ports, configuring ingress, or requiring `kubectl`. See [examples/](examples/) for Docker Compose and Kubernetes configurations.
+
 ---
 
 # iroh-default Mode
@@ -551,19 +557,20 @@ Exchange public keys (npub) between peers.
 
 ### 2. Start Tunnel
 
-**Sender** (on server with SSH):
+**Sender** (on server with SSH — waits for receiver connections):
 ```bash
 tunnel-rs sender nostr \
-  --source tcp://127.0.0.1:22 \
-  --nsec nsec1sender... \
+  --allowed-tcp 127.0.0.0/8 \
+  --nsec-file ./sender.nsec \
   --peer-npub npub1receiver...
 ```
 
-**Receiver** (on client):
+**Receiver** (on client — initiates connection):
 ```bash
 tunnel-rs receiver nostr \
-  --target 127.0.0.1:2222 \
-  --nsec nsec1receiver... \
+  --source tcp://127.0.0.1:22 \
+  --target tcp://127.0.0.1:2222 \
+  --nsec-file ./receiver.nsec \
   --peer-npub npub1sender...
 ```
 
@@ -576,16 +583,17 @@ ssh -p 2222 user@127.0.0.1
 ## UDP Tunnel (e.g., WireGuard)
 
 ```bash
-# Sender
+# Sender (allows UDP traffic to localhost)
 tunnel-rs sender nostr \
-  --source udp://127.0.0.1:51820 \
-  --nsec nsec1sender... \
+  --allowed-udp 127.0.0.0/8 \
+  --nsec-file ./sender.nsec \
   --peer-npub npub1receiver...
 
-# Receiver
+# Receiver (requests WireGuard tunnel)
 tunnel-rs receiver nostr \
+  --source udp://127.0.0.1:51820 \
   --target udp://0.0.0.0:51820 \
-  --nsec nsec1receiver... \
+  --nsec-file ./receiver.nsec \
   --peer-npub npub1sender...
 ```
 
@@ -595,19 +603,24 @@ tunnel-rs receiver nostr \
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--source`, `-s` | required | Source address to forward traffic to |
-| `--nsec` | required | Your Nostr private key (nsec or hex format) |
+| `--allowed-tcp` | - | Allowed TCP networks in CIDR (repeatable, e.g., `127.0.0.0/8`) |
+| `--allowed-udp` | - | Allowed UDP networks in CIDR (repeatable, e.g., `10.0.0.0/8`) |
+| `--nsec` | - | Your Nostr private key (nsec or hex format) |
+| `--nsec-file` | - | Path to file containing your Nostr private key |
 | `--peer-npub` | required | Peer's Nostr public key (npub or hex format) |
 | `--relay` | public relays | Nostr relay URL(s), repeatable |
 | `--stun-server` | public | STUN server(s), repeatable |
 | `--no-stun` | false | Disable STUN |
+| `--max-sessions` | 10 | Maximum concurrent sessions (0 = unlimited) |
 
 ### receiver nostr
 
 | Option | Default | Description |
 |--------|---------|-------------|
+| `--source`, `-s` | required | Source address to request from sender |
 | `--target`, `-t` | required | Local address to listen on |
-| `--nsec` | required | Your Nostr private key (nsec or hex format) |
+| `--nsec` | - | Your Nostr private key (nsec or hex format) |
+| `--nsec-file` | - | Path to file containing your Nostr private key |
 | `--peer-npub` | required | Peer's Nostr public key (npub or hex format) |
 | `--relay` | public relays | Nostr relay URL(s), repeatable |
 | `--stun-server` | public | STUN server(s), repeatable |
@@ -616,15 +629,17 @@ tunnel-rs receiver nostr \
 ## Configuration File
 
 ```toml
+# Sender config
 role = "sender"
 mode = "nostr"
-source = "tcp://127.0.0.1:22"
 
 [nostr]
-nsec = "nsec1..."
+nsec_file = "./sender.nsec"
 peer_npub = "npub1..."
+allowed_tcp = ["127.0.0.0/8", "10.0.0.0/8"]
 relays = ["wss://relay.damus.io", "wss://nos.lol"]
 stun_servers = ["stun.l.google.com:19302"]
+max_sessions = 10
 ```
 
 ## Default Nostr Relays
@@ -659,10 +674,10 @@ When no relays are specified, these public relays are used:
 **Nostr Multi-Session Usage:**
 ```bash
 # Accept up to 5 concurrent sessions from the same peer
-tunnel-rs sender nostr -s tcp://127.0.0.1:22 --nsec <KEY> --peer-npub <NPUB> --max-sessions 5
+tunnel-rs sender nostr --allowed-tcp 127.0.0.0/8 --nsec-file ./sender.nsec --peer-npub <NPUB> --max-sessions 5
 
 # Unlimited concurrent sessions
-tunnel-rs sender nostr -s tcp://127.0.0.1:22 --nsec <KEY> --peer-npub <NPUB> --max-sessions 0
+tunnel-rs sender nostr --allowed-tcp 127.0.0.0/8 --nsec-file ./sender.nsec --peer-npub <NPUB> --max-sessions 0
 ```
 
 **For single-session modes (`iroh-manual`, `custom`):**
@@ -767,12 +782,13 @@ All protocol modes and features are available on all platforms.
 
 *Advantage: Full ICE provides reliable NAT traversal even for symmetric NATs.*
 
-### Nostr Mode
+### Nostr Mode (Receiver-Initiated)
 1. Both peers derive deterministic transfer ID from their sorted public keys
-2. Sender gathers ICE candidates and publishes offer to Nostr relays
-3. Receiver subscribes to relays, receives offer, gathers candidates
-4. Receiver publishes answer to Nostr relays
-5. Sender receives answer, ICE connectivity checks begin
-6. Best working path selected, QUIC connection established
+2. Sender waits for connection requests from receivers
+3. Receiver publishes connection request with desired source to Nostr relays
+4. Sender receives request, gathers ICE candidates, publishes offer
+5. Receiver receives offer, gathers candidates, publishes answer
+6. ICE connectivity checks begin, best path selected
+7. QUIC connection established over ICE socket
 
-*Advantage: Automated signaling with static keys (like WireGuard) + full ICE NAT traversal.*
+*Advantage: Receiver-initiated flow (like WireGuard) + automated signaling + full ICE NAT traversal.*

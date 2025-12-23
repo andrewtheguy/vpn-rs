@@ -2,6 +2,25 @@
 
 Example configurations for running tunnel-rs in Docker and Kubernetes.
 
+## Nostr Mode Overview
+
+Nostr mode uses a **receiver-initiated** model similar to SSH tunneling:
+
+| SSH Equivalent | tunnel-rs | Description |
+|----------------|-----------|-------------|
+| `ssh -L 8080:service:80` | Receiver with `--source` | Receiver requests what to tunnel |
+| `sshd` with allowed hosts | Sender with `--allowed-tcp` | Sender whitelists allowed networks |
+
+**Sender** (runs on server, waits for connections):
+- Uses `--allowed-tcp` / `--allowed-udp` with **CIDR notation** (e.g., `10.0.0.0/8`) to whitelist networks
+- Does NOT specify ports — receivers choose the destination
+- Supports multiple concurrent sessions via `--max-sessions`
+
+**Receiver** (initiates connection):
+- Uses `--source` with **hostname:port** (e.g., `tcp://postgres:5432`) to request a specific service
+- Uses `--target` to specify local listen address
+- The source must resolve to an IP within sender's allowed CIDR range
+
 ## Docker
 
 ### Basic Example (iroh-default mode)
@@ -31,14 +50,14 @@ For persistent connections without manual EndpointId exchange:
 ```bash
 # Generate keys
 tunnel-rs generate-nostr-key --output sender.nsec
-# npub1sender...
+# npub: npub1sender...
 
 tunnel-rs generate-nostr-key --output receiver.nsec
-# npub1receiver...
+# npub: npub1receiver...
 
-# Create .env
+# Create .env with sender's nsec and receiver's npub
 cat > .env << EOF
-SENDER_NSEC=nsec1...
+SENDER_NSEC_FILE=./sender.nsec
 RECEIVER_NPUB=npub1receiver...
 EOF
 
@@ -61,34 +80,63 @@ kubectl logs -l app=myapp -c tunnel-sender | grep EndpointId
 tunnel-rs receiver iroh-default --node-id <ID> --target tcp://127.0.0.1:8080
 ```
 
-### Expose Cluster Services
+### Expose Cluster Services (Multi-Session)
 
-Access ClusterIP services from outside the cluster (alternative to `kubectl port-forward`):
+Access ClusterIP services from outside the cluster — like SSH tunneling but over P2P.
+
+The sender whitelists allowed sources, and receivers request specific services:
 
 ```bash
 # Create secrets
 kubectl create secret generic tunnel-nostr-keys \
   --from-file=sender.nsec=./sender.nsec \
-  --from-literal=peer-npub=npub1...
+  --from-literal=peer-npub=npub1receiver...
 
 kubectl apply -f kubernetes/tunnel-service.yaml
+```
+
+**Receiver examples** (run on your local machine):
+
+```bash
+# Tunnel to a web dashboard
+tunnel-rs receiver nostr \
+  --source tcp://kubernetes-dashboard.kubernetes-dashboard.svc:443 \
+  --target tcp://127.0.0.1:8443 \
+  --nsec-file ./receiver.nsec \
+  --peer-npub <SENDER_NPUB>
+
+# Tunnel to PostgreSQL
+tunnel-rs receiver nostr \
+  --source tcp://postgres.database.svc:5432 \
+  --target tcp://127.0.0.1:5432 \
+  --nsec-file ./receiver.nsec \
+  --peer-npub <SENDER_NPUB>
+
+# Tunnel to Redis
+tunnel-rs receiver nostr \
+  --source tcp://redis.cache.svc:6379 \
+  --target tcp://127.0.0.1:6379 \
+  --nsec-file ./receiver.nsec \
+  --peer-npub <SENDER_NPUB>
 ```
 
 **Advantages over `kubectl port-forward`:**
 - Supports UDP (kubectl doesn't)
 - Works across NAT without kubectl access
-- Persistent connections
+- Persistent connections with auto-reconnect
 - No need for cluster credentials on client
+- Multiple receivers can connect simultaneously
 
 ### UDP Example (what kubectl can't do)
 
 Tunnel UDP services like DNS or WireGuard:
 
 ```bash
-# Expose cluster DNS
+# Expose cluster DNS (receiver requests source, sender must allow it)
 tunnel-rs receiver nostr \
+  --source udp://kube-dns.kube-system.svc.cluster.local:53 \
   --target udp://127.0.0.1:5353 \
-  --nsec <YOUR_NSEC> \
+  --nsec-file ./receiver.nsec \
   --peer-npub <SENDER_NPUB>
 
 # Query cluster DNS locally
@@ -97,10 +145,11 @@ dig @127.0.0.1 -p 5353 kubernetes.default.svc.cluster.local
 
 ## Use Cases
 
-| Scenario | Mode | Example |
-|----------|------|---------|
-| Quick dev access | iroh-default | `docker-compose.yml` |
-| Persistent tunnel | nostr | `docker-compose-nostr.yml` |
-| Sidecar debugging | iroh-default | `deployment-sidecar.yaml` |
-| Cluster service access | nostr | `tunnel-service.yaml` |
-| UDP tunneling | any | See UDP examples |
+| Scenario | Mode | Description |
+|----------|------|-------------|
+| Quick dev access | iroh-default | Simple setup, ephemeral EndpointId |
+| Persistent tunnel | nostr | Static keys, automated signaling |
+| Dynamic service access | nostr (multi-session) | Receiver chooses what to tunnel |
+| Sidecar debugging | iroh-default | Access pod services directly |
+| Cluster-wide access | nostr | Single sender, multiple services |
+| UDP tunneling | any | DNS, WireGuard, game servers |
