@@ -956,12 +956,12 @@ pub async fn run_manual_udp_receiver(listen: String, stun_servers: Vec<String>) 
 /// Session handler function signature for nostr sender modes.
 /// Takes signaling client, request, target address, STUN servers, and timing params.
 type SessionHandler = fn(
-    Arc<NostrSignaling>,
-    ManualRequest,
-    SocketAddr,
-    Vec<String>,
-    u64,
-    u64,
+    signaling: Arc<NostrSignaling>,
+    request: ManualRequest,
+    target_addr: SocketAddr,
+    stun_servers: Vec<String>,
+    republish_interval_secs: u64,
+    max_wait_secs: u64,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>>;
 
 /// Generic nostr sender loop that handles session management for both TCP and UDP.
