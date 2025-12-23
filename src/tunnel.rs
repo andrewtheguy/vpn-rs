@@ -85,9 +85,17 @@ fn is_source_allowed(source: &str, allowed_networks: &[String]) -> bool {
 
     // Check against each allowed network
     for network_str in allowed_networks {
-        if let Ok(network) = network_str.parse::<ipnet::IpNet>() {
-            if network.contains(&source_ip) {
-                return true;
+        match network_str.parse::<ipnet::IpNet>() {
+            Ok(network) => {
+                if network.contains(&source_ip) {
+                    return true;
+                }
+            }
+            Err(e) => {
+                eprintln!(
+                    "Warning: Invalid CIDR '{}' in allowed_networks: {}",
+                    network_str, e
+                );
             }
         }
     }
