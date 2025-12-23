@@ -1,4 +1,4 @@
-# Tunnel-rs
+# tunnel-rs
 
 **Cross-platform Secure Peer-to-Peer TCP/UDP port forwarding with NAT traversal.**
 
