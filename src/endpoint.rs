@@ -7,7 +7,7 @@ use iroh::{
     endpoint::{Builder as EndpointBuilder, PathSelection},
     Endpoint, EndpointAddr, EndpointId, RelayMap, RelayMode, RelayUrl, SecretKey, Watcher,
 };
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::Duration;
 use url::Url;
 
