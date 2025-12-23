@@ -325,11 +325,60 @@ impl NostrSignaling {
         }
     }
 
-    /// Wait for an offer from the peer with custom timeout, returns None on timeout.
-    /// Use this variant for re-publish loops where timeout is expected and not an error.
-    pub async fn try_wait_for_offer_timeout(&self, timeout_secs: u64) -> Option<ManualOffer> {
-        self.wait_for_message_optional(SIGNALING_TYPE_OFFER, timeout_secs)
-            .await
+    /// Wait for an offer from the peer, also checking for rejections.
+    ///
+    /// Returns:
+    /// - `Ok(Some(offer))` if an offer matching `session_id` is received
+    /// - `Ok(None)` on timeout
+    /// - `Err(reject)` if a rejection matching `session_id` is received
+    ///
+    /// This prevents rejections from being discarded while waiting for offers.
+    pub async fn try_wait_for_offer_or_rejection(
+        &self,
+        session_id: &str,
+        timeout_secs: u64,
+    ) -> Result<Option<ManualOffer>, ManualReject> {
+        let mut notifications = self.notifications.lock().await;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_secs);
+
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                return Ok(None); // Timeout
+            }
+            let wait_duration = remaining.min(Duration::from_secs(1));
+
+            match tokio::time::timeout(wait_duration, notifications.recv()).await {
+                Ok(Ok(RelayPoolNotification::Event { event, .. })) => {
+                    // Check for offer first
+                    if let Some(offer) =
+                        self.try_parse_event::<ManualOffer>(&event, SIGNALING_TYPE_OFFER)
+                    {
+                        if offer.session_id.as_ref() == Some(&session_id.to_string()) {
+                            println!("Received {} from peer", SIGNALING_TYPE_OFFER);
+                            return Ok(Some(offer));
+                        }
+                        println!("Ignoring offer with mismatched session ID (stale event)");
+                    }
+                    // Check for rejection
+                    if let Some(reject) =
+                        self.try_parse_event::<ManualReject>(&event, SIGNALING_TYPE_REJECT)
+                    {
+                        if reject.session_id == session_id {
+                            println!("Received {} from peer", SIGNALING_TYPE_REJECT);
+                            return Err(reject);
+                        }
+                        // Rejection for different session - ignore
+                    }
+                }
+                Ok(Ok(_)) => continue,
+                Ok(Err(recv_err)) => match recv_err {
+                    RecvError::Closed => return Ok(None),
+                    RecvError::Lagged(_) => continue,
+                },
+                Err(_) => continue, // Timeout elapsed, loop again
+            }
+        }
     }
 
     /// Wait for an answer from the peer with custom timeout, returns None on timeout.
@@ -337,29 +386,6 @@ impl NostrSignaling {
     pub async fn try_wait_for_answer_timeout(&self, timeout_secs: u64) -> Option<ManualAnswer> {
         self.wait_for_message_optional(SIGNALING_TYPE_ANSWER, timeout_secs)
             .await
-    }
-
-    /// Check for a rejection from the peer (non-blocking).
-    ///
-    /// Uses the persistent notification receiver to avoid missing messages.
-    pub async fn try_check_for_rejection(&self) -> Option<ManualReject> {
-        let mut notifications = self.notifications.lock().await;
-        loop {
-            match notifications.try_recv() {
-                Ok(RelayPoolNotification::Event { event, .. }) => {
-                    if let Some(reject) =
-                        self.try_parse_event::<ManualReject>(&event, SIGNALING_TYPE_REJECT)
-                    {
-                        println!("Received {} from peer", SIGNALING_TYPE_REJECT);
-                        return Some(reject);
-                    }
-                }
-                Ok(_) => continue,
-                Err(TryRecvError::Empty) => return None,
-                Err(TryRecvError::Closed) => return None,
-                Err(TryRecvError::Lagged(_)) => continue, // Keep draining
-            }
-        }
     }
 
     /// Wait for a specific message type with timeout, returns None on timeout or channel closed.

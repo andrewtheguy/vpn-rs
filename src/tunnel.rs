@@ -119,6 +119,7 @@ async fn publish_offer_and_wait_for_answer(
 /// - Periodic re-publishing of the request with exponential backoff
 /// - Overall timeout of `max_wait_secs`
 /// - Session ID validation to filter stale offers
+/// - Inline rejection detection (rejections are checked while waiting for offers)
 async fn publish_request_and_wait_for_offer(
     signaling: &NostrSignaling,
     request: &ManualRequest,
@@ -139,21 +140,17 @@ async fn publish_request_and_wait_for_offer(
     );
 
     loop {
-        if let Some(offer) = signaling
-            .try_wait_for_offer_timeout(current_interval)
+        // Wait for offer, also checking for rejections inline
+        match signaling
+            .try_wait_for_offer_or_rejection(session_id, current_interval)
             .await
         {
-            // Verify session ID matches
-            if offer.session_id.as_ref() == Some(session_id) {
-                return Ok(offer);
-            }
-            println!("Ignoring offer with mismatched session ID (stale event)");
-        }
-
-        // Check for rejection
-        if let Some(reject) = signaling.try_check_for_rejection().await {
-            if reject.session_id == *session_id {
+            Ok(Some(offer)) => return Ok(offer),
+            Err(reject) => {
                 anyhow::bail!("Session rejected by sender: {}", reject.reason);
+            }
+            Ok(None) => {
+                // Timeout - continue to re-publish
             }
         }
 
