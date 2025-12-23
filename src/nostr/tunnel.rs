@@ -904,11 +904,19 @@ pub async fn run_nostr_tcp_receiver(
             }
         }
 
-        // Clean up completed tasks
-        while connection_tasks.try_join_next().is_some() {}
+        // Clean up completed tasks and log any panics
+        while let Some(result) = connection_tasks.try_join_next() {
+            if let Err(e) = result {
+                log::error!("Connection task panicked: {}", e);
+            }
+        }
     }
 
     // Abort remaining connection tasks
+    let remaining = connection_tasks.len();
+    if remaining > 0 {
+        log::debug!("Aborting {} remaining connection tasks", remaining);
+    }
     connection_tasks.shutdown().await;
 
     // Clean up the ICE keeper task

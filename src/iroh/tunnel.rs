@@ -342,11 +342,19 @@ pub async fn run_tcp_receiver(
             }
         }
 
-        // Clean up completed tasks
-        while connection_tasks.try_join_next().is_some() {}
+        // Clean up completed tasks and log any panics
+        while let Some(result) = connection_tasks.try_join_next() {
+            if let Err(e) = result {
+                log::error!("Connection task panicked: {}", e);
+            }
+        }
     }
 
     // Abort remaining connection tasks
+    let remaining = connection_tasks.len();
+    if remaining > 0 {
+        log::debug!("Aborting {} remaining connection tasks", remaining);
+    }
     connection_tasks.shutdown().await;
 
     conn.close(0u32.into(), b"done");
@@ -488,11 +496,19 @@ pub async fn run_iroh_manual_tcp_receiver(listen: String, stun_servers: Vec<Stri
             }
         }
 
-        // Clean up completed tasks
-        while connection_tasks.try_join_next().is_some() {}
+        // Clean up completed tasks and log any panics
+        while let Some(result) = connection_tasks.try_join_next() {
+            if let Err(e) = result {
+                log::error!("Connection task panicked: {}", e);
+            }
+        }
     }
 
     // Abort remaining connection tasks
+    let remaining = connection_tasks.len();
+    if remaining > 0 {
+        log::debug!("Aborting {} remaining connection tasks", remaining);
+    }
     connection_tasks.shutdown().await;
 
     conn.close(0u32.into(), b"done");
