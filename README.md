@@ -719,6 +719,14 @@ Display the EndpointId for an existing secret key:
 tunnel-rs show-id --secret-file ./sender.key
 ```
 
+## show-npub
+
+Display the npub for an existing nsec key file:
+
+```bash
+tunnel-rs show-npub --nsec-file ./nostr.nsec
+```
+
 ---
 
 ## Platform Compatibility

@@ -214,6 +214,12 @@ enum Command {
         #[arg(short, long)]
         secret_file: PathBuf,
     },
+    /// Show the Nostr public key (npub) for an existing nsec file
+    ShowNpub {
+        /// Path to the nsec key file
+        #[arg(short, long)]
+        nsec_file: PathBuf,
+    },
     /// Generate a Nostr keypair for use with nostr mode
     GenerateNostrKey {
         /// Path where to save the nsec key file
@@ -848,6 +854,7 @@ async fn main() -> Result<()> {
         }
         Command::GenerateSecret { output, force } => secret::generate_secret(output, force),
         Command::ShowId { secret_file } => secret::show_id(secret_file),
+        Command::ShowNpub { nsec_file } => secret::show_npub(nsec_file),
         Command::GenerateNostrKey { output, force } => secret::generate_nostr_key(output, force),
     }
 }

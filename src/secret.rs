@@ -3,7 +3,7 @@
 use anyhow::{Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use iroh::SecretKey;
-use nostr_sdk::ToBech32;
+use nostr_sdk::{Keys, ToBech32};
 use std::path::PathBuf;
 
 use crate::endpoint::{load_secret, secret_to_endpoint_id};
@@ -51,6 +51,21 @@ pub fn show_id(secret_file: PathBuf) -> Result<()> {
     let secret = load_secret(&secret_file)?;
     let endpoint_id = secret_to_endpoint_id(&secret);
     println!("{}", endpoint_id);
+    Ok(())
+}
+
+/// Show the npub for an existing nsec key file
+pub fn show_npub(nsec_file: PathBuf) -> Result<()> {
+    let content = std::fs::read_to_string(&nsec_file)
+        .with_context(|| format!("Failed to read nsec file: {}", nsec_file.display()))?;
+    let nsec = content.trim();
+    if nsec.is_empty() {
+        anyhow::bail!("nsec file is empty: {}", nsec_file.display());
+    }
+    let keys = Keys::parse(nsec)
+        .context("Failed to parse private key (expected nsec or hex format)")?;
+    let npub = keys.public_key().to_bech32().context("Failed to encode npub")?;
+    println!("{}", npub);
     Ok(())
 }
 
