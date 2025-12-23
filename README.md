@@ -4,6 +4,8 @@
 
 Tunnel-rs enables you to forward TCP and UDP traffic between machines without requiring public IP addresses, port forwarding, or VPN infrastructure. It establishes direct encrypted connections between peers using modern P2P networking techniques.
 
+> **Project Goal:** The project's primary goal is to provide a convenient way to connect to different networks for development or homelab purposes without the hassle and security risk of opening a port. It is **not** meant for production setups or designed to be performant at scale.
+
 **Key Features:**
 - **Cross-platform support** — Works on Linux, macOS, and Windows
 - **End-to-end encryption** via QUIC/TLS 1.3
@@ -28,7 +30,7 @@ tunnel-rs provides multiple modes for establishing tunnels:
 
 | Mode | Discovery | NAT Traversal | Protocols | Use Case |
 |------|-----------|---------------|-----------|----------|
-| **iroh-default** | Automatic (Pkarr/DNS/mDNS) | Relay fallback | TCP, UDP | Production, always-on tunnels |
+| **iroh-default** | Automatic (Pkarr/DNS/mDNS) | Relay fallback | TCP, UDP | Persistent, always-on tunnels |
 | **iroh-manual** | Manual copy-paste | STUN heuristic | TCP, UDP | Serverless, simple NATs |
 | **custom** | Manual copy-paste | Full ICE | TCP, UDP | Best NAT compatibility |
 | **nostr** | Nostr relays | Full ICE | TCP, UDP | Automated signaling, static keys |
@@ -283,7 +285,7 @@ tunnel-rs receiver -c ./my-receiver.toml
 
 ## Persistent Identity
 
-By default, a new EndpointId is generated each run. For production, use persistent identity:
+By default, a new EndpointId is generated each run. For long-running setups, use persistent identity:
 
 ```bash
 # First run: generates and saves key
