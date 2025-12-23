@@ -688,7 +688,14 @@ tunnel-rs generate-nostr-key --output ./nostr.nsec --force
 tunnel-rs generate-nostr-key --output -
 ```
 
-Output:
+Output (when using `--output -`):
+
+stdout (nsec):
+```
+nsec1...
+```
+
+stderr (npub):
 ```
 npub1...
 ```

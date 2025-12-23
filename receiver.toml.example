@@ -53,7 +53,9 @@ relay_only = false
 
 # [nostr]
 # # Your Nostr private key (generate with: tunnel-rs generate-nostr-key)
-# # Use either nsec or nsec_file
+# # Use either nsec or nsec_file (mutually exclusive; config validation will error if both are set)
+# # If using nsec_file, keep permissions tight (e.g., chmod 600) and do not commit to VCS.
+# # Relative paths are resolved from the process working directory, not the config file location.
 # nsec = "nsec1..."
 # nsec_file = "./nostr.nsec"
 #
