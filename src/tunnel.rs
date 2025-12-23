@@ -48,6 +48,109 @@ async fn resolve_target_addr(target: &str) -> Result<SocketAddr> {
     addrs.next().context("No addresses found for host")
 }
 
+/// Resolve a target address to all available socket addresses.
+/// Returns all IPv4 and IPv6 addresses for the hostname.
+async fn resolve_all_target_addrs(target: &str) -> Result<Vec<SocketAddr>> {
+    let addrs: Vec<SocketAddr> = lookup_host(target)
+        .await
+        .with_context(|| format!("Failed to resolve '{}'", target))?
+        .collect();
+    if addrs.is_empty() {
+        anyhow::bail!("No addresses found for host '{}'", target);
+    }
+    Ok(addrs)
+}
+
+/// Delay between starting connection attempts (Happy Eyeballs style).
+const CONNECTION_ATTEMPT_DELAY: Duration = Duration::from_millis(250);
+
+/// Try to connect to any of the given addresses using Happy Eyeballs algorithm (RFC 8305).
+/// - Prefers IPv6 addresses (tried first)
+/// - Interleaves IPv6 and IPv4 attempts
+/// - Staggers connection attempts with a small delay
+/// - Returns first successful connection, cancels remaining attempts
+async fn try_connect_tcp(addrs: &[SocketAddr]) -> Result<TcpStream> {
+    use tokio::sync::mpsc;
+
+    if addrs.is_empty() {
+        anyhow::bail!("No addresses to connect to");
+    }
+
+    // Separate addresses by family, preferring IPv6
+    let (ipv6, ipv4): (Vec<SocketAddr>, Vec<SocketAddr>) = addrs.iter().copied().partition(|a| a.is_ipv6());
+
+    // Interleave addresses: IPv6 first, then alternate
+    let mut ordered = Vec::with_capacity(addrs.len());
+    let mut v6_iter = ipv6.into_iter();
+    let mut v4_iter = ipv4.into_iter();
+
+    // Start with IPv6 if available
+    while ordered.len() < addrs.len() {
+        if let Some(addr) = v6_iter.next() {
+            ordered.push(addr);
+        }
+        if let Some(addr) = v4_iter.next() {
+            ordered.push(addr);
+        }
+    }
+
+    // Channel for connection results
+    let (tx, mut rx) = mpsc::channel::<(SocketAddr, Result<TcpStream, std::io::Error>)>(ordered.len());
+
+    // Spawn staggered connection attempts
+    let mut handles = Vec::with_capacity(ordered.len());
+    for (i, addr) in ordered.into_iter().enumerate() {
+        let tx = tx.clone();
+        let handle = tokio::spawn(async move {
+            // Stagger attempts: first immediately, then with delay
+            if i > 0 {
+                tokio::time::sleep(CONNECTION_ATTEMPT_DELAY * i as u32).await;
+            }
+            let result = TcpStream::connect(addr).await;
+            // Ignore send error (receiver may have closed on success)
+            let _ = tx.send((addr, result)).await;
+        });
+        handles.push(handle);
+    }
+    drop(tx); // Close sender so rx completes when all attempts finish
+
+    // Collect errors for reporting if all fail
+    let mut errors: Vec<(SocketAddr, std::io::Error)> = Vec::new();
+
+    // Wait for first success or all failures
+    while let Some((addr, result)) = rx.recv().await {
+        match result {
+            Ok(stream) => {
+                // Success! Cancel remaining attempts
+                for handle in handles {
+                    handle.abort();
+                }
+                return Ok(stream);
+            }
+            Err(e) => {
+                errors.push((addr, e));
+            }
+        }
+    }
+
+    // All attempts failed - build error message
+    if errors.is_empty() {
+        anyhow::bail!("No addresses to connect to");
+    } else if errors.len() == 1 {
+        let (addr, e) = errors.remove(0);
+        anyhow::bail!("Failed to connect to {}: {}", addr, e);
+    } else {
+        let error_details: Vec<String> = errors
+            .iter()
+            .map(|(addr, e)| format!("{}: {}", addr, e))
+            .collect();
+        anyhow::bail!(
+            "Failed to connect to any address:\n  {}",
+            error_details.join("\n  ")
+        );
+    }
+}
+
 /// Generate a random session ID for nostr signaling.
 fn generate_session_id() -> String {
     use rand::Rng;
@@ -58,6 +161,98 @@ fn generate_session_id() -> String {
 /// Get a short prefix of a session ID for logging (first 8 chars or less).
 fn short_session_id(session_id: &str) -> &str {
     &session_id[..8.min(session_id.len())]
+}
+
+/// Validate that all entries in allowed_networks are valid CIDR notation.
+/// Returns an error with context if any entry fails to parse.
+fn validate_allowed_networks(allowed_networks: &[String], label: &str) -> Result<()> {
+    for network_str in allowed_networks {
+        network_str.parse::<ipnet::IpNet>().with_context(|| {
+            format!(
+                "Invalid CIDR '{}' in {}. Expected format: 192.168.0.0/16 or ::1/128",
+                network_str, label
+            )
+        })?;
+    }
+    Ok(())
+}
+
+/// Check if a source address is allowed by any network in the CIDR list.
+/// Supports both IP addresses and hostnames (resolved via DNS).
+///
+/// The source format is `protocol://host:port` (e.g., `tcp://192.168.1.100:22` or `tcp://myserver.local:22`).
+/// The allowed_networks list contains CIDR notation (e.g., `192.168.0.0/16`, `::1/128`).
+///
+/// Returns true if:
+/// - allowed_networks is empty (no restrictions, caller should handle default)
+/// - The source IP (or resolved hostname IP) is contained in any of the allowed networks
+async fn is_source_allowed(source: &str, allowed_networks: &[String]) -> bool {
+    use tokio::net::lookup_host;
+
+    if allowed_networks.is_empty() {
+        return true; // No restrictions
+    }
+
+    // Extract host from source (protocol://host:port)
+    let Some(host) = extract_host_from_source(source) else {
+        return false;
+    };
+
+    // Try parsing as IP first, fall back to DNS resolution
+    let source_ip = match host.parse::<std::net::IpAddr>() {
+        Ok(ip) => ip,
+        Err(_) => {
+            // Not an IP - try DNS resolution
+            let Some(port) = extract_port_from_source(source) else {
+                return false;
+            };
+            let lookup_target = format!("{}:{}", host, port);
+            let addrs = match lookup_host(&lookup_target).await {
+                Ok(addrs) => addrs,
+                Err(_) => return false,
+            };
+            let resolved_ip = match addrs.into_iter().next() {
+                Some(addr) => addr.ip(),
+                None => return false,
+            };
+            resolved_ip
+        }
+    };
+
+    // Check against each allowed network (pre-validated at startup)
+    for network_str in allowed_networks {
+        // unwrap is safe: networks are validated at startup by validate_allowed_networks
+        let network: ipnet::IpNet = network_str.parse().unwrap();
+        if network.contains(&source_ip) {
+            return true;
+        }
+    }
+
+    false
+}
+
+/// Extract address (host:port) from a source URL (protocol://host:port).
+fn extract_addr_from_source(source: &str) -> Option<String> {
+    let url = url::Url::parse(source).ok()?;
+    let host = url.host_str()?;
+    let port = url.port()?;
+    // Re-add brackets for IPv6 addresses
+    if host.contains(':') {
+        Some(format!("[{}]:{}", host, port))
+    } else {
+        Some(format!("{}:{}", host, port))
+    }
+}
+
+/// Extract host from a source URL (protocol://host:port).
+fn extract_host_from_source(source: &str) -> Option<String> {
+    let url = url::Url::parse(source).ok()?;
+    url.host_str().map(|s| s.to_string())
+}
+
+/// Extract port from a source URL (protocol://host:port).
+fn extract_port_from_source(source: &str) -> Option<u16> {
+    url::Url::parse(source).ok()?.port()
 }
 
 /// Get current Unix timestamp in seconds.
@@ -608,9 +803,9 @@ pub async fn run_tcp_receiver(
 // ============================================================================
 
 pub async fn run_manual_tcp_sender(target: String, stun_servers: Vec<String>) -> Result<()> {
-    let target_addr = resolve_target_addr(&target)
+    let target_addrs = Arc::new(resolve_all_target_addrs(&target)
         .await
-        .with_context(|| format!("Invalid target address or hostname '{}'", target))?;
+        .with_context(|| format!("Invalid target address or hostname '{}'", target))?);
 
     println!("Manual TCP Tunnel - Sender Mode");
     println!("================================");
@@ -678,7 +873,7 @@ pub async fn run_manual_tcp_sender(target: String, stun_servers: Vec<String>) ->
         };
 
         println!("New TCP connection request received");
-        let target = target_addr;
+        let target = Arc::clone(&target_addrs);
         tokio::spawn(async move {
             if let Err(e) = handle_tcp_sender_stream_quic(send_stream, recv_stream, target).await {
                 eprintln!("TCP connection error: {}", e);
@@ -968,18 +1163,20 @@ pub async fn run_manual_udp_receiver(listen: String, stun_servers: Vec<String>) 
 // Nostr Sender Loop (shared session management for TCP/UDP)
 // ============================================================================
 
-/// Session handler function signature for nostr sender modes.
-/// Takes signaling client, request, target address, STUN servers, and timing params.
+/// Session handler function type for nostr mode.
+/// The handler receives `allowed_tcp` and `allowed_udp` networks separately,
+/// and determines which to use based on the protocol in `request.source`.
 type SessionHandler = fn(
     signaling: Arc<NostrSignaling>,
     request: ManualRequest,
-    target_addr: SocketAddr,
+    allowed_tcp: Arc<Vec<String>>,
+    allowed_udp: Arc<Vec<String>>,
     stun_servers: Vec<String>,
     republish_interval_secs: u64,
     max_wait_secs: u64,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>>;
 
-/// Generic nostr sender loop that handles session management for both TCP and UDP.
+/// Generic nostr sender loop that handles session management.
 ///
 /// # Long-running
 ///
@@ -993,8 +1190,8 @@ type SessionHandler = fn(
 /// - Spawning session handler tasks
 /// - Tracking active sessions and cleaning up completed ones
 async fn run_nostr_sender_loop(
-    protocol_name: &str,
-    target_addr: SocketAddr,
+    allowed_tcp: Vec<String>,
+    allowed_udp: Vec<String>,
     signaling: Arc<NostrSignaling>,
     stun_servers: Vec<String>,
     republish_interval_secs: u64,
@@ -1002,6 +1199,10 @@ async fn run_nostr_sender_loop(
     max_sessions: usize,
     session_handler: SessionHandler,
 ) -> Result<()> {
+    // Wrap allowed networks in Arc to avoid per-session Vec cloning
+    let allowed_tcp = Arc::new(allowed_tcp);
+    let allowed_udp = Arc::new(allowed_udp);
+
     // Session limit enforcement via semaphore (None = unlimited)
     let session_semaphore: Option<Arc<tokio::sync::Semaphore>> = if max_sessions > 0 {
         Some(Arc::new(tokio::sync::Semaphore::new(max_sessions)))
@@ -1053,9 +1254,12 @@ async fn run_nostr_sender_loop(
         }
 
         let session_id = request.session_id.clone();
+        let protocol = request.source.as_ref()
+            .and_then(|s| s.split("://").next())
+            .unwrap_or("unknown");
         println!(
             "Received {} request for session {}",
-            protocol_name,
+            protocol.to_uppercase(),
             short_session_id(&session_id)
         );
 
@@ -1103,6 +1307,8 @@ async fn run_nostr_sender_loop(
 
         let sig = signaling.clone();
         let stun = stun_servers.clone();
+        let allowed_tcp_clone = Arc::clone(&allowed_tcp);
+        let allowed_udp_clone = Arc::clone(&allowed_udp);
         let limit_str_clone = limit_str.clone();
         let sem_clone = session_semaphore.clone();
         let max_sessions_copy = max_sessions;
@@ -1114,7 +1320,8 @@ async fn run_nostr_sender_loop(
             let result = session_handler(
                 sig,
                 request,
-                target_addr,
+                allowed_tcp_clone,
+                allowed_udp_clone,
                 stun,
                 republish_interval_secs,
                 max_wait_secs,
@@ -1145,29 +1352,107 @@ async fn run_nostr_sender_loop(
 // ============================================================================
 
 /// Wrapper function for handle_nostr_tcp_session_impl that returns a boxed future.
-fn handle_nostr_tcp_session(
+/// Unified session handler that routes to TCP or UDP based on request.source protocol.
+fn handle_nostr_session(
     signaling: Arc<NostrSignaling>,
     request: ManualRequest,
-    target_addr: SocketAddr,
+    allowed_tcp: Arc<Vec<String>>,
+    allowed_udp: Arc<Vec<String>>,
     stun_servers: Vec<String>,
     republish_interval_secs: u64,
     max_wait_secs: u64,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>> {
-    Box::pin(handle_nostr_tcp_session_impl(
+    Box::pin(handle_nostr_session_impl(
         signaling,
         request,
-        target_addr,
+        allowed_tcp,
+        allowed_udp,
         stun_servers,
         republish_interval_secs,
         max_wait_secs,
     ))
 }
 
+/// Handle a nostr session by routing to TCP or UDP based on source protocol.
+async fn handle_nostr_session_impl(
+    signaling: Arc<NostrSignaling>,
+    request: ManualRequest,
+    allowed_tcp: Arc<Vec<String>>,
+    allowed_udp: Arc<Vec<String>>,
+    stun_servers: Vec<String>,
+    republish_interval_secs: u64,
+    max_wait_secs: u64,
+) -> Result<()> {
+    let session_id = request.session_id.clone();
+    let short_id = short_session_id(&session_id);
+
+    // source is required - receiver must specify which source to connect to
+    let requested_source = request.source.as_ref().ok_or_else(|| {
+        anyhow::anyhow!("[{}] Request missing required 'source' field", short_id)
+    })?;
+
+    // Parse protocol from source (tcp:// or udp://)
+    let protocol = requested_source.split("://").next().unwrap_or("");
+
+    match protocol {
+        "tcp" => {
+            // Validate against TCP allowed networks
+            if !is_source_allowed(requested_source, &allowed_tcp).await {
+                let reject = ManualReject::new(
+                    session_id.clone(),
+                    format!("TCP source '{}' not in allowed networks", requested_source),
+                );
+                if let Err(e) = signaling.publish_reject(&reject).await {
+                    eprintln!("[{}] Failed to publish reject: {}", short_id, e);
+                }
+                anyhow::bail!("[{}] Rejected: TCP source not allowed", short_id);
+            }
+            handle_nostr_tcp_session_impl(
+                signaling,
+                request,
+                stun_servers,
+                republish_interval_secs,
+                max_wait_secs,
+            ).await
+        }
+        "udp" => {
+            // Validate against UDP allowed networks
+            if !is_source_allowed(requested_source, &allowed_udp).await {
+                let reject = ManualReject::new(
+                    session_id.clone(),
+                    format!("UDP source '{}' not in allowed networks", requested_source),
+                );
+                if let Err(e) = signaling.publish_reject(&reject).await {
+                    eprintln!("[{}] Failed to publish reject: {}", short_id, e);
+                }
+                anyhow::bail!("[{}] Rejected: UDP source not allowed", short_id);
+            }
+            handle_nostr_udp_session_impl(
+                signaling,
+                request,
+                stun_servers,
+                republish_interval_secs,
+                max_wait_secs,
+            ).await
+        }
+        _ => {
+            let reject = ManualReject::new(
+                session_id.clone(),
+                format!("Unknown protocol in source '{}'. Use tcp:// or udp://", requested_source),
+            );
+            if let Err(e) = signaling.publish_reject(&reject).await {
+                eprintln!("[{}] Failed to publish reject: {}", short_id, e);
+            }
+            anyhow::bail!("[{}] Unknown protocol: {}", short_id, protocol)
+        }
+    }
+}
+
 /// Handle a single nostr TCP session from request to connection closure.
+/// Source is required and has already been validated by the caller.
 async fn handle_nostr_tcp_session_impl(
     signaling: Arc<NostrSignaling>,
     request: ManualRequest,
-    target_addr: SocketAddr,
     stun_servers: Vec<String>,
     republish_interval_secs: u64,
     max_wait_secs: u64,
@@ -1175,6 +1460,19 @@ async fn handle_nostr_tcp_session_impl(
     let session_id = request.session_id.clone();
     let short_id = short_session_id(&session_id);
     println!("[{}] Starting TCP session...", short_id);
+
+    // Source is required - already validated by handle_nostr_session_impl
+    let requested_source = request.source.as_ref()
+        .ok_or_else(|| anyhow::anyhow!("[{}] Missing source", short_id))?;
+
+    // Extract host:port from source URL (strip protocol prefix)
+    let target_hostport = extract_addr_from_source(requested_source)
+        .ok_or_else(|| anyhow::anyhow!("[{}] Invalid source format '{}'", short_id, requested_source))?;
+
+    println!("[{}] Forwarding to: {}", short_id, requested_source);
+    let target_addrs = Arc::new(resolve_all_target_addrs(&target_hostport)
+        .await
+        .with_context(|| format!("Invalid source '{}'", requested_source))?);
 
     // Gather ICE candidates
     let ice = IceEndpoint::gather(&stun_servers).await?;
@@ -1236,7 +1534,7 @@ async fn handle_nostr_tcp_session_impl(
         .await
         .context("Timeout during QUIC handshake")?
         .context("Failed to accept QUIC connection")?;
-    println!("[{}] QUIC connected, forwarding to {}", short_id, target_addr);
+    println!("[{}] QUIC connected, forwarding to {:?}", short_id, target_addrs.as_slice());
 
     loop {
         let (send_stream, recv_stream) = match conn.accept_bi().await {
@@ -1247,7 +1545,7 @@ async fn handle_nostr_tcp_session_impl(
             }
         };
 
-        let target = target_addr;
+        let target = Arc::clone(&target_addrs);
         let sid = short_id.to_string();
         tokio::spawn(async move {
             if let Err(e) = handle_tcp_sender_stream_quic(send_stream, recv_stream, target).await {
@@ -1259,8 +1557,11 @@ async fn handle_nostr_tcp_session_impl(
     Ok(())
 }
 
-pub async fn run_nostr_tcp_sender(
-    target: String,
+/// Unified nostr sender that handles both TCP and UDP requests.
+/// The protocol is determined by the receiver's source request (tcp:// or udp://).
+pub async fn run_nostr_sender(
+    allowed_tcp: Vec<String>,
+    allowed_udp: Vec<String>,
     stun_servers: Vec<String>,
     nsec: String,
     peer_npub: String,
@@ -1272,12 +1573,12 @@ pub async fn run_nostr_tcp_sender(
     // Ensure crypto provider is installed before nostr-sdk uses rustls
     quic::ensure_crypto_provider();
 
-    let target_addr = resolve_target_addr(&target)
-        .await
-        .with_context(|| format!("Invalid target address or hostname '{}'", target))?;
+    // Validate CIDR networks upfront (fail fast on misconfiguration)
+    validate_allowed_networks(&allowed_tcp, "--allowed-tcp")?;
+    validate_allowed_networks(&allowed_udp, "--allowed-udp")?;
 
-    println!("Nostr TCP Tunnel - Sender Mode (Multi-Session)");
-    println!("===============================================");
+    println!("Nostr Tunnel - Sender Mode (Multi-Session)");
+    println!("==========================================");
 
     // Create Nostr signaling client
     let relay_list = if relays.is_empty() { None } else { Some(relays) };
@@ -1286,26 +1587,33 @@ pub async fn run_nostr_tcp_sender(
     println!("Your pubkey: {}", signaling.public_key_bech32());
     println!("Transfer ID: {}", signaling.transfer_id());
     println!("Relays: {:?}", signaling.relay_urls());
+    if !allowed_tcp.is_empty() {
+        println!("Allowed TCP networks: {:?}", allowed_tcp);
+    }
+    if !allowed_udp.is_empty() {
+        println!("Allowed UDP networks: {:?}", allowed_udp);
+    }
 
     // Subscribe to incoming events
     signaling.subscribe().await?;
 
     // Run the session management loop
     run_nostr_sender_loop(
-        "TCP",
-        target_addr,
+        allowed_tcp,
+        allowed_udp,
         signaling,
         stun_servers,
         republish_interval_secs,
         max_wait_secs,
         max_sessions,
-        handle_nostr_tcp_session,
+        handle_nostr_session,
     )
     .await
 }
 
 pub async fn run_nostr_tcp_receiver(
     listen: String,
+    source: String,
     stun_servers: Vec<String>,
     nsec: String,
     peer_npub: String,
@@ -1315,6 +1623,22 @@ pub async fn run_nostr_tcp_receiver(
 ) -> Result<()> {
     // Ensure crypto provider is installed before nostr-sdk uses rustls
     quic::ensure_crypto_provider();
+
+    // Validate source URL locally before publishing request
+    let source_url = url::Url::parse(&source)
+        .with_context(|| format!("Invalid source URL '{}'. Expected format: tcp://host:port", source))?;
+    if source_url.scheme() != "tcp" {
+        anyhow::bail!(
+            "Source URL must use tcp:// scheme for TCP receiver (got '{}://'). Use run_nostr_udp_receiver for udp://",
+            source_url.scheme()
+        );
+    }
+    if source_url.host_str().is_none() {
+        anyhow::bail!("Source URL '{}' missing host", source);
+    }
+    if source_url.port().is_none() {
+        anyhow::bail!("Source URL '{}' missing port", source);
+    }
 
     let listen_addr: SocketAddr = listen
         .parse()
@@ -1330,6 +1654,7 @@ pub async fn run_nostr_tcp_receiver(
     println!("Your pubkey: {}", signaling.public_key_bech32());
     println!("Transfer ID: {}", signaling.transfer_id());
     println!("Relays: {:?}", signaling.relay_urls());
+    println!("Requesting source: {}", source);
 
     // Subscribe to incoming events
     signaling.subscribe().await?;
@@ -1351,6 +1676,7 @@ pub async fn run_nostr_tcp_receiver(
         candidates: local_candidates.clone(),
         session_id: session_id.clone(),
         timestamp: current_timestamp(),
+        source: Some(source),
     };
 
     // Publish request and wait for offer (re-publish periodically)
@@ -1457,30 +1783,11 @@ pub async fn run_nostr_tcp_receiver(
 // Nostr UDP Tunnel Implementation (ICE + QUIC with Nostr signaling)
 // ============================================================================
 
-/// Wrapper function for handle_nostr_udp_session_impl that returns a boxed future.
-fn handle_nostr_udp_session(
-    signaling: Arc<NostrSignaling>,
-    request: ManualRequest,
-    target_addr: SocketAddr,
-    stun_servers: Vec<String>,
-    republish_interval_secs: u64,
-    max_wait_secs: u64,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>> {
-    Box::pin(handle_nostr_udp_session_impl(
-        signaling,
-        request,
-        target_addr,
-        stun_servers,
-        republish_interval_secs,
-        max_wait_secs,
-    ))
-}
-
 /// Handle a single nostr UDP session from request to connection closure.
+/// Source is required and has already been validated by the caller.
 async fn handle_nostr_udp_session_impl(
     signaling: Arc<NostrSignaling>,
     request: ManualRequest,
-    target_addr: SocketAddr,
     stun_servers: Vec<String>,
     republish_interval_secs: u64,
     max_wait_secs: u64,
@@ -1488,6 +1795,19 @@ async fn handle_nostr_udp_session_impl(
     let session_id = request.session_id.clone();
     let short_id = short_session_id(&session_id);
     println!("[{}] Starting UDP session...", short_id);
+
+    // Source is required - already validated by handle_nostr_session_impl
+    let requested_source = request.source.as_ref()
+        .ok_or_else(|| anyhow::anyhow!("[{}] Missing source", short_id))?;
+
+    // Extract host:port from source URL (strip protocol prefix)
+    let target_hostport = extract_addr_from_source(requested_source)
+        .ok_or_else(|| anyhow::anyhow!("[{}] Invalid source format '{}'", short_id, requested_source))?;
+
+    println!("[{}] Forwarding to: {}", short_id, requested_source);
+    let target_addr = resolve_target_addr(&target_hostport)
+        .await
+        .with_context(|| format!("Invalid source '{}'", requested_source))?;
 
     // Gather ICE candidates
     let ice = IceEndpoint::gather(&stun_servers).await?;
@@ -1578,53 +1898,9 @@ async fn handle_nostr_udp_session_impl(
     Ok(())
 }
 
-pub async fn run_nostr_udp_sender(
-    target: String,
-    stun_servers: Vec<String>,
-    nsec: String,
-    peer_npub: String,
-    relays: Vec<String>,
-    republish_interval_secs: u64,
-    max_wait_secs: u64,
-    max_sessions: usize,
-) -> Result<()> {
-    // Ensure crypto provider is installed before nostr-sdk uses rustls
-    quic::ensure_crypto_provider();
-
-    let target_addr = resolve_target_addr(&target)
-        .await
-        .with_context(|| format!("Invalid target address or hostname '{}'", target))?;
-
-    println!("Nostr UDP Tunnel - Sender Mode (Multi-Session)");
-    println!("===============================================");
-
-    // Create Nostr signaling client
-    let relay_list = if relays.is_empty() { None } else { Some(relays) };
-    let signaling = Arc::new(NostrSignaling::new(&nsec, &peer_npub, relay_list).await?);
-
-    println!("Your pubkey: {}", signaling.public_key_bech32());
-    println!("Transfer ID: {}", signaling.transfer_id());
-    println!("Relays: {:?}", signaling.relay_urls());
-
-    // Subscribe to incoming events
-    signaling.subscribe().await?;
-
-    // Run the session management loop
-    run_nostr_sender_loop(
-        "UDP",
-        target_addr,
-        signaling,
-        stun_servers,
-        republish_interval_secs,
-        max_wait_secs,
-        max_sessions,
-        handle_nostr_udp_session,
-    )
-    .await
-}
-
 pub async fn run_nostr_udp_receiver(
     listen: String,
+    source: String,
     stun_servers: Vec<String>,
     nsec: String,
     peer_npub: String,
@@ -1634,6 +1910,22 @@ pub async fn run_nostr_udp_receiver(
 ) -> Result<()> {
     // Ensure crypto provider is installed before nostr-sdk uses rustls
     quic::ensure_crypto_provider();
+
+    // Validate source URL locally before publishing request
+    let source_url = url::Url::parse(&source)
+        .with_context(|| format!("Invalid source URL '{}'. Expected format: udp://host:port", source))?;
+    if source_url.scheme() != "udp" {
+        anyhow::bail!(
+            "Source URL must use udp:// scheme for UDP receiver (got '{}://'). Use run_nostr_tcp_receiver for tcp://",
+            source_url.scheme()
+        );
+    }
+    if source_url.host_str().is_none() {
+        anyhow::bail!("Source URL '{}' missing host", source);
+    }
+    if source_url.port().is_none() {
+        anyhow::bail!("Source URL '{}' missing port", source);
+    }
 
     let listen_addr: SocketAddr = listen
         .parse()
@@ -1649,6 +1941,7 @@ pub async fn run_nostr_udp_receiver(
     println!("Your pubkey: {}", signaling.public_key_bech32());
     println!("Transfer ID: {}", signaling.transfer_id());
     println!("Relays: {:?}", signaling.relay_urls());
+    println!("Requesting source: {}", source);
 
     // Subscribe to incoming events
     signaling.subscribe().await?;
@@ -1670,6 +1963,7 @@ pub async fn run_nostr_udp_receiver(
         candidates: local_candidates.clone(),
         session_id: session_id.clone(),
         timestamp: current_timestamp(),
+        source: Some(source),
     };
 
     // Publish request and wait for offer (re-publish periodically)
@@ -1774,19 +2068,20 @@ pub async fn run_nostr_udp_receiver(
 async fn handle_tcp_sender_stream_quic(
     send_stream: quinn::SendStream,
     mut recv_stream: quinn::RecvStream,
-    target_addr: SocketAddr,
+    target_addrs: Arc<Vec<SocketAddr>>,
 ) -> Result<()> {
     // Read and discard the stream marker byte sent by the receiver
     let mut marker = [0u8; 1];
     recv_stream.read_exact(&mut marker).await.context("Failed to read stream marker")?;
 
-    let tcp_stream = TcpStream::connect(target_addr)
+    let tcp_stream = try_connect_tcp(&target_addrs)
         .await
         .context("Failed to connect to target TCP service")?;
 
-    println!("-> Connected to target {}", target_addr);
+    let local_addr = tcp_stream.peer_addr().ok();
+    println!("-> Connected to target {:?}", local_addr);
     bridge_quinn_streams(recv_stream, send_stream, tcp_stream).await?;
-    println!("<- TCP connection to {} closed", target_addr);
+    println!("<- TCP connection to {:?} closed", local_addr);
     Ok(())
 }
 

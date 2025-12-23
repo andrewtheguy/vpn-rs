@@ -4647,7 +4647,7 @@ dependencies = [
 
 [[package]]
 name = "tunnel-rs"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "anyhow",
  "base64",
@@ -4656,6 +4656,7 @@ dependencies = [
  "dirs",
  "get_if_addrs",
  "hex",
+ "ipnet",
  "iroh",
  "nostr-sdk",
  "quinn",

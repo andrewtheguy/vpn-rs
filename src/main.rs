@@ -12,11 +12,11 @@
 //!   tunnel-rs sender iroh-default --source tcp://127.0.0.1:22
 //!   tunnel-rs sender iroh-manual --source tcp://127.0.0.1:22
 //!   tunnel-rs sender custom --source tcp://127.0.0.1:22
-//!   tunnel-rs sender nostr --source tcp://127.0.0.1:22 --nsec <NSEC> --peer-npub <NPUB>
+//!   tunnel-rs sender nostr --allowed-tcp 127.0.0.0/8 --nsec <NSEC> --peer-npub <NPUB>
 //!   tunnel-rs receiver iroh-default --node-id <NODE_ID> --target tcp://127.0.0.1:2222
 //!   tunnel-rs receiver iroh-manual --target tcp://127.0.0.1:2222
 //!   tunnel-rs receiver custom --target tcp://127.0.0.1:2222
-//!   tunnel-rs receiver nostr --target tcp://127.0.0.1:2222 --nsec <NSEC> --peer-npub <NPUB>
+//!   tunnel-rs receiver nostr --target tcp://127.0.0.1:2222 --source tcp://127.0.0.1:22 --nsec <NSEC> --peer-npub <NPUB>
 
 mod config;
 mod endpoint;
@@ -213,9 +213,15 @@ enum SenderMode {
     },
     /// Full ICE with Nostr-based signaling (WireGuard-like static keys)
     Nostr {
-        /// Source address to forward traffic to (tcp://host:port or udp://host:port)
-        #[arg(short, long)]
-        source: Option<String>,
+        /// Allowed TCP source networks in CIDR notation (repeatable)
+        /// E.g., --allowed-tcp 127.0.0.0/8 --allowed-tcp 192.168.0.0/16
+        #[arg(long = "allowed-tcp")]
+        allowed_tcp: Vec<String>,
+
+        /// Allowed UDP source networks in CIDR notation (repeatable)
+        /// E.g., --allowed-udp 10.0.0.0/8 --allowed-udp ::1/128
+        #[arg(long = "allowed-udp")]
+        allowed_udp: Vec<String>,
 
         /// Your Nostr private key (nsec or hex format)
         #[arg(long)]
@@ -310,6 +316,11 @@ enum ReceiverMode {
         /// Local address to listen on (tcp://host:port or udp://host:port, or host:port for TCP, e.g., tcp://127.0.0.1:2222)
         #[arg(short, long)]
         target: Option<String>,
+
+        /// Source address to request from sender (tcp://host:port or udp://host:port)
+        /// The sender must have this in its --allowed-tcp or --allowed-udp list
+        #[arg(short, long)]
+        source: Option<String>,
 
         /// Your Nostr private key (nsec or hex format)
         #[arg(long)]
@@ -492,32 +503,44 @@ async fn main() -> Result<()> {
                 }
                 "nostr" => {
                     let nostr_cfg = cfg.nostr();
-                    let (source, stun_servers, nsec, peer_npub, relays, republish_interval, max_wait, max_sessions) = match &mode {
-                        Some(SenderMode::Nostr { source: s, stun_servers: ss, no_stun, nsec: n, peer_npub: p, relays: r, republish_interval: ri, max_wait: mw, max_sessions: ms }) => (
-                            normalize_optional_endpoint(s.clone()).or(source),
-                            resolve_stun_servers(ss, nostr_cfg.and_then(|c| c.stun_servers.clone()), *no_stun)?,
-                            n.clone().or_else(|| nostr_cfg.and_then(|c| c.nsec.clone())),
-                            p.clone().or_else(|| nostr_cfg.and_then(|c| c.peer_npub.clone())),
-                            if r.is_empty() { nostr_cfg.and_then(|c| c.relays.clone()).unwrap_or_default() } else { r.clone() },
-                            *ri,
-                            *mw,
-                            *ms,
-                        ),
-                        _ => (
-                            source,
-                            resolve_stun_servers(&[], nostr_cfg.and_then(|c| c.stun_servers.clone()), false)?,
-                            nostr_cfg.and_then(|c| c.nsec.clone()),
-                            nostr_cfg.and_then(|c| c.peer_npub.clone()),
-                            nostr_cfg.and_then(|c| c.relays.clone()).unwrap_or_default(),
-                            10, // default republish interval
-                            120, // default max wait
-                            nostr_cfg.and_then(|c| c.max_sessions).unwrap_or(10),
-                        ),
+                    let (allowed_tcp, allowed_udp, stun_servers, nsec, peer_npub, relays, republish_interval, max_wait, max_sessions) = match &mode {
+                        Some(SenderMode::Nostr { allowed_tcp: at, allowed_udp: au, stun_servers: ss, no_stun, nsec: n, peer_npub: p, relays: r, republish_interval: ri, max_wait: mw, max_sessions: ms }) => {
+                            let cfg_allowed = nostr_cfg.and_then(|c| c.allowed_sources.clone()).unwrap_or_default();
+                            (
+                                if at.is_empty() { cfg_allowed.tcp.clone() } else { at.clone() },
+                                if au.is_empty() { cfg_allowed.udp.clone() } else { au.clone() },
+                                resolve_stun_servers(ss, nostr_cfg.and_then(|c| c.stun_servers.clone()), *no_stun)?,
+                                n.clone().or_else(|| nostr_cfg.and_then(|c| c.nsec.clone())),
+                                p.clone().or_else(|| nostr_cfg.and_then(|c| c.peer_npub.clone())),
+                                if r.is_empty() { nostr_cfg.and_then(|c| c.relays.clone()).unwrap_or_default() } else { r.clone() },
+                                *ri,
+                                *mw,
+                                *ms,
+                            )
+                        },
+                        _ => {
+                            let cfg_allowed = nostr_cfg.and_then(|c| c.allowed_sources.clone()).unwrap_or_default();
+                            (
+                                cfg_allowed.tcp,
+                                cfg_allowed.udp,
+                                resolve_stun_servers(&[], nostr_cfg.and_then(|c| c.stun_servers.clone()), false)?,
+                                nostr_cfg.and_then(|c| c.nsec.clone()),
+                                nostr_cfg.and_then(|c| c.peer_npub.clone()),
+                                nostr_cfg.and_then(|c| c.relays.clone()).unwrap_or_default(),
+                                10, // default republish interval
+                                120, // default max wait
+                                nostr_cfg.and_then(|c| c.max_sessions).unwrap_or(10),
+                            )
+                        },
                     };
 
-                    let source = source.context(
-                        "source is required. Provide via --source or in config file.",
-                    )?;
+                    // Require at least one allowed network
+                    if allowed_tcp.is_empty() && allowed_udp.is_empty() {
+                        anyhow::bail!(
+                            "At least one of --allowed-tcp or --allowed-udp must be specified for nostr sender mode."
+                        );
+                    }
+
                     let nsec = nsec.context(
                         "nsec is required. Provide via --nsec or in config file. Use 'tunnel-rs generate-nostr-key' to create one.",
                     )?;
@@ -530,13 +553,8 @@ async fn main() -> Result<()> {
                         relays
                     };
 
-                    let (protocol, target) = parse_endpoint(&source)
-                        .with_context(|| format!("Invalid sender source '{}'", source))?;
-
-                    match protocol {
-                        Protocol::Udp => tunnel::run_nostr_udp_sender(target, stun_servers, nsec, peer_npub, relays, republish_interval, max_wait, max_sessions).await,
-                        Protocol::Tcp => tunnel::run_nostr_tcp_sender(target, stun_servers, nsec, peer_npub, relays, republish_interval, max_wait, max_sessions).await,
-                    }
+                    // Run both TCP and UDP senders concurrently
+                    tunnel::run_nostr_sender(allowed_tcp, allowed_udp, stun_servers, nsec, peer_npub, relays, republish_interval, max_wait, max_sessions).await
                 }
                 _ => anyhow::bail!("Invalid mode '{}'. Use: iroh-default, iroh-manual, custom, or nostr", effective_mode),
             }
@@ -654,9 +672,10 @@ async fn main() -> Result<()> {
                 }
                 "nostr" => {
                     let nostr_cfg = cfg.nostr();
-                    let (target, stun_servers, nsec, peer_npub, relays, republish_interval, max_wait) = match &mode {
-                        Some(ReceiverMode::Nostr { target: t, stun_servers: ss, no_stun, nsec: n, peer_npub: p, relays: r, republish_interval: ri, max_wait: mw }) => (
+                    let (target, source, stun_servers, nsec, peer_npub, relays, republish_interval, max_wait) = match &mode {
+                        Some(ReceiverMode::Nostr { target: t, source: src, stun_servers: ss, no_stun, nsec: n, peer_npub: p, relays: r, republish_interval: ri, max_wait: mw }) => (
                             normalize_optional_endpoint(t.clone()).or(target),
+                            normalize_optional_endpoint(src.clone()).or_else(|| nostr_cfg.and_then(|c| c.request_source.clone())),
                             resolve_stun_servers(ss, nostr_cfg.and_then(|c| c.stun_servers.clone()), *no_stun)?,
                             n.clone().or_else(|| nostr_cfg.and_then(|c| c.nsec.clone())),
                             p.clone().or_else(|| nostr_cfg.and_then(|c| c.peer_npub.clone())),
@@ -666,6 +685,7 @@ async fn main() -> Result<()> {
                         ),
                         _ => (
                             target,
+                            nostr_cfg.and_then(|c| c.request_source.clone()),
                             resolve_stun_servers(&[], nostr_cfg.and_then(|c| c.stun_servers.clone()), false)?,
                             nostr_cfg.and_then(|c| c.nsec.clone()),
                             nostr_cfg.and_then(|c| c.peer_npub.clone()),
@@ -677,6 +697,9 @@ async fn main() -> Result<()> {
 
                     let target = target.context(
                         "target is required. Provide via --target or in config file.",
+                    )?;
+                    let source = source.context(
+                        "--source is required for nostr receiver mode. Specify the source to request from sender (e.g., --source tcp://127.0.0.1:22)",
                     )?;
                     let nsec = nsec.context(
                         "nsec is required. Provide via --nsec or in config file. Use 'tunnel-rs generate-nostr-key' to create one.",
@@ -699,12 +722,12 @@ async fn main() -> Result<()> {
                         let (protocol, addr) = parse_endpoint(&listen)
                             .with_context(|| format!("Invalid receiver target '{}'", listen))?;
                         match protocol {
-                            Protocol::Udp => tunnel::run_nostr_udp_receiver(addr, stun_servers, nsec, peer_npub, relays, republish_interval, max_wait).await,
-                            Protocol::Tcp => tunnel::run_nostr_tcp_receiver(addr, stun_servers, nsec, peer_npub, relays, republish_interval, max_wait).await,
+                            Protocol::Udp => tunnel::run_nostr_udp_receiver(addr, source, stun_servers, nsec, peer_npub, relays, republish_interval, max_wait).await,
+                            Protocol::Tcp => tunnel::run_nostr_tcp_receiver(addr, source, stun_servers, nsec, peer_npub, relays, republish_interval, max_wait).await,
                         }
                     } else {
                         // Default to TCP if no protocol specified
-                        tunnel::run_nostr_tcp_receiver(listen, stun_servers, nsec, peer_npub, relays, republish_interval, max_wait).await
+                        tunnel::run_nostr_tcp_receiver(listen, source, stun_servers, nsec, peer_npub, relays, republish_interval, max_wait).await
                     }
                 }
                 _ => anyhow::bail!("Invalid mode '{}'. Use: iroh-default, iroh-manual, custom, or nostr", effective_mode),

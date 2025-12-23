@@ -74,3 +74,8 @@ relay_only = false
 #     "stun1.l.google.com:19302",
 #     "stun.services.mozilla.com:3478",
 # ]
+#
+# # Source address to request from sender (REQUIRED for nostr mode)
+# # Must be in sender's allowed_sources list (--allowed-tcp or --allowed-udp)
+# # Can also use 'source' as an alias
+# request_source = "tcp://127.0.0.1:22"
