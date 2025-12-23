@@ -1823,6 +1823,12 @@ where
     F: Fn() -> Fut,
     Fut: std::future::Future<Output = Result<T, E>>,
 {
+    if max_attempts == 0 {
+        return Err(anyhow::anyhow!(
+            "max_attempts must be > 0 for {}",
+            operation_name
+        ));
+    }
     debug_assert!(max_attempts > 0, "max_attempts must be > 0");
 
     for attempt in 0..max_attempts {
