@@ -23,6 +23,8 @@ use std::path::{Path, PathBuf};
 pub struct IrohDefaultConfig {
     /// Path to secret key file for persistent identity (sender only)
     pub secret_file: Option<PathBuf>,
+    /// Base64-encoded secret key for persistent identity (sender only)
+    pub secret: Option<String>,
     pub relay_urls: Option<Vec<String>>,
     pub relay_only: Option<bool>,
     pub dns_server: Option<String>,
@@ -65,6 +67,8 @@ pub struct NostrConfig {
     pub relays: Option<Vec<String>>,
     /// Your Nostr private key (nsec or hex)
     pub nsec: Option<String>,
+    /// Path to file containing your Nostr private key (nsec or hex)
+    pub nsec_file: Option<PathBuf>,
     /// Peer's Nostr public key (npub or hex)
     pub peer_npub: Option<String>,
     /// STUN servers for ICE candidate gathering
@@ -223,8 +227,20 @@ impl SenderConfig {
         }
 
         // Mode-specific validation
+        if expected_mode == "iroh-default" {
+            if let Some(ref iroh) = self.iroh_default {
+                if iroh.secret.is_some() && iroh.secret_file.is_some() {
+                    anyhow::bail!(
+                        "[iroh-default] Use only one of 'secret' or 'secret_file'."
+                    );
+                }
+            }
+        }
         if expected_mode == "nostr" {
             if let Some(ref nostr) = self.nostr {
+                if nostr.nsec.is_some() && nostr.nsec_file.is_some() {
+                    anyhow::bail!("[nostr] Use only one of 'nsec' or 'nsec_file'.");
+                }
                 // Reject receiver-only fields
                 if nostr.request_source.is_some() {
                     anyhow::bail!(
@@ -315,6 +331,9 @@ impl ReceiverConfig {
         // Mode-specific validation
         if expected_mode == "nostr" {
             if let Some(ref nostr) = self.nostr {
+                if nostr.nsec.is_some() && nostr.nsec_file.is_some() {
+                    anyhow::bail!("[nostr] Use only one of 'nsec' or 'nsec_file'.");
+                }
                 // Reject sender-only fields
                 if nostr.allowed_sources.is_some() {
                     anyhow::bail!(

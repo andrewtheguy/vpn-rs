@@ -170,24 +170,13 @@ pub fn create_endpoint_builder(
 pub async fn create_sender_endpoint(
     relay_urls: &[String],
     relay_only: bool,
-    secret_file: Option<&PathBuf>,
+    secret: Option<SecretKey>,
     dns_server: Option<&str>,
     alpn: &[u8],
 ) -> Result<Endpoint> {
     let relay_mode = parse_relay_mode(relay_urls)?;
     let using_custom_relay = !matches!(relay_mode, RelayMode::Default);
     print_relay_status(relay_urls, relay_only, using_custom_relay);
-
-    // Load secret key first (needed for both identity and DNS publishing)
-    let secret = if let Some(secret_path) = secret_file {
-        let secret = load_secret(secret_path)?;
-        let endpoint_id = secret_to_endpoint_id(&secret);
-        println!("Loaded identity from: {}", secret_path.display());
-        println!("EndpointId: {}", endpoint_id);
-        Some(secret)
-    } else {
-        None
-    };
 
     let mut builder = create_endpoint_builder(
         relay_mode,
