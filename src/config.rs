@@ -32,7 +32,6 @@ pub struct IrohConfig {
     /// special cases due to VCS/log exposure risk. Secret files should be 0600 on Unix.
     pub secret: Option<String>,
     pub relay_urls: Option<Vec<String>>,
-    pub relay_only: Option<bool>,
     pub dns_server: Option<String>,
     /// NodeId of the server to connect to (client only)
     pub node_id: Option<String>,

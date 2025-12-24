@@ -41,6 +41,7 @@ const DEFAULT_MAX_SESSIONS: usize = 100;
 ///
 /// This mode allows clients to request specific sources (tcp://host:port or udp://host:port).
 /// The server validates requests against allowed_tcp and allowed_udp CIDR lists.
+/// Note: relay_only is only meaningful when the 'test-utils' feature is enabled.
 pub async fn run_multi_source_server(
     allowed_tcp: Vec<String>,
     allowed_udp: Vec<String>,
@@ -50,6 +51,10 @@ pub async fn run_multi_source_server(
     relay_only: bool,
     dns_server: Option<String>,
 ) -> Result<()> {
+    // relay_only is only meaningful with test-utils feature
+    #[cfg(not(feature = "test-utils"))]
+    let relay_only = { let _ = relay_only; false };
+
     // Validate CIDR notation at startup
     validate_allowed_networks(&allowed_tcp, "--allowed-tcp")?;
     validate_allowed_networks(&allowed_udp, "--allowed-udp")?;
@@ -317,6 +322,7 @@ async fn handle_multi_source_stream(
 ///
 /// Connects to a server and requests a specific source (tcp://host:port or udp://host:port).
 /// The server validates the request and either accepts or rejects it.
+/// Note: relay_only is only meaningful when the 'test-utils' feature is enabled.
 pub async fn run_multi_source_client(
     node_id: String,
     source: String,
@@ -325,6 +331,10 @@ pub async fn run_multi_source_client(
     relay_only: bool,
     dns_server: Option<String>,
 ) -> Result<()> {
+    // relay_only is only meaningful with test-utils feature
+    #[cfg(not(feature = "test-utils"))]
+    let relay_only = { let _ = relay_only; false };
+
     validate_relay_only(relay_only, &relay_urls)?;
 
     // Validate source format

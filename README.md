@@ -211,7 +211,7 @@ tunnel-rs client iroh --node-id <ENDPOINT_ID> --source udp://127.0.0.1:51820 --t
 | `--secret` | - | Base64-encoded secret key for persistent identity |
 | `--secret-file` | - | Path to secret key file for persistent identity |
 | `--relay-url` | public | Custom relay server URL(s), repeatable |
-| `--relay-only` | false | Force all traffic through relay |
+| `--relay-only` | false | Force all traffic through relay (requires `test-utils` feature) |
 | `--dns-server` | public | Custom DNS server URL for peer discovery |
 
 ### client
@@ -229,7 +229,7 @@ tunnel-rs client iroh --node-id <ENDPOINT_ID> --source udp://127.0.0.1:51820 --t
 | `--source`, `-s` | required | Source address to request from server (tcp://host:port or udp://host:port) |
 | `--target`, `-t` | required | Local address to listen on |
 | `--relay-url` | public | Custom relay server URL(s), repeatable |
-| `--relay-only` | false | Force all traffic through relay |
+| `--relay-only` | false | Force all traffic through relay (requires `test-utils` feature) |
 | `--dns-server` | public | Custom DNS server URL for peer discovery |
 
 ## Configuration Files
@@ -252,7 +252,6 @@ mode = "iroh"  # or "iroh-manual", "custom-manual", or "nostr"
 [iroh]
 secret_file = "./server.key"
 relay_urls = ["https://relay.example.com"]
-relay_only = false
 dns_server = "https://dns.example.com/pkarr"
 max_sessions = 100
 
@@ -286,7 +285,6 @@ node_id = "2xnbkpbc7izsilvewd7c62w7wnwziacmpfwvhcrya5nt76dqkpga"
 request_source = "tcp://127.0.0.1:22"
 target = "127.0.0.1:2222"
 relay_urls = ["https://relay.example.com"]
-relay_only = false
 dns_server = "https://dns.example.com/pkarr"
 ```
 
@@ -326,7 +324,8 @@ tunnel-rs server iroh --allowed-tcp 127.0.0.0/8 --secret-file ./server.key
 tunnel-rs server iroh --relay-url https://relay.example.com --allowed-tcp 127.0.0.0/8
 tunnel-rs client iroh --relay-url https://relay.example.com --node-id <ID> --source tcp://127.0.0.1:22 --target 127.0.0.1:2222
 
-# Force relay-only (no direct P2P)
+# Force relay-only (no direct P2P) - requires test-utils feature
+# Build with: cargo build --features test-utils
 tunnel-rs server iroh --relay-url https://relay.example.com --relay-only --allowed-tcp 127.0.0.0/8
 ```
 

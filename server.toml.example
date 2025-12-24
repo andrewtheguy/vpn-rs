@@ -30,9 +30,6 @@ relay_urls = [
     "https://relay2.example.com",
 ]
 
-# Force all connections through relay (disables direct P2P)
-relay_only = false
-
 # Custom DNS server URL for peer discovery
 # Used with self-hosted iroh-dns-server for fully independent operation
 # NOTE: URL must include the /pkarr path
