@@ -4,11 +4,11 @@
 //! with Nostr relay-based automated signaling.
 
 use anyhow::{Context, Result};
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::net::{TcpListener, UdpSocket};
 use tokio::sync::Mutex;
 use tokio::task::JoinSet;
@@ -179,10 +179,12 @@ async fn run_nostr_sender_loop(
 
     let mut session_tasks: JoinSet<Result<()>> = JoinSet::new();
 
-    // Track recently-processed session IDs to avoid duplicate processing
-    // Nostr relays may deliver the same request multiple times
-    let mut processed_sessions: HashSet<String> = HashSet::new();
+    // Track recently-processed session IDs with timestamps to avoid duplicate processing.
+    // Nostr relays may deliver the same request multiple times.
+    // Uses TTL-based eviction: entries older than MAX_REQUEST_AGE_SECS are eligible for removal.
+    let mut processed_sessions: HashMap<String, Instant> = HashMap::new();
     const MAX_PROCESSED_SESSIONS: usize = 1000; // Limit memory usage
+    let session_ttl = Duration::from_secs(MAX_REQUEST_AGE_SECS * 2); // 2x request age for safety margin
 
     let limit_str = if max_sessions == 0 {
         "unlimited".to_string()
@@ -233,9 +235,10 @@ async fn run_nostr_sender_loop(
         }
 
         let session_id = request.session_id.clone();
+        let now = Instant::now();
 
         // Skip duplicate requests (Nostr relays may deliver the same event multiple times)
-        if processed_sessions.contains(&session_id) {
+        if processed_sessions.contains_key(&session_id) {
             log::debug!(
                 "Ignoring duplicate request for session {}",
                 short_session_id(&session_id)
@@ -243,12 +246,42 @@ async fn run_nostr_sender_loop(
             continue;
         }
 
-        // Limit memory usage by clearing old entries when reaching capacity
+        // Evict expired entries when approaching capacity (TTL-based eviction)
         if processed_sessions.len() >= MAX_PROCESSED_SESSIONS {
-            processed_sessions.clear();
-            log::debug!("Cleared processed sessions cache (reached {} entries)", MAX_PROCESSED_SESSIONS);
+            let before_count = processed_sessions.len();
+            processed_sessions.retain(|_, timestamp| now.duration_since(*timestamp) < session_ttl);
+            let evicted = before_count - processed_sessions.len();
+            if evicted > 0 {
+                log::debug!(
+                    "Evicted {} expired session entries (TTL: {:?})",
+                    evicted,
+                    session_ttl
+                );
+            }
+
+            // If still at capacity after TTL eviction, remove oldest 25% of entries
+            if processed_sessions.len() >= MAX_PROCESSED_SESSIONS {
+                let to_remove = MAX_PROCESSED_SESSIONS / 4;
+                let mut entries: Vec<_> = processed_sessions
+                    .iter()
+                    .map(|(k, ts)| (k.clone(), *ts))
+                    .collect();
+                entries.sort_by_key(|(_, ts)| *ts);
+                let keys_to_remove: Vec<_> = entries
+                    .into_iter()
+                    .take(to_remove)
+                    .map(|(k, _)| k)
+                    .collect();
+                for session in keys_to_remove {
+                    processed_sessions.remove(&session);
+                }
+                log::debug!(
+                    "Evicted {} oldest session entries (capacity limit)",
+                    to_remove
+                );
+            }
         }
-        processed_sessions.insert(session_id.clone());
+        processed_sessions.insert(session_id.clone(), now);
         let protocol = request
             .source
             .as_ref()
