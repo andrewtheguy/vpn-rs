@@ -16,11 +16,13 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,id=cargo-registry-${TARG
     --mount=type=cache,target=/usr/local/cargo/git,id=cargo-git-${TARGETPLATFORM} \
     --mount=type=cache,target=/build/target,id=cargo-target-${TARGETPLATFORM} \
     cargo build --release && \
-    cp target/release/tunnel-rs /tunnel-rs
+    cp target/release/tunnel-rs /tunnel-rs && \
+    cp target/release/tunnel-signaling /tunnel-signaling
 
-# Export stage - only contains the binary (used by docker-bake.hcl)
+# Export stage - contains both binaries (used by docker-bake.hcl)
 FROM scratch AS export
 COPY --from=builder /tunnel-rs /tunnel-rs
+COPY --from=builder /tunnel-signaling /tunnel-signaling
 
 # Runtime stage - minimal image for container deployment (builds from source)
 FROM debian:trixie-slim AS runtime

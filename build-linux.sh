@@ -3,10 +3,11 @@ set -e
 
 # Build script for cross-compiling Linux binaries using Docker
 # Builds for both AMD64 and ARM64 architectures
+# Produces: tunnel-rs (main tunnel binary) and tunnel-signaling (DCUtR signaling server)
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUILD_DIR="${SCRIPT_DIR}/target/build"
-DOCKERFILE="${SCRIPT_DIR}/Dockerfile.cross"
+DOCKERFILE="${SCRIPT_DIR}/Dockerfile.build"
 IMAGE_NAME="tunnel-rs-builder"
 VERSION="${VERSION:-latest}"
 
@@ -65,7 +66,11 @@ echo "----------------------"
 if [ -d "$BUILD_DIR/linux_amd64" ]; then
     if [ -f "$BUILD_DIR/linux_amd64/tunnel-rs" ]; then
         mv "$BUILD_DIR/linux_amd64/tunnel-rs" "$BUILD_DIR/tunnel-rs-linux-amd64"
-        echo "✓ AMD64 binary saved to: $BUILD_DIR/tunnel-rs-linux-amd64"
+        echo "✓ tunnel-rs AMD64 saved to: $BUILD_DIR/tunnel-rs-linux-amd64"
+    fi
+    if [ -f "$BUILD_DIR/linux_amd64/tunnel-signaling" ]; then
+        mv "$BUILD_DIR/linux_amd64/tunnel-signaling" "$BUILD_DIR/tunnel-signaling-linux-amd64"
+        echo "✓ tunnel-signaling AMD64 saved to: $BUILD_DIR/tunnel-signaling-linux-amd64"
     fi
     rm -rf "$BUILD_DIR/linux_amd64"
 fi
@@ -73,7 +78,11 @@ fi
 if [ -d "$BUILD_DIR/linux_arm64" ]; then
     if [ -f "$BUILD_DIR/linux_arm64/tunnel-rs" ]; then
         mv "$BUILD_DIR/linux_arm64/tunnel-rs" "$BUILD_DIR/tunnel-rs-linux-arm64"
-        echo "✓ ARM64 binary saved to: $BUILD_DIR/tunnel-rs-linux-arm64"
+        echo "✓ tunnel-rs ARM64 saved to: $BUILD_DIR/tunnel-rs-linux-arm64"
+    fi
+    if [ -f "$BUILD_DIR/linux_arm64/tunnel-signaling" ]; then
+        mv "$BUILD_DIR/linux_arm64/tunnel-signaling" "$BUILD_DIR/tunnel-signaling-linux-arm64"
+        echo "✓ tunnel-signaling ARM64 saved to: $BUILD_DIR/tunnel-signaling-linux-arm64"
     fi
     rm -rf "$BUILD_DIR/linux_arm64"
 fi
@@ -83,14 +92,18 @@ echo ""
 echo "Build complete!"
 echo "==============="
 echo ""
-ls -lh "$BUILD_DIR"/tunnel-rs-*
+echo "Tunnel binaries:"
+ls -lh "$BUILD_DIR"/tunnel-rs-* 2>/dev/null || echo "  (none found)"
+echo ""
+echo "Signaling server binaries:"
+ls -lh "$BUILD_DIR"/tunnel-signaling-* 2>/dev/null || echo "  (none found)"
 echo ""
 
 # Verify binaries
 echo "Verifying binaries..."
 echo "---------------------"
 if command -v file &> /dev/null; then
-    file "$BUILD_DIR"/tunnel-rs-*
+    file "$BUILD_DIR"/tunnel-rs-* "$BUILD_DIR"/tunnel-signaling-* 2>/dev/null || true
 else
     echo "Note: 'file' command not available, skipping binary verification"
 fi
@@ -101,8 +114,12 @@ echo ""
 echo "To test on Linux:"
 echo "  # AMD64:"
 echo "  scp $BUILD_DIR/tunnel-rs-linux-amd64 user@host:/tmp/tunnel-rs"
+echo "  scp $BUILD_DIR/tunnel-signaling-linux-amd64 user@host:/tmp/tunnel-signaling"
 echo "  ssh user@host '/tmp/tunnel-rs --help'"
+echo "  ssh user@host '/tmp/tunnel-signaling --help'"
 echo ""
 echo "  # ARM64:"
 echo "  scp $BUILD_DIR/tunnel-rs-linux-arm64 user@host:/tmp/tunnel-rs"
+echo "  scp $BUILD_DIR/tunnel-signaling-linux-arm64 user@host:/tmp/tunnel-signaling"
 echo "  ssh user@host '/tmp/tunnel-rs --help'"
+echo "  ssh user@host '/tmp/tunnel-signaling --help'"
