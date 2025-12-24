@@ -348,12 +348,16 @@ impl IceEndpoint {
                         let (demux_socket, stun_rx) = DemuxSocket::new(nominated_tokio)
                             .context("Failed to create demux socket")?;
 
+                        let (disconnect_tx, disconnect_rx) =
+                            tokio::sync::watch::channel(false);
+
                         // Create the ICE keeper to handle STUN in the background
                         let ice_keeper = IceKeeper::new(
                             self.ice,
                             demux_socket.clone(),
                             stun_rx,
                             source,
+                            disconnect_tx,
                         );
 
                         // Print connection info
@@ -370,6 +374,7 @@ impl IceEndpoint {
                             socket: demux_socket,
                             ice_keeper,
                             remote_addr: destination,
+                            disconnect_rx,
                         });
                     }
                 }

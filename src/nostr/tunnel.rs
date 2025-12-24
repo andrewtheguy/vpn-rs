@@ -480,6 +480,7 @@ async fn handle_nostr_tcp_session_impl(
     log::info!("[{}] ICE connection established", short_id);
 
     // Spawn the ICE keeper
+    let mut ice_disconnect_rx = ice_conn.disconnect_rx.clone();
     let ice_keeper_handle = tokio::spawn(ice_conn.ice_keeper.run());
 
     let endpoint = quic::make_server_endpoint(ice_conn.socket, quic_identity.server_config)?;
@@ -902,6 +903,20 @@ pub async fn run_nostr_tcp_receiver(
                 log::info!("QUIC connection closed: {}", error);
                 break;
             }
+            result = ice_disconnect_rx.changed() => {
+                match result {
+                    Ok(()) => {
+                        if *ice_disconnect_rx.borrow() {
+                            log::warn!("ICE disconnected; shutting down receiver.");
+                            break;
+                        }
+                    }
+                    Err(_) => {
+                        log::warn!("ICE disconnect watcher closed; shutting down receiver.");
+                        break;
+                    }
+                }
+            }
         }
 
         // Clean up completed tasks and log any panics
@@ -1054,6 +1069,7 @@ pub async fn run_nostr_udp_receiver(
         .await?;
 
     // Spawn the ICE keeper to handle STUN packets in the background
+    let mut ice_disconnect_rx = ice_conn.disconnect_rx.clone();
     let ice_keeper_handle = tokio::spawn(ice_conn.ice_keeper.run());
 
     let endpoint = quic::make_client_endpoint(ice_conn.socket, &offer.quic_fingerprint)?;
@@ -1099,6 +1115,18 @@ pub async fn run_nostr_udp_receiver(
         result = forward_stream_to_udp_receiver(recv_stream, udp_socket, client_addr) => {
             if let Err(e) = result {
                 log::warn!("Stream to UDP error: {}", e);
+            }
+        }
+        result = ice_disconnect_rx.changed() => {
+            match result {
+                Ok(()) => {
+                    if *ice_disconnect_rx.borrow() {
+                        log::warn!("ICE disconnected; shutting down receiver.");
+                    }
+                }
+                Err(_) => {
+                    log::warn!("ICE disconnect watcher closed; shutting down receiver.");
+                }
             }
         }
     }

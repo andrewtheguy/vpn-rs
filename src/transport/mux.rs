@@ -231,6 +231,7 @@ pub struct IceKeeper {
     socket: Arc<DemuxSocket>,
     stun_rx: mpsc::Receiver<ReceivedPacket>,
     local_addr: SocketAddr,
+    disconnect_tx: tokio::sync::watch::Sender<bool>,
 }
 
 impl IceKeeper {
@@ -240,12 +241,14 @@ impl IceKeeper {
         socket: Arc<DemuxSocket>,
         stun_rx: mpsc::Receiver<ReceivedPacket>,
         local_addr: SocketAddr,
+        disconnect_tx: tokio::sync::watch::Sender<bool>,
     ) -> Self {
         Self {
             ice,
             socket,
             stun_rx,
             local_addr,
+            disconnect_tx,
         }
     }
 
@@ -262,7 +265,9 @@ impl IceKeeper {
                 _ = interval.tick() => {
                     self.ice.handle_timeout(Instant::now());
                     self.drain_transmit().await;
-                    self.drain_events();
+                    if self.drain_events() {
+                        break;
+                    }
                 }
 
                 result = self.stun_rx.recv() => {
@@ -270,7 +275,9 @@ impl IceKeeper {
                         Some(packet) => {
                             self.handle_stun_packet(packet);
                             self.drain_transmit().await;
-                            self.drain_events();
+                            if self.drain_events() {
+                                break;
+                            }
                         }
                         None => {
                             // Channel closed, stop running
@@ -315,16 +322,19 @@ impl IceKeeper {
         }
     }
 
-    fn drain_events(&mut self) {
+    fn drain_events(&mut self) -> bool {
+        let mut disconnected = false;
         while let Some(event) = self.ice.poll_event() {
             if let IceAgentEvent::IceConnectionStateChange(state) = event {
                 // ICE state may change even after initial connection
                 // (e.g., if keepalives fail)
                 if state.is_disconnected() {
-                    // Log or handle ICE disconnection if needed
+                    let _ = self.disconnect_tx.send(true);
+                    disconnected = true;
                 }
             }
         }
+        disconnected
     }
 }
 
@@ -336,4 +346,6 @@ pub struct IceConnection {
     pub ice_keeper: IceKeeper,
     /// The remote peer address (nominated by ICE).
     pub remote_addr: SocketAddr,
+    /// Notifies when ICE transitions to a disconnected/failed state.
+    pub disconnect_rx: tokio::sync::watch::Receiver<bool>,
 }
