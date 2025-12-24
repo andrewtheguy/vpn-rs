@@ -27,7 +27,14 @@ const MAX_RTT_SAMPLES: usize = 10;
 #[allow(dead_code)]
 struct ClientState {
     client_id: String,
-    addrs: Vec<SocketAddr>,
+    /// ICE username fragment
+    ice_ufrag: String,
+    /// ICE password
+    ice_pwd: String,
+    /// SDP candidate strings
+    candidates: Vec<String>,
+    /// QUIC fingerprint (for server role)
+    quic_fingerprint: Option<String>,
     rtt_samples_us: Vec<u64>, // RTT in microseconds
     tx: mpsc::Sender<ServerMessage>,
     connected_at: Instant,
@@ -221,7 +228,10 @@ async fn handle_register(
     // Register client
     let client_state = ClientState {
         client_id: params.client_id.clone(),
-        addrs: Vec::new(),
+        ice_ufrag: params.ice_ufrag,
+        ice_pwd: params.ice_pwd,
+        candidates: params.candidates,
+        quic_fingerprint: params.quic_fingerprint,
         rtt_samples_us: Vec::new(),
         tx,
         connected_at: Instant::now(),
@@ -305,12 +315,7 @@ async fn handle_connect_request(
     )
     .map_err(|e| JsonRpcError::invalid_params(e.to_string()))?;
 
-    let mut state = state.write().await;
-
-    // Update requester's addresses
-    if let Some(client) = state.clients.get_mut(requester_id) {
-        client.addrs = params.my_addrs.clone();
-    }
+    let state = state.read().await;
 
     // Find target client
     let target = state
@@ -318,8 +323,10 @@ async fn handle_connect_request(
         .get(&params.target_id)
         .ok_or_else(|| JsonRpcError::peer_not_found(&params.target_id))?;
 
-    // Get RTT values
+    // Get requester state
     let requester = state.clients.get(requester_id).unwrap();
+
+    // Get RTT values
     let rtt_requester = requester.avg_rtt_ms();
     let rtt_target = target.avg_rtt_ms();
 
@@ -341,18 +348,28 @@ async fn handle_connect_request(
         start_at_ms - now_ms
     );
 
-    // Prepare sync_connect messages
+    // Prepare sync_connect messages with full ICE credentials
+    // Requester gets target's info (and acts as QUIC client)
     let sync_to_requester = SyncConnectParams {
-        peer_addrs: target.addrs.clone(),
+        peer_ice_ufrag: target.ice_ufrag.clone(),
+        peer_ice_pwd: target.ice_pwd.clone(),
+        peer_candidates: target.candidates.clone(),
+        peer_quic_fingerprint: target.quic_fingerprint.clone(),
         start_at_ms,
+        is_server: false, // Requester is the QUIC client
     };
 
+    // Target gets requester's info from the connect_request params (and acts as QUIC server)
     let sync_to_target = SyncConnectParams {
-        peer_addrs: params.my_addrs,
+        peer_ice_ufrag: params.ice_ufrag,
+        peer_ice_pwd: params.ice_pwd,
+        peer_candidates: params.candidates,
+        peer_quic_fingerprint: params.quic_fingerprint,
         start_at_ms,
+        is_server: true, // Target is the QUIC server
     };
 
-    // Send to both clients
+    // Get channels before dropping lock
     let target_tx = target.tx.clone();
     let requester_tx = requester.tx.clone();
 

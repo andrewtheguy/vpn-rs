@@ -1,7 +1,6 @@
 //! JSON-RPC 2.0 protocol types for DCUtR-style signaling.
 
 use serde::{Deserialize, Serialize};
-use std::net::SocketAddr;
 
 /// JSON-RPC version string
 pub const JSONRPC_VERSION: &str = "2.0";
@@ -115,6 +114,15 @@ impl JsonRpcError {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RegisterParams {
     pub client_id: String,
+    /// ICE username fragment
+    pub ice_ufrag: String,
+    /// ICE password
+    pub ice_pwd: String,
+    /// SDP candidate strings
+    pub candidates: Vec<String>,
+    /// QUIC fingerprint (server role only)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quic_fingerprint: Option<String>,
 }
 
 /// Result for "register" method
@@ -142,7 +150,15 @@ pub struct PingResult {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConnectRequestParams {
     pub target_id: String,
-    pub my_addrs: Vec<SocketAddr>,
+    /// ICE username fragment
+    pub ice_ufrag: String,
+    /// ICE password
+    pub ice_pwd: String,
+    /// SDP candidate strings
+    pub candidates: Vec<String>,
+    /// QUIC TLS fingerprint (for TLS verification)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quic_fingerprint: Option<String>,
 }
 
 /// Result for "connect_request" method
@@ -156,8 +172,20 @@ pub struct ConnectRequestResult {
 /// Parameters for "sync_connect" notification (server → client)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SyncConnectParams {
-    pub peer_addrs: Vec<SocketAddr>,
+    /// Peer's ICE username fragment
+    pub peer_ice_ufrag: String,
+    /// Peer's ICE password
+    pub peer_ice_pwd: String,
+    /// Peer's SDP candidates
+    pub peer_candidates: Vec<String>,
+    /// Peer's QUIC fingerprint (for TLS verification)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer_quic_fingerprint: Option<String>,
+    /// Coordinated start time for hole punching
     pub start_at_ms: u64,
+    /// Whether this client should act as the ICE/QUIC server (accepts connections)
+    #[serde(default)]
+    pub is_server: bool,
 }
 
 /// Parameters for "connect_result" notification (client → server)

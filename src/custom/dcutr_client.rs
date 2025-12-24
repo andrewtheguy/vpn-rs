@@ -4,9 +4,9 @@
 //! - Connects to signaling server
 //! - Registers and measures RTT
 //! - Coordinates hole punch timing with peer
-//! - Establishes QUIC tunnel
+//! - Establishes QUIC tunnel as client (connecting to server)
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use std::net::SocketAddr;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
@@ -22,6 +22,9 @@ use crate::tunnel_common::{
     forward_stream_to_udp_client, forward_udp_to_stream, handle_tcp_client_connection,
     open_bi_with_retry, QUIC_CONNECTION_TIMEOUT,
 };
+
+/// Server name for QUIC TLS (must match server's certificate)
+const DCUTR_SERVER_NAME: &str = "dcutr";
 
 /// Get current time in milliseconds since Unix epoch
 fn current_time_ms() -> u64 {
@@ -42,10 +45,10 @@ fn generate_client_id() -> String {
 /// Run DCUtR TCP client.
 ///
 /// Connects to signaling server, registers, requests connection to peer,
-/// performs coordinated ICE hole punch, establishes QUIC tunnel.
+/// performs coordinated ICE hole punch, establishes QUIC tunnel as CLIENT.
 pub async fn run_dcutr_tcp_client(
     listen: String,
-    source: String,
+    _source: String, // Source is requested from server, not used directly by client
     signaling_server: String,
     peer_id: String,
     client_id: Option<String>,
@@ -53,26 +56,6 @@ pub async fn run_dcutr_tcp_client(
 ) -> Result<()> {
     // Ensure crypto provider is installed
     quic::ensure_crypto_provider();
-
-    // Validate source URL
-    let source_url = url::Url::parse(&source).with_context(|| {
-        format!(
-            "Invalid source URL '{}'. Expected format: tcp://host:port",
-            source
-        )
-    })?;
-    if source_url.scheme() != "tcp" {
-        anyhow::bail!(
-            "Source URL must use tcp:// scheme for TCP client (got '{}://'). Use run_dcutr_udp_client for udp://",
-            source_url.scheme()
-        );
-    }
-    if source_url.host_str().is_none() {
-        anyhow::bail!("Source URL '{}' missing host", source);
-    }
-    if source_url.port().is_none() {
-        anyhow::bail!("Source URL '{}' missing port", source);
-    }
 
     let listen_addr: SocketAddr = listen
         .parse()
@@ -86,11 +69,10 @@ pub async fn run_dcutr_tcp_client(
     log::info!("Client ID: {}", client_id);
     log::info!("Peer ID: {}", peer_id);
     log::info!("Signaling server: {}", signaling_server);
-    log::info!("Requesting source: {}", source);
 
     // 1. Gather ICE candidates first
     let ice = IceEndpoint::gather(&stun_servers).await?;
-    let _local_creds = ice.local_credentials();
+    let local_creds = ice.local_credentials();
     let local_candidates = ice.local_candidates();
 
     log::info!(
@@ -98,37 +80,50 @@ pub async fn run_dcutr_tcp_client(
         local_candidates.len()
     );
 
-    // Parse SDP candidate strings to extract socket addresses
-    // SDP format: "candidate:... <addr> <port> ..."
-    let my_addrs: Vec<SocketAddr> = local_candidates
-        .iter()
-        .filter_map(|sdp| {
-            str0m::Candidate::from_sdp_string(sdp)
-                .ok()
-                .map(|c| c.addr())
-        })
-        .collect();
-
     // 2. Connect to signaling server
     let mut signaling = DCUtRSignaling::connect(&signaling_server).await?;
 
-    // 3. Register with signaling server
-    signaling.register(&client_id).await?;
+    // 3. Register with signaling server (client doesn't need QUIC fingerprint)
+    signaling
+        .register(
+            &client_id,
+            &local_creds.ufrag,
+            &local_creds.pass,
+            local_candidates.clone(),
+            None, // Client doesn't provide QUIC fingerprint (server does)
+        )
+        .await?;
 
     // 4. Measure RTT to signaling server
     let rtt = signaling.measure_rtt().await?;
     log::info!("RTT to signaling server: {}ms", rtt);
 
     // 5. Request connection to peer
-    signaling.connect_request(&peer_id, my_addrs).await?;
+    signaling
+        .connect_request(
+            &peer_id,
+            &local_creds.ufrag,
+            &local_creds.pass,
+            local_candidates,
+            None, // Client doesn't need QUIC fingerprint
+        )
+        .await?;
 
-    // 6. Wait for sync_connect notification with timing info
+    // 6. Wait for sync_connect notification with timing info and peer's ICE credentials
     let sync_params = signaling.wait_for_sync_connect().await?;
     log::info!(
-        "Received sync_connect: {} peer addresses, start at {}",
-        sync_params.peer_addrs.len(),
-        sync_params.start_at_ms
+        "Received sync_connect: {} peer candidates, start at {}, is_server={}",
+        sync_params.peer_candidates.len(),
+        sync_params.start_at_ms,
+        sync_params.is_server
     );
+
+    // Client should NOT be server (server side handles that)
+    if sync_params.is_server {
+        return Err(anyhow!(
+            "Client received is_server=true but should be connecting as QUIC client. Use server mode instead."
+        ));
+    }
 
     // 7. Wait until start time for coordinated hole punch
     let now_ms = current_time_ms();
@@ -138,38 +133,21 @@ pub async fn run_dcutr_tcp_client(
         tokio::time::sleep(Duration::from_millis(wait_ms)).await;
     }
 
-    // 8. Perform ICE connectivity check
+    // 8. Perform ICE connectivity check with peer's credentials
     log::info!("Starting ICE connectivity check...");
 
-    // Convert peer addresses to SDP candidate strings
-    // The connect method expects Vec<String> in SDP format
-    let remote_candidates: Vec<String> = sync_params
-        .peer_addrs
-        .iter()
-        .map(|addr| {
-            // Create SDP candidate string from socket address
-            // Format: candidate:<foundation> <component> <protocol> <priority> <addr> <port> typ <type>
-            format!(
-                "candidate:dcutr 1 UDP 2130706431 {} {} typ host",
-                addr.ip(),
-                addr.port()
-            )
-        })
-        .collect();
-
-    if remote_candidates.is_empty() {
-        anyhow::bail!("No valid ICE candidates from peer");
-    }
-
-    // We need remote credentials - for now use a placeholder
-    // In a full implementation, these would be exchanged via signaling
     let remote_creds = str0m::IceCreds {
-        ufrag: peer_id.clone(),
-        pass: peer_id.clone(),
+        ufrag: sync_params.peer_ice_ufrag.clone(),
+        pass: sync_params.peer_ice_pwd.clone(),
     };
 
+    // As client (initiator), we are the controlling agent
     let ice_conn = ice
-        .connect(IceRole::Controlling, remote_creds, remote_candidates)
+        .connect(
+            IceRole::Controlling,
+            remote_creds,
+            sync_params.peer_candidates.clone(),
+        )
         .await?;
 
     // Report success to signaling server
@@ -181,26 +159,30 @@ pub async fn run_dcutr_tcp_client(
     let mut ice_disconnect_rx = ice_conn.disconnect_rx.clone();
     let ice_keeper_handle = tokio::spawn(ice_conn.ice_keeper.run());
 
-    // 9. Generate QUIC identity and establish connection
-    let quic_identity = quic::generate_server_identity()?;
-    let endpoint = quic::make_server_endpoint(ice_conn.socket, quic_identity.server_config)?;
+    // 9. Connect as QUIC CLIENT to the server
+    // Server's QUIC fingerprint is required for TLS verification
+    let server_fingerprint = sync_params.peer_quic_fingerprint.as_ref().ok_or_else(|| {
+        anyhow!("Server did not provide QUIC fingerprint for TLS verification")
+    })?;
+
+    let endpoint = quic::make_client_endpoint(ice_conn.socket, server_fingerprint)?;
 
     log::info!(
-        "Waiting for QUIC connection (timeout: {:?})...",
+        "Connecting to peer via QUIC (timeout: {:?})...",
         QUIC_CONNECTION_TIMEOUT
     );
 
-    let connecting = tokio::time::timeout(QUIC_CONNECTION_TIMEOUT, endpoint.accept())
-        .await
-        .context("Timeout waiting for QUIC connection")?
-        .context("No incoming QUIC connection")?;
-    let conn = tokio::time::timeout(QUIC_CONNECTION_TIMEOUT, connecting)
-        .await
-        .context("Timeout during QUIC handshake")?
-        .context("Failed to accept QUIC connection")?;
-    log::info!("Peer connected over QUIC.");
+    let conn = tokio::time::timeout(
+        QUIC_CONNECTION_TIMEOUT,
+        endpoint.connect(ice_conn.remote_addr, DCUTR_SERVER_NAME)?,
+    )
+    .await
+    .context("Timeout during QUIC connection")?
+    .context("Failed to connect via QUIC")?;
 
-    // 10. Run TCP tunnel loop
+    log::info!("Connected to peer via QUIC.");
+
+    // 10. Run TCP tunnel loop (listen locally, forward to server via QUIC)
     let conn = Arc::new(conn);
     let tunnel_established = Arc::new(AtomicBool::new(false));
 
@@ -290,9 +272,12 @@ pub async fn run_dcutr_tcp_client(
 }
 
 /// Run DCUtR UDP client.
+///
+/// Connects to signaling server, registers, requests connection to peer,
+/// performs coordinated ICE hole punch, establishes QUIC tunnel as CLIENT for UDP.
 pub async fn run_dcutr_udp_client(
     listen: String,
-    source: String,
+    _source: String, // Source is requested from server, not used directly by client
     signaling_server: String,
     peer_id: String,
     client_id: Option<String>,
@@ -300,26 +285,6 @@ pub async fn run_dcutr_udp_client(
 ) -> Result<()> {
     // Ensure crypto provider is installed
     quic::ensure_crypto_provider();
-
-    // Validate source URL
-    let source_url = url::Url::parse(&source).with_context(|| {
-        format!(
-            "Invalid source URL '{}'. Expected format: udp://host:port",
-            source
-        )
-    })?;
-    if source_url.scheme() != "udp" {
-        anyhow::bail!(
-            "Source URL must use udp:// scheme for UDP client (got '{}://'). Use run_dcutr_tcp_client for tcp://",
-            source_url.scheme()
-        );
-    }
-    if source_url.host_str().is_none() {
-        anyhow::bail!("Source URL '{}' missing host", source);
-    }
-    if source_url.port().is_none() {
-        anyhow::bail!("Source URL '{}' missing port", source);
-    }
 
     let listen_addr: SocketAddr = listen
         .parse()
@@ -333,11 +298,10 @@ pub async fn run_dcutr_udp_client(
     log::info!("Client ID: {}", client_id);
     log::info!("Peer ID: {}", peer_id);
     log::info!("Signaling server: {}", signaling_server);
-    log::info!("Requesting source: {}", source);
 
     // 1. Gather ICE candidates first
     let ice = IceEndpoint::gather(&stun_servers).await?;
-    let _local_creds = ice.local_credentials();
+    let local_creds = ice.local_credentials();
     let local_candidates = ice.local_candidates();
 
     log::info!(
@@ -345,37 +309,50 @@ pub async fn run_dcutr_udp_client(
         local_candidates.len()
     );
 
-    // Parse SDP candidate strings to extract socket addresses
-    // SDP format: "candidate:... <addr> <port> ..."
-    let my_addrs: Vec<SocketAddr> = local_candidates
-        .iter()
-        .filter_map(|sdp| {
-            str0m::Candidate::from_sdp_string(sdp)
-                .ok()
-                .map(|c| c.addr())
-        })
-        .collect();
-
     // 2. Connect to signaling server
     let mut signaling = DCUtRSignaling::connect(&signaling_server).await?;
 
-    // 3. Register with signaling server
-    signaling.register(&client_id).await?;
+    // 3. Register with signaling server (client doesn't need QUIC fingerprint)
+    signaling
+        .register(
+            &client_id,
+            &local_creds.ufrag,
+            &local_creds.pass,
+            local_candidates.clone(),
+            None, // Client doesn't provide QUIC fingerprint
+        )
+        .await?;
 
     // 4. Measure RTT to signaling server
     let rtt = signaling.measure_rtt().await?;
     log::info!("RTT to signaling server: {}ms", rtt);
 
     // 5. Request connection to peer
-    signaling.connect_request(&peer_id, my_addrs).await?;
+    signaling
+        .connect_request(
+            &peer_id,
+            &local_creds.ufrag,
+            &local_creds.pass,
+            local_candidates,
+            None, // Client doesn't need QUIC fingerprint
+        )
+        .await?;
 
     // 6. Wait for sync_connect notification with timing info
     let sync_params = signaling.wait_for_sync_connect().await?;
     log::info!(
-        "Received sync_connect: {} peer addresses, start at {}",
-        sync_params.peer_addrs.len(),
-        sync_params.start_at_ms
+        "Received sync_connect: {} peer candidates, start at {}, is_server={}",
+        sync_params.peer_candidates.len(),
+        sync_params.start_at_ms,
+        sync_params.is_server
     );
+
+    // Client should NOT be server
+    if sync_params.is_server {
+        return Err(anyhow!(
+            "Client received is_server=true but should be connecting as QUIC client. Use server mode instead."
+        ));
+    }
 
     // 7. Wait until start time for coordinated hole punch
     let now_ms = current_time_ms();
@@ -385,33 +362,21 @@ pub async fn run_dcutr_udp_client(
         tokio::time::sleep(Duration::from_millis(wait_ms)).await;
     }
 
-    // 8. Perform ICE connectivity check
+    // 8. Perform ICE connectivity check with peer's credentials
     log::info!("Starting ICE connectivity check...");
 
-    // Convert peer addresses to SDP candidate strings
-    let remote_candidates: Vec<String> = sync_params
-        .peer_addrs
-        .iter()
-        .map(|addr| {
-            format!(
-                "candidate:dcutr 1 UDP 2130706431 {} {} typ host",
-                addr.ip(),
-                addr.port()
-            )
-        })
-        .collect();
-
-    if remote_candidates.is_empty() {
-        anyhow::bail!("No valid ICE candidates from peer");
-    }
-
     let remote_creds = str0m::IceCreds {
-        ufrag: peer_id.clone(),
-        pass: peer_id.clone(),
+        ufrag: sync_params.peer_ice_ufrag.clone(),
+        pass: sync_params.peer_ice_pwd.clone(),
     };
 
+    // As client (initiator), we are the controlling agent
     let ice_conn = ice
-        .connect(IceRole::Controlling, remote_creds, remote_candidates)
+        .connect(
+            IceRole::Controlling,
+            remote_creds,
+            sync_params.peer_candidates.clone(),
+        )
         .await?;
 
     signaling
@@ -421,24 +386,28 @@ pub async fn run_dcutr_udp_client(
     let mut ice_disconnect_rx = ice_conn.disconnect_rx.clone();
     let ice_keeper_handle = tokio::spawn(ice_conn.ice_keeper.run());
 
-    // 9. Establish QUIC connection
-    let quic_identity = quic::generate_server_identity()?;
-    let endpoint = quic::make_server_endpoint(ice_conn.socket, quic_identity.server_config)?;
+    // 9. Connect as QUIC CLIENT to the server
+    // Server's QUIC fingerprint is required for TLS verification
+    let server_fingerprint = sync_params.peer_quic_fingerprint.as_ref().ok_or_else(|| {
+        anyhow!("Server did not provide QUIC fingerprint for TLS verification")
+    })?;
+
+    let endpoint = quic::make_client_endpoint(ice_conn.socket, server_fingerprint)?;
 
     log::info!(
-        "Waiting for QUIC connection (timeout: {:?})...",
+        "Connecting to peer via QUIC (timeout: {:?})...",
         QUIC_CONNECTION_TIMEOUT
     );
 
-    let connecting = tokio::time::timeout(QUIC_CONNECTION_TIMEOUT, endpoint.accept())
-        .await
-        .context("Timeout waiting for QUIC connection")?
-        .context("No incoming QUIC connection")?;
-    let conn = tokio::time::timeout(QUIC_CONNECTION_TIMEOUT, connecting)
-        .await
-        .context("Timeout during QUIC handshake")?
-        .context("Failed to accept QUIC connection")?;
-    log::info!("Peer connected over QUIC.");
+    let conn = tokio::time::timeout(
+        QUIC_CONNECTION_TIMEOUT,
+        endpoint.connect(ice_conn.remote_addr, DCUTR_SERVER_NAME)?,
+    )
+    .await
+    .context("Timeout during QUIC connection")?
+    .context("Failed to connect via QUIC")?;
+
+    log::info!("Connected to peer via QUIC.");
 
     // 10. Run UDP tunnel
     let (send_stream, recv_stream) = open_bi_with_retry(&conn).await?;

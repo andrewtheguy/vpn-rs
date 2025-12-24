@@ -2,7 +2,6 @@
 //!
 //! Connects to a DCUtR signaling server for coordinated NAT hole punching.
 
-use std::net::SocketAddr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Context, Result};
@@ -65,7 +64,21 @@ where
     }
 
     /// Register with the signaling server
-    pub async fn register(&mut self, client_id: &str) -> Result<()> {
+    ///
+    /// # Arguments
+    /// * `client_id` - Unique identifier for this client
+    /// * `ice_ufrag` - ICE username fragment
+    /// * `ice_pwd` - ICE password
+    /// * `candidates` - SDP candidate strings
+    /// * `quic_fingerprint` - Optional QUIC TLS fingerprint (required if this client will be QUIC server)
+    pub async fn register(
+        &mut self,
+        client_id: &str,
+        ice_ufrag: &str,
+        ice_pwd: &str,
+        candidates: Vec<String>,
+        quic_fingerprint: Option<String>,
+    ) -> Result<()> {
         info!("Registering with signaling server as '{}'", client_id);
 
         let request = JsonRpcRequest {
@@ -73,6 +86,10 @@ where
             method: "register".to_string(),
             params: Some(serde_json::to_value(RegisterParams {
                 client_id: client_id.to_string(),
+                ice_ufrag: ice_ufrag.to_string(),
+                ice_pwd: ice_pwd.to_string(),
+                candidates,
+                quic_fingerprint,
             })?),
             id: Some(self.next_request_id()),
         };
@@ -139,15 +156,25 @@ where
     }
 
     /// Send a connect request to initiate hole punching with a peer
+    ///
+    /// # Arguments
+    /// * `target_id` - ID of the peer to connect to
+    /// * `ice_ufrag` - Our ICE username fragment
+    /// * `ice_pwd` - Our ICE password
+    /// * `candidates` - Our SDP candidate strings
+    /// * `quic_fingerprint` - Optional QUIC TLS fingerprint (if we're the QUIC client, we don't need this)
     pub async fn connect_request(
         &mut self,
         target_id: &str,
-        my_addrs: Vec<SocketAddr>,
+        ice_ufrag: &str,
+        ice_pwd: &str,
+        candidates: Vec<String>,
+        quic_fingerprint: Option<String>,
     ) -> Result<()> {
         info!(
-            "Requesting connection to peer '{}' with {} local addresses",
+            "Requesting connection to peer '{}' with {} candidates",
             target_id,
-            my_addrs.len()
+            candidates.len()
         );
 
         let request = JsonRpcRequest {
@@ -155,7 +182,10 @@ where
             method: "connect_request".to_string(),
             params: Some(serde_json::to_value(ConnectRequestParams {
                 target_id: target_id.to_string(),
-                my_addrs,
+                ice_ufrag: ice_ufrag.to_string(),
+                ice_pwd: ice_pwd.to_string(),
+                candidates,
+                quic_fingerprint,
             })?),
             id: Some(self.next_request_id()),
         };
@@ -199,9 +229,10 @@ where
                     if let Some(params) = msg.get("params") {
                         let sync_params: SyncConnectParams = serde_json::from_value(params.clone())?;
                         info!(
-                            "Received sync_connect: {} peer addresses, start at {}",
-                            sync_params.peer_addrs.len(),
-                            sync_params.start_at_ms
+                            "Received sync_connect: {} peer candidates, start at {}, is_server={}",
+                            sync_params.peer_candidates.len(),
+                            sync_params.start_at_ms,
+                            sync_params.is_server
                         );
                         return Ok(sync_params);
                     }
