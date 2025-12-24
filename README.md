@@ -813,19 +813,20 @@ cargo build --release --bin signaling
 ### 2. Start Tunnel Server
 
 ```bash
+# Server specifies the exact source to forward to
 tunnel-rs server dcutr \
   --signaling-server <signaling-ip>:9999 \
-  --allowed-tcp 127.0.0.0/8 \
+  --source tcp://127.0.0.1:22 \
   --server-id my-server
 ```
 
 ### 3. Start Tunnel Client
 
 ```bash
+# Client specifies local listen address and peer to connect to
 tunnel-rs client dcutr \
   --signaling-server <signaling-ip>:9999 \
   --peer-id my-server \
-  --source tcp://127.0.0.1:22 \
   --target 127.0.0.1:2222
 ```
 

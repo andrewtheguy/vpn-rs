@@ -40,9 +40,9 @@ fn generate_server_id() -> String {
 ///
 /// Registers with signaling server, waits for client connection requests,
 /// performs coordinated ICE hole punch, accepts QUIC connections,
-/// and forwards traffic to allowed TCP sources.
+/// and forwards traffic to the configured TCP source.
 pub async fn run_dcutr_tcp_server(
-    allowed_sources: Vec<String>,
+    source: String,
     signaling_server: String,
     server_id: Option<String>,
     stun_servers: Vec<String>,
@@ -57,11 +57,11 @@ pub async fn run_dcutr_tcp_server(
     log::info!("==============================");
     log::info!("Server ID: {}", server_id);
     log::info!("Signaling server: {}", signaling_server);
-    log::info!("Allowed TCP sources: {:?}", allowed_sources);
+    log::info!("Source: {}", source);
 
     loop {
         match run_dcutr_tcp_server_session(
-            &allowed_sources,
+            &source,
             &signaling_server,
             &server_id,
             &stun_servers,
@@ -81,7 +81,7 @@ pub async fn run_dcutr_tcp_server(
 
 /// Run a single DCUtR TCP server session
 async fn run_dcutr_tcp_server_session(
-    allowed_sources: &[String],
+    source: &str,
     signaling_server: &str,
     server_id: &str,
     stun_servers: &[String],
@@ -187,7 +187,24 @@ async fn run_dcutr_tcp_server_session(
 
     log::info!("Client connected via QUIC");
 
-    // 10. Handle incoming streams and forward to allowed sources
+    // 10. Handle incoming streams and forward to configured source
+    // Pre-resolve the target once
+    let target_hostport = extract_addr_from_source(source)
+        .ok_or_else(|| anyhow!("Invalid source format: {}", source))?;
+    let target_addrs = Arc::new(
+        resolve_all_target_addrs(&target_hostport)
+            .await
+            .with_context(|| format!("Invalid source '{}'", source))?,
+    );
+    if target_addrs.is_empty() {
+        return Err(anyhow!("No addresses resolved for: {}", target_hostport));
+    }
+    log::info!(
+        "Forwarding TCP traffic to {} ({} address(es) resolved)",
+        target_addrs.first().unwrap(),
+        target_addrs.len()
+    );
+
     let mut stream_tasks: JoinSet<()> = JoinSet::new();
 
     loop {
@@ -201,41 +218,9 @@ async fn run_dcutr_tcp_server_session(
                     }
                 };
 
-                // Read the source request from the stream (first message contains the source URL)
-                // For simplicity, we'll use the first allowed source
-                // In a full implementation, the client would send which source it wants
-                let allowed = allowed_sources.to_vec();
-
+                let target_addrs_clone = Arc::clone(&target_addrs);
                 stream_tasks.spawn(async move {
-                    // Use first allowed source as default
-                    // TODO: Parse source request from client if needed
-                    if allowed.is_empty() {
-                        log::warn!("No allowed sources configured");
-                        return;
-                    }
-
-                    let source = &allowed[0];
-                    let target_hostport = match extract_addr_from_source(source) {
-                        Some(addr) => addr,
-                        None => {
-                            log::warn!("Invalid source format: {}", source);
-                            return;
-                        }
-                    };
-
-                    let target_addrs = match resolve_all_target_addrs(&target_hostport).await {
-                        Ok(addrs) if !addrs.is_empty() => Arc::new(addrs),
-                        Ok(_) => {
-                            log::warn!("No addresses resolved for: {}", target_hostport);
-                            return;
-                        }
-                        Err(e) => {
-                            log::warn!("Failed to resolve {}: {}", target_hostport, e);
-                            return;
-                        }
-                    };
-
-                    if let Err(e) = handle_tcp_server_stream(send_stream, recv_stream, target_addrs).await {
+                    if let Err(e) = handle_tcp_server_stream(send_stream, recv_stream, target_addrs_clone).await {
                         let err_str = e.to_string();
                         if !err_str.contains("closed") && !err_str.contains("reset") {
                             log::warn!("TCP stream error: {}", e);
@@ -292,9 +277,9 @@ async fn run_dcutr_tcp_server_session(
 ///
 /// Registers with signaling server, waits for client connection requests,
 /// performs coordinated ICE hole punch, accepts QUIC connections,
-/// and forwards traffic to allowed UDP sources.
+/// and forwards traffic to the configured UDP source.
 pub async fn run_dcutr_udp_server(
-    allowed_sources: Vec<String>,
+    source: String,
     signaling_server: String,
     server_id: Option<String>,
     stun_servers: Vec<String>,
@@ -309,11 +294,11 @@ pub async fn run_dcutr_udp_server(
     log::info!("==============================");
     log::info!("Server ID: {}", server_id);
     log::info!("Signaling server: {}", signaling_server);
-    log::info!("Allowed UDP sources: {:?}", allowed_sources);
+    log::info!("Source: {}", source);
 
     loop {
         match run_dcutr_udp_server_session(
-            &allowed_sources,
+            &source,
             &signaling_server,
             &server_id,
             &stun_servers,
@@ -333,7 +318,7 @@ pub async fn run_dcutr_udp_server(
 
 /// Run a single DCUtR UDP server session
 async fn run_dcutr_udp_server_session(
-    allowed_sources: &[String],
+    source: &str,
     signaling_server: &str,
     server_id: &str,
     stun_servers: &[String],
@@ -445,12 +430,6 @@ async fn run_dcutr_udp_server_session(
         .await
         .context("Failed to accept stream from client")?;
 
-    // Use first allowed source as default
-    if allowed_sources.is_empty() {
-        return Err(anyhow!("No allowed sources configured"));
-    }
-
-    let source = &allowed_sources[0];
     let target_hostport = extract_addr_from_source(source)
         .ok_or_else(|| anyhow!("Invalid source format: {}", source))?;
 

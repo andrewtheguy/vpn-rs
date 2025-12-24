@@ -7,8 +7,10 @@ Research on implementing a lightweight DCUtR-style signaling server for coordina
 **Phase 1 (Plain TCP Server): Implemented** ✅
 
 The DCUtR signaling server and client are now implemented as an experimental mode:
-- Server: `tunnel-rs server dcutr --signaling-server <addr> --allowed-tcp <cidr> --server-id <id>`
-- Client: `tunnel-rs client dcutr --signaling-server <addr> --peer-id <id> --source <url> --target <addr>`
+- Server: `tunnel-rs server dcutr --signaling-server <addr> --source tcp://host:port --server-id <id>`
+- Client: `tunnel-rs client dcutr --signaling-server <addr> --peer-id <id> --target <addr>`
+
+This follows the single-session pattern where the server hardcodes the source address.
 
 ### Implemented Features
 - JSON-RPC 2.0 signaling protocol over TCP

@@ -50,7 +50,6 @@ fn generate_client_id() -> String {
 /// Retries on failure.
 pub async fn run_dcutr_tcp_client(
     listen: String,
-    _source: String, // Source is requested from server, not used directly by client
     signaling_server: String,
     peer_id: String,
     client_id: Option<String>,
@@ -309,7 +308,6 @@ async fn run_dcutr_tcp_client_session(
 /// Retries on failure.
 pub async fn run_dcutr_udp_client(
     listen: String,
-    _source: String, // Source is requested from server, not used directly by client
     signaling_server: String,
     peer_id: String,
     client_id: Option<String>,

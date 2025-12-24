@@ -378,15 +378,10 @@ enum ServerMode {
     /// Full ICE with DCUtR signaling server (coordinated NAT hole punching)
     #[command(name = "dcutr")]
     DCUtR {
-        /// Allowed TCP source networks in CIDR notation (repeatable)
-        /// E.g., --allowed-tcp tcp://127.0.0.1:22 --allowed-tcp tcp://192.168.1.0/24:80
-        #[arg(long = "allowed-tcp")]
-        allowed_tcp: Vec<String>,
-
-        /// Allowed UDP source networks in CIDR notation (repeatable)
-        /// E.g., --allowed-udp udp://127.0.0.1:51820 --allowed-udp udp://10.0.0.0/8:*
-        #[arg(long = "allowed-udp")]
-        allowed_udp: Vec<String>,
+        /// Source address to forward to (tcp://host:port or udp://host:port)
+        /// E.g., --source tcp://127.0.0.1:22 or --source udp://127.0.0.1:51820
+        #[arg(short, long)]
+        source: Option<String>,
 
         /// DCUtR signaling server address (host:port)
         #[arg(long)]
@@ -527,10 +522,6 @@ enum ClientMode {
         /// Local address to listen on (e.g., 127.0.0.1:2222)
         #[arg(short, long)]
         target: Option<String>,
-
-        /// Source address to request from peer (tcp://host:port or udp://host:port)
-        #[arg(short, long)]
-        source: Option<String>,
 
         /// DCUtR signaling server address (host:port)
         #[arg(long)]
@@ -797,11 +788,10 @@ async fn main() -> Result<()> {
                 }
                 "dcutr" => {
                     // Extract DCUtR-specific args from CLI
-                    let (allowed_tcp, allowed_udp, signaling_server, server_id, stun_servers) = match &mode {
-                        Some(ServerMode::DCUtR { allowed_tcp: at, allowed_udp: au, signaling_server: ss, server_id: si, stun_servers: stun, no_stun }) => {
+                    let (source, signaling_server, server_id, stun_servers) = match &mode {
+                        Some(ServerMode::DCUtR { source: src, signaling_server: ss, server_id: si, stun_servers: stun, no_stun }) => {
                             (
-                                at.clone(),
-                                au.clone(),
+                                src.clone(),
                                 ss.clone(),
                                 si.clone(),
                                 resolve_stun_servers(stun, None, *no_stun)?,
@@ -810,8 +800,7 @@ async fn main() -> Result<()> {
                         _ => {
                             // Fallback to empty defaults (would require config support)
                             (
-                                Vec::new(),
-                                Vec::new(),
+                                None,
                                 None,
                                 None,
                                 resolve_stun_servers(&[], None, false)?,
@@ -819,22 +808,24 @@ async fn main() -> Result<()> {
                         },
                     };
 
+                    // Require source
+                    let source = source.context(
+                        "--source is required for dcutr server mode. Specify the source address (e.g., --source tcp://127.0.0.1:22)"
+                    )?;
+
                     // Require signaling server
                     let signaling_server = signaling_server.context(
                         "signaling-server is required for dcutr mode. Provide via --signaling-server."
                     )?;
 
-                    // Require at least one allowed network
-                    if allowed_tcp.is_empty() && allowed_udp.is_empty() {
-                        anyhow::bail!(
-                            "At least one of --allowed-tcp or --allowed-udp must be specified for dcutr server mode."
-                        );
-                    }
+                    // Determine protocol from source
+                    let (protocol, _) = parse_endpoint(&source)
+                        .with_context(|| format!("Invalid source '{}'. Expected format: tcp://host:port or udp://host:port", source))?;
 
-                    // Run dcutr server (currently only TCP supported)
-                    // Combine TCP and UDP sources into a single list
-                    let all_sources: Vec<String> = allowed_tcp.iter().chain(allowed_udp.iter()).cloned().collect();
-                    custom::run_dcutr_tcp_server(all_sources, signaling_server, server_id, stun_servers).await
+                    match protocol {
+                        Protocol::Tcp => custom::run_dcutr_tcp_server(source, signaling_server, server_id, stun_servers).await,
+                        Protocol::Udp => custom::run_dcutr_udp_server(source, signaling_server, server_id, stun_servers).await,
+                    }
                 }
                 _ => anyhow::bail!("Invalid mode '{}'. Use: iroh, iroh-manual, custom-manual, nostr, or dcutr", effective_mode),
             }
@@ -1046,23 +1037,19 @@ async fn main() -> Result<()> {
                     }
                 }
                 "dcutr" => {
-                    let (target, source, signaling_server, peer_id, client_id, stun_servers) = match &mode {
-                        Some(ClientMode::DCUtR { target: t, source: src, signaling_server: ss, peer_id: pi, client_id: ci, stun_servers: stun, no_stun }) => (
+                    let (target, signaling_server, peer_id, client_id, stun_servers) = match &mode {
+                        Some(ClientMode::DCUtR { target: t, signaling_server: ss, peer_id: pi, client_id: ci, stun_servers: stun, no_stun }) => (
                             t.clone(),
-                            normalize_optional_endpoint(src.clone()),
                             ss.clone(),
                             pi.clone(),
                             ci.clone(),
                             resolve_stun_servers(stun, None, *no_stun)?,
                         ),
-                        _ => (None, None, None, None, None, default_stun_servers()),
+                        _ => (None, None, None, None, default_stun_servers()),
                     };
 
                     let target = target.context(
                         "--target is required for dcutr client mode. Specify the local address to listen on (e.g., --target 127.0.0.1:2222)",
-                    )?;
-                    let source = source.context(
-                        "--source is required for dcutr client mode. Specify the source to request (e.g., --source tcp://127.0.0.1:22)",
                     )?;
                     let signaling_server = signaling_server.context(
                         "--signaling-server is required for dcutr mode. Specify the signaling server address (e.g., --signaling-server 1.2.3.4:9999)",
@@ -1071,14 +1058,8 @@ async fn main() -> Result<()> {
                         "--peer-id is required for dcutr mode. Specify the target peer ID to connect to.",
                     )?;
 
-                    // Validate source format early
-                    let (protocol, _) = parse_endpoint(&source)
-                        .with_context(|| format!("Invalid source '{}'. Expected format: tcp://host:port or udp://host:port", source))?;
-
-                    match protocol {
-                        Protocol::Tcp => custom::run_dcutr_tcp_client(target, source, signaling_server, peer_id, client_id, stun_servers).await,
-                        Protocol::Udp => custom::run_dcutr_udp_client(target, source, signaling_server, peer_id, client_id, stun_servers).await,
-                    }
+                    // DCUtR client uses TCP by default (server determines the actual source)
+                    custom::run_dcutr_tcp_client(target, signaling_server, peer_id, client_id, stun_servers).await
                 }
                 _ => anyhow::bail!("Invalid mode '{}'. Use: iroh, iroh-manual, custom-manual, nostr, or dcutr", effective_mode),
             }
