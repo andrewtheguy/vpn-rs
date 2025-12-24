@@ -21,6 +21,8 @@ pub struct DCUtRSignaling<S> {
     client_id: Option<String>,
     rtt_ms: u64,
     next_id: u64,
+    /// Buffered sync_connect notification received while waiting for response
+    pending_sync_connect: Option<SyncConnectParams>,
 }
 
 impl DCUtRSignaling<TcpStream> {
@@ -45,6 +47,34 @@ where
             client_id: None,
             rtt_ms: 100, // Default RTT
             next_id: 1,
+            pending_sync_connect: None,
+        }
+    }
+
+    /// Read a response, buffering any sync_connect notifications that arrive
+    async fn read_response(&mut self) -> Result<JsonRpcResponse> {
+        loop {
+            let msg: serde_json::Value = read_message(&mut self.stream).await?;
+
+            // Check if it's a notification (has method, typically no id)
+            if let Some(method) = msg.get("method").and_then(|m| m.as_str()) {
+                if method == "sync_connect" {
+                    if let Some(params) = msg.get("params") {
+                        let sync_params: SyncConnectParams = serde_json::from_value(params.clone())?;
+                        debug!(
+                            "Buffering sync_connect notification received while waiting for response"
+                        );
+                        self.pending_sync_connect = Some(sync_params);
+                        continue; // Keep reading for the actual response
+                    }
+                }
+                debug!("Received notification '{}' while waiting for response, ignoring", method);
+                continue;
+            }
+
+            // It's a response - parse it
+            let response: JsonRpcResponse = serde_json::from_value(msg)?;
+            return Ok(response);
         }
     }
 
@@ -95,7 +125,7 @@ where
         };
 
         write_message(&mut self.stream, &request).await?;
-        let response: JsonRpcResponse = read_message(&mut self.stream).await?;
+        let response = self.read_response().await?;
 
         if let Some(error) = response.error {
             return Err(anyhow!("Registration failed: {}", error.message));
@@ -126,7 +156,7 @@ where
             };
 
             write_message(&mut self.stream, &request).await?;
-            let response: JsonRpcResponse = read_message(&mut self.stream).await?;
+            let response = self.read_response().await?;
 
             if let Some(error) = response.error {
                 return Err(anyhow!("Ping failed: {}", error.message));
@@ -191,7 +221,7 @@ where
         };
 
         write_message(&mut self.stream, &request).await?;
-        let response: JsonRpcResponse = read_message(&mut self.stream).await?;
+        let response = self.read_response().await?;
 
         if let Some(error) = response.error {
             return Err(anyhow!("Connect request failed: {}", error.message));
@@ -217,6 +247,17 @@ where
 
     /// Wait for a sync_connect notification from the server
     pub async fn wait_for_sync_connect(&mut self) -> Result<SyncConnectParams> {
+        // Check if we already received sync_connect while waiting for a response
+        if let Some(params) = self.pending_sync_connect.take() {
+            info!(
+                "Using buffered sync_connect: {} peer candidates, start at {}, is_server={}",
+                params.peer_candidates.len(),
+                params.start_at_ms,
+                params.is_server
+            );
+            return Ok(params);
+        }
+
         info!("Waiting for sync_connect notification...");
 
         loop {
