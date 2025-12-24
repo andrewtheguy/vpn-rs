@@ -5,10 +5,10 @@ This document outlines planned features and improvements for tunnel-rs.
 ## Current Status
 
 tunnel-rs currently supports four operational modes:
-- **iroh-default**: Persistent identity support with automatic discovery and relay fallback
-- **iroh-manual**: Serverless with manual signaling
-- **custom**: Full ICE with manual signaling
-- **nostr**: Full ICE with automated Nostr relay signaling
+- **iroh**: Persistent identity with automatic discovery, relay fallback, and receiver-requested sources
+- **nostr**: Full ICE with automated Nostr relay signaling and receiver-requested sources
+- **iroh-manual**: Serverless with manual signaling (single-target)
+- **custom-manual**: Full ICE with manual signaling (single-target)
 
 All modes support TCP and UDP tunneling with end-to-end encryption via QUIC/TLS 1.3.
 
@@ -18,26 +18,40 @@ All modes support TCP and UDP tunneling with end-to-end encryption via QUIC/TLS 
 
 ### High Priority
 
-#### Receiver-Requested Source for Nostr Mode
+#### Receiver-Requested Source (iroh and nostr modes)
 
 **Status:** Implemented
 
-Receivers can request specific source endpoints, similar to SSH's `-R` flag for reverse tunnels. Senders can restrict allowed networks via `--allowed-tcp` / `--allowed-udp` flags or config file.
+Both `iroh` and `nostr` modes support receiver-requested sources, similar to SSH's `-R` flag for reverse tunnels. Senders restrict allowed networks via `--allowed-tcp` / `--allowed-udp` flags or config file.
 
-**Usage:**
+**Usage (iroh mode):**
 ```bash
-# Sender: allow networks via CIDR (separate flags for TCP and UDP)
+# Sender: allow networks via CIDR
+tunnel-rs sender iroh \
+  --allowed-tcp 127.0.0.0/8 \
+  --allowed-tcp 192.168.0.0/16 \
+  --allowed-udp 10.0.0.0/8
+
+# Receiver: request a specific source
+tunnel-rs receiver iroh \
+  --node-id <sender-node-id> \
+  --source tcp://127.0.0.1:22 \
+  --target 127.0.0.1:2222
+```
+
+**Usage (nostr mode):**
+```bash
+# Sender: allow networks via CIDR
 tunnel-rs sender nostr --nsec-file ./sender.nsec \
   --peer-npub npub1receiver... \
   --allowed-tcp 127.0.0.0/8 \
-  --allowed-tcp 192.168.0.0/16 \
   --allowed-udp 10.0.0.0/8
 
 # Receiver: request a specific source
 tunnel-rs receiver nostr --nsec-file ./receiver.nsec \
   --peer-npub npub1sender... \
   --source tcp://127.0.0.1:22 \
-  --target tcp://127.0.0.1:2222
+  --target 127.0.0.1:2222
 ```
 
 **Network Patterns (CIDR):**
@@ -59,13 +73,13 @@ tunnel-rs receiver nostr --nsec-file ./receiver.nsec \
 
 | Mode | Multi-Session | Dynamic Source |
 |------|---------------|----------------|
-| `iroh-default` | **Yes** - unlimited concurrent receivers | No - fixed `--source` |
+| `iroh` | **Yes** - use `--max-sessions` (default: 100) | **Yes** - receiver specifies `--source` |
 | `nostr` | **Yes** - use `--max-sessions` (default: 10) | **Yes** - receiver specifies `--source` |
 | `iroh-manual` | No | No |
-| `custom` | No | No |
+| `custom-manual` | No | No |
 
 **Multi-Session** = Multiple concurrent connections to the same sender
-**Dynamic Source** = Receiver specifies which service to tunnel (only nostr)
+**Dynamic Source** = Receiver specifies which service to tunnel (iroh and nostr modes)
 
 **Implementation Details:**
 - Each session gets independent ICE/QUIC stack
@@ -74,11 +88,11 @@ tunnel-rs receiver nostr --nsec-file ./receiver.nsec \
 
 ---
 
-#### Relay Fallback for Custom/Nostr Modes
+#### Relay Fallback for Custom-Manual/Nostr Modes
 
 **Status:** Idea
 
-Custom and nostr modes use full ICE but have no relay fallback for symmetric NAT scenarios where direct connectivity fails.
+Custom-manual and nostr modes use full ICE but have no relay fallback for symmetric NAT scenarios where direct connectivity fails.
 
 ---
 
@@ -92,7 +106,7 @@ Custom and nostr modes use full ICE but have no relay fallback for symmetric NAT
 | Stream retry with backoff | **Implemented** |
 | Connection-level auto-reconnect | Idea |
 
-**iroh-default mode (Moderate complexity):**
+**iroh mode (Moderate complexity):**
 - Add receiver-side connection retry loop with exponential backoff
 - Iroh's discovery automatically re-resolves sender's new IP/relay address
 

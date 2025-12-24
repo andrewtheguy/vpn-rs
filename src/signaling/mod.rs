@@ -11,9 +11,10 @@ pub mod nostr;
 
 // Re-export commonly used types
 pub use codec::{
-    decode_answer, decode_offer, encode_answer, encode_offer, IrohManualAnswer, IrohManualOffer,
-    ManualAnswer, ManualOffer, ManualReject, ManualRequest, IROH_SIGNAL_VERSION,
-    MANUAL_SIGNAL_VERSION,
+    decode_answer, decode_offer, decode_source_request, decode_source_response, encode_answer,
+    encode_offer, encode_source_request, encode_source_response, read_length_prefixed,
+    IrohManualAnswer, IrohManualOffer, ManualAnswer, ManualOffer, ManualReject, ManualRequest,
+    SourceRequest, SourceResponse, IROH_SIGNAL_VERSION, MANUAL_SIGNAL_VERSION,
 };
 pub use manual::{
     display_answer, display_iroh_answer, display_iroh_offer, display_offer,

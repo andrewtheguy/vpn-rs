@@ -15,7 +15,7 @@
 #      kubectl logs -l app=myapp -c tunnel-sender | grep EndpointId
 #
 #   4. On remote machine, connect:
-#      tunnel-rs receiver iroh-default --node-id <ENDPOINT_ID> --target tcp://127.0.0.1:8080
+#      tunnel-rs receiver iroh --node-id <ENDPOINT_ID> --target tcp://127.0.0.1:8080
 #
 # This is useful for:
 #   - Accessing staging/dev services without exposing them publicly
@@ -50,13 +50,13 @@ spec:
           image: ghcr.io/andrewtheguy/tunnel-rs:latest
           args:
             - sender
-            - iroh-default
+            - iroh
             - --source
             - tcp://127.0.0.1:80
           # Optional: use persistent key for stable EndpointId
           # args:
           #   - sender
-          #   - iroh-default
+          #   - iroh
           #   - --source
           #   - tcp://127.0.0.1:80
           #   - --secret-file

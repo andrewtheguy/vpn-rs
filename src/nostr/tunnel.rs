@@ -20,10 +20,10 @@ use crate::signaling::{
 use crate::transport::ice::{IceEndpoint, IceRole};
 use crate::transport::quic;
 use crate::tunnel_common::{
-    current_timestamp, extract_addr_from_source, forward_stream_to_udp_receiver,
-    forward_stream_to_udp_sender, forward_udp_to_stream, generate_session_id,
-    handle_tcp_receiver_connection, handle_tcp_sender_stream, is_source_allowed,
-    open_bi_with_retry, resolve_all_target_addrs, resolve_target_addr, short_session_id,
+    bind_udp_for_targets, current_timestamp, extract_addr_from_source,
+    forward_stream_to_udp_receiver, forward_stream_to_udp_sender, forward_udp_to_stream,
+    generate_session_id, handle_tcp_receiver_connection, handle_tcp_sender_stream,
+    is_source_allowed, open_bi_with_retry, resolve_all_target_addrs, short_session_id,
     validate_allowed_networks, MAX_REQUEST_AGE_SECS, QUIC_CONNECTION_TIMEOUT,
 };
 
@@ -448,6 +448,7 @@ async fn handle_nostr_tcp_session_impl(
         candidates: local_candidates,
         quic_fingerprint: quic_identity.fingerprint.clone(),
         session_id: Some(session_id.clone()),
+        source: None, // Source is communicated via SourceRequest in nostr mode
     };
 
     // Publish offer once - we already have receiver's ICE credentials from the REQUEST,
@@ -557,9 +558,14 @@ async fn handle_nostr_udp_session_impl(
         .ok_or_else(|| anyhow::anyhow!("[{}] Invalid source format '{}'", short_id, requested_source))?;
 
     log::info!("[{}] Forwarding to: {}", short_id, requested_source);
-    let target_addr = resolve_target_addr(&target_hostport)
-        .await
-        .with_context(|| format!("Invalid source '{}'", requested_source))?;
+    let target_addrs = Arc::new(
+        resolve_all_target_addrs(&target_hostport)
+            .await
+            .with_context(|| format!("Invalid source '{}'", requested_source))?,
+    );
+    if target_addrs.is_empty() {
+        anyhow::bail!("[{}] No target addresses resolved for '{}'", short_id, requested_source);
+    }
 
     // Gather ICE candidates
     let ice = IceEndpoint::gather(&stun_servers).await?;
@@ -580,6 +586,7 @@ async fn handle_nostr_udp_session_impl(
         candidates: local_candidates,
         quic_fingerprint: quic_identity.fingerprint.clone(),
         session_id: Some(session_id.clone()),
+        source: None, // Source is communicated via SourceRequest in nostr mode
     };
 
     // Publish offer once - we already have receiver's ICE credentials from the REQUEST,
@@ -620,16 +627,17 @@ async fn handle_nostr_udp_session_impl(
         .await
         .context("Failed to accept stream from receiver")?;
 
-    log::info!("[{}] Forwarding UDP traffic to {}", short_id, target_addr);
+    let primary_addr = target_addrs.first().copied().unwrap();
+    log::info!(
+        "[{}] Forwarding UDP traffic to {} ({} address(es) resolved)",
+        short_id,
+        primary_addr,
+        target_addrs.len()
+    );
 
-    // Bind to the same address family as the target
-    let bind_addr: SocketAddr = if target_addr.is_ipv6() {
-        "[::]:0".parse().unwrap()
-    } else {
-        "0.0.0.0:0".parse().unwrap()
-    };
+    // Bind to appropriate address family based on all resolved targets
     let udp_socket = Arc::new(
-        UdpSocket::bind(bind_addr)
+        bind_udp_for_targets(&target_addrs)
             .await
             .context("Failed to bind UDP socket")?,
     );
@@ -658,7 +666,7 @@ async fn handle_nostr_udp_session_impl(
     });
 
     let forward_result = tokio::select! {
-        result = forward_stream_to_udp_sender(recv_stream, send_stream, udp_socket, target_addr) => {
+        result = forward_stream_to_udp_sender(recv_stream, send_stream, udp_socket, Arc::clone(&target_addrs)) => {
             result
         }
         error = conn.closed() => {
@@ -851,6 +859,7 @@ pub async fn run_nostr_tcp_receiver(
         ice_pwd: local_creds.pass.clone(),
         candidates: local_candidates,
         session_id: Some(session_id),
+        quic_fingerprint: None, // Nostr mode: fingerprint is in the offer, not answer
     };
 
     // Publish answer once - sender already has our ICE credentials from the request,
@@ -1082,6 +1091,7 @@ pub async fn run_nostr_udp_receiver(
         ice_pwd: local_creds.pass.clone(),
         candidates: local_candidates,
         session_id: Some(session_id),
+        quic_fingerprint: None, // Nostr mode: fingerprint is in the offer, not answer
     };
 
     // Publish answer once - sender already has our ICE credentials from the request,

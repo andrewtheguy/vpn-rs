@@ -7,9 +7,10 @@
 
 use anyhow::{Context, Result};
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::net::{lookup_host, TcpStream};
+use tokio::net::{lookup_host, TcpStream, UdpSocket};
 
 /// Timeout for QUIC connection (matches webrtc crate's 180 second connection timeout)
 pub const QUIC_CONNECTION_TIMEOUT: Duration = Duration::from_secs(180);
@@ -47,14 +48,6 @@ pub const BACKOFF_MAX_MULTIPLIER: u64 = 1024;
 // ============================================================================
 // Address Resolution
 // ============================================================================
-
-/// Resolve a target address to a single socket address.
-pub async fn resolve_target_addr(target: &str) -> Result<SocketAddr> {
-    let mut addrs = lookup_host(target)
-        .await
-        .with_context(|| format!("Failed to resolve '{}'", target))?;
-    addrs.next().context("No addresses found for host")
-}
 
 /// Resolve a target address to all available socket addresses.
 /// Returns all IPv4 and IPv6 addresses for the hostname.
@@ -175,6 +168,58 @@ pub async fn try_connect_tcp(addrs: &[SocketAddr]) -> Result<TcpStream> {
             error_details.join("\n  ")
         );
     }
+}
+
+// ============================================================================
+// UDP Helpers
+// ============================================================================
+
+/// Bind a UDP socket appropriate for the given target addresses.
+///
+/// - If all targets are IPv4: binds to 0.0.0.0:0
+/// - If all targets are IPv6: binds to [::]:0
+/// - If mixed: binds to [::]:0 (dual-stack on most systems)
+pub async fn bind_udp_for_targets(addrs: &[SocketAddr]) -> Result<UdpSocket> {
+    if addrs.is_empty() {
+        anyhow::bail!("No target addresses provided for UDP binding");
+    }
+
+    let has_ipv6 = addrs.iter().any(|a| a.is_ipv6());
+    let has_ipv4 = addrs.iter().any(|a| a.is_ipv4());
+
+    let bind_addr: SocketAddr = if has_ipv6 || (has_ipv4 && has_ipv6) {
+        // Use IPv6 for dual-stack capability
+        "[::]:0".parse().unwrap()
+    } else {
+        // All IPv4
+        "0.0.0.0:0".parse().unwrap()
+    };
+
+    UdpSocket::bind(bind_addr)
+        .await
+        .with_context(|| format!("Failed to bind UDP socket to {}", bind_addr))
+}
+
+/// Order addresses for UDP connection attempts (Happy Eyeballs style).
+/// Returns addresses with IPv6 first, then IPv4.
+pub fn order_udp_addresses(addrs: &[SocketAddr]) -> Vec<SocketAddr> {
+    let (ipv6, ipv4): (Vec<SocketAddr>, Vec<SocketAddr>) =
+        addrs.iter().copied().partition(|a| a.is_ipv6());
+
+    let mut ordered = Vec::with_capacity(addrs.len());
+    let mut v6_iter = ipv6.into_iter();
+    let mut v4_iter = ipv4.into_iter();
+
+    // Interleave addresses: IPv6 first, then alternate
+    while ordered.len() < addrs.len() {
+        if let Some(addr) = v6_iter.next() {
+            ordered.push(addr);
+        }
+        if let Some(addr) = v4_iter.next() {
+            ordered.push(addr);
+        }
+    }
+    ordered
 }
 
 // ============================================================================
@@ -402,8 +447,6 @@ where
 // ============================================================================
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
-use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
 
 /// Open a QUIC bidirectional stream with retry and exponential backoff.
@@ -529,15 +572,28 @@ pub async fn forward_udp_to_stream(
     }
 }
 
-/// Read from quinn stream, forward to UDP target, and send responses back (sender mode)
+/// Read from quinn stream, forward to UDP target, and send responses back (sender mode).
+///
+/// Supports multiple target addresses with fallback:
+/// - Addresses are tried in Happy Eyeballs order (IPv6 first)
+/// - On send error, falls back to the next address
+/// - Aggregates errors if all addresses fail
 pub async fn forward_stream_to_udp_sender(
     mut recv_stream: quinn::RecvStream,
     mut send_stream: quinn::SendStream,
     udp_socket: Arc<UdpSocket>,
-    target_addr: SocketAddr,
+    target_addrs: Arc<Vec<SocketAddr>>,
 ) -> Result<()> {
-    let udp_clone = udp_socket.clone();
+    if target_addrs.is_empty() {
+        anyhow::bail!("No target addresses provided for UDP forwarding");
+    }
 
+    // Order addresses for connection attempts
+    let ordered_addrs = order_udp_addresses(&target_addrs);
+    let current_addr_idx = std::sync::atomic::AtomicUsize::new(0);
+    let current_addr_idx = Arc::new(current_addr_idx);
+
+    let udp_clone = udp_socket.clone();
     let response_task = tokio::spawn(async move {
         let mut buf = vec![0u8; 65535];
         while let Ok((len, _addr)) = udp_clone.recv_from(&mut buf).await {
@@ -552,6 +608,11 @@ pub async fn forward_stream_to_udp_sender(
         }
     });
 
+    // Track errors for each address for aggregate reporting
+    let mut errors: Vec<(SocketAddr, std::io::Error)> = Vec::new();
+    let mut active_addr_idx = 0;
+    let mut logged_active = false;
+
     loop {
         let mut len_buf = [0u8; 2];
         if recv_stream.read_exact(&mut len_buf).await.is_err() {
@@ -565,12 +626,55 @@ pub async fn forward_stream_to_udp_sender(
             .await
             .context("Failed to read frame payload")?;
 
-        udp_socket
-            .send_to(&buf, target_addr)
-            .await
-            .context("Failed to send UDP packet")?;
+        // Try to send to current address, falling back on error
+        let mut sent = false;
+        while active_addr_idx < ordered_addrs.len() {
+            let target_addr = ordered_addrs[active_addr_idx];
 
-        log::debug!("<- Forwarded {} bytes to {}", len, target_addr);
+            match udp_socket.send_to(&buf, target_addr).await {
+                Ok(_) => {
+                    if !logged_active {
+                        if active_addr_idx > 0 {
+                            log::info!(
+                                "UDP fallback: using {} after {} failed address(es)",
+                                target_addr,
+                                active_addr_idx
+                            );
+                        }
+                        // Update shared index for any monitoring
+                        current_addr_idx.store(active_addr_idx, std::sync::atomic::Ordering::Relaxed);
+                        logged_active = true;
+                    }
+                    log::debug!("<- Forwarded {} bytes to {}", len, target_addr);
+                    sent = true;
+                    break;
+                }
+                Err(e) => {
+                    log::warn!("UDP send to {} failed: {}", target_addr, e);
+                    errors.push((target_addr, e));
+                    active_addr_idx += 1;
+                    logged_active = false; // Re-log when we switch addresses
+                }
+            }
+        }
+
+        if !sent {
+            // All addresses failed
+            response_task.abort();
+            if errors.len() == 1 {
+                let (addr, e) = errors.remove(0);
+                anyhow::bail!("Failed to send UDP packet to {}: {}", addr, e);
+            } else {
+                let error_details: Vec<String> = errors
+                    .iter()
+                    .map(|(addr, e)| format!("{}: {}", addr, e))
+                    .collect();
+                anyhow::bail!(
+                    "Failed to send UDP packet to any address:\n  {}",
+                    error_details.join("\n  ")
+                );
+            }
+        }
     }
 
     response_task.abort();
