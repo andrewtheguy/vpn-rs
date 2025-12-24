@@ -330,7 +330,7 @@ async fn handle_nostr_session_impl(
     max_wait_secs: u64,
 ) -> Result<()> {
     let session_id = request.session_id.clone();
-    let short_id = short_session_id(&session_id);
+    let short_id = short_session_id(&session_id).to_string();
 
     // source is required - receiver must specify which source to connect to
     let requested_source = request.source.as_ref().ok_or_else(|| {
@@ -408,7 +408,7 @@ async fn handle_nostr_tcp_session_impl(
     max_wait_secs: u64,
 ) -> Result<()> {
     let session_id = request.session_id.clone();
-    let short_id = short_session_id(&session_id);
+    let short_id = short_session_id(&session_id).to_string();
     log::info!("[{}] Starting TCP session...", short_id);
 
     // Source is required - already validated by handle_nostr_session_impl
@@ -555,7 +555,7 @@ async fn handle_nostr_udp_session_impl(
     max_wait_secs: u64,
 ) -> Result<()> {
     let session_id = request.session_id.clone();
-    let short_id = short_session_id(&session_id);
+    let short_id = short_session_id(&session_id).to_string();
     log::info!("[{}] Starting UDP session...", short_id);
 
     // Source is required - already validated by handle_nostr_session_impl
@@ -899,6 +899,7 @@ pub async fn run_nostr_tcp_receiver(
         .await?;
 
     // Spawn the ICE keeper to handle STUN packets in the background
+    let mut ice_disconnect_rx = ice_conn.disconnect_rx.clone();
     let ice_keeper_handle = tokio::spawn(ice_conn.ice_keeper.run());
 
     let endpoint = quic::make_client_endpoint(ice_conn.socket, &offer.quic_fingerprint)?;
