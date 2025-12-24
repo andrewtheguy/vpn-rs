@@ -1,12 +1,17 @@
 [package]
 name = "tunnel-rs"
-version = "0.1.21"
+version = "0.1.22"
 edition = "2021"
 description = "TCP/UDP port forwarding through iroh P2P connections"
 
+[features]
+default = []
+# Enable --relay-only CLI flag for testing. Requires iroh's test-utils feature.
+# Build with: cargo build --features test-utils
+test-utils = ["iroh/test-utils"]
 
 [dependencies]
-iroh = { version = "0.95.1", features = ["discovery-local-network", "test-utils"] }
+iroh = { version = "0.95.1", features = ["discovery-local-network"] }
 tokio = { version = "1", features = ["full"] }
 clap = { version = "4", features = ["derive"] }
 anyhow = "1"

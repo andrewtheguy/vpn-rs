@@ -278,7 +278,9 @@ enum ServerMode {
         #[arg(long = "relay-url")]
         relay_urls: Vec<String>,
 
-        /// Force all connections through the relay server (disables direct P2P)
+        /// Force all connections through the relay server (disables direct P2P).
+        /// Only available with the 'test-utils' feature: cargo build --features test-utils
+        #[cfg(feature = "test-utils")]
         #[arg(long)]
         relay_only: bool,
 
@@ -400,7 +402,9 @@ enum ClientMode {
         #[arg(long = "relay-url")]
         relay_urls: Vec<String>,
 
-        /// Force all connections through the relay server (disables direct P2P)
+        /// Force all connections through the relay server (disables direct P2P).
+        /// Only available with the 'test-utils' feature: cargo build --features test-utils
+        #[cfg(feature = "test-utils")]
         #[arg(long)]
         relay_only: bool,
 
@@ -568,9 +572,9 @@ async fn main() -> Result<()> {
             match effective_mode {
                 "iroh" => {
                     let iroh_cfg = cfg.iroh();
-                    // Override with CLI values if provided
-                    let (allowed_tcp, allowed_udp, max_sessions, secret, secret_file, relay_urls, relay_only, dns_server) = match &mode {
-                        Some(ServerMode::Iroh { allowed_tcp: at, allowed_udp: au, max_sessions: ms, secret: se, secret_file: sf, relay_urls: r, relay_only: ro, dns_server: d }) => {
+                    // Extract common fields (relay_only is CLI-only, requires test-utils feature)
+                    let (allowed_tcp, allowed_udp, max_sessions, secret, secret_file, relay_urls, dns_server) = match &mode {
+                        Some(ServerMode::Iroh { allowed_tcp: at, allowed_udp: au, max_sessions: ms, secret: se, secret_file: sf, relay_urls: r, dns_server: d, .. }) => {
                             let cfg_allowed = iroh_cfg.and_then(|c| c.allowed_sources.clone()).unwrap_or_default();
                             let cfg_secret = iroh_cfg.and_then(|c| c.secret.clone());
                             let cfg_secret_file = iroh_cfg.and_then(|c| c.secret_file.clone());
@@ -586,7 +590,6 @@ async fn main() -> Result<()> {
                                 secret,
                                 secret_file,
                                 if r.is_empty() { iroh_cfg.and_then(|c| c.relay_urls.clone()).unwrap_or_default() } else { r.clone() },
-                                *ro || iroh_cfg.and_then(|c| c.relay_only).unwrap_or(false),
                                 d.clone().or_else(|| iroh_cfg.and_then(|c| c.dns_server.clone())),
                             )
                         }
@@ -599,11 +602,18 @@ async fn main() -> Result<()> {
                                 iroh_cfg.and_then(|c| c.secret.clone()),
                                 iroh_cfg.and_then(|c| c.secret_file.clone()),
                                 iroh_cfg.and_then(|c| c.relay_urls.clone()).unwrap_or_default(),
-                                iroh_cfg.and_then(|c| c.relay_only).unwrap_or(false),
                                 iroh_cfg.and_then(|c| c.dns_server.clone()),
                             )
                         },
                     };
+                    // relay_only: CLI-only, requires test-utils feature
+                    #[cfg(feature = "test-utils")]
+                    let relay_only = match &mode {
+                        Some(ServerMode::Iroh { relay_only, .. }) => *relay_only,
+                        _ => false,
+                    };
+                    #[cfg(not(feature = "test-utils"))]
+                    let relay_only = false;
 
                     let secret = resolve_iroh_secret(secret, secret_file)?;
 
@@ -762,13 +772,13 @@ async fn main() -> Result<()> {
                 "iroh" => {
                     let iroh_cfg = cfg.iroh();
                     // Override with CLI values if provided
-                    let (node_id, source, target, relay_urls, relay_only, dns_server) = match &mode {
-                        Some(ClientMode::Iroh { node_id: n, source: src, target: t, relay_urls: r, relay_only: ro, dns_server: d }) => (
+                    // Note: relay_only is CLI-only (not in config), requires test-utils feature
+                    let (node_id, source, target, relay_urls, dns_server) = match &mode {
+                        Some(ClientMode::Iroh { node_id: n, source: src, target: t, relay_urls: r, dns_server: d, .. }) => (
                             n.clone().or_else(|| iroh_cfg.and_then(|c| c.node_id.clone())),
                             normalize_optional_endpoint(src.clone()).or_else(|| iroh_cfg.and_then(|c| c.request_source.clone())),
                             t.clone().or_else(|| iroh_cfg.and_then(|c| c.target.clone())),
                             if r.is_empty() { iroh_cfg.and_then(|c| c.relay_urls.clone()).unwrap_or_default() } else { r.clone() },
-                            *ro || iroh_cfg.and_then(|c| c.relay_only).unwrap_or(false),
                             d.clone().or_else(|| iroh_cfg.and_then(|c| c.dns_server.clone())),
                         ),
                         _ => (
@@ -776,10 +786,17 @@ async fn main() -> Result<()> {
                             iroh_cfg.and_then(|c| c.request_source.clone()),
                             iroh_cfg.and_then(|c| c.target.clone()),
                             iroh_cfg.and_then(|c| c.relay_urls.clone()).unwrap_or_default(),
-                            iroh_cfg.and_then(|c| c.relay_only).unwrap_or(false),
                             iroh_cfg.and_then(|c| c.dns_server.clone()),
                         ),
                     };
+                    // relay_only: CLI-only, requires test-utils feature
+                    #[cfg(feature = "test-utils")]
+                    let relay_only = match &mode {
+                        Some(ClientMode::Iroh { relay_only, .. }) => *relay_only,
+                        _ => false,
+                    };
+                    #[cfg(not(feature = "test-utils"))]
+                    let relay_only = false;
 
                     let node_id = node_id.context(
                         "node_id is required. Provide via --node-id or in config file.",

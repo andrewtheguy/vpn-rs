@@ -55,7 +55,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Build Release
-        run: cargo build --release --all-features --target ${{ matrix.target }}
+        run: cargo build --release --target ${{ matrix.target }}
 
       - name: Rename Binary
         run: mv target/${{ matrix.target }}/release/tunnel-rs target/release/tunnel-rs-${{ matrix.suffix }}
@@ -100,7 +100,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Build Release
-        run: cargo build --release --all-features --target ${{ matrix.target }}
+        run: cargo build --release --target ${{ matrix.target }}
 
       - name: Rename Binary (Unix)
         if: runner.os != 'Windows'
