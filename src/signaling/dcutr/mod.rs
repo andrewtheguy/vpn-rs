@@ -20,11 +20,13 @@
 //!
 //! - `sync_connect` - Coordinated hole punch timing with peer addresses and start time
 
+pub mod client;
 pub mod framing;
 pub mod protocol;
 pub mod server;
 
 // Re-export commonly used types
+pub use client::DCUtRSignaling;
 pub use framing::{read_message, write_message};
 pub use protocol::{
     ConnectRequestParams, ConnectRequestResult, ConnectResultParams, JsonRpcError,

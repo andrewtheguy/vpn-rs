@@ -492,6 +492,37 @@ enum ClientMode {
         #[arg(long, default_value = "120")]
         max_wait: u64,
     },
+    /// Full ICE with DCUtR signaling server (coordinated NAT hole punching)
+    #[command(name = "dcutr")]
+    DCUtR {
+        /// Local address to listen on (e.g., 127.0.0.1:2222)
+        #[arg(short, long)]
+        target: Option<String>,
+
+        /// Source address to request from peer (tcp://host:port or udp://host:port)
+        #[arg(short, long)]
+        source: Option<String>,
+
+        /// DCUtR signaling server address (host:port)
+        #[arg(long)]
+        signaling_server: Option<String>,
+
+        /// Target peer ID to connect to
+        #[arg(long)]
+        peer_id: Option<String>,
+
+        /// Our client ID (auto-generated if not specified)
+        #[arg(long)]
+        client_id: Option<String>,
+
+        /// STUN server (repeatable). Uses default servers if not specified.
+        #[arg(long = "stun-server")]
+        stun_servers: Vec<String>,
+
+        /// Disable STUN (no external infrastructure)
+        #[arg(long)]
+        no_stun: bool,
+    },
 }
 
 /// Load server config based on flags. Returns (config, was_loaded_from_file).
@@ -751,6 +782,7 @@ async fn main() -> Result<()> {
                     ClientMode::IrohManual { .. } => "iroh-manual",
                     ClientMode::CustomManual { .. } => "custom-manual",
                     ClientMode::Nostr { .. } => "nostr",
+                    ClientMode::DCUtR { .. } => "dcutr",
                 }),
                 (None, Some(m)) => Some(m.as_str()),
                 (None, None) => None,
@@ -942,7 +974,42 @@ async fn main() -> Result<()> {
                         nostr::run_nostr_tcp_client(listen, source, stun_servers, nsec, peer_npub, relays, republish_interval, max_wait).await
                     }
                 }
-                _ => anyhow::bail!("Invalid mode '{}'. Use: iroh, iroh-manual, custom-manual, or nostr", effective_mode),
+                "dcutr" => {
+                    let (target, source, signaling_server, peer_id, client_id, stun_servers) = match &mode {
+                        Some(ClientMode::DCUtR { target: t, source: src, signaling_server: ss, peer_id: pi, client_id: ci, stun_servers: stun, no_stun }) => (
+                            t.clone(),
+                            normalize_optional_endpoint(src.clone()),
+                            ss.clone(),
+                            pi.clone(),
+                            ci.clone(),
+                            resolve_stun_servers(stun, None, *no_stun)?,
+                        ),
+                        _ => (None, None, None, None, None, default_stun_servers()),
+                    };
+
+                    let target = target.context(
+                        "--target is required for dcutr client mode. Specify the local address to listen on (e.g., --target 127.0.0.1:2222)",
+                    )?;
+                    let source = source.context(
+                        "--source is required for dcutr client mode. Specify the source to request (e.g., --source tcp://127.0.0.1:22)",
+                    )?;
+                    let signaling_server = signaling_server.context(
+                        "--signaling-server is required for dcutr mode. Specify the signaling server address (e.g., --signaling-server 1.2.3.4:9999)",
+                    )?;
+                    let peer_id = peer_id.context(
+                        "--peer-id is required for dcutr mode. Specify the target peer ID to connect to.",
+                    )?;
+
+                    // Validate source format early
+                    let (protocol, _) = parse_endpoint(&source)
+                        .with_context(|| format!("Invalid source '{}'. Expected format: tcp://host:port or udp://host:port", source))?;
+
+                    match protocol {
+                        Protocol::Tcp => custom::run_dcutr_tcp_client(target, source, signaling_server, peer_id, client_id, stun_servers).await,
+                        Protocol::Udp => custom::run_dcutr_udp_client(target, source, signaling_server, peer_id, client_id, stun_servers).await,
+                    }
+                }
+                _ => anyhow::bail!("Invalid mode '{}'. Use: iroh, iroh-manual, custom-manual, nostr, or dcutr", effective_mode),
             }
         }
         Command::GenerateIrohKey { output, force } => secret::generate_secret(output, force),
