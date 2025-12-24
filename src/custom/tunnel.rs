@@ -18,9 +18,9 @@ use crate::signaling::{
 use crate::transport::ice::{IceEndpoint, IceRole};
 use crate::transport::quic;
 use crate::tunnel_common::{
-    forward_stream_to_udp_receiver, forward_stream_to_udp_sender, forward_udp_to_stream,
-    handle_tcp_receiver_connection, handle_tcp_sender_stream, is_source_allowed,
-    open_bi_with_retry, resolve_all_target_addrs, QUIC_CONNECTION_TIMEOUT,
+    extract_addr_from_source, forward_stream_to_udp_receiver, forward_stream_to_udp_sender,
+    forward_udp_to_stream, handle_tcp_receiver_connection, handle_tcp_sender_stream,
+    is_source_allowed, open_bi_with_retry, resolve_all_target_addrs, QUIC_CONNECTION_TIMEOUT,
 };
 
 // ============================================================================
@@ -76,9 +76,13 @@ pub async fn run_manual_sender(
         );
     }
 
+    // Extract address from source URL (strip tcp:// or udp:// prefix)
+    let addr_str = extract_addr_from_source(source)
+        .context("Failed to parse source URL")?;
+
     // Resolve target addresses
     let target_addrs = Arc::new(
-        resolve_all_target_addrs(source)
+        resolve_all_target_addrs(&addr_str)
             .await
             .with_context(|| format!("Invalid source address '{}'", source))?,
     );
