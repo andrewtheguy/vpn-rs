@@ -379,9 +379,9 @@ pub async fn run_manual_udp_sender(target: String, stun_servers: Vec<String>) ->
             .context("Failed to bind UDP socket")?,
     );
 
-    tokio::select! {
+    let forward_res = tokio::select! {
         result = forward_stream_to_udp_sender(recv_stream, send_stream, udp_socket, target_addr) => {
-            result?;
+            result
         }
         result = ice_disconnect_rx.changed() => {
             match result {
@@ -394,8 +394,9 @@ pub async fn run_manual_udp_sender(target: String, stun_servers: Vec<String>) ->
                     log::warn!("ICE disconnect watcher closed; ending session.");
                 }
             }
+            Ok(())
         }
-    }
+    };
 
     conn.close(0u32.into(), b"done");
     log::info!("Connection closed.");
@@ -408,7 +409,7 @@ pub async fn run_manual_udp_sender(target: String, stun_servers: Vec<String>) ->
         Err(e) => log::warn!("ICE keeper task failed: {}", e),
     }
 
-    Ok(())
+    forward_res
 }
 
 pub async fn run_manual_udp_receiver(listen: String, stun_servers: Vec<String>) -> Result<()> {
@@ -491,16 +492,18 @@ pub async fn run_manual_udp_receiver(listen: String, stun_servers: Vec<String>) 
     // Use select! for UDP: forward_udp_to_stream has no exit mechanism when peer closes,
     // so we need select! to ensure prompt shutdown. UDP is inherently unreliable, so
     // losing buffered data on shutdown is acceptable.
-    tokio::select! {
+    let forward_res = tokio::select! {
         result = forward_udp_to_stream(udp_clone, send_stream, client_clone) => {
             if let Err(e) = result {
                 log::warn!("UDP to stream error: {}", e);
             }
+            result
         }
         result = forward_stream_to_udp_receiver(recv_stream, udp_socket, client_addr) => {
             if let Err(e) = result {
                 log::warn!("Stream to UDP error: {}", e);
             }
+            result
         }
         result = ice_disconnect_rx.changed() => {
             match result {
@@ -513,6 +516,7 @@ pub async fn run_manual_udp_receiver(listen: String, stun_servers: Vec<String>) 
                     log::warn!("ICE disconnect watcher closed; shutting down receiver.");
                 }
             }
+            Ok(())
         }
     }
 
@@ -527,5 +531,5 @@ pub async fn run_manual_udp_receiver(listen: String, stun_servers: Vec<String>) 
         Err(e) => log::warn!("ICE keeper task failed: {}", e),
     }
 
-    Ok(())
+    forward_res
 }
