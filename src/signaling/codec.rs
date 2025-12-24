@@ -14,6 +14,8 @@ use serde::{Deserialize, Serialize};
 pub const MANUAL_SIGNAL_VERSION: u16 = 1;
 /// Version 2: Iroh manual mode
 pub const IROH_SIGNAL_VERSION: u16 = 2;
+/// Version 1: Iroh multi-source handshake protocol
+pub const IROH_MULTI_VERSION: u16 = 1;
 
 pub(crate) const PREFIX: &str = "TRS";
 pub(crate) const LINE_WIDTH: usize = 76;
@@ -129,6 +131,58 @@ pub struct IrohManualAnswer {
     pub node_id: String,
     /// Direct socket addresses (from STUN/local interfaces)
     pub direct_addresses: Vec<String>,
+}
+
+// ============================================================================
+// Iroh Multi-Source Handshake Protocol
+// ============================================================================
+
+/// Source request sent by receiver after iroh connection established.
+/// Used in iroh multi-source mode to request a specific forwarding target.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SourceRequest {
+    pub version: u16,
+    /// Requested source endpoint (e.g., "tcp://127.0.0.1:22" or "udp://127.0.0.1:53")
+    pub source: String,
+}
+
+impl SourceRequest {
+    pub fn new(source: String) -> Self {
+        Self {
+            version: IROH_MULTI_VERSION,
+            source,
+        }
+    }
+}
+
+/// Source response from sender to receiver.
+/// Indicates whether the requested source was accepted.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SourceResponse {
+    pub version: u16,
+    /// Whether the source request was accepted
+    pub accepted: bool,
+    /// Reason for rejection (if rejected)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+impl SourceResponse {
+    pub fn accepted() -> Self {
+        Self {
+            version: IROH_MULTI_VERSION,
+            accepted: true,
+            reason: None,
+        }
+    }
+
+    pub fn rejected(reason: impl Into<String>) -> Self {
+        Self {
+            version: IROH_MULTI_VERSION,
+            accepted: false,
+            reason: Some(reason.into()),
+        }
+    }
 }
 
 // ============================================================================
@@ -262,4 +316,117 @@ pub(crate) fn wrap_lines(s: &str, width: usize) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+// ============================================================================
+// Stream-based Encoding/Decoding for Iroh Multi-Source
+// ============================================================================
+
+/// Maximum size for source request/response messages (16KB)
+pub const MAX_SOURCE_MESSAGE_SIZE: usize = 16 * 1024;
+
+/// Encode a SourceRequest as length-prefixed JSON bytes.
+pub fn encode_source_request(req: &SourceRequest) -> Result<Vec<u8>> {
+    let json = serde_json::to_vec(req).context("Failed to serialize SourceRequest")?;
+    if json.len() > MAX_SOURCE_MESSAGE_SIZE {
+        anyhow::bail!("SourceRequest too large: {} bytes", json.len());
+    }
+    let len = (json.len() as u32).to_be_bytes();
+    let mut buf = Vec::with_capacity(4 + json.len());
+    buf.extend_from_slice(&len);
+    buf.extend_from_slice(&json);
+    Ok(buf)
+}
+
+/// Decode a SourceRequest from length-prefixed JSON bytes.
+pub fn decode_source_request(data: &[u8]) -> Result<SourceRequest> {
+    if data.len() < 4 {
+        anyhow::bail!("SourceRequest too short: {} bytes", data.len());
+    }
+    let len = u32::from_be_bytes([data[0], data[1], data[2], data[3]]) as usize;
+    if len > MAX_SOURCE_MESSAGE_SIZE {
+        anyhow::bail!("SourceRequest length too large: {} bytes", len);
+    }
+    if data.len() < 4 + len {
+        anyhow::bail!(
+            "SourceRequest incomplete: expected {} bytes, got {}",
+            4 + len,
+            data.len()
+        );
+    }
+    let req: SourceRequest =
+        serde_json::from_slice(&data[4..4 + len]).context("Invalid SourceRequest JSON")?;
+    if req.version != IROH_MULTI_VERSION {
+        anyhow::bail!(
+            "SourceRequest version mismatch: expected {}, got {}",
+            IROH_MULTI_VERSION,
+            req.version
+        );
+    }
+    Ok(req)
+}
+
+/// Encode a SourceResponse as length-prefixed JSON bytes.
+pub fn encode_source_response(resp: &SourceResponse) -> Result<Vec<u8>> {
+    let json = serde_json::to_vec(resp).context("Failed to serialize SourceResponse")?;
+    if json.len() > MAX_SOURCE_MESSAGE_SIZE {
+        anyhow::bail!("SourceResponse too large: {} bytes", json.len());
+    }
+    let len = (json.len() as u32).to_be_bytes();
+    let mut buf = Vec::with_capacity(4 + json.len());
+    buf.extend_from_slice(&len);
+    buf.extend_from_slice(&json);
+    Ok(buf)
+}
+
+/// Decode a SourceResponse from length-prefixed JSON bytes.
+pub fn decode_source_response(data: &[u8]) -> Result<SourceResponse> {
+    if data.len() < 4 {
+        anyhow::bail!("SourceResponse too short: {} bytes", data.len());
+    }
+    let len = u32::from_be_bytes([data[0], data[1], data[2], data[3]]) as usize;
+    if len > MAX_SOURCE_MESSAGE_SIZE {
+        anyhow::bail!("SourceResponse length too large: {} bytes", len);
+    }
+    if data.len() < 4 + len {
+        anyhow::bail!(
+            "SourceResponse incomplete: expected {} bytes, got {}",
+            4 + len,
+            data.len()
+        );
+    }
+    let resp: SourceResponse =
+        serde_json::from_slice(&data[4..4 + len]).context("Invalid SourceResponse JSON")?;
+    if resp.version != IROH_MULTI_VERSION {
+        anyhow::bail!(
+            "SourceResponse version mismatch: expected {}, got {}",
+            IROH_MULTI_VERSION,
+            resp.version
+        );
+    }
+    Ok(resp)
+}
+
+/// Read a length-prefixed message from a stream.
+/// Returns the raw bytes including the length prefix.
+pub async fn read_length_prefixed<R: tokio::io::AsyncReadExt + Unpin>(
+    reader: &mut R,
+) -> Result<Vec<u8>> {
+    let mut len_buf = [0u8; 4];
+    reader
+        .read_exact(&mut len_buf)
+        .await
+        .context("Failed to read message length")?;
+    let len = u32::from_be_bytes(len_buf) as usize;
+    if len > MAX_SOURCE_MESSAGE_SIZE {
+        anyhow::bail!("Message length too large: {} bytes", len);
+    }
+    let mut buf = Vec::with_capacity(4 + len);
+    buf.extend_from_slice(&len_buf);
+    buf.resize(4 + len, 0);
+    reader
+        .read_exact(&mut buf[4..])
+        .await
+        .context("Failed to read message body")?;
+    Ok(buf)
 }

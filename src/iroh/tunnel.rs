@@ -1,7 +1,7 @@
 //! Iroh-based tunnel implementations.
 //!
 //! This module provides tunnel implementations using the Iroh networking stack:
-//! - **iroh-default**: Fully automated with Iroh relays and discovery
+//! - **iroh**: Multi-source mode with Iroh relays and discovery (receiver requests source)
 //! - **iroh-manual**: Manual signaling with direct STUN/local addresses (no relay)
 
 use anyhow::{Context, Result};
@@ -17,99 +17,331 @@ use tokio::task::JoinSet;
 
 use crate::iroh::endpoint::{
     connect_to_sender, create_receiver_endpoint, create_sender_endpoint, print_connection_type,
-    validate_relay_only, TCP_ALPN, UDP_ALPN,
+    validate_relay_only, MULTI_ALPN, TCP_ALPN, UDP_ALPN,
 };
 use crate::signaling::{
-    display_iroh_answer, display_iroh_offer, read_iroh_answer_from_stdin, read_iroh_offer_from_stdin,
-    IrohManualAnswer, IrohManualOffer, IROH_SIGNAL_VERSION,
+    decode_source_request, decode_source_response, display_iroh_answer, display_iroh_offer,
+    encode_source_request, encode_source_response, read_iroh_answer_from_stdin,
+    read_iroh_offer_from_stdin, read_length_prefixed, IrohManualAnswer, IrohManualOffer,
+    SourceRequest, SourceResponse, IROH_SIGNAL_VERSION,
 };
 use crate::tunnel_common::{
-    copy_stream, resolve_stun_addrs, resolve_target_addr, retry_with_backoff,
+    copy_stream, extract_addr_from_source, is_source_allowed, resolve_all_target_addrs,
+    resolve_stun_addrs, resolve_target_addr, retry_with_backoff, validate_allowed_networks,
     STREAM_OPEN_BASE_DELAY_MS, STREAM_OPEN_MAX_ATTEMPTS,
 };
 
+
+async fn handle_tcp_sender_stream(
+    send_stream: iroh::endpoint::SendStream,
+    recv_stream: iroh::endpoint::RecvStream,
+    target_addr: SocketAddr,
+) -> Result<()> {
+    let tcp_stream = TcpStream::connect(target_addr)
+        .await
+        .context("Failed to connect to target TCP service")?;
+
+    log::info!("-> Connected to target {}", target_addr);
+
+    bridge_streams(recv_stream, send_stream, tcp_stream).await?;
+
+    log::info!("<- TCP connection to {} closed", target_addr);
+    Ok(())
+}
+
+async fn handle_tcp_receiver_connection(
+    conn: Arc<iroh::endpoint::Connection>,
+    tcp_stream: TcpStream,
+    peer_addr: SocketAddr,
+    tunnel_established: Arc<AtomicBool>,
+) -> Result<()> {
+    let (send_stream, recv_stream) = open_bi_with_retry(&conn).await?;
+
+    // Print success message only on first successful stream
+    if !tunnel_established.swap(true, Ordering::Relaxed) {
+        log::info!("Tunnel to sender established!");
+    }
+    log::info!("-> Opened tunnel for {}", peer_addr);
+
+    bridge_streams(recv_stream, send_stream, tcp_stream).await?;
+
+    log::info!("<- Connection from {} closed", peer_addr);
+    Ok(())
+}
+
 // ============================================================================
-// Iroh-Default Mode: UDP Tunnel
+// Iroh Multi-Source Mode
 // ============================================================================
 
-pub async fn run_udp_sender(
-    target: String,
+/// Default maximum concurrent sessions for multi-source mode.
+const DEFAULT_MAX_SESSIONS: usize = 100;
+
+/// Run iroh multi-source sender.
+///
+/// This mode allows receivers to request specific sources (tcp://host:port or udp://host:port).
+/// The sender validates requests against allowed_tcp and allowed_udp CIDR lists.
+pub async fn run_multi_source_sender(
+    allowed_tcp: Vec<String>,
+    allowed_udp: Vec<String>,
+    max_sessions: Option<usize>,
     secret: Option<SecretKey>,
     relay_urls: Vec<String>,
     relay_only: bool,
     dns_server: Option<String>,
 ) -> Result<()> {
-    validate_relay_only(relay_only, &relay_urls)?;
+    // Validate CIDR notation at startup
+    validate_allowed_networks(&allowed_tcp, "--allowed-tcp")?;
+    validate_allowed_networks(&allowed_udp, "--allowed-udp")?;
 
-    let target_addr = resolve_target_addr(&target)
-        .await
-        .with_context(|| format!("Invalid target address or hostname '{}'", target))?;
-
-    log::info!("UDP Tunnel - Sender Mode");
-    log::info!("========================");
-    log::info!("Creating iroh endpoint...");
-
-    let endpoint =
-        create_sender_endpoint(&relay_urls, relay_only, secret, dns_server.as_deref(), UDP_ALPN)
-            .await?;
-
-    let endpoint_id = endpoint.id();
-    let target_port = target_addr.port();
-    log::info!("\nEndpointId: {}", endpoint_id);
-    log::info!("\nOn the receiver side, run:");
-    log::info!(
-        "  tunnel-rs receiver --node-id {} --target udp://0.0.0.0:{}\n",
-        endpoint_id, target_port
-    );
-    log::info!("Waiting for receiver to connect...");
-
-    let conn = endpoint
-        .accept()
-        .await
-        .context("No incoming connection")?
-        .await
-        .context("Failed to accept connection")?;
-
-    let remote_id = conn.remote_id();
-    log::info!("Receiver connected from: {}", remote_id);
-
-    let (send_stream, recv_stream) = conn
-        .accept_bi()
-        .await
-        .context("Failed to accept stream from receiver")?;
-
-    log::info!("Forwarding UDP traffic to {}", target_addr);
-
-    // Bind to the same address family as the target
-    let bind_addr: SocketAddr = if target_addr.is_ipv6() {
-        "[::]:0".parse().unwrap()
-    } else {
-        "0.0.0.0:0".parse().unwrap()
-    };
-    let udp_socket = Arc::new(
-        UdpSocket::bind(bind_addr)
-            .await
-            .context("Failed to bind UDP socket")?,
-    );
-
-    tokio::select! {
-        result = forward_stream_to_udp_sender(recv_stream, send_stream, udp_socket, target_addr) => {
-            result?;
-        }
-        error = conn.closed() => {
-            log::warn!("QUIC connection closed: {}", error);
-        }
+    if allowed_tcp.is_empty() && allowed_udp.is_empty() {
+        anyhow::bail!(
+            "At least one --allowed-tcp or --allowed-udp network must be specified.\n\
+            Example: --allowed-tcp 127.0.0.0/8 --allowed-udp 10.0.0.0/8"
+        );
     }
 
-    conn.close(0u32.into(), b"done");
+    validate_relay_only(relay_only, &relay_urls)?;
+
+    log::info!("Multi-Source Tunnel - Sender Mode");
+    log::info!("==================================");
+    log::info!("Creating iroh endpoint...");
+
+    let endpoint = create_sender_endpoint(
+        &relay_urls,
+        relay_only,
+        secret,
+        dns_server.as_deref(),
+        MULTI_ALPN,
+    )
+    .await?;
+
+    let endpoint_id = endpoint.id();
+    let max_sessions = max_sessions.unwrap_or(DEFAULT_MAX_SESSIONS);
+
+    log::info!("\nEndpointId: {}", endpoint_id);
+    log::info!("Allowed TCP networks: {:?}", allowed_tcp);
+    log::info!("Allowed UDP networks: {:?}", allowed_udp);
+    log::info!("Max concurrent sessions: {}", max_sessions);
+    log::info!("\nOn the receiver side, run:");
+    log::info!(
+        "  tunnel-rs receiver iroh --node-id {} --source tcp://target:port --listen 127.0.0.1:port\n",
+        endpoint_id
+    );
+    log::info!("Waiting for receivers to connect...");
+
+    // Session management with semaphore for concurrency limit
+    let session_semaphore = Arc::new(tokio::sync::Semaphore::new(max_sessions));
+    let mut connection_tasks: JoinSet<()> = JoinSet::new();
+
+    loop {
+        // Clean up completed tasks
+        while connection_tasks.try_join_next().is_some() {}
+
+        let incoming = match endpoint.accept().await {
+            Some(incoming) => incoming,
+            None => {
+                log::info!("Endpoint closed");
+                break;
+            }
+        };
+
+        let conn = match incoming.await {
+            Ok(conn) => conn,
+            Err(e) => {
+                log::warn!("Failed to accept connection: {}", e);
+                continue;
+            }
+        };
+
+        let remote_id = conn.remote_id();
+        log::info!("Receiver connected from: {}", remote_id);
+
+        // Clone for the spawned task
+        let allowed_tcp = allowed_tcp.clone();
+        let allowed_udp = allowed_udp.clone();
+        let semaphore = session_semaphore.clone();
+
+        connection_tasks.spawn(async move {
+            if let Err(e) =
+                handle_multi_source_connection(conn, allowed_tcp, allowed_udp, semaphore).await
+            {
+                log::warn!("Connection error for {}: {}", remote_id, e);
+            }
+        });
+    }
+
+    // Wait for remaining tasks to complete
+    connection_tasks.shutdown().await;
     endpoint.close().await;
-    log::info!("Connection closed.");
+    log::info!("Multi-source sender stopped.");
 
     Ok(())
 }
 
-pub async fn run_udp_receiver(
+/// Handle a single multi-source connection.
+/// Each bidirectional stream from the receiver is a separate source request.
+async fn handle_multi_source_connection(
+    conn: iroh::endpoint::Connection,
+    allowed_tcp: Vec<String>,
+    allowed_udp: Vec<String>,
+    semaphore: Arc<tokio::sync::Semaphore>,
+) -> Result<()> {
+    let remote_id = conn.remote_id();
+    let mut stream_tasks: JoinSet<()> = JoinSet::new();
+
+    loop {
+        tokio::select! {
+            accept_result = conn.accept_bi() => {
+                let (send_stream, recv_stream) = match accept_result {
+                    Ok(streams) => streams,
+                    Err(e) => {
+                        log::info!("Receiver {} disconnected: {}", remote_id, e);
+                        break;
+                    }
+                };
+
+                // Try to acquire a session permit
+                let permit = match semaphore.clone().try_acquire_owned() {
+                    Ok(permit) => permit,
+                    Err(_) => {
+                        log::warn!("Session limit reached, rejecting stream from {}", remote_id);
+                        // Send rejection and close stream
+                        let response = SourceResponse::rejected("Session limit reached");
+                        if let Ok(encoded) = encode_source_response(&response) {
+                            let mut send = send_stream;
+                            let _ = send.write_all(&encoded).await;
+                            let _ = send.finish();
+                        }
+                        continue;
+                    }
+                };
+
+                let allowed_tcp = allowed_tcp.clone();
+                let allowed_udp = allowed_udp.clone();
+
+                stream_tasks.spawn(async move {
+                    let _permit = permit; // Hold permit until task completes
+                    if let Err(e) = handle_multi_source_stream(
+                        send_stream,
+                        recv_stream,
+                        allowed_tcp,
+                        allowed_udp,
+                    ).await {
+                        log::warn!("Stream error: {}", e);
+                    }
+                });
+            }
+            error = conn.closed() => {
+                log::info!("Receiver {} disconnected: {}", remote_id, error);
+                break;
+            }
+        }
+
+        // Clean up completed stream tasks
+        while stream_tasks.try_join_next().is_some() {}
+    }
+
+    // Wait for remaining stream tasks
+    stream_tasks.shutdown().await;
+    conn.close(0u32.into(), b"done");
+    log::info!("Connection from {} closed", remote_id);
+
+    Ok(())
+}
+
+/// Handle a single stream within a multi-source connection.
+/// Reads SourceRequest, validates, sends SourceResponse, then forwards traffic.
+async fn handle_multi_source_stream(
+    mut send_stream: iroh::endpoint::SendStream,
+    mut recv_stream: iroh::endpoint::RecvStream,
+    allowed_tcp: Vec<String>,
+    allowed_udp: Vec<String>,
+) -> Result<()> {
+    // Read the source request
+    let request_bytes = read_length_prefixed(&mut recv_stream)
+        .await
+        .context("Failed to read source request")?;
+    let request = decode_source_request(&request_bytes).context("Invalid source request")?;
+
+    log::info!("Source request: {}", request.source);
+
+    // Determine protocol and validate
+    let is_tcp = request.source.starts_with("tcp://");
+    let is_udp = request.source.starts_with("udp://");
+
+    if !is_tcp && !is_udp {
+        let response = SourceResponse::rejected("Invalid protocol (must be tcp:// or udp://)");
+        let encoded = encode_source_response(&response)?;
+        send_stream.write_all(&encoded).await?;
+        send_stream.finish()?;
+        anyhow::bail!("Invalid protocol in source request: {}", request.source);
+    }
+
+    // Validate against allowed networks
+    let allowed_networks = if is_tcp { &allowed_tcp } else { &allowed_udp };
+    let is_allowed = is_source_allowed(&request.source, allowed_networks).await;
+
+    if !is_allowed {
+        let response = SourceResponse::rejected("Source not in allowed networks");
+        let encoded = encode_source_response(&response)?;
+        send_stream.write_all(&encoded).await?;
+        send_stream.finish()?;
+        anyhow::bail!("Source not allowed: {}", request.source);
+    }
+
+    // Extract target address
+    let target_addr = extract_addr_from_source(&request.source)
+        .ok_or_else(|| anyhow::anyhow!("Invalid source URL format: {}", request.source))?;
+
+    // Send acceptance response
+    let response = SourceResponse::accepted();
+    let encoded = encode_source_response(&response)?;
+    send_stream.write_all(&encoded).await?;
+
+    log::info!("Accepted source request, forwarding to {}", target_addr);
+
+    // Route to appropriate handler based on protocol
+    if is_tcp {
+        // Resolve and connect to TCP target
+        let target_addrs = resolve_all_target_addrs(&target_addr).await?;
+        let tcp_stream = crate::tunnel_common::try_connect_tcp(&target_addrs)
+            .await
+            .context("Failed to connect to target TCP service")?;
+
+        log::info!("-> Connected to TCP target {}", target_addr);
+        bridge_streams(recv_stream, send_stream, tcp_stream).await?;
+        log::info!("<- TCP connection to {} closed", target_addr);
+    } else {
+        // UDP forwarding
+        let target_addr = resolve_target_addr(&target_addr).await?;
+
+        // Bind UDP socket matching target address family
+        let bind_addr: SocketAddr = if target_addr.is_ipv6() {
+            "[::]:0".parse().unwrap()
+        } else {
+            "0.0.0.0:0".parse().unwrap()
+        };
+        let udp_socket = Arc::new(
+            UdpSocket::bind(bind_addr)
+                .await
+                .context("Failed to bind UDP socket")?,
+        );
+
+        log::info!("-> Forwarding UDP to {}", target_addr);
+        forward_stream_to_udp_sender(recv_stream, send_stream, udp_socket, target_addr).await?;
+        log::info!("<- UDP forwarding to {} closed", target_addr);
+    }
+
+    Ok(())
+}
+
+/// Run iroh multi-source receiver.
+///
+/// Connects to a sender and requests a specific source (tcp://host:port or udp://host:port).
+/// The sender validates the request and either accepts or rejects it.
+pub async fn run_multi_source_receiver(
     node_id: String,
+    source: String,
     listen: String,
     relay_urls: Vec<String>,
     relay_only: bool,
@@ -117,26 +349,186 @@ pub async fn run_udp_receiver(
 ) -> Result<()> {
     validate_relay_only(relay_only, &relay_urls)?;
 
+    // Validate source format
+    let is_tcp = source.starts_with("tcp://");
+    let is_udp = source.starts_with("udp://");
+    if !is_tcp && !is_udp {
+        anyhow::bail!(
+            "Source must start with tcp:// or udp:// (got: {})",
+            source
+        );
+    }
+
     let listen_addr: SocketAddr = listen.parse().context(
-        "Invalid listen address format. Use format like 127.0.0.1:51820 or [::]:51820",
+        "Invalid listen address format. Use format like 127.0.0.1:2222 or [::]:2222",
     )?;
 
     let sender_id: EndpointId = node_id
         .parse()
         .context("Invalid EndpointId format. Should be a 52-character base32 string.")?;
 
-    log::info!("UDP Tunnel - Receiver Mode");
-    log::info!("==========================");
+    log::info!("Multi-Source Tunnel - Receiver Mode");
+    log::info!("====================================");
+    log::info!("Requesting source: {}", source);
     log::info!("Creating iroh endpoint...");
 
     let endpoint = create_receiver_endpoint(&relay_urls, relay_only, dns_server.as_deref()).await?;
 
-    let conn = connect_to_sender(&endpoint, sender_id, &relay_urls, relay_only, UDP_ALPN).await?;
+    let conn = connect_to_sender(&endpoint, sender_id, &relay_urls, relay_only, MULTI_ALPN).await?;
 
     log::info!("Connected to sender!");
     print_connection_type(&endpoint, conn.remote_id());
 
-    let (send_stream, recv_stream) = open_bi_with_retry(&conn).await?;
+    let conn = Arc::new(conn);
+    let tunnel_established = Arc::new(AtomicBool::new(false));
+
+    if is_tcp {
+        run_multi_source_tcp_receiver(conn, source, listen_addr, tunnel_established).await?;
+    } else {
+        run_multi_source_udp_receiver(conn, source, listen_addr).await?;
+    }
+
+    endpoint.close().await;
+    log::info!("Multi-source receiver stopped.");
+
+    Ok(())
+}
+
+/// Run TCP receiver for multi-source mode.
+/// Opens streams for each local connection and sends source requests.
+async fn run_multi_source_tcp_receiver(
+    conn: Arc<iroh::endpoint::Connection>,
+    source: String,
+    listen_addr: SocketAddr,
+    tunnel_established: Arc<AtomicBool>,
+) -> Result<()> {
+    let listener = TcpListener::bind(listen_addr)
+        .await
+        .context("Failed to bind TCP listener")?;
+    log::info!(
+        "Listening on TCP {} - configure your client to connect here",
+        listen_addr
+    );
+
+    let mut connection_tasks: JoinSet<()> = JoinSet::new();
+
+    loop {
+        tokio::select! {
+            accept_result = listener.accept() => {
+                let (tcp_stream, peer_addr) = match accept_result {
+                    Ok(result) => result,
+                    Err(e) => {
+                        log::warn!("Failed to accept TCP connection: {}", e);
+                        continue;
+                    }
+                };
+
+                log::info!("New local connection from {}", peer_addr);
+
+                let conn_clone = conn.clone();
+                let source_clone = source.clone();
+                let established = tunnel_established.clone();
+
+                connection_tasks.spawn(async move {
+                    match handle_multi_source_tcp_receiver_connection(
+                        conn_clone,
+                        tcp_stream,
+                        peer_addr,
+                        source_clone,
+                        established,
+                    ).await {
+                        Ok(()) => {}
+                        Err(e) => {
+                            log::warn!("TCP tunnel error for {}: {}", peer_addr, e);
+                        }
+                    }
+                });
+            }
+            error = conn.closed() => {
+                log::info!("QUIC connection closed: {}", error);
+                break;
+            }
+        }
+
+        // Clean up completed tasks
+        while let Some(result) = connection_tasks.try_join_next() {
+            if let Err(e) = result {
+                log::error!("Connection task panicked: {}", e);
+            }
+        }
+    }
+
+    connection_tasks.shutdown().await;
+    conn.close(0u32.into(), b"done");
+    log::info!("TCP receiver stopped.");
+
+    Ok(())
+}
+
+/// Handle a single TCP connection in multi-source receiver mode.
+async fn handle_multi_source_tcp_receiver_connection(
+    conn: Arc<iroh::endpoint::Connection>,
+    tcp_stream: TcpStream,
+    peer_addr: SocketAddr,
+    source: String,
+    tunnel_established: Arc<AtomicBool>,
+) -> Result<()> {
+    let (mut send_stream, mut recv_stream) = open_bi_with_retry(&conn).await?;
+
+    // Send source request
+    let request = SourceRequest::new(source.clone());
+    let encoded = encode_source_request(&request)?;
+    send_stream.write_all(&encoded).await?;
+
+    // Read response
+    let response_bytes = read_length_prefixed(&mut recv_stream)
+        .await
+        .context("Failed to read source response")?;
+    let response = decode_source_response(&response_bytes).context("Invalid source response")?;
+
+    if !response.accepted {
+        let reason = response.reason.unwrap_or_else(|| "Unknown".to_string());
+        anyhow::bail!("Source request rejected: {}", reason);
+    }
+
+    // Print success message only on first successful stream
+    if !tunnel_established.swap(true, Ordering::Relaxed) {
+        log::info!("Tunnel to sender established! Source: {}", source);
+    }
+    log::info!("-> Opened tunnel for {}", peer_addr);
+
+    bridge_streams(recv_stream, send_stream, tcp_stream).await?;
+
+    log::info!("<- Connection from {} closed", peer_addr);
+    Ok(())
+}
+
+/// Run UDP receiver for multi-source mode.
+/// Opens a single stream and sends source request, then forwards UDP traffic.
+async fn run_multi_source_udp_receiver(
+    conn: Arc<iroh::endpoint::Connection>,
+    source: String,
+    listen_addr: SocketAddr,
+) -> Result<()> {
+    let (mut send_stream, mut recv_stream) = open_bi_with_retry(&conn).await?;
+
+    // Send source request
+    let request = SourceRequest::new(source.clone());
+    let encoded = encode_source_request(&request)?;
+    send_stream.write_all(&encoded).await?;
+
+    // Read response
+    let response_bytes = read_length_prefixed(&mut recv_stream)
+        .await
+        .context("Failed to read source response")?;
+    let response = decode_source_response(&response_bytes).context("Invalid source response")?;
+
+    if !response.accepted {
+        let reason = response.reason.unwrap_or_else(|| "Unknown".to_string());
+        anyhow::bail!("Source request rejected: {}", reason);
+    }
+
+    log::info!("Tunnel established! Source: {}", source);
 
     let udp_socket = Arc::new(
         UdpSocket::bind(listen_addr)
@@ -170,234 +562,8 @@ pub async fn run_udp_receiver(
     }
 
     conn.close(0u32.into(), b"done");
-    endpoint.close().await;
-    log::info!("Connection closed.");
+    log::info!("UDP receiver stopped.");
 
-    Ok(())
-}
-
-// ============================================================================
-// Iroh-Default Mode: TCP Tunnel
-// ============================================================================
-
-pub async fn run_tcp_sender(
-    target: String,
-    secret: Option<SecretKey>,
-    relay_urls: Vec<String>,
-    relay_only: bool,
-    dns_server: Option<String>,
-) -> Result<()> {
-    validate_relay_only(relay_only, &relay_urls)?;
-
-    let target_addr = resolve_target_addr(&target)
-        .await
-        .with_context(|| format!("Invalid target address or hostname '{}'", target))?;
-
-    log::info!("TCP Tunnel - Sender Mode");
-    log::info!("========================");
-    log::info!("Creating iroh endpoint...");
-
-    let endpoint =
-        create_sender_endpoint(&relay_urls, relay_only, secret, dns_server.as_deref(), TCP_ALPN)
-            .await?;
-
-    let endpoint_id = endpoint.id();
-    let target_port = target_addr.port();
-    log::info!("\nEndpointId: {}", endpoint_id);
-    log::info!("\nOn the receiver side, run:");
-    log::info!(
-        "  tunnel-rs receiver --node-id {} --target tcp://127.0.0.1:{}\n",
-        endpoint_id, target_port
-    );
-    log::info!("Waiting for receiver to connect...");
-
-    loop {
-        let conn = match endpoint.accept().await {
-            Some(incoming) => match incoming.await {
-                Ok(conn) => conn,
-                Err(e) => {
-                    log::warn!("Failed to accept connection: {}", e);
-                    continue;
-                }
-            },
-            None => {
-                log::info!("Endpoint closed");
-                break;
-            }
-        };
-
-        let remote_id = conn.remote_id();
-        log::info!("Receiver connected from: {}", remote_id);
-        log::info!("Forwarding TCP connections to {}", target_addr);
-
-        let target = target_addr;
-        tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    accept_result = conn.accept_bi() => {
-                        let (send_stream, recv_stream) = match accept_result {
-                            Ok(streams) => streams,
-                            Err(e) => {
-                                log::info!("Receiver disconnected: {}", e);
-                                break;
-                            }
-                        };
-
-                        log::info!("New TCP connection request received");
-
-                        tokio::spawn(async move {
-                            if let Err(e) = handle_tcp_sender_stream(send_stream, recv_stream, target).await
-                            {
-                                log::warn!("TCP connection error: {}", e);
-                            }
-                        });
-                    }
-                    error = conn.closed() => {
-                        log::info!("Receiver disconnected: {}", error);
-                        break;
-                    }
-                }
-            }
-
-            conn.close(0u32.into(), b"done");
-            log::info!("Receiver connection closed.");
-        });
-
-        log::info!("Waiting for next receiver to connect...");
-    }
-
-    endpoint.close().await;
-    Ok(())
-}
-
-async fn handle_tcp_sender_stream(
-    send_stream: iroh::endpoint::SendStream,
-    recv_stream: iroh::endpoint::RecvStream,
-    target_addr: SocketAddr,
-) -> Result<()> {
-    let tcp_stream = TcpStream::connect(target_addr)
-        .await
-        .context("Failed to connect to target TCP service")?;
-
-    log::info!("-> Connected to target {}", target_addr);
-
-    bridge_streams(recv_stream, send_stream, tcp_stream).await?;
-
-    log::info!("<- TCP connection to {} closed", target_addr);
-    Ok(())
-}
-
-pub async fn run_tcp_receiver(
-    node_id: String,
-    listen: String,
-    relay_urls: Vec<String>,
-    relay_only: bool,
-    dns_server: Option<String>,
-) -> Result<()> {
-    validate_relay_only(relay_only, &relay_urls)?;
-
-    let listen_addr: SocketAddr = listen
-        .parse()
-        .context("Invalid listen address format. Use format like 127.0.0.1:2222 or [::]:2222")?;
-
-    let sender_id: EndpointId = node_id
-        .parse()
-        .context("Invalid EndpointId format. Should be a 52-character base32 string.")?;
-
-    log::info!("TCP Tunnel - Receiver Mode");
-    log::info!("==========================");
-    log::info!("Creating iroh endpoint...");
-
-    let endpoint = create_receiver_endpoint(&relay_urls, relay_only, dns_server.as_deref()).await?;
-
-    let conn = connect_to_sender(&endpoint, sender_id, &relay_urls, relay_only, TCP_ALPN).await?;
-
-    print_connection_type(&endpoint, conn.remote_id());
-
-    let conn = Arc::new(conn);
-    let tunnel_established = Arc::new(AtomicBool::new(false));
-
-    let listener = TcpListener::bind(listen_addr)
-        .await
-        .context("Failed to bind TCP listener")?;
-    log::info!(
-        "Listening on TCP {} - configure your client to connect here",
-        listen_addr
-    );
-
-    let mut connection_tasks: JoinSet<()> = JoinSet::new();
-
-    loop {
-        tokio::select! {
-            accept_result = listener.accept() => {
-                let (tcp_stream, peer_addr) = match accept_result {
-                    Ok(result) => result,
-                    Err(e) => {
-                        log::warn!("Failed to accept TCP connection: {}", e);
-                        continue;
-                    }
-                };
-
-                log::info!("New local connection from {}", peer_addr);
-
-                let conn_clone = conn.clone();
-                let established = tunnel_established.clone();
-
-                connection_tasks.spawn(async move {
-                    match handle_tcp_receiver_connection(conn_clone, tcp_stream, peer_addr, established)
-                        .await
-                    {
-                        Ok(()) => {}
-                        Err(e) => {
-                            log::warn!("TCP tunnel error for {}: {}", peer_addr, e);
-                        }
-                    }
-                });
-            }
-            error = conn.closed() => {
-                log::info!("QUIC connection closed: {}", error);
-                break;
-            }
-        }
-
-        // Clean up completed tasks and log any panics
-        while let Some(result) = connection_tasks.try_join_next() {
-            if let Err(e) = result {
-                log::error!("Connection task panicked: {}", e);
-            }
-        }
-    }
-
-    // Abort remaining connection tasks
-    let remaining = connection_tasks.len();
-    if remaining > 0 {
-        log::debug!("Aborting {} remaining connection tasks", remaining);
-    }
-    connection_tasks.shutdown().await;
-
-    conn.close(0u32.into(), b"done");
-    endpoint.close().await;
-    log::info!("TCP receiver stopped.");
-    Ok(())
-}
-
-async fn handle_tcp_receiver_connection(
-    conn: Arc<iroh::endpoint::Connection>,
-    tcp_stream: TcpStream,
-    peer_addr: SocketAddr,
-    tunnel_established: Arc<AtomicBool>,
-) -> Result<()> {
-    let (send_stream, recv_stream) = open_bi_with_retry(&conn).await?;
-
-    // Print success message only on first successful stream
-    if !tunnel_established.swap(true, Ordering::Relaxed) {
-        log::info!("Tunnel to sender established!");
-    }
-    log::info!("-> Opened tunnel for {}", peer_addr);
-
-    bridge_streams(recv_stream, send_stream, tcp_stream).await?;
-
-    log::info!("<- Connection from {} closed", peer_addr);
     Ok(())
 }
 

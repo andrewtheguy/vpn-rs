@@ -3,7 +3,7 @@
 //! Configuration structure:
 //! - `role` and `mode` fields for validation
 //! - Shared options at top level (source/target)
-//! - Mode-specific sections: [iroh-default], [iroh-manual], [custom], [nostr]
+//! - Mode-specific sections: [iroh], [iroh-manual], [custom-manual], [nostr]
 //!
 //! Role-based field semantics are enforced by `validate()` at parse time:
 //! - Sender-only fields are rejected when role=receiver
@@ -18,9 +18,13 @@ use std::path::{Path, PathBuf};
 // Configuration Structures
 // ============================================================================
 
-/// iroh-default mode configuration.
+/// iroh mode configuration (multi-source).
+///
+/// Some fields are role-specific (enforced by validate()):
+/// - Sender-only: `allowed_sources`, `max_sessions`, `secret`, `secret_file`
+/// - Receiver-only: `request_source`, `listen`, `node_id`
 #[derive(Deserialize, Default, Clone)]
-pub struct IrohDefaultConfig {
+pub struct IrohConfig {
     /// Path to secret key file for persistent identity (sender only)
     pub secret_file: Option<PathBuf>,
     /// Base64-encoded secret key for persistent identity (sender only).
@@ -32,6 +36,18 @@ pub struct IrohDefaultConfig {
     pub dns_server: Option<String>,
     /// NodeId of the sender to connect to (receiver only)
     pub node_id: Option<String>,
+    /// Allowed source networks in CIDR notation (sender only).
+    /// Receivers must request sources within these networks.
+    pub allowed_sources: Option<AllowedSources>,
+    /// Maximum concurrent sessions (sender only, default: 100)
+    pub max_sessions: Option<usize>,
+    /// Source URL to request from sender (receiver only).
+    /// Format: tcp://host:port or udp://host:port
+    #[serde(alias = "source")]
+    pub request_source: Option<String>,
+    /// Local address to listen on (receiver only).
+    /// Format: host:port
+    pub listen: Option<String>,
 }
 
 /// iroh-manual mode configuration.
@@ -40,9 +56,9 @@ pub struct IrohManualConfig {
     pub stun_servers: Option<Vec<String>>,
 }
 
-/// custom mode configuration.
+/// custom-manual mode configuration.
 #[derive(Deserialize, Default, Clone)]
-pub struct CustomConfig {
+pub struct CustomManualConfig {
     pub stun_servers: Option<Vec<String>>,
 }
 
@@ -97,11 +113,11 @@ pub struct SenderConfig {
     pub source: Option<String>,
 
     // Mode-specific sections
-    #[serde(rename = "iroh-default")]
-    pub iroh_default: Option<IrohDefaultConfig>,
+    pub iroh: Option<IrohConfig>,
     #[serde(rename = "iroh-manual")]
     pub iroh_manual: Option<IrohManualConfig>,
-    pub custom: Option<CustomConfig>,
+    #[serde(rename = "custom-manual")]
+    pub custom_manual: Option<CustomManualConfig>,
     pub nostr: Option<NostrConfig>,
 }
 
@@ -116,11 +132,11 @@ pub struct ReceiverConfig {
     pub target: Option<String>,
 
     // Mode-specific sections
-    #[serde(rename = "iroh-default")]
-    pub iroh_default: Option<IrohDefaultConfig>,
+    pub iroh: Option<IrohConfig>,
     #[serde(rename = "iroh-manual")]
     pub iroh_manual: Option<IrohManualConfig>,
-    pub custom: Option<CustomConfig>,
+    #[serde(rename = "custom-manual")]
+    pub custom_manual: Option<CustomManualConfig>,
     pub nostr: Option<NostrConfig>,
 }
 
@@ -172,19 +188,19 @@ fn validate_allowed_sources(allowed: &AllowedSources) -> Result<()> {
 // ============================================================================
 
 impl SenderConfig {
-    /// Get iroh-default config section.
-    pub fn iroh_default(&self) -> Option<&IrohDefaultConfig> {
-        self.iroh_default.as_ref()
+    /// Get iroh config section (multi-source mode).
+    pub fn iroh(&self) -> Option<&IrohConfig> {
+        self.iroh.as_ref()
     }
 
-    /// Get iroh-manual config section.
+    /// Get iroh-manual config section (single-target mode).
     pub fn iroh_manual(&self) -> Option<&IrohManualConfig> {
         self.iroh_manual.as_ref()
     }
 
-    /// Get custom config section.
-    pub fn custom(&self) -> Option<&CustomConfig> {
-        self.custom.as_ref()
+    /// Get custom-manual config section (single-target mode).
+    pub fn custom_manual(&self) -> Option<&CustomManualConfig> {
+        self.custom_manual.as_ref()
     }
 
     /// Get nostr config section.
@@ -197,9 +213,9 @@ impl SenderConfig {
     /// Enforces:
     /// - Role must be "sender"
     /// - Mode must match expected_mode
-    /// - Nostr mode: rejects receiver-only fields (request_source)
-    /// - Nostr mode: validates CIDR format in allowed_sources
-    /// - Non-nostr modes: validates source URL format if present
+    /// - Multi-source modes (iroh, nostr): rejects receiver-only fields (request_source)
+    /// - Multi-source modes: validates CIDR format in allowed_sources
+    /// - Single-target modes: validates source URL format if present
     pub fn validate(&self, expected_mode: &str) -> Result<()> {
         let role = self.role.as_deref().context(
             "Config file missing required 'role' field. Add: role = \"sender\"",
@@ -212,7 +228,7 @@ impl SenderConfig {
         }
 
         let mode = self.mode.as_deref().context(
-            "Config file missing required 'mode' field. Add: mode = \"iroh-default\" (or iroh-manual, custom, nostr)",
+            "Config file missing required 'mode' field. Add: mode = \"iroh\" (or iroh-manual, custom-manual, nostr)",
         )?;
         if mode != expected_mode {
             anyhow::bail!(
@@ -224,18 +240,41 @@ impl SenderConfig {
 
         // Validate mode is known
         match expected_mode {
-            "iroh-default" | "iroh-manual" | "custom" | "nostr" => {}
-            _ => anyhow::bail!("Unknown mode '{}'. Valid modes: iroh-default, iroh-manual, custom, nostr", expected_mode),
+            "iroh" | "iroh-manual" | "custom-manual" | "nostr" => {}
+            _ => anyhow::bail!("Unknown mode '{}'. Valid modes: iroh, iroh-manual, custom-manual, nostr", expected_mode),
         }
 
         // Mode-specific validation
-        if expected_mode == "iroh-default" {
-            if let Some(ref iroh) = self.iroh_default {
+        if expected_mode == "iroh" {
+            if let Some(ref iroh) = self.iroh {
                 if iroh.secret.is_some() && iroh.secret_file.is_some() {
                     anyhow::bail!(
-                        "[iroh-default] Use only one of 'secret' or 'secret_file'."
+                        "[iroh] Use only one of 'secret' or 'secret_file'."
                     );
                 }
+                // Reject receiver-only fields
+                if iroh.request_source.is_some() || iroh.listen.is_some() {
+                    anyhow::bail!(
+                        "[iroh] 'source' / 'request_source' / 'listen' are receiver-only fields. \
+                        Senders use 'allowed_sources' to restrict what receivers can request."
+                    );
+                }
+                if iroh.node_id.is_some() {
+                    anyhow::bail!(
+                        "[iroh] 'node_id' is a receiver-only field."
+                    );
+                }
+                // Validate CIDR format
+                if let Some(ref allowed) = iroh.allowed_sources {
+                    validate_allowed_sources(allowed)?;
+                }
+            }
+            // Sender iroh mode should not have top-level source
+            if self.source.is_some() {
+                anyhow::bail!(
+                    "Top-level 'source' is not allowed for iroh sender mode. \
+                    Use [iroh.allowed_sources] to restrict what receivers can request."
+                );
             }
         }
         if expected_mode == "nostr" {
@@ -262,8 +301,8 @@ impl SenderConfig {
                     Use [nostr.allowed_sources] to restrict what receivers can request."
                 );
             }
-        } else {
-            // Non-nostr modes: validate source URL format if present
+        } else if expected_mode == "iroh-manual" || expected_mode == "custom-manual" {
+            // Single-target modes: validate source URL format if present
             if let Some(ref source) = self.source {
                 validate_tcp_udp_url(source, "source")?;
             }
@@ -274,19 +313,19 @@ impl SenderConfig {
 }
 
 impl ReceiverConfig {
-    /// Get iroh-default config section.
-    pub fn iroh_default(&self) -> Option<&IrohDefaultConfig> {
-        self.iroh_default.as_ref()
+    /// Get iroh config section (multi-source mode).
+    pub fn iroh(&self) -> Option<&IrohConfig> {
+        self.iroh.as_ref()
     }
 
-    /// Get iroh-manual config section.
+    /// Get iroh-manual config section (single-target mode).
     pub fn iroh_manual(&self) -> Option<&IrohManualConfig> {
         self.iroh_manual.as_ref()
     }
 
-    /// Get custom config section.
-    pub fn custom(&self) -> Option<&CustomConfig> {
-        self.custom.as_ref()
+    /// Get custom-manual config section (single-target mode).
+    pub fn custom_manual(&self) -> Option<&CustomManualConfig> {
+        self.custom_manual.as_ref()
     }
 
     /// Get nostr config section.
@@ -299,9 +338,9 @@ impl ReceiverConfig {
     /// Enforces:
     /// - Role must be "receiver"
     /// - Mode must match expected_mode
-    /// - Nostr mode: rejects sender-only fields (allowed_sources, max_sessions)
-    /// - Nostr mode: validates request_source URL format if present
-    /// - Non-nostr modes: validates target URL format if present
+    /// - Multi-source modes (iroh, nostr): rejects sender-only fields (allowed_sources, max_sessions)
+    /// - Multi-source modes: validates request_source URL format if present
+    /// - Single-target modes: validates target URL format if present
     pub fn validate(&self, expected_mode: &str) -> Result<()> {
         let role = self.role.as_deref().context(
             "Config file missing required 'role' field. Add: role = \"receiver\"",
@@ -314,7 +353,7 @@ impl ReceiverConfig {
         }
 
         let mode = self.mode.as_deref().context(
-            "Config file missing required 'mode' field. Add: mode = \"iroh-default\" (or iroh-manual, custom, nostr)",
+            "Config file missing required 'mode' field. Add: mode = \"iroh\" (or iroh-manual, custom-manual, nostr)",
         )?;
         if mode != expected_mode {
             anyhow::bail!(
@@ -326,17 +365,33 @@ impl ReceiverConfig {
 
         // Validate mode is known
         match expected_mode {
-            "iroh-default" | "iroh-manual" | "custom" | "nostr" => {}
-            _ => anyhow::bail!("Unknown mode '{}'. Valid modes: iroh-default, iroh-manual, custom, nostr", expected_mode),
+            "iroh" | "iroh-manual" | "custom-manual" | "nostr" => {}
+            _ => anyhow::bail!("Unknown mode '{}'. Valid modes: iroh, iroh-manual, custom-manual, nostr", expected_mode),
         }
 
         // Mode-specific validation
-        if expected_mode == "iroh-default" {
-            if let Some(ref iroh) = self.iroh_default {
+        if expected_mode == "iroh" {
+            if let Some(ref iroh) = self.iroh {
                 if iroh.secret.is_some() || iroh.secret_file.is_some() {
                     anyhow::bail!(
-                        "[iroh-default] 'secret' and 'secret_file' are sender-only fields."
+                        "[iroh] 'secret' and 'secret_file' are sender-only fields."
                     );
+                }
+                // Reject sender-only fields
+                if iroh.allowed_sources.is_some() {
+                    anyhow::bail!(
+                        "[iroh] 'allowed_sources' is a sender-only field. \
+                        Receivers use 'source' to specify what to request from sender."
+                    );
+                }
+                if iroh.max_sessions.is_some() {
+                    anyhow::bail!(
+                        "[iroh] 'max_sessions' is a sender-only field."
+                    );
+                }
+                // Validate request_source URL format
+                if let Some(ref source) = iroh.request_source {
+                    validate_tcp_udp_url(source, "request_source")?;
                 }
             }
         }
@@ -364,9 +419,11 @@ impl ReceiverConfig {
             }
         }
 
-        // Validate target URL format if present
-        if let Some(ref target) = self.target {
-            validate_tcp_udp_url(target, "target")?;
+        // Validate target URL format if present (for single-target modes)
+        if expected_mode == "iroh-manual" || expected_mode == "custom-manual" {
+            if let Some(ref target) = self.target {
+                validate_tcp_udp_url(target, "target")?;
+            }
         }
 
         Ok(())
