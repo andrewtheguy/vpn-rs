@@ -111,6 +111,8 @@ graph LR
 
 ## Mode Comparison
 
+> **Tip for Containerized Environments:** Use `iroh-default` mode for Docker, Kubernetes, and cloud VM deployments. It includes relay fallback which ensures connectivity even when both peers are behind restrictive NATs (common in cloud environments). The `nostr`, `custom`, and `iroh-manual` modes use STUN-only NAT traversal which may fail in these environments.
+
 ### Feature Matrix
 
 ```mermaid
@@ -872,6 +874,8 @@ graph TB
 ## Nostr Mode
 
 Nostr mode combines the full ICE implementation from custom mode with automated signaling via Nostr relays. Instead of manual copy-paste, ICE credentials are exchanged through Nostr events using static keypairs.
+
+> **Note for Containerized Environments:** Like custom mode, nostr mode uses STUN-only NAT traversal without relay fallback. If both peers are behind restrictive NATs (common in Docker, Kubernetes, or cloud VMs), ICE connectivity may fail. For containerized deployments, consider using `iroh-default` mode which includes automatic relay fallback.
 
 ### Receiver-Initiated Dynamic Source
 

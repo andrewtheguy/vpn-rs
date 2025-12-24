@@ -2,6 +2,9 @@
 
 Example configurations for running tunnel-rs in Docker and Kubernetes.
 
+> [!TIP]
+> **Recommended Mode for Containers:** Use `iroh-default` mode for Docker and Kubernetes deployments. It includes relay fallback which ensures connectivity even when both peers are behind restrictive NATs (common in cloud environments). The `nostr` mode uses STUN-only NAT traversal which may fail in containerized environments.
+
 ## Mode Comparison
 
 | Mode | Multi-Session | Dynamic Source | Use Case |
