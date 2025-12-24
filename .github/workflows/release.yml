@@ -147,7 +147,9 @@ jobs:
           path: .
 
       - name: Prepare binary
-        run: mv tunnel-rs-${{ matrix.suffix }} tunnel-rs
+        run: |
+          mv tunnel-rs-${{ matrix.suffix }} tunnel-rs
+          chmod +x tunnel-rs
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
