@@ -500,21 +500,39 @@ async fn handle_nostr_tcp_session_impl(
     );
 
     loop {
-        let (send_stream, recv_stream) = match conn.accept_bi().await {
-            Ok(streams) => streams,
-            Err(e) => {
-                log::info!("[{}] Session ended: {}", short_id, e);
-                break;
-            }
-        };
+        tokio::select! {
+            accept_result = conn.accept_bi() => {
+                let (send_stream, recv_stream) = match accept_result {
+                    Ok(streams) => streams,
+                    Err(e) => {
+                        log::info!("[{}] Session ended: {}", short_id, e);
+                        break;
+                    }
+                };
 
-        let target = Arc::clone(&target_addrs);
-        let sid = short_id.to_string();
-        tokio::spawn(async move {
-            if let Err(e) = handle_tcp_sender_stream(send_stream, recv_stream, target).await {
-                log::warn!("[{}] TCP connection error: {}", sid, e);
+                let target = Arc::clone(&target_addrs);
+                let sid = short_id.to_string();
+                tokio::spawn(async move {
+                    if let Err(e) = handle_tcp_sender_stream(send_stream, recv_stream, target).await {
+                        log::warn!("[{}] TCP connection error: {}", sid, e);
+                    }
+                });
             }
-        });
+            result = ice_disconnect_rx.changed() => {
+                match result {
+                    Ok(()) => {
+                        if *ice_disconnect_rx.borrow() {
+                            log::warn!("[{}] ICE disconnected; ending session.", short_id);
+                            break;
+                        }
+                    }
+                    Err(_) => {
+                        log::warn!("[{}] ICE disconnect watcher closed; ending session.", short_id);
+                        break;
+                    }
+                }
+            }
+        }
     }
 
     // Clean up the ICE keeper task

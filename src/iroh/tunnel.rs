@@ -92,7 +92,14 @@ pub async fn run_udp_sender(
             .context("Failed to bind UDP socket")?,
     );
 
-    forward_stream_to_udp_sender(recv_stream, send_stream, udp_socket, target_addr).await?;
+    tokio::select! {
+        result = forward_stream_to_udp_sender(recv_stream, send_stream, udp_socket, target_addr) => {
+            result?;
+        }
+        error = conn.closed() => {
+            log::warn!("QUIC connection closed: {}", error);
+        }
+    }
 
     conn.close(0u32.into(), b"done");
     endpoint.close().await;
@@ -156,6 +163,9 @@ pub async fn run_udp_receiver(
             if let Err(e) = result {
                 log::warn!("Stream to UDP error: {}", e);
             }
+        }
+        error = conn.closed() => {
+            log::warn!("QUIC connection closed: {}", error);
         }
     }
 
@@ -223,22 +233,30 @@ pub async fn run_tcp_sender(
         let target = target_addr;
         tokio::spawn(async move {
             loop {
-                let (send_stream, recv_stream) = match conn.accept_bi().await {
-                    Ok(streams) => streams,
-                    Err(e) => {
-                        log::info!("Receiver disconnected: {}", e);
+                tokio::select! {
+                    accept_result = conn.accept_bi() => {
+                        let (send_stream, recv_stream) = match accept_result {
+                            Ok(streams) => streams,
+                            Err(e) => {
+                                log::info!("Receiver disconnected: {}", e);
+                                break;
+                            }
+                        };
+
+                        log::info!("New TCP connection request received");
+
+                        tokio::spawn(async move {
+                            if let Err(e) = handle_tcp_sender_stream(send_stream, recv_stream, target).await
+                            {
+                                log::warn!("TCP connection error: {}", e);
+                            }
+                        });
+                    }
+                    error = conn.closed() => {
+                        log::info!("Receiver disconnected: {}", error);
                         break;
                     }
-                };
-
-                log::info!("New TCP connection request received");
-
-                tokio::spawn(async move {
-                    if let Err(e) = handle_tcp_sender_stream(send_stream, recv_stream, target).await
-                    {
-                        log::warn!("TCP connection error: {}", e);
-                    }
-                });
+                }
             }
 
             conn.close(0u32.into(), b"done");
@@ -408,20 +426,28 @@ pub async fn run_iroh_manual_tcp_sender(target: String, stun_servers: Vec<String
     log::info!("Forwarding TCP connections to {}", target_addr);
 
     loop {
-        let (send_stream, recv_stream) = match conn.accept_bi().await {
-            Ok(streams) => streams,
-            Err(e) => {
-                log::info!("Connection ended: {}", e);
+        tokio::select! {
+            accept_result = conn.accept_bi() => {
+                let (send_stream, recv_stream) = match accept_result {
+                    Ok(streams) => streams,
+                    Err(e) => {
+                        log::info!("Connection ended: {}", e);
+                        break;
+                    }
+                };
+
+                let target = target_addr;
+                tokio::spawn(async move {
+                    if let Err(e) = handle_tcp_sender_stream(send_stream, recv_stream, target).await {
+                        log::warn!("TCP connection error: {}", e);
+                    }
+                });
+            }
+            error = conn.closed() => {
+                log::info!("Connection ended: {}", error);
                 break;
             }
-        };
-
-        let target = target_addr;
-        tokio::spawn(async move {
-            if let Err(e) = handle_tcp_sender_stream(send_stream, recv_stream, target).await {
-                log::warn!("TCP connection error: {}", e);
-            }
-        });
+        }
     }
 
     conn.close(0u32.into(), b"done");
@@ -559,7 +585,14 @@ pub async fn run_iroh_manual_udp_sender(target: String, stun_servers: Vec<String
             .context("Failed to bind UDP socket")?,
     );
 
-    forward_stream_to_udp_sender(recv_stream, send_stream, udp_socket, target_addr).await?;
+    tokio::select! {
+        result = forward_stream_to_udp_sender(recv_stream, send_stream, udp_socket, target_addr) => {
+            result?;
+        }
+        error = conn.closed() => {
+            log::warn!("QUIC connection closed: {}", error);
+        }
+    }
 
     conn.close(0u32.into(), b"done");
     endpoint.close().await;
@@ -614,6 +647,9 @@ pub async fn run_iroh_manual_udp_receiver(listen: String, stun_servers: Vec<Stri
             if let Err(e) = result {
                 log::warn!("Stream to UDP error: {}", e);
             }
+        }
+        error = conn.closed() => {
+            log::warn!("QUIC connection closed: {}", error);
         }
     }
 
