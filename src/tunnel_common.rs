@@ -292,25 +292,62 @@ pub fn validate_allowed_networks(allowed_networks: &[String], label: &str) -> Re
     Ok(())
 }
 
+/// Result of checking if a source is allowed.
+#[derive(Debug)]
+pub struct SourceCheckResult {
+    /// Whether the source is allowed
+    pub allowed: bool,
+    /// The resolved IP addresses (if any)
+    pub resolved_ips: Vec<std::net::IpAddr>,
+    /// Error message if not allowed (includes resolved IPs for debugging)
+    pub reason: Option<String>,
+}
+
+impl SourceCheckResult {
+    /// Format the rejection reason with resolved IPs for detailed error messages.
+    pub fn rejection_reason(&self, source: &str, allowed_networks: &[String]) -> String {
+        // Use the explicit reason if available (for parse/resolution errors)
+        if let Some(ref reason) = self.reason {
+            return format!("Source '{}': {}", source, reason);
+        }
+
+        if self.resolved_ips.is_empty() {
+            format!("Source '{}' could not be resolved or parsed", source)
+        } else {
+            let ips_str: Vec<String> = self.resolved_ips.iter().map(|ip| ip.to_string()).collect();
+            format!(
+                "Source '{}' (resolved to {}) not in allowed networks {:?}",
+                source,
+                ips_str.join(", "),
+                allowed_networks
+            )
+        }
+    }
+}
+
 /// Check if a source address is allowed by any network in the CIDR list.
-/// Supports both IP addresses and hostnames (resolved via DNS).
+/// Returns detailed information about the check including resolved IPs.
 ///
 /// The source format is `protocol://host:port` (e.g., `tcp://192.168.1.100:22` or `tcp://myserver.local:22`).
 /// The allowed_networks list contains CIDR notation (e.g., `192.168.0.0/16`, `::1/128`).
-///
-/// Returns true if:
-/// - allowed_networks is empty (no restrictions, caller should handle default)
-/// - The source IP (or resolved hostname IP) is contained in any of the allowed networks
-pub async fn is_source_allowed(source: &str, allowed_networks: &[String]) -> bool {
+pub async fn check_source_allowed(source: &str, allowed_networks: &[String]) -> SourceCheckResult {
     use tokio::net::lookup_host;
 
     if allowed_networks.is_empty() {
-        return true; // No restrictions
+        return SourceCheckResult {
+            allowed: true,
+            resolved_ips: vec![],
+            reason: None,
+        };
     }
 
     // Extract host from source (protocol://host:port)
     let Some(host) = extract_host_from_source(source) else {
-        return false;
+        return SourceCheckResult {
+            allowed: false,
+            resolved_ips: vec![],
+            reason: Some("Failed to parse source URL".to_string()),
+        };
     };
 
     // Collect all IPs to check (either the literal IP or all resolved addresses)
@@ -319,16 +356,30 @@ pub async fn is_source_allowed(source: &str, allowed_networks: &[String]) -> boo
         Err(_) => {
             // Not an IP - try DNS resolution
             let Some(port) = extract_port_from_source(source) else {
-                return false;
+                return SourceCheckResult {
+                    allowed: false,
+                    resolved_ips: vec![],
+                    reason: Some("Failed to parse port from source URL".to_string()),
+                };
             };
             let lookup_target = format!("{}:{}", host, port);
             let addrs = match lookup_host(&lookup_target).await {
                 Ok(addrs) => addrs,
-                Err(_) => return false,
+                Err(e) => {
+                    return SourceCheckResult {
+                        allowed: false,
+                        resolved_ips: vec![],
+                        reason: Some(format!("DNS resolution failed: {}", e)),
+                    };
+                }
             };
             let ips: Vec<_> = addrs.map(|a| a.ip()).collect();
             if ips.is_empty() {
-                return false;
+                return SourceCheckResult {
+                    allowed: false,
+                    resolved_ips: vec![],
+                    reason: Some("DNS resolution returned no addresses".to_string()),
+                };
             }
             ips
         }
@@ -341,12 +392,20 @@ pub async fn is_source_allowed(source: &str, allowed_networks: &[String]) -> boo
             // unwrap is safe: networks are validated at startup by validate_allowed_networks
             let network: ipnet::IpNet = network_str.parse().unwrap();
             if network.contains(source_ip) {
-                return true;
+                return SourceCheckResult {
+                    allowed: true,
+                    resolved_ips: source_ips,
+                    reason: None,
+                };
             }
         }
     }
 
-    false
+    SourceCheckResult {
+        allowed: false,
+        resolved_ips: source_ips,
+        reason: None,
+    }
 }
 
 // ============================================================================

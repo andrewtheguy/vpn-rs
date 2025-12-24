@@ -18,10 +18,10 @@ use crate::signaling::{
 use crate::transport::ice::{IceEndpoint, IceRole};
 use crate::transport::quic;
 use crate::tunnel_common::{
-    bind_udp_for_targets, extract_addr_from_source, forward_stream_to_udp_receiver,
-    forward_stream_to_udp_sender, forward_udp_to_stream, handle_tcp_receiver_connection,
-    handle_tcp_sender_stream, is_source_allowed, open_bi_with_retry, resolve_all_target_addrs,
-    QUIC_CONNECTION_TIMEOUT,
+    bind_udp_for_targets, check_source_allowed, extract_addr_from_source,
+    forward_stream_to_udp_receiver, forward_stream_to_udp_sender, forward_udp_to_stream,
+    handle_tcp_receiver_connection, handle_tcp_sender_stream, open_bi_with_retry,
+    resolve_all_target_addrs, QUIC_CONNECTION_TIMEOUT,
 };
 
 // ============================================================================
@@ -68,13 +68,9 @@ pub async fn run_manual_sender(
     }
 
     let allowed_networks = if is_tcp { &allowed_tcp } else { &allowed_udp };
-    if !is_source_allowed(source, allowed_networks).await {
-        anyhow::bail!(
-            "Source '{}' not in allowed networks. Sender has: --allowed-{} {:?}",
-            source,
-            if is_tcp { "tcp" } else { "udp" },
-            allowed_networks
-        );
+    let check_result = check_source_allowed(source, allowed_networks).await;
+    if !check_result.allowed {
+        anyhow::bail!("{}", check_result.rejection_reason(source, allowed_networks));
     }
 
     // Extract address from source URL (strip tcp:// or udp:// prefix)

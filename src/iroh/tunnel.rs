@@ -26,7 +26,7 @@ use crate::signaling::{
     SourceRequest, SourceResponse, IROH_SIGNAL_VERSION,
 };
 use crate::tunnel_common::{
-    bind_udp_for_targets, copy_stream, extract_addr_from_source, is_source_allowed,
+    bind_udp_for_targets, check_source_allowed, copy_stream, extract_addr_from_source,
     order_udp_addresses, resolve_all_target_addrs, resolve_stun_addrs, retry_with_backoff,
     validate_allowed_networks, STREAM_OPEN_BASE_DELAY_MS, STREAM_OPEN_MAX_ATTEMPTS,
 };
@@ -289,14 +289,15 @@ async fn handle_multi_source_stream(
 
     // Validate against allowed networks
     let allowed_networks = if is_tcp { &allowed_tcp } else { &allowed_udp };
-    let is_allowed = is_source_allowed(&request.source, allowed_networks).await;
+    let check_result = check_source_allowed(&request.source, allowed_networks).await;
 
-    if !is_allowed {
-        let response = SourceResponse::rejected("Source not in allowed networks");
+    if !check_result.allowed {
+        let reason = check_result.rejection_reason(&request.source, allowed_networks);
+        let response = SourceResponse::rejected(&reason);
         let encoded = encode_source_response(&response)?;
         send_stream.write_all(&encoded).await?;
         send_stream.finish()?;
-        anyhow::bail!("Source not allowed: {}", request.source);
+        anyhow::bail!("{}", reason);
     }
 
     // Extract target address
@@ -622,13 +623,9 @@ pub async fn run_iroh_manual_sender(
     }
 
     let allowed_networks = if is_tcp { &allowed_tcp } else { &allowed_udp };
-    if !is_source_allowed(source, allowed_networks).await {
-        anyhow::bail!(
-            "Source '{}' not in allowed networks. Sender has: --allowed-{} {:?}",
-            source,
-            if is_tcp { "tcp" } else { "udp" },
-            allowed_networks
-        );
+    let check_result = check_source_allowed(source, allowed_networks).await;
+    if !check_result.allowed {
+        anyhow::bail!("{}", check_result.rejection_reason(source, allowed_networks));
     }
 
     // Resolve target addresses (supports both IP addresses and hostnames)

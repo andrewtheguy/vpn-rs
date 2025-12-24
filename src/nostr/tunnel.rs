@@ -20,11 +20,11 @@ use crate::signaling::{
 use crate::transport::ice::{IceEndpoint, IceRole};
 use crate::transport::quic;
 use crate::tunnel_common::{
-    bind_udp_for_targets, current_timestamp, extract_addr_from_source,
+    bind_udp_for_targets, check_source_allowed, current_timestamp, extract_addr_from_source,
     forward_stream_to_udp_receiver, forward_stream_to_udp_sender, forward_udp_to_stream,
     generate_session_id, handle_tcp_receiver_connection, handle_tcp_sender_stream,
-    is_source_allowed, open_bi_with_retry, resolve_all_target_addrs, short_session_id,
-    validate_allowed_networks, MAX_REQUEST_AGE_SECS, QUIC_CONNECTION_TIMEOUT,
+    open_bi_with_retry, resolve_all_target_addrs, short_session_id, validate_allowed_networks,
+    MAX_REQUEST_AGE_SECS, QUIC_CONNECTION_TIMEOUT,
 };
 
 // ============================================================================
@@ -344,15 +344,14 @@ async fn handle_nostr_session_impl(
     match protocol {
         "tcp" => {
             // Validate against TCP allowed networks
-            if !is_source_allowed(requested_source, &allowed_tcp).await {
-                let reject = ManualReject::new(
-                    session_id.clone(),
-                    format!("TCP source '{}' not in allowed networks", requested_source),
-                );
+            let check_result = check_source_allowed(requested_source, &allowed_tcp).await;
+            if !check_result.allowed {
+                let reason = check_result.rejection_reason(requested_source, &allowed_tcp);
+                let reject = ManualReject::new(session_id.clone(), reason.clone());
                 if let Err(e) = signaling.publish_reject(&reject).await {
                     log::warn!("[{}] Failed to publish reject: {}", short_id, e);
                 }
-                anyhow::bail!("[{}] Rejected: TCP source not allowed", short_id);
+                anyhow::bail!("[{}] Rejected: {}", short_id, reason);
             }
             handle_nostr_tcp_session_impl(
                 signaling,
@@ -365,15 +364,14 @@ async fn handle_nostr_session_impl(
         }
         "udp" => {
             // Validate against UDP allowed networks
-            if !is_source_allowed(requested_source, &allowed_udp).await {
-                let reject = ManualReject::new(
-                    session_id.clone(),
-                    format!("UDP source '{}' not in allowed networks", requested_source),
-                );
+            let check_result = check_source_allowed(requested_source, &allowed_udp).await;
+            if !check_result.allowed {
+                let reason = check_result.rejection_reason(requested_source, &allowed_udp);
+                let reject = ManualReject::new(session_id.clone(), reason.clone());
                 if let Err(e) = signaling.publish_reject(&reject).await {
                     log::warn!("[{}] Failed to publish reject: {}", short_id, e);
                 }
-                anyhow::bail!("[{}] Rejected: UDP source not allowed", short_id);
+                anyhow::bail!("[{}] Rejected: {}", short_id, reason);
             }
             handle_nostr_udp_session_impl(
                 signaling,
