@@ -7,8 +7,8 @@ use log::info;
 use nostr_sdk::{Keys, ToBech32};
 use std::path::PathBuf;
 
-use crate::endpoint::{load_secret, secret_to_endpoint_id};
-use crate::manual::nostr_signaling::generate_keypair;
+use crate::iroh::endpoint::{load_secret, secret_to_endpoint_id};
+use crate::signaling::nostr::generate_keypair;
 
 fn write_secret_to_output(
     output: &PathBuf,

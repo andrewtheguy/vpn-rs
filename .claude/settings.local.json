@@ -25,7 +25,8 @@
       "Bash(cargo run:*)",
       "Bash(mv:*)",
       "Bash(./target/release/tunnel-rs sender nostr:*)",
-      "Bash(./target/release/tunnel-rs:*)"
+      "Bash(./target/release/tunnel-rs:*)",
+      "Bash(mkdir:*)"
     ]
   }
 }

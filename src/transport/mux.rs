@@ -8,6 +8,7 @@ use std::future::Future;
 use std::io::{self, IoSliceMut};
 use std::net::SocketAddr;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
@@ -36,12 +37,30 @@ pub struct ReceivedPacket {
     pub data: Vec<u8>,
 }
 
+/// Capacity for the bounded STUN packet channel.
+///
+/// This value balances memory usage against STUN packet loss risk:
+/// - Too small: drops during ICE negotiation bursts, causing connectivity failures
+/// - Too large: wastes memory and masks underlying processing bottlenecks
+///
+/// 128 packets provides headroom for typical ICE candidate gathering bursts
+/// (multiple STUN servers × multiple local interfaces × retransmissions).
+/// If warn logs show significant STUN drops in production, consider:
+/// 1. Increasing this value (up to 256-512 for complex network topologies)
+/// 2. Investigating why the ICE agent is processing packets slowly
+/// 3. Reducing the number of configured STUN servers
+const STUN_CHANNEL_CAPACITY: usize = 128;
+
+/// Global counter for dropped STUN packets due to channel backpressure.
+/// Non-zero values indicate potential ICE negotiation issues.
+static STUN_DROPS: AtomicU64 = AtomicU64::new(0);
+
 /// A demultiplexing socket that routes STUN to ICE and QUIC to quinn.
 #[derive(Debug)]
 pub struct DemuxSocket {
     io: UdpSocket,
     inner: quinn::udp::UdpSocketState,
-    stun_tx: mpsc::UnboundedSender<ReceivedPacket>,
+    stun_tx: mpsc::Sender<ReceivedPacket>,
     local_addr: SocketAddr,
 }
 
@@ -51,10 +70,10 @@ impl DemuxSocket {
     /// Returns the socket and a receiver for STUN packets.
     pub fn new(
         io: UdpSocket,
-    ) -> io::Result<(Arc<Self>, mpsc::UnboundedReceiver<ReceivedPacket>)> {
+    ) -> io::Result<(Arc<Self>, mpsc::Receiver<ReceivedPacket>)> {
         let local_addr = io.local_addr()?;
         let inner = quinn::udp::UdpSocketState::new((&io).into())?;
-        let (stun_tx, stun_rx) = mpsc::unbounded_channel();
+        let (stun_tx, stun_rx) = mpsc::channel(STUN_CHANNEL_CAPACITY);
 
         let socket = Arc::new(Self {
             io,
@@ -74,8 +93,20 @@ impl DemuxSocket {
     /// Route a STUN packet to the ICE channel.
     fn route_stun(&self, source: SocketAddr, data: Vec<u8>) {
         let packet = ReceivedPacket { source, data };
-        // Ignore send errors (receiver may be dropped)
-        let _ = self.stun_tx.send(packet);
+        match self.stun_tx.try_send(packet) {
+            Ok(()) => {}
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                let total_drops = STUN_DROPS.fetch_add(1, Ordering::Relaxed) + 1;
+                log::warn!(
+                    "STUN channel full, dropping packet from {} (total drops: {})",
+                    source,
+                    total_drops
+                );
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                // Receiver dropped, ICE keeper has stopped
+            }
+        }
     }
 }
 
@@ -119,13 +150,16 @@ impl AsyncUdpSocket for DemuxSocket {
                             // Don't include in results for quinn
                         } else {
                             // Keep QUIC packet in results
-                            if quic_count != i {
+                            // Invariant: quic_count <= i (we only increment quic_count after processing)
+                            debug_assert!(quic_count <= i, "quic_count must not exceed current index");
+                            if quic_count < i {
                                 // Shift meta entry down
                                 meta[quic_count] = meta[i];
-                                // Copy data to correct buffer position
-                                // Need to copy to temp first to avoid borrow issues
-                                let temp: Vec<u8> = bufs[i][..len].to_vec();
-                                bufs[quic_count][..len].copy_from_slice(&temp);
+                                // Copy data to correct buffer position using split_at_mut
+                                // to get non-overlapping slices (quic_count < i is guaranteed by condition)
+                                let (left, right) = bufs.split_at_mut(quic_count + 1);
+                                let src_idx = i - (quic_count + 1);
+                                left[quic_count][..len].copy_from_slice(&right[src_idx][..len]);
                             }
                             quic_count += 1;
                         }
@@ -195,7 +229,7 @@ impl UdpPoller for DemuxPoller {
 pub struct IceKeeper {
     ice: IceAgent,
     socket: Arc<DemuxSocket>,
-    stun_rx: mpsc::UnboundedReceiver<ReceivedPacket>,
+    stun_rx: mpsc::Receiver<ReceivedPacket>,
     local_addr: SocketAddr,
 }
 
@@ -204,7 +238,7 @@ impl IceKeeper {
     pub fn new(
         ice: IceAgent,
         socket: Arc<DemuxSocket>,
-        stun_rx: mpsc::UnboundedReceiver<ReceivedPacket>,
+        stun_rx: mpsc::Receiver<ReceivedPacket>,
         local_addr: SocketAddr,
     ) -> Self {
         Self {
@@ -262,11 +296,22 @@ impl IceKeeper {
 
     async fn drain_transmit(&mut self) {
         while let Some(transmit) = self.ice.poll_transmit() {
-            let _ = self
+            match self
                 .socket
                 .io()
                 .send_to(&transmit.contents, transmit.destination)
-                .await;
+                .await
+            {
+                Ok(_) => {}
+                Err(e) => {
+                    log::debug!(
+                        "Failed to send STUN packet ({} bytes) to {}: {}",
+                        transmit.contents.len(),
+                        transmit.destination,
+                        e
+                    );
+                }
+            }
         }
     }
 

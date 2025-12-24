@@ -1,7 +1,7 @@
-//! Manual signaling payloads and helpers.
+//! Signaling payload types and encoding/decoding.
 //!
 //! Supports two signaling formats:
-//! - v1 (Custom mode): ICE/QUIC with str0m + quinn
+//! - v1 (Custom/Nostr mode): ICE/QUIC with str0m + quinn
 //! - v2 (Iroh manual mode): Iroh endpoint with NodeId and direct addresses
 
 use anyhow::{anyhow, Context, Result};
@@ -9,27 +9,14 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use crc32fast::Hasher;
 use serde::{Deserialize, Serialize};
-use std::io::BufRead;
 
 /// Version 1: Custom mode (str0m ICE + quinn QUIC)
 pub const MANUAL_SIGNAL_VERSION: u16 = 1;
 /// Version 2: Iroh manual mode
 pub const IROH_SIGNAL_VERSION: u16 = 2;
 
-const PREFIX: &str = "TRS";
-const LINE_WIDTH: usize = 76;
-
-// Custom mode markers (v1)
-const OFFER_BEGIN_MARKER: &str = "-----BEGIN TUNNEL-RS MANUAL OFFER-----";
-const OFFER_END_MARKER: &str = "-----END TUNNEL-RS MANUAL OFFER-----";
-const ANSWER_BEGIN_MARKER: &str = "-----BEGIN TUNNEL-RS MANUAL ANSWER-----";
-const ANSWER_END_MARKER: &str = "-----END TUNNEL-RS MANUAL ANSWER-----";
-
-// Iroh mode markers (v2)
-const IROH_OFFER_BEGIN_MARKER: &str = "-----BEGIN TUNNEL-RS IROH OFFER-----";
-const IROH_OFFER_END_MARKER: &str = "-----END TUNNEL-RS IROH OFFER-----";
-const IROH_ANSWER_BEGIN_MARKER: &str = "-----BEGIN TUNNEL-RS IROH ANSWER-----";
-const IROH_ANSWER_END_MARKER: &str = "-----END TUNNEL-RS IROH ANSWER-----";
+pub(crate) const PREFIX: &str = "TRS";
+pub(crate) const LINE_WIDTH: usize = 76;
 
 // ============================================================================
 // Custom Mode (v1) - str0m ICE + quinn QUIC
@@ -144,6 +131,10 @@ pub struct IrohManualAnswer {
     pub direct_addresses: Vec<String>,
 }
 
+// ============================================================================
+// Encoding/Decoding
+// ============================================================================
+
 pub fn encode_offer(offer: &ManualOffer) -> Result<String> {
     encode_payload(offer)
 }
@@ -160,28 +151,6 @@ pub fn decode_answer(payload: &str) -> Result<ManualAnswer> {
     decode_payload(payload)
 }
 
-pub fn display_offer(offer: &ManualOffer) -> Result<()> {
-    display_payload(encode_offer(offer)?, OFFER_BEGIN_MARKER, OFFER_END_MARKER)
-}
-
-pub fn display_answer(answer: &ManualAnswer) -> Result<()> {
-    display_payload(encode_answer(answer)?, ANSWER_BEGIN_MARKER, ANSWER_END_MARKER)
-}
-
-pub fn read_offer_from_stdin() -> Result<ManualOffer> {
-    let payload = read_marked_payload(OFFER_BEGIN_MARKER, OFFER_END_MARKER)?;
-    decode_offer(&payload)
-}
-
-pub fn read_answer_from_stdin() -> Result<ManualAnswer> {
-    let payload = read_marked_payload(ANSWER_BEGIN_MARKER, ANSWER_END_MARKER)?;
-    decode_answer(&payload)
-}
-
-// ============================================================================
-// Iroh Manual Mode (v2) - Public API
-// ============================================================================
-
 pub fn encode_iroh_offer(offer: &IrohManualOffer) -> Result<String> {
     encode_payload_v(offer, IROH_SIGNAL_VERSION)
 }
@@ -196,24 +165,6 @@ pub fn encode_iroh_answer(answer: &IrohManualAnswer) -> Result<String> {
 
 pub fn decode_iroh_answer(payload: &str) -> Result<IrohManualAnswer> {
     decode_payload_v(payload, IROH_SIGNAL_VERSION)
-}
-
-pub fn display_iroh_offer(offer: &IrohManualOffer) -> Result<()> {
-    display_payload(encode_iroh_offer(offer)?, IROH_OFFER_BEGIN_MARKER, IROH_OFFER_END_MARKER)
-}
-
-pub fn display_iroh_answer(answer: &IrohManualAnswer) -> Result<()> {
-    display_payload(encode_iroh_answer(answer)?, IROH_ANSWER_BEGIN_MARKER, IROH_ANSWER_END_MARKER)
-}
-
-pub fn read_iroh_offer_from_stdin() -> Result<IrohManualOffer> {
-    let payload = read_marked_payload(IROH_OFFER_BEGIN_MARKER, IROH_OFFER_END_MARKER)?;
-    decode_iroh_offer(&payload)
-}
-
-pub fn read_iroh_answer_from_stdin() -> Result<IrohManualAnswer> {
-    let payload = read_marked_payload(IROH_ANSWER_BEGIN_MARKER, IROH_ANSWER_END_MARKER)?;
-    decode_iroh_answer(&payload)
 }
 
 // ============================================================================
@@ -235,7 +186,10 @@ fn decode_payload<T: for<'de> Deserialize<'de>>(payload: &str) -> Result<T> {
     decode_payload_v(payload, MANUAL_SIGNAL_VERSION)
 }
 
-fn decode_payload_v<T: for<'de> Deserialize<'de>>(payload: &str, expected_version: u16) -> Result<T> {
+fn decode_payload_v<T: for<'de> Deserialize<'de>>(
+    payload: &str,
+    expected_version: u16,
+) -> Result<T> {
     let trimmed = payload.trim();
     let mut parts = trimmed.splitn(3, ':');
     let header = parts
@@ -263,8 +217,8 @@ fn decode_payload_v<T: for<'de> Deserialize<'de>>(payload: &str, expected_versio
         ));
     }
 
-    let expected_crc = u32::from_str_radix(checksum_hex, 16)
-        .context("Invalid manual payload checksum")?;
+    let expected_crc =
+        u32::from_str_radix(checksum_hex, 16).context("Invalid manual payload checksum")?;
     let decoded = URL_SAFE_NO_PAD
         .decode(body.as_bytes())
         .context("Manual payload base64 decode failed")?;
@@ -288,63 +242,24 @@ fn crc32(bytes: &[u8]) -> u32 {
     hasher.finalize()
 }
 
-fn wrap_lines(s: &str, width: usize) -> String {
+/// Wrap a string into lines of at most `width` characters.
+///
+/// # Precondition
+/// The input string `s` must contain only ASCII characters (as is the case for
+/// base64-encoded payloads with ASCII prefix/checksum). This function chunks by
+/// bytes for efficiency, which is safe for ASCII but would split multi-byte UTF-8
+/// codepoints. The function will panic if given non-ASCII input.
+pub(crate) fn wrap_lines(s: &str, width: usize) -> String {
+    debug_assert!(
+        s.is_ascii(),
+        "wrap_lines requires ASCII input; got non-ASCII characters"
+    );
     s.as_bytes()
         .chunks(width)
-        .map(|chunk| std::str::from_utf8(chunk).unwrap_or(""))
+        .map(|chunk| {
+            std::str::from_utf8(chunk)
+                .expect("wrap_lines: chunk is not valid UTF-8; input must be ASCII")
+        })
         .collect::<Vec<_>>()
         .join("\n")
-}
-
-fn display_payload(payload: String, begin: &str, end: &str) -> Result<()> {
-    let wrapped = wrap_lines(&payload, LINE_WIDTH);
-    println!();
-    println!("{}", begin);
-    println!("{}", wrapped);
-    println!("{}", end);
-    println!();
-    Ok(())
-}
-
-fn read_marked_payload(begin: &str, end: &str) -> Result<String> {
-    let stdin = std::io::stdin();
-    let mut lines = stdin.lock().lines();
-    let mut collected = Vec::new();
-
-    loop {
-        let line = lines
-            .next()
-            .ok_or_else(|| anyhow!("Missing BEGIN marker"))??;
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        if trimmed == begin {
-            break;
-        }
-        return Err(anyhow!("Unexpected text before BEGIN marker"));
-    }
-
-    let mut found_end = false;
-    for line in lines {
-        let line = line?;
-        let trimmed = line.trim();
-        if trimmed == end {
-            found_end = true;
-            break;
-        }
-        if !trimmed.is_empty() {
-            collected.push(trimmed.to_string());
-        }
-    }
-
-    if !found_end {
-        return Err(anyhow!("END marker not found"));
-    }
-
-    if collected.is_empty() {
-        return Err(anyhow!("No payload found between markers"));
-    }
-
-    Ok(collected.join(""))
 }
