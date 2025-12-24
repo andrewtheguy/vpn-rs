@@ -16,9 +16,9 @@ use crate::tunnel_common::{copy_stream, order_udp_addresses, retry_with_backoff,
 // TCP Connection Handlers
 // ============================================================================
 
-/// Handle a TCP connection on the sender side.
+/// Handle a TCP connection on the server side.
 /// Connects to target and bridges the QUIC stream with the TCP connection.
-pub(super) async fn handle_tcp_sender_stream(
+pub(super) async fn handle_tcp_server_stream(
     send_stream: iroh::endpoint::SendStream,
     recv_stream: iroh::endpoint::RecvStream,
     target_addrs: Arc<Vec<SocketAddr>>,
@@ -36,9 +36,9 @@ pub(super) async fn handle_tcp_sender_stream(
     Ok(())
 }
 
-/// Handle a TCP connection on the receiver side.
+/// Handle a TCP connection on the client side.
 /// Opens a QUIC stream and bridges it with the local TCP connection.
-pub(super) async fn handle_tcp_receiver_connection(
+pub(super) async fn handle_tcp_client_connection(
     conn: Arc<iroh::endpoint::Connection>,
     tcp_stream: TcpStream,
     peer_addr: SocketAddr,
@@ -48,7 +48,7 @@ pub(super) async fn handle_tcp_receiver_connection(
 
     // Print success message only on first successful stream
     if !tunnel_established.swap(true, Ordering::Relaxed) {
-        log::info!("Tunnel to sender established!");
+        log::info!("Tunnel to server established!");
     }
     log::info!("-> Opened tunnel for {}", peer_addr);
 
@@ -140,13 +140,13 @@ pub(super) async fn forward_udp_to_stream(
     }
 }
 
-/// Read from iroh stream, forward to UDP target, and send responses back (sender mode).
+/// Read from iroh stream, forward to UDP target, and send responses back (server mode).
 ///
 /// Supports multiple target addresses with fallback:
 /// - Addresses are tried in Happy Eyeballs order (IPv6 first)
 /// - On send error, falls back to the next address
 /// - Aggregates errors if all addresses fail
-pub(super) async fn forward_stream_to_udp_sender(
+pub(super) async fn forward_stream_to_udp_server(
     mut recv_stream: iroh::endpoint::RecvStream,
     mut send_stream: iroh::endpoint::SendStream,
     udp_socket: Arc<UdpSocket>,
@@ -170,7 +170,7 @@ pub(super) async fn forward_stream_to_udp_sender(
             if send_stream.write_all(&buf[..len]).await.is_err() {
                 break;
             }
-            log::debug!("-> Sent {} bytes back to receiver", len);
+            log::debug!("-> Sent {} bytes back to client", len);
         }
     });
 
@@ -253,8 +253,8 @@ pub(super) async fn forward_stream_to_udp_sender(
     Ok(())
 }
 
-/// Read from iroh stream and forward to local UDP client (receiver mode).
-pub(super) async fn forward_stream_to_udp_receiver(
+/// Read from iroh stream and forward to local UDP client (client mode).
+pub(super) async fn forward_stream_to_udp_client(
     mut recv_stream: iroh::endpoint::RecvStream,
     udp_socket: Arc<UdpSocket>,
     client_addr: Arc<Mutex<Option<SocketAddr>>>,

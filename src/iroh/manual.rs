@@ -2,7 +2,7 @@
 //!
 //! This module provides the iroh-manual tunnel mode:
 //! - Manual signaling with direct STUN/local addresses (no relay)
-//! - Receiver-first pattern where receiver initiates with source request
+//! - Client-first pattern where client initiates with source request
 
 use anyhow::{Context, Result};
 use iroh::discovery::static_provider::StaticProvider;
@@ -17,8 +17,8 @@ use tokio::task::JoinSet;
 
 use super::endpoint::MULTI_ALPN;
 use super::helpers::{
-    forward_stream_to_udp_sender, forward_udp_to_stream, handle_tcp_receiver_connection,
-    handle_tcp_sender_stream, open_bi_with_retry,
+    forward_stream_to_udp_server, forward_udp_to_stream, handle_tcp_client_connection,
+    handle_tcp_server_stream, open_bi_with_retry,
 };
 use crate::signaling::{
     display_iroh_answer, display_iroh_offer, read_iroh_answer_from_stdin,
@@ -29,22 +29,22 @@ use crate::tunnel_common::{
     resolve_stun_addrs,
 };
 
-// Re-export the receiver-side UDP helper from helpers.rs
-use super::helpers::forward_stream_to_udp_receiver;
+// Re-export the client-side UDP helper from helpers.rs
+use super::helpers::forward_stream_to_udp_client;
 
 // ============================================================================
-// Iroh-Manual Mode: Receiver-Initiated Pattern
+// Iroh-Manual Mode: Client-Initiated Pattern
 // ============================================================================
 
-/// Iroh-manual sender (receiver-first pattern).
+/// Iroh-manual server (client-first pattern).
 /// Reads offer from stdin, validates source, generates answer, handles connections.
-pub async fn run_iroh_manual_sender(
+pub async fn run_iroh_manual_server(
     allowed_tcp: Vec<String>,
     allowed_udp: Vec<String>,
     stun_servers: Vec<String>,
 ) -> Result<()> {
-    log::info!("Iroh Manual Tunnel - Sender Mode (Receiver-First)");
-    log::info!("==================================================");
+    log::info!("Iroh Manual Tunnel - Server Mode (Client-First)");
+    log::info!("================================================");
     log::info!("Creating iroh endpoint (no relay)...");
 
     let (endpoint, discovery) = create_iroh_manual_endpoint(MULTI_ALPN).await?;
@@ -52,8 +52,8 @@ pub async fn run_iroh_manual_sender(
     let node_id = endpoint.id();
     let direct_addrs = get_direct_addresses(&endpoint, &stun_servers).await;
 
-    // Read offer from receiver (includes source)
-    log::info!("Paste receiver offer (include BEGIN/END markers), then press Enter:");
+    // Read offer from client (includes source)
+    log::info!("Paste client offer (include BEGIN/END markers), then press Enter:");
     let offer = read_iroh_offer_from_stdin()?;
     if offer.version != IROH_SIGNAL_VERSION {
         anyhow::bail!(
@@ -65,7 +65,7 @@ pub async fn run_iroh_manual_sender(
 
     // Validate requested source
     let source = offer.source.as_ref().context(
-        "Offer missing source field. Receiver must specify --source (e.g., --source tcp://127.0.0.1:22)",
+        "Offer missing source field. Client must specify --source (e.g., --source tcp://127.0.0.1:22)",
     )?;
     let is_tcp = source.starts_with("tcp://");
     let is_udp = source.starts_with("udp://");
@@ -97,7 +97,7 @@ pub async fn run_iroh_manual_sender(
         node_id: node_id.to_string(),
         direct_addresses: direct_addrs,
     };
-    log::info!("\nIroh Manual Answer (copy to receiver):");
+    log::info!("\nIroh Manual Answer (copy to client):");
     display_iroh_answer(&answer)?;
 
     // Add remote peer to discovery
@@ -150,7 +150,7 @@ pub async fn run_iroh_manual_sender(
                     };
                     let target = Arc::clone(&target_addrs);
                     tokio::spawn(async move {
-                        if let Err(e) = handle_tcp_sender_stream(send_stream, recv_stream, target).await {
+                        if let Err(e) = handle_tcp_server_stream(send_stream, recv_stream, target).await {
                             log::warn!("TCP connection error: {}", e);
                         }
                     });
@@ -171,7 +171,7 @@ pub async fn run_iroh_manual_sender(
         let (send_stream, recv_stream) = conn
             .accept_bi()
             .await
-            .context("Failed to accept stream from receiver")?;
+            .context("Failed to accept stream from client")?;
 
         let udp_socket = Arc::new(
             bind_udp_for_targets(&target_addrs)
@@ -180,7 +180,7 @@ pub async fn run_iroh_manual_sender(
         );
 
         tokio::select! {
-            result = forward_stream_to_udp_sender(recv_stream, send_stream, udp_socket, Arc::clone(&target_addrs)) => {
+            result = forward_stream_to_udp_server(recv_stream, send_stream, udp_socket, Arc::clone(&target_addrs)) => {
                 result?;
             }
             error = conn.closed() => {
@@ -196,9 +196,9 @@ pub async fn run_iroh_manual_sender(
     Ok(())
 }
 
-/// Iroh-manual receiver (receiver-first pattern).
+/// Iroh-manual client (client-first pattern).
 /// Generates offer with source, reads answer, listens for local connections.
-pub async fn run_iroh_manual_receiver(
+pub async fn run_iroh_manual_client(
     source: String,
     listen: SocketAddr,
     stun_servers: Vec<String>,
@@ -212,8 +212,8 @@ pub async fn run_iroh_manual_receiver(
         );
     }
 
-    log::info!("Iroh Manual Tunnel - Receiver Mode (Receiver-First)");
-    log::info!("====================================================");
+    log::info!("Iroh Manual Tunnel - Client Mode (Client-First)");
+    log::info!("================================================");
     log::info!("Requesting source: {}", source);
     log::info!("Creating iroh endpoint (no relay)...");
 
@@ -229,11 +229,11 @@ pub async fn run_iroh_manual_receiver(
         direct_addresses: direct_addrs,
         source: Some(source.clone()),
     };
-    log::info!("\nIroh Manual Offer (copy to sender):");
+    log::info!("\nIroh Manual Offer (copy to server):");
     display_iroh_offer(&offer)?;
 
-    // Read answer from sender
-    log::info!("Paste sender answer (include BEGIN/END markers), then press Enter:");
+    // Read answer from server
+    log::info!("Paste server answer (include BEGIN/END markers), then press Enter:");
     let answer = read_iroh_answer_from_stdin()?;
     if answer.version != IROH_SIGNAL_VERSION {
         anyhow::bail!(
@@ -305,7 +305,7 @@ pub async fn run_iroh_manual_receiver(
                     let established = tunnel_established.clone();
 
                     connection_tasks.spawn(async move {
-                        match handle_tcp_receiver_connection(conn_clone, tcp_stream, peer_addr, established)
+                        match handle_tcp_client_connection(conn_clone, tcp_stream, peer_addr, established)
                             .await
                         {
                             Ok(()) => {}
@@ -336,7 +336,7 @@ pub async fn run_iroh_manual_receiver(
 
         conn.close(0u32.into(), b"done");
         endpoint.close().await;
-        log::info!("TCP receiver stopped.");
+        log::info!("TCP client stopped.");
     } else {
         // UDP mode
         let (send_stream, recv_stream) = open_bi_with_retry(&conn).await?;
@@ -361,7 +361,7 @@ pub async fn run_iroh_manual_receiver(
                     log::warn!("UDP to stream error: {}", e);
                 }
             }
-            result = forward_stream_to_udp_receiver(recv_stream, udp_socket, client_addr) => {
+            result = forward_stream_to_udp_client(recv_stream, udp_socket, client_addr) => {
                 if let Err(e) = result {
                     log::warn!("Stream to UDP error: {}", e);
                 }
@@ -373,7 +373,7 @@ pub async fn run_iroh_manual_receiver(
 
         conn.close(0u32.into(), b"done");
         endpoint.close().await;
-        log::info!("UDP receiver stopped.");
+        log::info!("UDP client stopped.");
     }
 
     Ok(())

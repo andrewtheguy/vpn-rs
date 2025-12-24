@@ -522,7 +522,7 @@ pub async fn open_bi_with_retry(
 }
 
 /// Handle TCP sender stream: read marker, connect to target, bridge streams
-pub async fn handle_tcp_sender_stream(
+pub async fn handle_tcp_server_stream(
     send_stream: quinn::SendStream,
     mut recv_stream: quinn::RecvStream,
     target_addrs: Arc<Vec<SocketAddr>>,
@@ -546,7 +546,7 @@ pub async fn handle_tcp_sender_stream(
 }
 
 /// Handle TCP receiver connection: open stream, write marker, bridge streams
-pub async fn handle_tcp_receiver_connection(
+pub async fn handle_tcp_client_connection(
     conn: Arc<quinn::Connection>,
     tcp_stream: TcpStream,
     peer_addr: SocketAddr,
@@ -561,7 +561,7 @@ pub async fn handle_tcp_receiver_connection(
         .context("Failed to write stream marker")?;
 
     if !tunnel_established.swap(true, Ordering::Relaxed) {
-        log::info!("Tunnel to sender established!");
+        log::info!("Tunnel to server established!");
     }
     log::info!("-> Opened tunnel for {}", peer_addr);
 
@@ -637,7 +637,7 @@ pub async fn forward_udp_to_stream(
 /// - Addresses are tried in Happy Eyeballs order (IPv6 first)
 /// - On send error, falls back to the next address
 /// - Aggregates errors if all addresses fail
-pub async fn forward_stream_to_udp_sender(
+pub async fn forward_stream_to_udp_server(
     mut recv_stream: quinn::RecvStream,
     mut send_stream: quinn::SendStream,
     udp_socket: Arc<UdpSocket>,
@@ -741,7 +741,7 @@ pub async fn forward_stream_to_udp_sender(
 }
 
 /// Read from quinn stream and forward to local UDP client (receiver mode)
-pub async fn forward_stream_to_udp_receiver(
+pub async fn forward_stream_to_udp_client(
     mut recv_stream: quinn::RecvStream,
     udp_socket: Arc<UdpSocket>,
     client_addr: Arc<Mutex<Option<SocketAddr>>>,

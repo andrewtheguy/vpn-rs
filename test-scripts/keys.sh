@@ -11,26 +11,26 @@ generate_keys() {
     echo "Generating new key pairs..."
     mkdir -p "$KEYS_DIR"
 
-    # Generate sender keys (nsec saved to file, npub printed to stdout)
-    SENDER_NPUB=$("$TUNNEL_BIN" generate-nostr-key --output "$KEYS_DIR/sender.nsec" --force 2>/dev/null | grep "^npub:" | awk '{print $2}')
-    SENDER_NSEC_FILE="$KEYS_DIR/sender.nsec"
+    # Generate server keys (nsec saved to file, npub printed to stdout)
+    SERVER_NPUB=$("$TUNNEL_BIN" generate-nostr-key --output "$KEYS_DIR/server.nsec" --force 2>/dev/null | grep "^npub:" | awk '{print $2}')
+    SERVER_NSEC_FILE="$KEYS_DIR/server.nsec"
 
-    # Generate receiver keys
-    RECEIVER_NPUB=$("$TUNNEL_BIN" generate-nostr-key --output "$KEYS_DIR/receiver.nsec" --force 2>/dev/null | grep "^npub:" | awk '{print $2}')
-    RECEIVER_NSEC_FILE="$KEYS_DIR/receiver.nsec"
+    # Generate client keys
+    CLIENT_NPUB=$("$TUNNEL_BIN" generate-nostr-key --output "$KEYS_DIR/client.nsec" --force 2>/dev/null | grep "^npub:" | awk '{print $2}')
+    CLIENT_NSEC_FILE="$KEYS_DIR/client.nsec"
 
     # Save paths and npubs to config file
     cat > "$KEYS_FILE" << EOF
 # Tunnel test keys - generated $(date)
-SENDER_NSEC_FILE=$SENDER_NSEC_FILE
-SENDER_NPUB=$SENDER_NPUB
-RECEIVER_NSEC_FILE=$RECEIVER_NSEC_FILE
-RECEIVER_NPUB=$RECEIVER_NPUB
+SERVER_NSEC_FILE=$SERVER_NSEC_FILE
+SERVER_NPUB=$SERVER_NPUB
+CLIENT_NSEC_FILE=$CLIENT_NSEC_FILE
+CLIENT_NPUB=$CLIENT_NPUB
 EOF
 
     echo "Keys saved to $KEYS_DIR/"
-    echo "  Sender:   $SENDER_NPUB"
-    echo "  Receiver: $RECEIVER_NPUB"
+    echo "  Server: $SERVER_NPUB"
+    echo "  Client: $CLIENT_NPUB"
 }
 
 load_keys() {
@@ -39,16 +39,16 @@ load_keys() {
         generate_keys
     fi
     source "$KEYS_FILE"
-    export SENDER_NSEC_FILE SENDER_NPUB RECEIVER_NSEC_FILE RECEIVER_NPUB
+    export SERVER_NSEC_FILE SERVER_NPUB CLIENT_NSEC_FILE CLIENT_NPUB
 }
 
 show_keys() {
     load_keys
     echo "=== Tunnel Test Keys ==="
-    echo "Sender NSEC:   $SENDER_NSEC_FILE"
-    echo "Sender NPUB:   $SENDER_NPUB"
-    echo "Receiver NSEC: $RECEIVER_NSEC_FILE"
-    echo "Receiver NPUB: $RECEIVER_NPUB"
+    echo "Server NSEC:  $SERVER_NSEC_FILE"
+    echo "Server NPUB:  $SERVER_NPUB"
+    echo "Client NSEC:  $CLIENT_NSEC_FILE"
+    echo "Client NPUB:  $CLIENT_NPUB"
 }
 
 # Auto-load keys when sourced

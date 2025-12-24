@@ -19,24 +19,24 @@ use crate::transport::ice::{IceEndpoint, IceRole};
 use crate::transport::quic;
 use crate::tunnel_common::{
     bind_udp_for_targets, check_source_allowed, extract_addr_from_source,
-    forward_stream_to_udp_receiver, forward_stream_to_udp_sender, forward_udp_to_stream,
-    handle_tcp_receiver_connection, handle_tcp_sender_stream, open_bi_with_retry,
+    forward_stream_to_udp_client, forward_stream_to_udp_server, forward_udp_to_stream,
+    handle_tcp_client_connection, handle_tcp_server_stream, open_bi_with_retry,
     resolve_all_target_addrs, QUIC_CONNECTION_TIMEOUT,
 };
 
 // ============================================================================
-// Manual Mode: Receiver-Initiated Pattern (ICE + QUIC)
+// Manual Mode: Client-Initiated Pattern (ICE + QUIC)
 // ============================================================================
 
-/// Custom-manual sender (receiver-first pattern).
+/// Custom-manual server (client-first pattern).
 /// Reads offer from stdin, validates source, generates answer with QUIC fingerprint.
-pub async fn run_manual_sender(
+pub async fn run_manual_server(
     allowed_tcp: Vec<String>,
     allowed_udp: Vec<String>,
     stun_servers: Vec<String>,
 ) -> Result<()> {
-    log::info!("Manual Tunnel - Sender Mode (Receiver-First)");
-    log::info!("=============================================");
+    log::info!("Manual Tunnel - Server Mode (Client-First)");
+    log::info!("===========================================");
 
     // Gather ICE candidates
     let ice = IceEndpoint::gather(&stun_servers).await?;
@@ -46,8 +46,8 @@ pub async fn run_manual_sender(
     // Generate QUIC server identity
     let quic_identity = quic::generate_server_identity()?;
 
-    // Read offer from receiver (includes source)
-    log::info!("Paste receiver offer (include BEGIN/END markers), then press Enter:");
+    // Read offer from client (includes source)
+    log::info!("Paste client offer (include BEGIN/END markers), then press Enter:");
     let offer = read_offer_from_stdin()?;
     if offer.version != MANUAL_SIGNAL_VERSION {
         anyhow::bail!(
@@ -59,7 +59,7 @@ pub async fn run_manual_sender(
 
     // Validate requested source
     let source = offer.source.as_ref().context(
-        "Offer missing source field. Receiver must specify --source (e.g., --source tcp://127.0.0.1:22)"
+        "Offer missing source field. Client must specify --source (e.g., --source tcp://127.0.0.1:22)"
     )?;
     let is_tcp = source.starts_with("tcp://");
     let is_udp = source.starts_with("udp://");
@@ -96,10 +96,10 @@ pub async fn run_manual_sender(
         session_id: None,
         quic_fingerprint: Some(quic_identity.fingerprint.clone()),
     };
-    log::info!("\nManual Answer (copy to receiver):");
+    log::info!("\nManual Answer (copy to client):");
     display_answer(&answer)?;
 
-    // Connect via ICE (sender is Controlled in receiver-first pattern)
+    // Connect via ICE (server is Controlled in client-first pattern)
     let remote_creds = str0m::IceCreds {
         ufrag: offer.ice_ufrag,
         pass: offer.ice_pwd,
@@ -115,7 +115,7 @@ pub async fn run_manual_sender(
     // Create QUIC server endpoint
     let endpoint = quic::make_server_endpoint(ice_conn.socket, quic_identity.server_config)?;
     log::info!(
-        "Waiting for receiver QUIC connection (timeout: {:?})...",
+        "Waiting for client QUIC connection (timeout: {:?})...",
         QUIC_CONNECTION_TIMEOUT
     );
 
@@ -127,7 +127,7 @@ pub async fn run_manual_sender(
         .await
         .context("Timeout during QUIC handshake")?
         .context("Failed to accept QUIC connection")?;
-    log::info!("Receiver connected over QUIC.");
+    log::info!("Client connected over QUIC.");
 
     // Handle connections based on protocol
     if is_tcp {
@@ -143,7 +143,7 @@ pub async fn run_manual_sender(
                     let (send_stream, recv_stream) = match accept_result {
                         Ok(streams) => streams,
                         Err(e) => {
-                            log::info!("Receiver disconnected: {}", e);
+                            log::info!("Client disconnected: {}", e);
                             break;
                         }
                     };
@@ -151,7 +151,7 @@ pub async fn run_manual_sender(
                     log::info!("New TCP connection request received");
                     let target = Arc::clone(&target_addrs);
                     tokio::spawn(async move {
-                        if let Err(e) = handle_tcp_sender_stream(send_stream, recv_stream, target).await {
+                        if let Err(e) = handle_tcp_server_stream(send_stream, recv_stream, target).await {
                             log::warn!("TCP connection error: {}", e);
                         }
                     });
@@ -183,7 +183,7 @@ pub async fn run_manual_sender(
         let (send_stream, recv_stream) = conn
             .accept_bi()
             .await
-            .context("Failed to accept stream from receiver")?;
+            .context("Failed to accept stream from client")?;
 
         let udp_socket = Arc::new(
             bind_udp_for_targets(&target_addrs)
@@ -192,7 +192,7 @@ pub async fn run_manual_sender(
         );
 
         tokio::select! {
-            result = forward_stream_to_udp_sender(recv_stream, send_stream, udp_socket, Arc::clone(&target_addrs)) => {
+            result = forward_stream_to_udp_server(recv_stream, send_stream, udp_socket, Arc::clone(&target_addrs)) => {
                 result?;
             }
             result = ice_disconnect_rx.changed() => {
@@ -224,9 +224,9 @@ pub async fn run_manual_sender(
     Ok(())
 }
 
-/// Custom-manual receiver (receiver-first pattern).
+/// Custom-manual client (client-first pattern).
 /// Generates offer with source, reads answer with QUIC fingerprint, connects.
-pub async fn run_manual_receiver(
+pub async fn run_manual_client(
     source: String,
     listen: SocketAddr,
     stun_servers: Vec<String>,
@@ -237,8 +237,8 @@ pub async fn run_manual_receiver(
         anyhow::bail!("Invalid source protocol '{}'. Must start with tcp:// or udp://", source);
     }
 
-    log::info!("Manual Tunnel - Receiver Mode (Receiver-First)");
-    log::info!("===============================================");
+    log::info!("Manual Tunnel - Client Mode (Client-First)");
+    log::info!("==========================================");
     log::info!("Requesting source: {}", source);
 
     // Gather ICE candidates
@@ -256,11 +256,11 @@ pub async fn run_manual_receiver(
         session_id: None,
         source: Some(source.clone()),
     };
-    log::info!("\nManual Offer (copy to sender):");
+    log::info!("\nManual Offer (copy to server):");
     display_offer(&offer)?;
 
-    // Read answer from sender (includes QUIC fingerprint)
-    log::info!("Paste sender answer (include BEGIN/END markers), then press Enter:");
+    // Read answer from server (includes QUIC fingerprint)
+    log::info!("Paste server answer (include BEGIN/END markers), then press Enter:");
     let answer = read_answer_from_stdin()?;
     if answer.version != MANUAL_SIGNAL_VERSION {
         anyhow::bail!(
@@ -273,9 +273,9 @@ pub async fn run_manual_receiver(
     // Extract QUIC fingerprint from answer
     let quic_fingerprint = answer
         .quic_fingerprint
-        .context("Answer missing QUIC fingerprint. Sender must include fingerprint in answer.")?;
+        .context("Answer missing QUIC fingerprint. Server must include fingerprint in answer.")?;
 
-    // Connect via ICE (receiver is Controlling in receiver-first pattern)
+    // Connect via ICE (client is Controlling in client-first pattern)
     let remote_creds = str0m::IceCreds {
         ufrag: answer.ice_ufrag,
         pass: answer.ice_pwd,
@@ -291,7 +291,7 @@ pub async fn run_manual_receiver(
     // Create QUIC client endpoint
     let endpoint = quic::make_client_endpoint(ice_conn.socket, &quic_fingerprint)?;
     log::info!(
-        "Connecting to sender via QUIC (timeout: {:?})...",
+        "Connecting to server via QUIC (timeout: {:?})...",
         QUIC_CONNECTION_TIMEOUT
     );
     let connecting = endpoint
@@ -300,8 +300,8 @@ pub async fn run_manual_receiver(
     let conn = tokio::time::timeout(QUIC_CONNECTION_TIMEOUT, connecting)
         .await
         .context("Timeout during QUIC connection")?
-        .context("Failed to connect to sender")?;
-    log::info!("Connected to sender over QUIC.");
+        .context("Failed to connect to server")?;
+    log::info!("Connected to server over QUIC.");
 
     if is_tcp {
         let conn = Arc::new(conn);
@@ -333,7 +333,7 @@ pub async fn run_manual_receiver(
                     let established = tunnel_established.clone();
 
                     connection_tasks.spawn(async move {
-                        match handle_tcp_receiver_connection(conn_clone, tcp_stream, peer_addr, established)
+                        match handle_tcp_client_connection(conn_clone, tcp_stream, peer_addr, established)
                             .await
                         {
                             Ok(()) => {}
@@ -354,12 +354,12 @@ pub async fn run_manual_receiver(
                     match result {
                         Ok(()) => {
                             if *ice_disconnect_rx.borrow() {
-                                log::warn!("ICE disconnected; shutting down receiver.");
+                                log::warn!("ICE disconnected; shutting down client.");
                                 break;
                             }
                         }
                         Err(_) => {
-                            log::warn!("ICE disconnect watcher closed; shutting down receiver.");
+                            log::warn!("ICE disconnect watcher closed; shutting down client.");
                             break;
                         }
                     }
@@ -389,7 +389,7 @@ pub async fn run_manual_receiver(
             Err(e) => log::warn!("ICE keeper task failed: {}", e),
         }
 
-        log::info!("TCP receiver stopped.");
+        log::info!("TCP client stopped.");
     } else {
         // UDP mode
         let (send_stream, recv_stream) = open_bi_with_retry(&conn).await?;
@@ -414,7 +414,7 @@ pub async fn run_manual_receiver(
                     log::warn!("UDP to stream error: {}", e);
                 }
             }
-            result = forward_stream_to_udp_receiver(recv_stream, udp_socket, client_addr) => {
+            result = forward_stream_to_udp_client(recv_stream, udp_socket, client_addr) => {
                 if let Err(ref e) = result {
                     log::warn!("Stream to UDP error: {}", e);
                 }
@@ -423,11 +423,11 @@ pub async fn run_manual_receiver(
                 match result {
                     Ok(()) => {
                         if *ice_disconnect_rx.borrow() {
-                            log::warn!("ICE disconnected; shutting down receiver.");
+                            log::warn!("ICE disconnected; shutting down client.");
                         }
                     }
                     Err(_) => {
-                        log::warn!("ICE disconnect watcher closed; shutting down receiver.");
+                        log::warn!("ICE disconnect watcher closed; shutting down client.");
                     }
                 }
             }
@@ -443,7 +443,7 @@ pub async fn run_manual_receiver(
             Err(e) => log::warn!("ICE keeper task failed: {}", e),
         }
 
-        log::info!("UDP receiver stopped.");
+        log::info!("UDP client stopped.");
     }
 
     Ok(())

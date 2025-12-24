@@ -359,7 +359,7 @@ impl NostrSignaling {
                         }
                         RecvError::Lagged(skipped) => {
                             warn!(
-                                "Warning: Notification receiver lagged, skipped {} messages; draining buffer...",
+                                "Warning: Notification message receiver lagged, skipped {} messages; draining buffer...",
                                 skipped
                             );
                             // Drain buffered messages and check for fresh request
@@ -493,7 +493,7 @@ impl NostrSignaling {
                     }
                     RecvError::Lagged(skipped) => {
                         warn!(
-                            "Warning: Notification receiver lagged, skipped {} messages; draining buffer...",
+                            "Warning: Notification message receiver lagged, skipped {} messages; draining buffer...",
                             skipped
                         );
                         // Drain buffered messages and check for offer/rejection

@@ -1,7 +1,7 @@
-# tunnel-rs sender configuration example
+# tunnel-rs server configuration example
 #
-# Usage: tunnel-rs sender -c sender.toml
-#        tunnel-rs sender --default-config
+# Usage: tunnel-rs server -c server.toml
+#        tunnel-rs server --default-config
 #
 # Mode is inferred from the 'mode' field below.
 # CLI arguments take precedence over config file values.
@@ -9,19 +9,19 @@
 # This file shows iroh mode. See commented sections below for other modes.
 
 # Required: validates config matches CLI command
-role = "sender"
+role = "server"
 mode = "iroh"  # or "iroh-manual", "custom-manual", or "nostr"
 
 # NOTE: For multi-source modes (iroh, nostr), do NOT set 'source' here.
-# Receivers request sources dynamically. Use allowed_sources below to restrict.
+# Clients request sources dynamically. Use allowed_sources below to restrict.
 
 [iroh]
 # Base64-encoded secret key for persistent identity (inline)
 # secret = "base64..."
 #
 # Path to secret key file for persistent identity (use either secret or secret_file)
-# Generate with: tunnel-rs generate-iroh-key --output sender.key
-# secret_file = "./sender.key"
+# Generate with: tunnel-rs generate-iroh-key --output server.key
+# secret_file = "./server.key"
 
 # Custom relay server URL(s) for failover
 # If not provided, uses iroh's default public relays
@@ -41,8 +41,8 @@ relay_only = false
 # Maximum concurrent sessions (default: 100)
 max_sessions = 100
 
-# Allowed source networks that receivers can request (CIDR notation)
-# Receivers MUST specify --source which must match one of these networks
+# Allowed source networks that clients can request (CIDR notation)
+# Clients MUST specify --source which must match one of these networks
 # Separate lists for TCP and UDP protocols
 # Supports IPv4 and IPv6 CIDR notation
 [iroh.allowed_sources]
@@ -56,36 +56,36 @@ udp = [
 ]
 
 # [iroh-manual]
-# # Receiver-initiated mode: receivers request sources, sender validates
+# # Client-initiated mode: clients request sources, server validates
 # # Set to [] to disable STUN entirely
 # stun_servers = [
 #     "stun.l.google.com:19302",
 #     "stun1.l.google.com:19302",
 #     "stun.services.mozilla.com:3478",
 # ]
-# # Allowed source networks that receivers can request (CIDR notation)
+# # Allowed source networks that clients can request (CIDR notation)
 # [iroh-manual.allowed_sources]
 # tcp = ["127.0.0.0/8", "192.168.0.0/16"]
 # udp = ["10.0.0.0/8"]
 
 # [custom-manual]
-# # Receiver-initiated mode: receivers request sources, sender validates
+# # Client-initiated mode: clients request sources, server validates
 # # Set to [] to disable STUN entirely
 # stun_servers = [
 #     "stun.l.google.com:19302",
 #     "stun1.l.google.com:19302",
 #     "stun.services.mozilla.com:3478",
 # ]
-# # Allowed source networks that receivers can request (CIDR notation)
+# # Allowed source networks that clients can request (CIDR notation)
 # [custom-manual.allowed_sources]
 # tcp = ["127.0.0.0/8", "192.168.0.0/16"]
 # udp = ["10.0.0.0/8"]
 
 # [nostr]
-# # NOTE: For nostr mode, do NOT set 'source' above - receivers request sources dynamically.
-# # Use allowed_sources below to restrict what receivers can request.
-# # Sender-only fields: allowed_sources, max_sessions
-# # (request_source is receiver-only and will be rejected if present here)
+# # NOTE: For nostr mode, do NOT set 'source' above - clients request sources dynamically.
+# # Use allowed_sources below to restrict what clients can request.
+# # Server-only fields: allowed_sources, max_sessions
+# # (request_source is client-only and will be rejected if present here)
 #
 # # Your Nostr private key (generate with: tunnel-rs generate-nostr-key)
 # # Use either nsec or nsec_file
@@ -112,11 +112,11 @@ udp = [
 #     "stun.services.mozilla.com:3478",
 # ]
 #
-# # Maximum concurrent sessions (sender only, default: 10)
+# # Maximum concurrent sessions (server only, default: 10)
 # max_sessions = 10
 #
-# # Allowed source networks that receivers can request (sender only, CIDR notation)
-# # Receivers MUST specify --source which must match one of these networks
+# # Allowed source networks that clients can request (server only, CIDR notation)
+# # Clients MUST specify --source which must match one of these networks
 # # Separate lists for TCP and UDP protocols
 # # Supports IPv4 and IPv6 CIDR notation
 # [nostr.allowed_sources]

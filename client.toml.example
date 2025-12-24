@@ -1,7 +1,7 @@
-# tunnel-rs receiver configuration example
+# tunnel-rs client configuration example
 #
-# Usage: tunnel-rs receiver -c receiver.toml
-#        tunnel-rs receiver --default-config
+# Usage: tunnel-rs client -c client.toml
+#        tunnel-rs client --default-config
 #
 # Mode is inferred from the 'mode' field below.
 # CLI arguments take precedence over config file values.
@@ -9,25 +9,25 @@
 # This file shows iroh mode. See commented sections below for other modes.
 
 # Required: validates config matches CLI command
-role = "receiver"
+role = "client"
 mode = "iroh"  # or "iroh-manual", "custom-manual", or "nostr"
 
-# All modes use receiver-initiated source requests with consistent config structure.
+# All modes use client-initiated source requests with consistent config structure.
 # Each mode section has request_source and target fields.
 
 [iroh]
-# NodeId of the sender to connect to (required for iroh)
+# NodeId of the server to connect to (required for iroh)
 node_id = "2xnbkpbc7izsilvewd7c62w7wnwziacmpfwvhcrya5nt76dqkpga"
 
-# Source address to request from sender (REQUIRED for iroh mode)
-# Must be in sender's allowed_sources list (--allowed-tcp or --allowed-udp)
+# Source address to request from server (REQUIRED for iroh mode)
+# Must be in server's allowed_sources list (--allowed-tcp or --allowed-udp)
 request_source = "tcp://127.0.0.1:22"
 
 # Local address to listen on (REQUIRED for iroh mode)
 target = "127.0.0.1:2222"
 
 # Custom relay server URL(s) for failover
-# Must match the sender's relay configuration
+# Must match the server's relay configuration
 relay_urls = [
     "https://relay1.example.com",
     "https://relay2.example.com",
@@ -37,13 +37,13 @@ relay_urls = [
 relay_only = false
 
 # Custom DNS server URL for peer discovery
-# Must match the sender's dns_server configuration
+# Must match the server's dns_server configuration
 # NOTE: URL must include the /pkarr path
 # dns_server = "https://dns.example.com/pkarr"
 
 # [iroh-manual]
-# # Receiver-initiated mode: request source from sender, listen locally
-# # Source address to request from sender (REQUIRED)
+# # Client-initiated mode: request source from server, listen locally
+# # Source address to request from server (REQUIRED)
 # request_source = "tcp://127.0.0.1:22"
 # # Local address to listen on (REQUIRED)
 # target = "127.0.0.1:2222"
@@ -55,8 +55,8 @@ relay_only = false
 # ]
 
 # [custom-manual]
-# # Receiver-initiated mode: request source from sender, listen locally
-# # Source address to request from sender (REQUIRED)
+# # Client-initiated mode: request source from server, listen locally
+# # Source address to request from server (REQUIRED)
 # request_source = "tcp://127.0.0.1:22"
 # # Local address to listen on (REQUIRED)
 # target = "127.0.0.1:2222"
@@ -95,8 +95,8 @@ relay_only = false
 #     "stun.services.mozilla.com:3478",
 # ]
 #
-# # Source address to request from sender (REQUIRED for nostr mode)
-# # Must be in sender's allowed_sources list (--allowed-tcp or --allowed-udp)
+# # Source address to request from server (REQUIRED for nostr mode)
+# # Must be in server's allowed_sources list (--allowed-tcp or --allowed-udp)
 # # Can also use 'source' as an alias
 # request_source = "tcp://127.0.0.1:22"
 #

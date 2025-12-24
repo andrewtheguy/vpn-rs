@@ -1,8 +1,8 @@
-//! Nostr mode receiver implementations.
+//! Nostr mode client implementations.
 //!
-//! This module provides the receiver-side logic for nostr tunnels:
-//! - TCP receiver with local listener
-//! - UDP receiver with local socket
+//! This module provides the client-side logic for nostr tunnels:
+//! - TCP client with local listener
+//! - UDP client with local socket
 
 use anyhow::{Context, Result};
 use std::net::SocketAddr;
@@ -20,8 +20,8 @@ use crate::signaling::{
 use crate::transport::ice::{IceEndpoint, IceRole};
 use crate::transport::quic;
 use crate::tunnel_common::{
-    current_timestamp, forward_stream_to_udp_receiver, forward_udp_to_stream, generate_session_id,
-    handle_tcp_receiver_connection, open_bi_with_retry, QUIC_CONNECTION_TIMEOUT,
+    current_timestamp, forward_stream_to_udp_client, forward_udp_to_stream, generate_session_id,
+    handle_tcp_client_connection, open_bi_with_retry, QUIC_CONNECTION_TIMEOUT,
 };
 
 // ============================================================================
@@ -57,7 +57,7 @@ async fn publish_request_and_wait_for_offer(
         {
             Ok(Some(offer)) => return Ok(offer),
             Err(OfferWaitError::Rejected(reject)) => {
-                anyhow::bail!("Session rejected by sender: {}", reject.reason);
+                anyhow::bail!("Session rejected by server: {}", reject.reason);
             }
             Err(OfferWaitError::ChannelClosed) => {
                 anyhow::bail!("Nostr signaling channel closed while waiting for offer");
@@ -87,7 +87,7 @@ async fn publish_request_and_wait_for_offer(
 // Public API
 // ============================================================================
 
-pub async fn run_nostr_tcp_receiver(
+pub async fn run_nostr_tcp_client(
     listen: String,
     source: String,
     stun_servers: Vec<String>,
@@ -109,7 +109,7 @@ pub async fn run_nostr_tcp_receiver(
     })?;
     if source_url.scheme() != "tcp" {
         anyhow::bail!(
-            "Source URL must use tcp:// scheme for TCP receiver (got '{}://'). Use run_nostr_udp_receiver for udp://",
+            "Source URL must use tcp:// scheme for TCP client (got '{}://'). Use run_nostr_udp_client for udp://",
             source_url.scheme()
         );
     }
@@ -124,8 +124,8 @@ pub async fn run_nostr_tcp_receiver(
         .parse()
         .context("Invalid listen address format. Use format like 127.0.0.1:2222 or [::]:2222")?;
 
-    log::info!("Nostr TCP Tunnel - Receiver Mode");
-    log::info!("================================");
+    log::info!("Nostr TCP Tunnel - Client Mode");
+    log::info!("===============================");
 
     // Create Nostr signaling client
     let relay_list = if relays.is_empty() {
@@ -190,7 +190,7 @@ pub async fn run_nostr_tcp_receiver(
         quic_fingerprint: None, // Nostr mode: fingerprint is in the offer, not answer
     };
 
-    // Publish answer once - sender already has our ICE credentials from the request,
+    // Publish answer once - server already has our ICE credentials from the request,
     // so we can proceed to ICE immediately after publishing (no blocking sleep)
     signaling.publish_answer(&answer).await?;
     log::info!("Published answer, starting ICE immediately");
@@ -217,7 +217,7 @@ pub async fn run_nostr_tcp_receiver(
 
     let endpoint = quic::make_client_endpoint(ice_conn.socket, &offer.quic_fingerprint)?;
     log::info!(
-        "Connecting to sender via QUIC (timeout: {:?})...",
+        "Connecting to server via QUIC (timeout: {:?})...",
         QUIC_CONNECTION_TIMEOUT
     );
     let connecting = endpoint
@@ -226,8 +226,8 @@ pub async fn run_nostr_tcp_receiver(
     let conn = tokio::time::timeout(QUIC_CONNECTION_TIMEOUT, connecting)
         .await
         .context("Timeout during QUIC connection")?
-        .context("Failed to connect to sender")?;
-    log::info!("Connected to sender over QUIC.");
+        .context("Failed to connect to server")?;
+    log::info!("Connected to server over QUIC.");
 
     let conn = Arc::new(conn);
     let tunnel_established = Arc::new(AtomicBool::new(false));
@@ -258,7 +258,7 @@ pub async fn run_nostr_tcp_receiver(
                 let established = tunnel_established.clone();
 
                 connection_tasks.spawn(async move {
-                    match handle_tcp_receiver_connection(conn_clone, tcp_stream, peer_addr, established)
+                    match handle_tcp_client_connection(conn_clone, tcp_stream, peer_addr, established)
                         .await
                     {
                         Ok(()) => {}
@@ -280,12 +280,12 @@ pub async fn run_nostr_tcp_receiver(
                 match result {
                     Ok(()) => {
                         if *ice_disconnect_rx.borrow() {
-                            log::warn!("ICE disconnected; shutting down receiver.");
+                            log::warn!("ICE disconnected; shutting down client.");
                             break;
                         }
                     }
                     Err(_) => {
-                        log::warn!("ICE disconnect watcher closed; shutting down receiver.");
+                        log::warn!("ICE disconnect watcher closed; shutting down client.");
                         break;
                     }
                 }
@@ -315,11 +315,11 @@ pub async fn run_nostr_tcp_receiver(
         Err(e) => log::warn!("ICE keeper task failed: {}", e),
     }
 
-    log::info!("TCP receiver stopped.");
+    log::info!("TCP client stopped.");
     Ok(())
 }
 
-pub async fn run_nostr_udp_receiver(
+pub async fn run_nostr_udp_client(
     listen: String,
     source: String,
     stun_servers: Vec<String>,
@@ -341,7 +341,7 @@ pub async fn run_nostr_udp_receiver(
     })?;
     if source_url.scheme() != "udp" {
         anyhow::bail!(
-            "Source URL must use udp:// scheme for UDP receiver (got '{}://'). Use run_nostr_tcp_receiver for tcp://",
+            "Source URL must use udp:// scheme for UDP client (got '{}://'). Use run_nostr_tcp_client for tcp://",
             source_url.scheme()
         );
     }
@@ -356,8 +356,8 @@ pub async fn run_nostr_udp_receiver(
         .parse()
         .context("Invalid listen address format. Use format like 127.0.0.1:51820 or [::]:51820")?;
 
-    log::info!("Nostr UDP Tunnel - Receiver Mode");
-    log::info!("================================");
+    log::info!("Nostr UDP Tunnel - Client Mode");
+    log::info!("===============================");
 
     // Create Nostr signaling client
     let relay_list = if relays.is_empty() {
@@ -422,7 +422,7 @@ pub async fn run_nostr_udp_receiver(
         quic_fingerprint: None, // Nostr mode: fingerprint is in the offer, not answer
     };
 
-    // Publish answer once - sender already has our ICE credentials from the request,
+    // Publish answer once - server already has our ICE credentials from the request,
     // so we can proceed to ICE immediately after publishing (no blocking sleep)
     signaling.publish_answer(&answer).await?;
     log::info!("Published answer, starting ICE immediately");
@@ -449,7 +449,7 @@ pub async fn run_nostr_udp_receiver(
 
     let endpoint = quic::make_client_endpoint(ice_conn.socket, &offer.quic_fingerprint)?;
     log::info!(
-        "Connecting to sender via QUIC (timeout: {:?})...",
+        "Connecting to server via QUIC (timeout: {:?})...",
         QUIC_CONNECTION_TIMEOUT
     );
     let connecting = endpoint
@@ -458,8 +458,8 @@ pub async fn run_nostr_udp_receiver(
     let conn = tokio::time::timeout(QUIC_CONNECTION_TIMEOUT, connecting)
         .await
         .context("Timeout during QUIC connection")?
-        .context("Failed to connect to sender")?;
-    log::info!("Connected to sender over QUIC.");
+        .context("Failed to connect to server")?;
+    log::info!("Connected to server over QUIC.");
 
     let (send_stream, recv_stream) = open_bi_with_retry(&conn).await?;
 
@@ -487,7 +487,7 @@ pub async fn run_nostr_udp_receiver(
                 log::warn!("UDP to stream error: {}", e);
             }
         }
-        result = forward_stream_to_udp_receiver(recv_stream, udp_socket, client_addr) => {
+        result = forward_stream_to_udp_client(recv_stream, udp_socket, client_addr) => {
             if let Err(e) = result {
                 log::warn!("Stream to UDP error: {}", e);
             }
@@ -496,11 +496,11 @@ pub async fn run_nostr_udp_receiver(
             match result {
                 Ok(()) => {
                     if *ice_disconnect_rx.borrow() {
-                        log::warn!("ICE disconnected; shutting down receiver.");
+                        log::warn!("ICE disconnected; shutting down client.");
                     }
                 }
                 Err(_) => {
-                    log::warn!("ICE disconnect watcher closed; shutting down receiver.");
+                    log::warn!("ICE disconnect watcher closed; shutting down client.");
                 }
             }
         }

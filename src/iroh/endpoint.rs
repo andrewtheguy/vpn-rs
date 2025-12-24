@@ -12,7 +12,7 @@ use std::path::Path;
 use std::time::Duration;
 use url::Url;
 
-/// ALPN for all iroh modes (receiver requests source)
+/// ALPN for all iroh modes (client requests source)
 pub const MULTI_ALPN: &[u8] = b"multi-forward/1";
 pub const RELAY_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -167,8 +167,8 @@ pub fn create_endpoint_builder(
     Ok(builder)
 }
 
-/// Create a sender endpoint with optional persistent identity.
-pub async fn create_sender_endpoint(
+/// Create a server endpoint with optional persistent identity.
+pub async fn create_server_endpoint(
     relay_urls: &[String],
     relay_only: bool,
     secret: Option<SecretKey>,
@@ -206,8 +206,8 @@ pub async fn create_sender_endpoint(
     Ok(endpoint)
 }
 
-/// Create a receiver endpoint.
-pub async fn create_receiver_endpoint(
+/// Create a client endpoint.
+pub async fn create_client_endpoint(
     relay_urls: &[String],
     relay_only: bool,
     dns_server: Option<&str>,
@@ -216,7 +216,7 @@ pub async fn create_receiver_endpoint(
     let using_custom_relay = !matches!(relay_mode, RelayMode::Default);
     print_relay_status(relay_urls, relay_only, using_custom_relay);
 
-    // Receiver doesn't have a secret key, so can only resolve (not publish) from custom DNS
+    // Client doesn't have a secret key, so can only resolve (not publish) from custom DNS
     let builder = create_endpoint_builder(relay_mode, relay_only, dns_server, None)?;
     let endpoint = builder.bind().await.context("Failed to create iroh endpoint")?;
 
@@ -233,22 +233,22 @@ pub async fn create_receiver_endpoint(
     Ok(endpoint)
 }
 
-/// Connect to a sender endpoint with relay failover support.
-pub async fn connect_to_sender(
+/// Connect to a server endpoint with relay failover support.
+pub async fn connect_to_server(
     endpoint: &Endpoint,
-    sender_id: EndpointId,
+    server_id: EndpointId,
     relay_urls: &[String],
     relay_only: bool,
     alpn: &[u8],
 ) -> Result<iroh::endpoint::Connection> {
-    info!("Connecting to sender {}...", sender_id);
+    info!("Connecting to server {}...", server_id);
 
     if relay_only {
         // Try each relay URL until one works
         let mut last_error = None;
         for relay_url_str in relay_urls {
             let relay_url: RelayUrl = relay_url_str.parse().context("Invalid relay URL")?;
-            let endpoint_addr = EndpointAddr::new(sender_id).with_relay_url(relay_url.clone());
+            let endpoint_addr = EndpointAddr::new(server_id).with_relay_url(relay_url.clone());
             info!(
                 "Trying relay: {} (timeout: {}s)",
                 relay_url,
@@ -278,7 +278,7 @@ pub async fn connect_to_sender(
             last_error.unwrap_or_else(|| "No relay URLs provided".to_string())
         )
     } else {
-        let endpoint_addr = EndpointAddr::new(sender_id);
+        let endpoint_addr = EndpointAddr::new(server_id);
         info!(
             "Connecting (timeout: {}s)...",
             RELAY_CONNECT_TIMEOUT.as_secs()
@@ -288,7 +288,7 @@ pub async fn connect_to_sender(
             endpoint.connect(endpoint_addr, alpn),
         ).await {
             Ok(Ok(conn)) => Ok(conn),
-            Ok(Err(e)) => Err(e).context("Failed to connect to sender"),
+            Ok(Err(e)) => Err(e).context("Failed to connect to server"),
             Err(_) => anyhow::bail!("Connection timed out after {}s", RELAY_CONNECT_TIMEOUT.as_secs()),
         }
     }
