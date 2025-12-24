@@ -25,7 +25,7 @@ Run iroh-relay as a Tor hidden service (.onion) to avoid needing a public IP add
 - Direct P2P (QUIC/UDP) bypasses Tor entirely - no performance impact
 - If direct P2P fails, traffic falls back through relay (via Tor)
 
-## Phase 1: External Tor Daemon (Recommended)
+## Setup
 
 Use external `tor` daemon with native `--socks5-proxy` support.
 
@@ -88,6 +88,7 @@ iroh-relay --http-bind-addr 127.0.0.1:3340
 # Replace with your .onion address
 tunnel-rs server iroh \
   --relay-url http://YOUR_ADDRESS.onion \
+  --socks5-proxy socks5://127.0.0.1:9050 \
   --secret-file ./server.key \
   --allowed-tcp 127.0.0.0/8 \
   --allowed-tcp 10.0.0.0/8
@@ -180,7 +181,7 @@ socks5_proxy = "socks5://127.0.0.1:9050"
 
 ---
 
-## Phase 2: Embedded Arti (Future)
+## Future: Embedded Arti
 
 Single-binary deployment with Tor built-in using [Arti](https://gitlab.torproject.org/tpo/core/arti) (Rust Tor implementation).
 
