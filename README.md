@@ -461,12 +461,11 @@ Uses full ICE (Interactive Connectivity Establishment) with str0m + quinn QUIC.
    tunnel-rs sender custom-manual --allowed-tcp 127.0.0.0/8
    ```
 
-   Paste the offer. The sender displays an answer block plus a QUIC fingerprint.
-   Copy the `-----BEGIN TUNNEL-RS MANUAL ANSWER-----` block.
+   Paste the offer, then copy the `-----BEGIN TUNNEL-RS MANUAL ANSWER-----` block.
 
 3. **Receiver** receives the answer:
 
-   Paste the answer into the receiver terminal, then enter the QUIC fingerprint when prompted.
+   Paste the answer into the receiver terminal.
 
 4. **Connect**:
    ```bash

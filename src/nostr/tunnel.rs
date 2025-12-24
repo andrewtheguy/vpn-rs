@@ -853,6 +853,7 @@ pub async fn run_nostr_tcp_receiver(
         ice_pwd: local_creds.pass.clone(),
         candidates: local_candidates,
         session_id: Some(session_id),
+        quic_fingerprint: None, // Nostr mode: fingerprint is in the offer, not answer
     };
 
     // Publish answer once - sender already has our ICE credentials from the request,
@@ -1084,6 +1085,7 @@ pub async fn run_nostr_udp_receiver(
         ice_pwd: local_creds.pass.clone(),
         candidates: local_candidates,
         session_id: Some(session_id),
+        quic_fingerprint: None, // Nostr mode: fingerprint is in the offer, not answer
     };
 
     // Publish answer once - sender already has our ICE credentials from the request,

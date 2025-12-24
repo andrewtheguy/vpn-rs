@@ -49,6 +49,9 @@ pub struct ManualAnswer {
     /// Session ID echoed from offer (for nostr mode)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
+    /// QUIC server fingerprint for custom-manual mode (sender is QUIC server)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quic_fingerprint: Option<String>,
 }
 
 /// Request from receiver to initiate a tunnel session (for nostr mode).

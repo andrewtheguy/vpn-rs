@@ -88,16 +88,16 @@ pub async fn run_manual_sender(
     );
     let target_addr = *target_addrs.first().context("No target addresses resolved")?;
 
-    // Generate and display answer with QUIC fingerprint
+    // Generate and display answer with QUIC fingerprint included
     let answer = ManualAnswer {
         version: MANUAL_SIGNAL_VERSION,
         ice_ufrag: local_creds.ufrag.clone(),
         ice_pwd: local_creds.pass.clone(),
         candidates: local_candidates,
         session_id: None,
+        quic_fingerprint: Some(quic_identity.fingerprint.clone()),
     };
     log::info!("\nManual Answer (copy to receiver):");
-    log::info!("QUIC fingerprint: {}", quic_identity.fingerprint);
     display_answer(&answer)?;
 
     // Connect via ICE (sender is Controlled in receiver-first pattern)
@@ -257,7 +257,6 @@ pub async fn run_manual_receiver(
 
     // Read answer from sender (includes QUIC fingerprint)
     log::info!("Paste sender answer (include BEGIN/END markers), then press Enter:");
-    log::info!("The sender will also display a QUIC fingerprint - enter it when prompted.");
     let answer = read_answer_from_stdin()?;
     if answer.version != MANUAL_SIGNAL_VERSION {
         anyhow::bail!(
@@ -267,14 +266,10 @@ pub async fn run_manual_receiver(
         );
     }
 
-    // Read QUIC fingerprint from stdin
-    log::info!("Enter the QUIC fingerprint from sender:");
-    let mut fingerprint_line = String::new();
-    std::io::stdin().read_line(&mut fingerprint_line)?;
-    let quic_fingerprint = fingerprint_line.trim().to_string();
-    if quic_fingerprint.is_empty() {
-        anyhow::bail!("QUIC fingerprint is required");
-    }
+    // Extract QUIC fingerprint from answer
+    let quic_fingerprint = answer
+        .quic_fingerprint
+        .context("Answer missing QUIC fingerprint. Sender must include fingerprint in answer.")?;
 
     // Connect via ICE (receiver is Controlling in receiver-first pattern)
     let remote_creds = str0m::IceCreds {
