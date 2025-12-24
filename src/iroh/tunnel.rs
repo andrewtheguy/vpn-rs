@@ -1208,12 +1208,12 @@ async fn forward_stream_to_udp_sender(
         }
     });
 
-    // Track errors for each address for aggregate reporting
-    let mut errors: Vec<(SocketAddr, std::io::Error)> = Vec::new();
     let mut active_addr_idx = 0;
     let mut logged_active = false;
 
     loop {
+        // Track errors for each address for aggregate reporting - fresh for each packet
+        let mut errors: Vec<(SocketAddr, std::io::Error)> = Vec::new();
         let mut len_buf = [0u8; 2];
         match recv_stream.read_exact(&mut len_buf).await {
             Ok(()) => {}
