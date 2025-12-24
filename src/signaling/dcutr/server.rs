@@ -130,6 +130,7 @@ where
     let (tx, mut rx) = mpsc::channel::<ServerMessage>(32);
 
     let mut client_id: Option<String> = None;
+    let mut loop_error: Option<anyhow::Error> = None;
 
     loop {
         tokio::select! {
@@ -151,12 +152,16 @@ where
                                 Ok(result) => JsonRpcResponse::success(id, result),
                                 Err(error) => JsonRpcResponse::error(id, error),
                             };
-                            write_message(&mut writer, &resp).await?;
+                            if let Err(e) = write_message(&mut writer, &resp).await {
+                                loop_error = Some(anyhow!("Write error: {}", e));
+                                break;
+                            }
                         }
                     }
                     Err(e) => {
                         // Connection closed or parse error
-                        return Err(anyhow!("Read error: {}", e));
+                        loop_error = Some(anyhow!("Read error: {}", e));
+                        break;
                     }
                 }
             }
@@ -166,7 +171,10 @@ where
                 match server_msg {
                     ServerMessage::SyncConnect(params) => {
                         let notification = JsonRpcNotification::new("sync_connect", params);
-                        write_message(&mut writer, &notification).await?;
+                        if let Err(e) = write_message(&mut writer, &notification).await {
+                            loop_error = Some(anyhow!("Write error: {}", e));
+                            break;
+                        }
                     }
                     ServerMessage::Shutdown => {
                         break;
@@ -176,14 +184,18 @@ where
         }
     }
 
-    // Cleanup: remove client from state
-    if let Some(id) = client_id {
+    // Cleanup: always remove client from state on any exit
+    if let Some(id) = &client_id {
         let mut state = state.write().await;
-        state.clients.remove(&id);
+        state.clients.remove(id);
         info!("Client {} unregistered", id);
     }
 
-    Ok(())
+    // Return error if one occurred, otherwise Ok
+    match loop_error {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
 }
 
 /// Handle a JSON-RPC request and return result or error
@@ -268,25 +280,21 @@ async fn handle_ping(
         .unwrap()
         .as_millis() as u64;
 
-    // Update RTT sample if client is registered
+    // Store client-measured RTT if provided (from previous ping response)
     if let Some(id) = client_id {
-        let mut state = state.write().await;
-        if let Some(client) = state.clients.get_mut(id) {
-            // Calculate RTT from client timestamp
-            if server_ts > params.timestamp {
-                let rtt_ms = server_ts - params.timestamp;
-                let rtt_us = rtt_ms * 1000;
-
+        if let Some(measured_rtt_us) = params.measured_rtt_us {
+            let mut state = state.write().await;
+            if let Some(client) = state.clients.get_mut(id) {
                 // Keep only last N samples
                 if client.rtt_samples_us.len() >= MAX_RTT_SAMPLES {
                     client.rtt_samples_us.remove(0);
                 }
-                client.rtt_samples_us.push(rtt_us);
+                client.rtt_samples_us.push(measured_rtt_us);
 
                 debug!(
-                    "Client {} RTT sample: {}ms (avg: {}ms)",
+                    "Client {} RTT sample: {}us (avg: {}ms)",
                     id,
-                    rtt_ms,
+                    measured_rtt_us,
                     client.avg_rtt_ms()
                 );
             }

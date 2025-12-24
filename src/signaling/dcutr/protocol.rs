@@ -136,6 +136,10 @@ pub struct RegisterResult {
 pub struct PingParams {
     pub seq: u32,
     pub timestamp: u64,
+    /// Client-measured RTT from previous ping (microseconds).
+    /// Populated after receiving the first pong response.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub measured_rtt_us: Option<u64>,
 }
 
 /// Result for "ping" method (pong)

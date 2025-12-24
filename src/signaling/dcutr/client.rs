@@ -141,6 +141,7 @@ where
         info!("Measuring RTT to signaling server ({} rounds)", RTT_ROUNDS);
 
         let mut rtt_samples = Vec::with_capacity(RTT_ROUNDS as usize);
+        let mut prev_rtt_us: Option<u64> = None;
 
         for seq in 0..RTT_ROUNDS {
             let send_time = Self::current_time_ms();
@@ -151,6 +152,8 @@ where
                 params: Some(serde_json::to_value(PingParams {
                     seq,
                     timestamp: send_time,
+                    // Send the previous RTT measurement to the server
+                    measured_rtt_us: prev_rtt_us,
                 })?),
                 id: Some(self.next_request_id()),
             };
@@ -163,9 +166,11 @@ where
             }
 
             let recv_time = Self::current_time_ms();
-            let rtt = recv_time.saturating_sub(send_time);
-            rtt_samples.push(rtt);
-            debug!("RTT sample {}: {}ms", seq, rtt);
+            let rtt_ms = recv_time.saturating_sub(send_time);
+            let rtt_us = rtt_ms * 1000; // Convert to microseconds for next ping
+            prev_rtt_us = Some(rtt_us);
+            rtt_samples.push(rtt_ms);
+            debug!("RTT sample {}: {}ms", seq, rtt_ms);
         }
 
         // Calculate average RTT
