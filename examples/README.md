@@ -107,12 +107,15 @@ kubectl apply -f kubernetes/deployment-sidecar.yaml
 # Get EndpointId
 kubectl logs -l app=myapp -c tunnel-sender | grep EndpointId
 
-# Connect from remote
+# Connect from remote (replace "myapp" with your service name)
 tunnel-rs receiver iroh \
   --node-id <ID> \
-  --source tcp://localhost:8080 \
+  --source tcp://myapp:8080 \
   --target 127.0.0.1:8080
 ```
+
+> **Note:** The `--source` specifies the service the sender should connect to on your behalf.
+> Replace `myapp:8080` with your actual service name and port (e.g., `myapp.namespace.svc:8080`).
 
 ### Expose Cluster Services (Multi-Session)
 
