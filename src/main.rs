@@ -450,7 +450,7 @@ enum ReceiverMode {
     },
     /// Full ICE with Nostr-based signaling (WireGuard-like static keys)
     Nostr {
-        /// Local address to listen on (tcp://host:port or udp://host:port, or host:port for TCP, e.g., tcp://127.0.0.1:2222)
+        /// Local address to listen on (e.g., 127.0.0.1:2222 for TCP, udp://127.0.0.1:5353 for UDP)
         #[arg(short, long)]
         target: Option<String>,
 

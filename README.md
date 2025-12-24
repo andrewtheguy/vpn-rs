@@ -579,7 +579,7 @@ tunnel-rs sender nostr \
 ```bash
 tunnel-rs receiver nostr \
   --source tcp://127.0.0.1:22 \
-  --target tcp://127.0.0.1:2222 \
+  --target 127.0.0.1:2222 \
   --nsec-file ./receiver.nsec \
   --peer-npub npub1sender...
 ```
@@ -709,10 +709,10 @@ Sender whitelists networks; receivers choose which service to tunnel:
 tunnel-rs sender nostr --allowed-tcp 127.0.0.0/8 --nsec-file ./sender.nsec --peer-npub <NPUB> --max-sessions 5
 
 # Receiver 1: tunnel to SSH
-tunnel-rs receiver nostr --source tcp://127.0.0.1:22 --target tcp://127.0.0.1:2222 ...
+tunnel-rs receiver nostr --source tcp://127.0.0.1:22 --target 127.0.0.1:2222 ...
 
 # Receiver 2: tunnel to web server (same sender!)
-tunnel-rs receiver nostr --source tcp://127.0.0.1:80 --target tcp://127.0.0.1:8080 ...
+tunnel-rs receiver nostr --source tcp://127.0.0.1:80 --target 127.0.0.1:8080 ...
 ```
 
 ### Single-Session Modes (iroh-manual, custom-manual)

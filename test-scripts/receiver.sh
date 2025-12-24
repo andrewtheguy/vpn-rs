@@ -33,7 +33,7 @@ for i in $(seq 1 $NUM_SESSIONS); do
     echo "[$i] Starting receiver on port $PORT..."
     "$TUNNEL_BIN" receiver nostr \
         --source "tcp://localhost:$SOURCE_PORT" \
-        --target "tcp://127.0.0.1:$PORT" \
+        --target "127.0.0.1:$PORT" \
         --nsec-file "$RECEIVER_NSEC_FILE" \
         --peer-npub "$SENDER_NPUB" &
     PIDS+=($!)
