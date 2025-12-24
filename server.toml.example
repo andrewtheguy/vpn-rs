@@ -35,6 +35,10 @@ relay_urls = [
 # NOTE: URL must include the /pkarr path
 # dns_server = "https://dns.example.com/pkarr"
 
+# SOCKS5 proxy for relay connections (required for .onion relay URLs)
+# Use with Tor: socks5://127.0.0.1:9050
+# socks5_proxy = "socks5://127.0.0.1:9050"
+
 # Maximum concurrent sessions (default: 100)
 max_sessions = 100
 
