@@ -208,10 +208,19 @@ async fn handle_multi_source_connection(
                         log::warn!("Session limit reached, rejecting stream from {}", remote_id);
                         // Send rejection and close stream
                         let response = SourceResponse::rejected("Session limit reached");
-                        if let Ok(encoded) = encode_source_response(&response) {
-                            let mut send = send_stream;
-                            let _ = send.write_all(&encoded).await;
-                            let _ = send.finish();
+                        match encode_source_response(&response) {
+                            Ok(encoded) => {
+                                let mut send = send_stream;
+                                if let Err(e) = send.write_all(&encoded).await {
+                                    log::warn!("Failed to write rejection response to {}: {}", remote_id, e);
+                                }
+                                if let Err(e) = send.finish() {
+                                    log::warn!("Failed to finish rejection stream to {}: {}", remote_id, e);
+                                }
+                            }
+                            Err(e) => {
+                                log::error!("Failed to encode rejection response for {}: {}", remote_id, e);
+                            }
                         }
                         continue;
                     }
