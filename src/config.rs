@@ -331,7 +331,7 @@ impl ServerConfig {
                     validate_allowed_sources(allowed)?;
                 }
             }
-            // Sender iroh mode should not have top-level source
+            // Server iroh mode should not have top-level source
             if self.source.is_some() {
                 anyhow::bail!(
                     "Top-level 'source' is not allowed for iroh server mode. \
@@ -356,7 +356,7 @@ impl ServerConfig {
                     validate_allowed_sources(allowed)?;
                 }
             }
-            // Sender nostr mode should not have top-level source
+            // Server nostr mode should not have top-level source
             if self.source.is_some() {
                 anyhow::bail!(
                     "Top-level 'source' is not allowed for nostr server mode. \
@@ -378,7 +378,7 @@ impl ServerConfig {
                     validate_allowed_sources(allowed)?;
                 }
             }
-            // Reject top-level source for iroh-manual sender
+            // Reject top-level source for iroh-manual server
             if self.source.is_some() {
                 anyhow::bail!(
                     "Top-level 'source' is not allowed for iroh-manual server mode. \
@@ -400,7 +400,7 @@ impl ServerConfig {
                     validate_allowed_sources(allowed)?;
                 }
             }
-            // Reject top-level source for custom-manual sender
+            // Reject top-level source for custom-manual server
             if self.source.is_some() {
                 anyhow::bail!(
                     "Top-level 'source' is not allowed for custom-manual server mode. \
@@ -583,17 +583,17 @@ fn load_config<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T> {
         .with_context(|| format!("Failed to parse config file: {}", path.display()))
 }
 
-/// Resolve the default sender config path (~/.config/tunnel-rs/server.toml).
+/// Resolve the default server config path (~/.config/tunnel-rs/server.toml).
 fn default_server_config_path() -> Option<PathBuf> {
     dirs::home_dir().map(|home| home.join(".config").join("tunnel-rs").join("server.toml"))
 }
 
-/// Resolve the default receiver config path (~/.config/tunnel-rs/client.toml).
+/// Resolve the default client config path (~/.config/tunnel-rs/client.toml).
 fn default_client_config_path() -> Option<PathBuf> {
     dirs::home_dir().map(|home| home.join(".config").join("tunnel-rs").join("client.toml"))
 }
 
-/// Load sender configuration from an explicit path, or from default location.
+/// Load server configuration from an explicit path, or from default location.
 ///
 /// - `path`: Some(path) loads from the specified path
 /// - `path`: None loads from the default path (~/.config/tunnel-rs/server.toml)
@@ -606,7 +606,7 @@ pub fn load_server_config(path: Option<&Path>) -> Result<ServerConfig> {
     load_config(&config_path)
 }
 
-/// Load receiver configuration from an explicit path, or from default location.
+/// Load client configuration from an explicit path, or from default location.
 ///
 /// - `path`: Some(path) loads from the specified path
 /// - `path`: None loads from the default path (~/.config/tunnel-rs/client.toml)
