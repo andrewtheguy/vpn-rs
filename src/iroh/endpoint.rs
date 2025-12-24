@@ -140,7 +140,13 @@ pub fn create_endpoint_builder(
 ) -> Result<EndpointBuilder> {
     // relay_only is only meaningful with test-utils feature
     #[cfg(not(feature = "test-utils"))]
-    let relay_only = { let _ = relay_only; false };
+    {
+        if relay_only {
+            log::warn!("relay_only=true requires 'test-utils' feature; ignoring and using relay_only=false");
+        }
+    }
+    #[cfg(not(feature = "test-utils"))]
+    let relay_only = false;
 
     // Configure transport with keep-alive and idle timeout.
     // See QUIC_KEEP_ALIVE_INTERVAL and QUIC_IDLE_TIMEOUT constants for rationale.
@@ -266,7 +272,11 @@ pub async fn connect_to_server(
 ) -> Result<iroh::endpoint::Connection> {
     // relay_only is only meaningful with test-utils feature
     #[cfg(not(feature = "test-utils"))]
-    let relay_only = { let _ = relay_only; false };
+    {
+        let _ = relay_only;
+    }
+    #[cfg(not(feature = "test-utils"))]
+    let relay_only = false;
 
     info!("Connecting to server {}...", server_id);
 

@@ -53,7 +53,13 @@ pub async fn run_multi_source_server(
 ) -> Result<()> {
     // relay_only is only meaningful with test-utils feature
     #[cfg(not(feature = "test-utils"))]
-    let relay_only = { let _ = relay_only; false };
+    {
+        if relay_only {
+            log::warn!("relay_only=true requires 'test-utils' feature; ignoring and using relay_only=false");
+        }
+    }
+    #[cfg(not(feature = "test-utils"))]
+    let relay_only = false;
 
     // Validate CIDR notation at startup
     validate_allowed_networks(&allowed_tcp, "--allowed-tcp")?;
@@ -333,7 +339,13 @@ pub async fn run_multi_source_client(
 ) -> Result<()> {
     // relay_only is only meaningful with test-utils feature
     #[cfg(not(feature = "test-utils"))]
-    let relay_only = { let _ = relay_only; false };
+    {
+        if relay_only {
+            log::warn!("relay_only=true requires 'test-utils' feature; ignoring and using relay_only=false");
+        }
+    }
+    #[cfg(not(feature = "test-utils"))]
+    let relay_only = false;
 
     validate_relay_only(relay_only, &relay_urls)?;
 
