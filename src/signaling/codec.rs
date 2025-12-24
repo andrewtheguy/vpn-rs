@@ -336,86 +336,88 @@ pub(crate) fn wrap_lines(s: &str, width: usize) -> String {
 /// Maximum size for source request/response messages (16KB)
 pub const MAX_SOURCE_MESSAGE_SIZE: usize = 16 * 1024;
 
-/// Encode a SourceRequest as length-prefixed JSON bytes.
-pub fn encode_source_request(req: &SourceRequest) -> Result<Vec<u8>> {
-    let json = serde_json::to_vec(req).context("Failed to serialize SourceRequest")?;
+// ============================================================================
+// Length-Prefixed JSON Helpers
+// ============================================================================
+
+/// Encode a value as length-prefixed JSON bytes.
+fn encode_length_prefixed<T: Serialize>(value: &T, type_name: &str) -> Result<Vec<u8>> {
+    let json =
+        serde_json::to_vec(value).with_context(|| format!("Failed to serialize {}", type_name))?;
     if json.len() > MAX_SOURCE_MESSAGE_SIZE {
-        anyhow::bail!("SourceRequest too large: {} bytes", json.len());
+        anyhow::bail!("{} too large: {} bytes", type_name, json.len());
     }
     let len = (json.len() as u32).to_be_bytes();
     let mut buf = Vec::with_capacity(4 + json.len());
     buf.extend_from_slice(&len);
     buf.extend_from_slice(&json);
     Ok(buf)
+}
+
+/// Decode a length-prefixed JSON value with version validation.
+fn decode_length_prefixed<T: for<'de> Deserialize<'de>>(
+    data: &[u8],
+    expected_version: u16,
+    get_version: impl FnOnce(&T) -> u16,
+    type_name: &str,
+) -> Result<T> {
+    if data.len() < 4 {
+        anyhow::bail!("{} too short: {} bytes", type_name, data.len());
+    }
+    let len = u32::from_be_bytes([data[0], data[1], data[2], data[3]]) as usize;
+    if len > MAX_SOURCE_MESSAGE_SIZE {
+        anyhow::bail!("{} length too large: {} bytes", type_name, len);
+    }
+    if data.len() < 4 + len {
+        anyhow::bail!(
+            "{} incomplete: expected {} bytes, got {}",
+            type_name,
+            4 + len,
+            data.len()
+        );
+    }
+    let value: T = serde_json::from_slice(&data[4..4 + len])
+        .with_context(|| format!("Invalid {} JSON", type_name))?;
+    let version = get_version(&value);
+    if version != expected_version {
+        anyhow::bail!(
+            "{} version mismatch: expected {}, got {}",
+            type_name,
+            expected_version,
+            version
+        );
+    }
+    Ok(value)
+}
+
+/// Encode a SourceRequest as length-prefixed JSON bytes.
+pub fn encode_source_request(req: &SourceRequest) -> Result<Vec<u8>> {
+    encode_length_prefixed(req, "SourceRequest")
 }
 
 /// Decode a SourceRequest from length-prefixed JSON bytes.
 pub fn decode_source_request(data: &[u8]) -> Result<SourceRequest> {
-    if data.len() < 4 {
-        anyhow::bail!("SourceRequest too short: {} bytes", data.len());
-    }
-    let len = u32::from_be_bytes([data[0], data[1], data[2], data[3]]) as usize;
-    if len > MAX_SOURCE_MESSAGE_SIZE {
-        anyhow::bail!("SourceRequest length too large: {} bytes", len);
-    }
-    if data.len() < 4 + len {
-        anyhow::bail!(
-            "SourceRequest incomplete: expected {} bytes, got {}",
-            4 + len,
-            data.len()
-        );
-    }
-    let req: SourceRequest =
-        serde_json::from_slice(&data[4..4 + len]).context("Invalid SourceRequest JSON")?;
-    if req.version != IROH_MULTI_VERSION {
-        anyhow::bail!(
-            "SourceRequest version mismatch: expected {}, got {}",
-            IROH_MULTI_VERSION,
-            req.version
-        );
-    }
-    Ok(req)
+    decode_length_prefixed(
+        data,
+        IROH_MULTI_VERSION,
+        |r: &SourceRequest| r.version,
+        "SourceRequest",
+    )
 }
 
 /// Encode a SourceResponse as length-prefixed JSON bytes.
 pub fn encode_source_response(resp: &SourceResponse) -> Result<Vec<u8>> {
-    let json = serde_json::to_vec(resp).context("Failed to serialize SourceResponse")?;
-    if json.len() > MAX_SOURCE_MESSAGE_SIZE {
-        anyhow::bail!("SourceResponse too large: {} bytes", json.len());
-    }
-    let len = (json.len() as u32).to_be_bytes();
-    let mut buf = Vec::with_capacity(4 + json.len());
-    buf.extend_from_slice(&len);
-    buf.extend_from_slice(&json);
-    Ok(buf)
+    encode_length_prefixed(resp, "SourceResponse")
 }
 
 /// Decode a SourceResponse from length-prefixed JSON bytes.
 pub fn decode_source_response(data: &[u8]) -> Result<SourceResponse> {
-    if data.len() < 4 {
-        anyhow::bail!("SourceResponse too short: {} bytes", data.len());
-    }
-    let len = u32::from_be_bytes([data[0], data[1], data[2], data[3]]) as usize;
-    if len > MAX_SOURCE_MESSAGE_SIZE {
-        anyhow::bail!("SourceResponse length too large: {} bytes", len);
-    }
-    if data.len() < 4 + len {
-        anyhow::bail!(
-            "SourceResponse incomplete: expected {} bytes, got {}",
-            4 + len,
-            data.len()
-        );
-    }
-    let resp: SourceResponse =
-        serde_json::from_slice(&data[4..4 + len]).context("Invalid SourceResponse JSON")?;
-    if resp.version != IROH_MULTI_VERSION {
-        anyhow::bail!(
-            "SourceResponse version mismatch: expected {}, got {}",
-            IROH_MULTI_VERSION,
-            resp.version
-        );
-    }
-    Ok(resp)
+    decode_length_prefixed(
+        data,
+        IROH_MULTI_VERSION,
+        |r: &SourceResponse| r.version,
+        "SourceResponse",
+    )
 }
 
 /// Read a length-prefixed message from a stream.
