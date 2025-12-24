@@ -42,6 +42,9 @@ tunnel-rs provides multiple modes for establishing tunnels:
 | **custom** | Manual copy-paste | Full ICE | TCP, UDP | Best NAT compatibility |
 | **nostr** | Nostr relays | Full ICE | TCP, UDP | Automated signaling, static keys |
 
+> [!TIP]
+> **For containerized environments (Docker, Kubernetes, cloud VMs):** Use `iroh-default` mode. It includes relay fallback which ensures connectivity even when both peers are behind restrictive NATs (common in cloud environments). The `nostr`, `custom`, and `iroh-manual` modes use STUN-only NAT traversal which may fail when both peers are behind symmetric NAT.
+
 ### Choosing a Serverless Mode
 
 The `iroh-manual`, `custom`, and `nostr` modes don't require iroh discovery/relay infrastructure:
@@ -659,6 +662,9 @@ When no relays are specified, these public relays are used:
 - Signaling uses Nostr event kind 24242 with tags for transfer ID and peer pubkey
 - Full ICE provides best NAT traversal (same as custom mode)
 - **Receiver-first protocol:** The receiver initiates the connection by publishing a request first; sender waits for a request before publishing its offer
+
+> [!WARNING]
+> **Containerized Environments:** Nostr mode uses STUN-only NAT traversal without relay fallback. If both peers are behind restrictive NATs (common in Docker, Kubernetes, or cloud VMs), ICE connectivity may fail. For containerized deployments, consider using `iroh-default` mode which includes automatic relay fallback.
 
 ## Mode Capabilities
 

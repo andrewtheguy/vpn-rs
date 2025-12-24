@@ -4,10 +4,11 @@
 //! with Nostr relay-based automated signaling.
 
 use anyhow::{Context, Result};
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::net::{TcpListener, UdpSocket};
 use tokio::sync::Mutex;
 use tokio::task::JoinSet;
@@ -29,60 +30,6 @@ use crate::tunnel_common::{
 // ============================================================================
 // Nostr Signaling Helpers
 // ============================================================================
-
-/// Publish offer and wait for answer with periodic re-publishing.
-async fn publish_offer_and_wait_for_answer(
-    signaling: &NostrSignaling,
-    offer: &ManualOffer,
-    session_id: &str,
-    republish_interval_secs: u64,
-    max_wait_secs: u64,
-) -> Result<ManualAnswer> {
-    let start_time = std::time::Instant::now();
-
-    // Exponential backoff: start at base interval, double each time, cap at 60s
-    let mut current_interval = republish_interval_secs;
-    const MAX_INTERVAL: u64 = 60;
-
-    // Create receiver BEFORE publishing to avoid race where answer arrives
-    // between publish and starting to listen.
-    let mut receiver = signaling.create_notification_receiver();
-
-    signaling.publish_offer(offer).await?;
-    log::info!(
-        "Waiting for answer (re-publishing with backoff, starting {}s, max {}s)...",
-        republish_interval_secs,
-        max_wait_secs
-    );
-
-    loop {
-        // Use session-specific waiting to support concurrent multi-session mode.
-        // Each session gets its own receiver so answers aren't consumed by other sessions.
-        if let Some(ans) = signaling
-            .try_wait_for_answer_with_session_id(&mut receiver, session_id, current_interval)
-            .await
-        {
-            return Ok(ans);
-        }
-
-        // Check overall timeout
-        if start_time.elapsed().as_secs() >= max_wait_secs {
-            anyhow::bail!(
-                "Timeout waiting for answer from peer ({}s)",
-                max_wait_secs
-            );
-        }
-
-        // Exponential backoff
-        let next_interval = (current_interval * 2).min(MAX_INTERVAL);
-
-        // Re-publish offer with backoff
-        log::info!("Re-publishing offer (next wait: {}s)...", next_interval);
-        signaling.publish_offer(offer).await?;
-
-        current_interval = next_interval;
-    }
-}
 
 /// Publish request and wait for offer with periodic re-publishing.
 async fn publish_request_and_wait_for_offer(
@@ -178,6 +125,13 @@ async fn run_nostr_sender_loop(
 
     let mut session_tasks: JoinSet<Result<()>> = JoinSet::new();
 
+    // Track recently-processed session IDs with timestamps to avoid duplicate processing.
+    // Nostr relays may deliver the same request multiple times.
+    // Uses TTL-based eviction: entries older than MAX_REQUEST_AGE_SECS are eligible for removal.
+    let mut processed_sessions: HashMap<String, Instant> = HashMap::new();
+    const MAX_PROCESSED_SESSIONS: usize = 1000; // Limit memory usage
+    let session_ttl = Duration::from_secs(MAX_REQUEST_AGE_SECS * 2); // 2x request age for safety margin
+
     let limit_str = if max_sessions == 0 {
         "unlimited".to_string()
     } else {
@@ -227,6 +181,53 @@ async fn run_nostr_sender_loop(
         }
 
         let session_id = request.session_id.clone();
+        let now = Instant::now();
+
+        // Skip duplicate requests (Nostr relays may deliver the same event multiple times)
+        if processed_sessions.contains_key(&session_id) {
+            log::debug!(
+                "Ignoring duplicate request for session {}",
+                short_session_id(&session_id)
+            );
+            continue;
+        }
+
+        // Evict expired entries when approaching capacity (TTL-based eviction)
+        if processed_sessions.len() >= MAX_PROCESSED_SESSIONS {
+            let before_count = processed_sessions.len();
+            processed_sessions.retain(|_, timestamp| now.duration_since(*timestamp) < session_ttl);
+            let evicted = before_count - processed_sessions.len();
+            if evicted > 0 {
+                log::debug!(
+                    "Evicted {} expired session entries (TTL: {:?})",
+                    evicted,
+                    session_ttl
+                );
+            }
+
+            // If still at capacity after TTL eviction, remove oldest 25% of entries
+            if processed_sessions.len() >= MAX_PROCESSED_SESSIONS {
+                let to_remove = MAX_PROCESSED_SESSIONS / 4;
+                let mut entries: Vec<_> = processed_sessions
+                    .iter()
+                    .map(|(k, ts)| (k.clone(), *ts))
+                    .collect();
+                entries.sort_by_key(|(_, ts)| *ts);
+                let keys_to_remove: Vec<_> = entries
+                    .into_iter()
+                    .take(to_remove)
+                    .map(|(k, _)| k)
+                    .collect();
+                for session in keys_to_remove {
+                    processed_sessions.remove(&session);
+                }
+                log::debug!(
+                    "Evicted {} oldest session entries (capacity limit)",
+                    to_remove
+                );
+            }
+        }
+        processed_sessions.insert(session_id.clone(), now);
         let protocol = request
             .source
             .as_ref()
@@ -404,8 +405,8 @@ async fn handle_nostr_tcp_session_impl(
     signaling: Arc<NostrSignaling>,
     request: ManualRequest,
     stun_servers: Vec<String>,
-    republish_interval_secs: u64,
-    max_wait_secs: u64,
+    _republish_interval_secs: u64,
+    _max_wait_secs: u64,
 ) -> Result<()> {
     let session_id = request.session_id.clone();
     let short_id = short_session_id(&session_id).to_string();
@@ -449,26 +450,13 @@ async fn handle_nostr_tcp_session_impl(
         session_id: Some(session_id.clone()),
     };
 
-    // Publish offer and wait for answer
-    let answer = publish_offer_and_wait_for_answer(
-        &signaling,
-        &offer,
-        &session_id,
-        republish_interval_secs,
-        max_wait_secs,
-    )
-    .await?;
+    // Publish offer once - we already have receiver's ICE credentials from the REQUEST,
+    // so we can start ICE immediately without waiting for the answer.
+    // The answer is only a confirmation that receiver got the offer.
+    signaling.publish_offer(&offer).await?;
+    log::info!("[{}] Published offer, starting ICE immediately", short_id);
 
-    if answer.version != MANUAL_SIGNAL_VERSION {
-        anyhow::bail!(
-            "[{}] Manual signaling version mismatch (expected {}, got {})",
-            short_id,
-            MANUAL_SIGNAL_VERSION,
-            answer.version
-        );
-    }
-
-    // Use receiver's ICE credentials from the REQUEST
+    // Use receiver's ICE credentials from the REQUEST (not from answer)
     let remote_creds = str0m::IceCreds {
         ufrag: request.ice_ufrag,
         pass: request.ice_pwd,
@@ -551,8 +539,8 @@ async fn handle_nostr_udp_session_impl(
     signaling: Arc<NostrSignaling>,
     request: ManualRequest,
     stun_servers: Vec<String>,
-    republish_interval_secs: u64,
-    max_wait_secs: u64,
+    _republish_interval_secs: u64,
+    _max_wait_secs: u64,
 ) -> Result<()> {
     let session_id = request.session_id.clone();
     let short_id = short_session_id(&session_id).to_string();
@@ -594,26 +582,13 @@ async fn handle_nostr_udp_session_impl(
         session_id: Some(session_id.clone()),
     };
 
-    // Publish offer and wait for answer
-    let answer = publish_offer_and_wait_for_answer(
-        &signaling,
-        &offer,
-        &session_id,
-        republish_interval_secs,
-        max_wait_secs,
-    )
-    .await?;
+    // Publish offer once - we already have receiver's ICE credentials from the REQUEST,
+    // so we can start ICE immediately without waiting for the answer.
+    // The answer is only a confirmation that receiver got the offer.
+    signaling.publish_offer(&offer).await?;
+    log::info!("[{}] Published offer, starting ICE immediately", short_id);
 
-    if answer.version != MANUAL_SIGNAL_VERSION {
-        anyhow::bail!(
-            "[{}] Manual signaling version mismatch (expected {}, got {})",
-            short_id,
-            MANUAL_SIGNAL_VERSION,
-            answer.version
-        );
-    }
-
-    // Use receiver's ICE credentials from the REQUEST
+    // Use receiver's ICE credentials from the REQUEST (not from answer)
     let remote_creds = str0m::IceCreds {
         ufrag: request.ice_ufrag,
         pass: request.ice_pwd,
@@ -879,15 +854,16 @@ pub async fn run_nostr_tcp_receiver(
     };
 
     // Publish answer once - sender already has our ICE credentials from the request,
-    // so we can proceed to ICE immediately after publishing
+    // so we can proceed to ICE immediately after publishing (no blocking sleep)
     signaling.publish_answer(&answer).await?;
+    log::info!("Published answer, starting ICE immediately");
 
-    // Brief delay to allow answer to propagate to relays
-    log::info!("Waiting briefly for answer to propagate...");
-    tokio::time::sleep(Duration::from_secs(3)).await;
-
-    // Disconnect from Nostr (signaling complete)
-    signaling.disconnect().await;
+    // Disconnect from Nostr in background after brief delay to ensure answer propagates
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        signaling.disconnect().await;
+        log::debug!("Nostr signaling disconnected");
+    });
 
     let remote_creds = str0m::IceCreds {
         ufrag: offer.ice_ufrag,
@@ -1109,15 +1085,16 @@ pub async fn run_nostr_udp_receiver(
     };
 
     // Publish answer once - sender already has our ICE credentials from the request,
-    // so we can proceed to ICE immediately after publishing
+    // so we can proceed to ICE immediately after publishing (no blocking sleep)
     signaling.publish_answer(&answer).await?;
+    log::info!("Published answer, starting ICE immediately");
 
-    // Brief delay to allow answer to propagate to relays
-    log::info!("Waiting briefly for answer to propagate...");
-    tokio::time::sleep(Duration::from_secs(3)).await;
-
-    // Disconnect from Nostr (signaling complete)
-    signaling.disconnect().await;
+    // Disconnect from Nostr in background after brief delay to ensure answer propagates
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        signaling.disconnect().await;
+        log::debug!("Nostr signaling disconnected");
+    });
 
     let remote_creds = str0m::IceCreds {
         ufrag: offer.ice_ufrag,

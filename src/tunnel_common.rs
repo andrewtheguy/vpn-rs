@@ -17,12 +17,15 @@ pub const QUIC_CONNECTION_TIMEOUT: Duration = Duration::from_secs(180);
 /// Maximum age for accepting incoming requests (seconds).
 /// Requests older than this are considered stale and ignored.
 ///
-/// Set to 60s to accommodate:
-/// - Nostr relay propagation delays (can take several seconds across relays)
-/// - Clock skew between sender and receiver (up to ~30s is common)
+/// Set to 30s to balance:
+/// - Nostr relay propagation delays (can take 2-5 seconds across relays)
+/// - Clock skew between sender and receiver (assume NTP sync, ~15s max)
 /// - Network latency and retransmission timing
-/// - Receiver re-publish intervals (typically 5-10s)
-pub const MAX_REQUEST_AGE_SECS: u64 = 60;
+/// - Avoid processing stale requests from previous receiver invocations
+///
+/// Note: Reduced from 60s to 30s to minimize processing of stale events
+/// from crashed/restarted receivers.
+pub const MAX_REQUEST_AGE_SECS: u64 = 30;
 
 /// Delay between starting connection attempts (Happy Eyeballs style).
 pub const CONNECTION_ATTEMPT_DELAY: Duration = Duration::from_millis(250);
