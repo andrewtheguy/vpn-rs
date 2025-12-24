@@ -363,6 +363,9 @@ async fn handle_nostr_tcp_session_impl(
             .await
             .with_context(|| format!("Invalid source '{}'", requested_source))?,
     );
+    if target_addrs.is_empty() {
+        anyhow::bail!("[{}] No target addresses resolved for '{}'", short_id, requested_source);
+    }
 
     // Gather ICE candidates
     let ice = IceEndpoint::gather(&stun_servers).await?;

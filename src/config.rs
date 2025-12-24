@@ -273,14 +273,14 @@ impl ServerConfig {
     /// Validate that config matches expected role and mode.
     ///
     /// Enforces:
-    /// - Role must be "sender"
+    /// - Role must be "server"
     /// - Mode must match expected_mode
     /// - Multi-source modes (iroh, nostr): rejects client-only fields (request_source)
     /// - Multi-source modes: validates CIDR format in allowed_sources
     /// - Single-target modes: validates source URL format if present
     pub fn validate(&self, expected_mode: &str) -> Result<()> {
         let role = self.role.as_deref().context(
-            "Config file missing required 'role' field. Add: role = \"sender\"",
+            "Config file missing required 'role' field. Add: role = \"server\"",
         )?;
         if role != "server" {
             anyhow::bail!(
@@ -437,14 +437,14 @@ impl ClientConfig {
     /// Validate that config matches expected role and mode.
     ///
     /// Enforces:
-    /// - Role must be "receiver"
+    /// - Role must be "client"
     /// - Mode must match expected_mode
     /// - Multi-source modes (iroh, nostr): rejects server-only fields (allowed_sources, max_sessions)
     /// - Multi-source modes: validates request_source URL format if present
     /// - Single-target modes: validates target URL format if present
     pub fn validate(&self, expected_mode: &str) -> Result<()> {
         let role = self.role.as_deref().context(
-            "Config file missing required 'role' field. Add: role = \"receiver\"",
+            "Config file missing required 'role' field. Add: role = \"client\"",
         )?;
         if role != "client" {
             anyhow::bail!(
