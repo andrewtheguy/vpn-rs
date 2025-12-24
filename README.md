@@ -175,7 +175,7 @@ Waiting for receivers to connect...
 
 **Receiver** (on client — requests source from sender):
 ```bash
-tunnel-rs receiver iroh --node-id <ENDPOINT_ID> --source tcp://127.0.0.1:22 --listen 127.0.0.1:2222
+tunnel-rs receiver iroh --node-id <ENDPOINT_ID> --source tcp://127.0.0.1:22 --target 127.0.0.1:2222
 ```
 
 Then connect: `ssh -p 2222 user@127.0.0.1`
@@ -189,7 +189,7 @@ tunnel-rs sender iroh --allowed-udp 127.0.0.0/8
 
 **Receiver**:
 ```bash
-tunnel-rs receiver iroh --node-id <ENDPOINT_ID> --source udp://127.0.0.1:51820 --listen 0.0.0.0:51820
+tunnel-rs receiver iroh --node-id <ENDPOINT_ID> --source udp://127.0.0.1:51820 --target 0.0.0.0:51820
 ```
 
 ## CLI Options
@@ -227,7 +227,7 @@ tunnel-rs receiver iroh --node-id <ENDPOINT_ID> --source udp://127.0.0.1:51820 -
 |--------|---------|-------------|
 | `--node-id`, `-n` | required | EndpointId of the sender |
 | `--source`, `-s` | required | Source address to request from sender (tcp://host:port or udp://host:port) |
-| `--listen`, `-l` | required | Local address to listen on |
+| `--target`, `-t` | required | Local address to listen on |
 | `--relay-url` | public | Custom relay server URL(s), repeatable |
 | `--relay-only` | false | Force all traffic through relay |
 | `--dns-server` | public | Custom DNS server URL for peer discovery |
@@ -284,7 +284,7 @@ mode = "iroh"  # or "iroh-manual", "custom-manual", or "nostr"
 [iroh]
 node_id = "2xnbkpbc7izsilvewd7c62w7wnwziacmpfwvhcrya5nt76dqkpga"
 request_source = "tcp://127.0.0.1:22"
-listen = "127.0.0.1:2222"
+target = "127.0.0.1:2222"
 relay_urls = ["https://relay.example.com"]
 relay_only = false
 dns_server = "https://dns.example.com/pkarr"
@@ -324,7 +324,7 @@ tunnel-rs sender iroh --allowed-tcp 127.0.0.0/8 --secret-file ./sender.key
 ```bash
 # Both sides must use the same relay
 tunnel-rs sender iroh --relay-url https://relay.example.com --allowed-tcp 127.0.0.0/8
-tunnel-rs receiver iroh --relay-url https://relay.example.com --node-id <ID> --source tcp://127.0.0.1:22 --listen 127.0.0.1:2222
+tunnel-rs receiver iroh --relay-url https://relay.example.com --node-id <ID> --source tcp://127.0.0.1:22 --target 127.0.0.1:2222
 
 # Force relay-only (no direct P2P)
 tunnel-rs sender iroh --relay-url https://relay.example.com --relay-only --allowed-tcp 127.0.0.0/8
@@ -344,7 +344,7 @@ For fully independent operation without public infrastructure:
 ```bash
 # Both sides use custom DNS server
 tunnel-rs sender iroh --dns-server https://dns.example.com/pkarr --secret-file ./sender.key --allowed-tcp 127.0.0.0/8
-tunnel-rs receiver iroh --dns-server https://dns.example.com/pkarr --node-id <ID> --source tcp://127.0.0.1:22 --listen 127.0.0.1:2222
+tunnel-rs receiver iroh --dns-server https://dns.example.com/pkarr --node-id <ID> --source tcp://127.0.0.1:22 --target 127.0.0.1:2222
 ```
 
 ---
@@ -689,10 +689,10 @@ Sender whitelists networks; receivers choose which service to tunnel:
 tunnel-rs sender iroh --allowed-tcp 127.0.0.0/8 --max-sessions 100
 
 # Receiver 1: tunnel to SSH
-tunnel-rs receiver iroh --node-id <ID> --source tcp://127.0.0.1:22 --listen 127.0.0.1:2222
+tunnel-rs receiver iroh --node-id <ID> --source tcp://127.0.0.1:22 --target 127.0.0.1:2222
 
 # Receiver 2: tunnel to web server (same sender!)
-tunnel-rs receiver iroh --node-id <ID> --source tcp://127.0.0.1:80 --listen 127.0.0.1:8080
+tunnel-rs receiver iroh --node-id <ID> --source tcp://127.0.0.1:80 --target 127.0.0.1:8080
 ```
 
 ### nostr (Multi-Session + Dynamic Source)

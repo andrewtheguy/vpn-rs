@@ -33,7 +33,7 @@ Both `iroh` and `nostr` modes use a **receiver-initiated** model similar to SSH 
 
 **Receiver** (initiates connection):
 - Uses `--source` with **hostname:port** (e.g., `tcp://postgres:5432`) to request a specific service
-- Uses `--listen` to specify local listen address
+- Uses `--target` to specify local listen address
 - The source must resolve to an IP within sender's allowed CIDR range
 
 ## iroh Mode Example
@@ -48,7 +48,7 @@ tunnel-rs sender iroh \
 tunnel-rs receiver iroh \
   --node-id <sender-node-id> \
   --source tcp://127.0.0.1:22 \
-  --listen 127.0.0.1:2222
+  --target 127.0.0.1:2222
 ```
 
 ## Docker
@@ -69,7 +69,7 @@ docker compose logs tunnel-sender
 tunnel-rs receiver iroh \
   --node-id 2xnbkpbc7izsilvewd7c62w7wnwziacmpfwvhcrya5nt76dqkpga \
   --source tcp://nginx:80 \
-  --listen 127.0.0.1:8080
+  --target 127.0.0.1:8080
 
 # Access at http://127.0.0.1:8080
 ```
@@ -111,7 +111,7 @@ kubectl logs -l app=myapp -c tunnel-sender | grep EndpointId
 tunnel-rs receiver iroh \
   --node-id <ID> \
   --source tcp://localhost:8080 \
-  --listen 127.0.0.1:8080
+  --target 127.0.0.1:8080
 ```
 
 ### Expose Cluster Services (Multi-Session)
@@ -135,21 +135,21 @@ kubectl apply -f kubernetes/tunnel-service.yaml
 # Tunnel to a web dashboard
 tunnel-rs receiver nostr \
   --source tcp://kubernetes-dashboard.kubernetes-dashboard.svc:443 \
-  --listen 127.0.0.1:8443 \
+  --target 127.0.0.1:8443 \
   --nsec-file ./receiver.nsec \
   --peer-npub <SENDER_NPUB>
 
 # Tunnel to PostgreSQL
 tunnel-rs receiver nostr \
   --source tcp://postgres.database.svc:5432 \
-  --listen 127.0.0.1:5432 \
+  --target 127.0.0.1:5432 \
   --nsec-file ./receiver.nsec \
   --peer-npub <SENDER_NPUB>
 
 # Tunnel to Redis
 tunnel-rs receiver nostr \
   --source tcp://redis.cache.svc:6379 \
-  --listen 127.0.0.1:6379 \
+  --target 127.0.0.1:6379 \
   --nsec-file ./receiver.nsec \
   --peer-npub <SENDER_NPUB>
 ```
@@ -169,7 +169,7 @@ Tunnel UDP services like DNS or WireGuard:
 # Expose cluster DNS (receiver requests source, sender must allow it)
 tunnel-rs receiver nostr \
   --source udp://kube-dns.kube-system.svc.cluster.local:53 \
-  --listen 127.0.0.1:5353 \
+  --target 127.0.0.1:5353 \
   --nsec-file ./receiver.nsec \
   --peer-npub <SENDER_NPUB>
 

@@ -25,7 +25,7 @@ node_id = "2xnbkpbc7izsilvewd7c62w7wnwziacmpfwvhcrya5nt76dqkpga"
 request_source = "tcp://127.0.0.1:22"
 
 # Local address to listen on (REQUIRED for iroh mode)
-listen = "127.0.0.1:2222"
+target = "127.0.0.1:2222"
 
 # Custom relay server URL(s) for failover
 # Must match the sender's relay configuration
@@ -92,3 +92,6 @@ relay_only = false
 # # Must be in sender's allowed_sources list (--allowed-tcp or --allowed-udp)
 # # Can also use 'source' as an alias
 # request_source = "tcp://127.0.0.1:22"
+#
+# # Local address to listen on (REQUIRED for nostr mode)
+# target = "127.0.0.1:2222"

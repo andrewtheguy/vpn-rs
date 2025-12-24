@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 ///
 /// Some fields are role-specific (enforced by validate()):
 /// - Sender-only: `allowed_sources`, `max_sessions`, `secret`, `secret_file`
-/// - Receiver-only: `request_source`, `listen`, `node_id`
+/// - Receiver-only: `request_source`, `target`, `node_id`
 #[derive(Deserialize, Default, Clone)]
 pub struct IrohConfig {
     /// Path to secret key file for persistent identity (sender only)
@@ -47,7 +47,7 @@ pub struct IrohConfig {
     pub request_source: Option<String>,
     /// Local address to listen on (receiver only).
     /// Format: host:port
-    pub listen: Option<String>,
+    pub target: Option<String>,
 }
 
 /// iroh-manual mode configuration.
@@ -253,9 +253,9 @@ impl SenderConfig {
                     );
                 }
                 // Reject receiver-only fields
-                if iroh.request_source.is_some() || iroh.listen.is_some() {
+                if iroh.request_source.is_some() || iroh.target.is_some() {
                     anyhow::bail!(
-                        "[iroh] 'source' / 'request_source' / 'listen' are receiver-only fields. \
+                        "[iroh] 'source' / 'request_source' / 'target' are receiver-only fields. \
                         Senders use 'allowed_sources' to restrict what receivers can request."
                     );
                 }

@@ -36,7 +36,7 @@ tunnel-rs sender iroh \
 tunnel-rs receiver iroh \
   --node-id <sender-node-id> \
   --source tcp://127.0.0.1:22 \
-  --listen 127.0.0.1:2222
+  --target 127.0.0.1:2222
 ```
 
 **Usage (nostr mode):**
@@ -51,7 +51,7 @@ tunnel-rs sender nostr --nsec-file ./sender.nsec \
 tunnel-rs receiver nostr --nsec-file ./receiver.nsec \
   --peer-npub npub1sender... \
   --source tcp://127.0.0.1:22 \
-  --listen 127.0.0.1:2222
+  --target 127.0.0.1:2222
 ```
 
 **Network Patterns (CIDR):**

@@ -12,9 +12,9 @@
 //!
 //! Usage (multi-source):
 //!   tunnel-rs sender iroh --allowed-tcp 127.0.0.0/8 --allowed-udp 10.0.0.0/8
-//!   tunnel-rs receiver iroh --node-id <NODE_ID> --source tcp://127.0.0.1:22 --listen 127.0.0.1:2222
+//!   tunnel-rs receiver iroh --node-id <NODE_ID> --source tcp://127.0.0.1:22 --target 127.0.0.1:2222
 //!   tunnel-rs sender nostr --allowed-tcp 127.0.0.0/8 --nsec <NSEC> --peer-npub <NPUB>
-//!   tunnel-rs receiver nostr --source tcp://127.0.0.1:22 --listen 127.0.0.1:2222 --nsec <NSEC> --peer-npub <NPUB>
+//!   tunnel-rs receiver nostr --source tcp://127.0.0.1:22 --target 127.0.0.1:2222 --nsec <NSEC> --peer-npub <NPUB>
 //!
 //! Usage (single-target):
 //!   tunnel-rs sender iroh-manual --source tcp://127.0.0.1:22
@@ -379,7 +379,7 @@ enum ReceiverMode {
 
         /// Local address to listen on (e.g., 127.0.0.1:2222)
         #[arg(short, long)]
-        listen: Option<String>,
+        target: Option<String>,
 
         /// Custom relay server URL(s) for failover
         #[arg(long = "relay-url")]
@@ -733,11 +733,11 @@ async fn main() -> Result<()> {
                 "iroh" => {
                     let iroh_cfg = cfg.iroh();
                     // Override with CLI values if provided
-                    let (node_id, source, listen, relay_urls, relay_only, dns_server) = match &mode {
-                        Some(ReceiverMode::Iroh { node_id: n, source: src, listen: l, relay_urls: r, relay_only: ro, dns_server: d }) => (
+                    let (node_id, source, target, relay_urls, relay_only, dns_server) = match &mode {
+                        Some(ReceiverMode::Iroh { node_id: n, source: src, target: t, relay_urls: r, relay_only: ro, dns_server: d }) => (
                             n.clone().or_else(|| iroh_cfg.and_then(|c| c.node_id.clone())),
                             normalize_optional_endpoint(src.clone()).or_else(|| iroh_cfg.and_then(|c| c.request_source.clone())),
-                            l.clone().or_else(|| iroh_cfg.and_then(|c| c.listen.clone())),
+                            t.clone().or_else(|| iroh_cfg.and_then(|c| c.target.clone())),
                             if r.is_empty() { iroh_cfg.and_then(|c| c.relay_urls.clone()).unwrap_or_default() } else { r.clone() },
                             *ro || iroh_cfg.and_then(|c| c.relay_only).unwrap_or(false),
                             d.clone().or_else(|| iroh_cfg.and_then(|c| c.dns_server.clone())),
@@ -745,7 +745,7 @@ async fn main() -> Result<()> {
                         _ => (
                             iroh_cfg.and_then(|c| c.node_id.clone()),
                             iroh_cfg.and_then(|c| c.request_source.clone()),
-                            iroh_cfg.and_then(|c| c.listen.clone()),
+                            iroh_cfg.and_then(|c| c.target.clone()),
                             iroh_cfg.and_then(|c| c.relay_urls.clone()).unwrap_or_default(),
                             iroh_cfg.and_then(|c| c.relay_only).unwrap_or(false),
                             iroh_cfg.and_then(|c| c.dns_server.clone()),
@@ -758,11 +758,11 @@ async fn main() -> Result<()> {
                     let source = source.context(
                         "--source is required for iroh receiver mode. Specify the source to request from sender (e.g., --source tcp://127.0.0.1:22)",
                     )?;
-                    let listen = listen.context(
-                        "--listen is required. Provide the local address to listen on (e.g., --listen 127.0.0.1:2222)",
+                    let target = target.context(
+                        "--target is required. Provide the local address to listen on (e.g., --target 127.0.0.1:2222)",
                     )?;
 
-                    iroh::run_multi_source_receiver(node_id, source, listen, relay_urls, relay_only, dns_server).await
+                    iroh::run_multi_source_receiver(node_id, source, target, relay_urls, relay_only, dns_server).await
                 }
                 "iroh-manual" => {
                     let manual_cfg = cfg.iroh_manual();

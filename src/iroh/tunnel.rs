@@ -124,7 +124,7 @@ pub async fn run_multi_source_sender(
     log::info!("Max concurrent sessions: {}", max_sessions);
     log::info!("\nOn the receiver side, run:");
     log::info!(
-        "  tunnel-rs receiver iroh --node-id {} --source tcp://target:port --listen 127.0.0.1:port\n",
+        "  tunnel-rs receiver iroh --node-id {} --source tcp://target:port --target 127.0.0.1:port\n",
         endpoint_id
     );
     log::info!("Waiting for receivers to connect...");
@@ -342,7 +342,7 @@ async fn handle_multi_source_stream(
 pub async fn run_multi_source_receiver(
     node_id: String,
     source: String,
-    listen: String,
+    target: String,
     relay_urls: Vec<String>,
     relay_only: bool,
     dns_server: Option<String>,
@@ -359,8 +359,8 @@ pub async fn run_multi_source_receiver(
         );
     }
 
-    let listen_addr: SocketAddr = listen.parse().context(
-        "Invalid listen address format. Use format like 127.0.0.1:2222 or [::]:2222",
+    let listen_addr: SocketAddr = target.parse().context(
+        "Invalid target address format. Use format like 127.0.0.1:2222 or [::]:2222",
     )?;
 
     let sender_id: EndpointId = node_id
