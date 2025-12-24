@@ -24,14 +24,14 @@
 #   6. On remote machine, run receiver to access web (uses hostname:port):
 #      tunnel-rs receiver nostr \
 #        --source tcp://web:80 \
-#        --target tcp://127.0.0.1:8080 \
+#        --target 127.0.0.1:8080 \
 #        --nsec-file ./receiver.nsec \
 #        --peer-npub <SENDER_NPUB>
 #
 #   7. Or access postgres:
 #      tunnel-rs receiver nostr \
 #        --source tcp://postgres:5432 \
-#        --target tcp://127.0.0.1:5432 \
+#        --target 127.0.0.1:5432 \
 #        --nsec-file ./receiver.nsec \
 #        --peer-npub <SENDER_NPUB>
 

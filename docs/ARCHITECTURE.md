@@ -889,7 +889,7 @@ This is similar to SSH's `-L` flag for local port forwarding, where the client (
 ```
 Sender: --allowed-tcp 10.0.0.0/8           # Whitelist networks (no ports)
 Receiver: --source tcp://postgres:5432    # Request specific service
-          --target tcp://127.0.0.1:5432   # Local listen address
+          --target 127.0.0.1:5432         # Local listen address
 ```
 
 ### Architecture Overview

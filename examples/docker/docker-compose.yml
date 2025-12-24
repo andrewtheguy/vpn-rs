@@ -14,7 +14,7 @@
 #      docker compose logs tunnel-sender
 #
 #   4. On the remote machine, connect:
-#      tunnel-rs receiver iroh --node-id <ENDPOINT_ID> --target tcp://127.0.0.1:8080
+#      tunnel-rs receiver iroh --node-id <ENDPOINT_ID> --target 127.0.0.1:8080
 #
 #   5. Access the web service at http://127.0.0.1:8080
 
