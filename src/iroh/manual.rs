@@ -110,14 +110,22 @@ pub async fn run_iroh_manual_sender(
         .iter()
         .filter_map(|s| s.parse().ok())
         .collect();
+    let parsed_count = remote_addrs.len();
+    let original_count = offer.direct_addresses.len();
     let remote_addr =
         EndpointAddr::new(remote_id).with_addrs(remote_addrs.into_iter().map(TransportAddr::Ip));
     discovery.add_endpoint_info(remote_addr);
-    log::info!(
-        "Added remote peer: {} ({} addresses)",
-        remote_id,
-        offer.direct_addresses.len()
-    );
+    if parsed_count < original_count {
+        log::warn!(
+            "Added remote peer: {} ({}/{} addresses parsed, {} failed)",
+            remote_id,
+            parsed_count,
+            original_count,
+            original_count - parsed_count
+        );
+    } else {
+        log::info!("Added remote peer: {} ({} addresses)", remote_id, parsed_count);
+    }
 
     // Race connect vs accept
     let conn = race_connect_accept(&endpoint, remote_id, MULTI_ALPN).await?;
@@ -245,14 +253,22 @@ pub async fn run_iroh_manual_receiver(
         .iter()
         .filter_map(|s| s.parse().ok())
         .collect();
+    let parsed_count = remote_addrs.len();
+    let original_count = answer.direct_addresses.len();
     let remote_addr =
         EndpointAddr::new(remote_id).with_addrs(remote_addrs.into_iter().map(TransportAddr::Ip));
     discovery.add_endpoint_info(remote_addr);
-    log::info!(
-        "Added remote peer: {} ({} addresses)",
-        remote_id,
-        answer.direct_addresses.len()
-    );
+    if parsed_count < original_count {
+        log::warn!(
+            "Added remote peer: {} ({}/{} addresses parsed, {} failed)",
+            remote_id,
+            parsed_count,
+            original_count,
+            original_count - parsed_count
+        );
+    } else {
+        log::info!("Added remote peer: {} ({} addresses)", remote_id, parsed_count);
+    }
 
     // Race connect vs accept
     let conn = race_connect_accept(&endpoint, remote_id, MULTI_ALPN).await?;
