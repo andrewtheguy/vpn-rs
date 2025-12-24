@@ -324,7 +324,7 @@ impl IceEndpoint {
             // Check for timeout
             if Instant::now() >= connect_deadline {
                 warn!("ICE connection timeout after {:?}", ICE_CONNECT_TIMEOUT);
-                return Err(anyhow!("ICE connection timeout - NAT traversal may have failed. Consider using iroh-default mode for more reliable connectivity."));
+                return Err(anyhow!("ICE connection timeout - NAT traversal may have failed. Consider using iroh mode for more reliable connectivity."));
             }
 
             let socket_map = socket_map(&self.sockets);
@@ -337,9 +337,9 @@ impl IceEndpoint {
                 warn!("Possible causes:");
                 warn!("  - Both peers behind symmetric NAT (common in enterprise/cloud networks)");
                 warn!("  - Firewall blocking UDP traffic");
-                warn!("  - STUN-only mode has no relay fallback (unlike iroh-default)");
-                warn!("Recommendation: Use iroh-default mode for more reliable connectivity");
-                return Err(anyhow!("ICE connectivity failed - peers may be behind incompatible NAT types. Consider using iroh-default mode for more reliable connectivity."));
+                warn!("  - STUN-only mode has no relay fallback (unlike iroh)");
+                warn!("Recommendation: Use iroh mode for more reliable connectivity");
+                return Err(anyhow!("ICE connectivity failed - peers may be behind incompatible NAT types. Consider using iroh mode for more reliable connectivity."));
             }
 
             if self.ice.state().is_connected() {

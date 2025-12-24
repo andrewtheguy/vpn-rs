@@ -3,7 +3,7 @@
 Scripts for testing receiver-initiated multi-session nostr tunnel.
 
 > [!NOTE]
-> These scripts test `nostr` mode which uses STUN-only NAT traversal. For containerized environments (Docker, Kubernetes, cloud VMs), use `iroh-default` mode instead, which includes relay fallback for reliable connectivity behind restrictive NATs.
+> These scripts test `nostr` mode which uses STUN-only NAT traversal. For containerized environments (Docker, Kubernetes, cloud VMs), use `iroh` mode instead, which includes relay fallback for reliable connectivity behind restrictive NATs.
 
 ## Architecture
 
