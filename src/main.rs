@@ -24,14 +24,11 @@
 //!   tunnel-rs server nostr --allowed-tcp 127.0.0.0/8 --nsec <NSEC> --peer-npub <NPUB>
 //!   tunnel-rs client nostr --source tcp://127.0.0.1:22 --target 127.0.0.1:2222 --nsec <NSEC> --peer-npub <NPUB>
 
-mod config;
-mod custom;
-mod iroh;
-mod nostr;
-mod secret;
-mod signaling;
-mod transport;
-mod tunnel_common;
+use tunnel_rs::config;
+use tunnel_rs::custom;
+use tunnel_rs::iroh;
+use tunnel_rs::nostr;
+use tunnel_rs::secret;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
@@ -378,6 +375,30 @@ enum ServerMode {
         #[arg(long, default_value = "10")]
         max_sessions: usize,
     },
+    /// Full ICE with DCUtR signaling server (coordinated NAT hole punching)
+    #[command(name = "dcutr")]
+    DCUtR {
+        /// Source address to forward to (tcp://host:port or udp://host:port)
+        /// E.g., --source tcp://127.0.0.1:22 or --source udp://127.0.0.1:51820
+        #[arg(short, long)]
+        source: Option<String>,
+
+        /// DCUtR signaling server address (host:port)
+        #[arg(long)]
+        signaling_server: Option<String>,
+
+        /// Server ID to register with signaling server
+        #[arg(long)]
+        server_id: Option<String>,
+
+        /// STUN server (repeatable, e.g., stun.l.google.com:19302)
+        #[arg(long = "stun-server")]
+        stun_servers: Vec<String>,
+
+        /// Disable STUN (no external infrastructure)
+        #[arg(long)]
+        no_stun: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -495,6 +516,33 @@ enum ClientMode {
         #[arg(long, default_value = "120")]
         max_wait: u64,
     },
+    /// Full ICE with DCUtR signaling server (coordinated NAT hole punching)
+    #[command(name = "dcutr")]
+    DCUtR {
+        /// Local address to listen on (e.g., 127.0.0.1:2222)
+        #[arg(short, long)]
+        target: Option<String>,
+
+        /// DCUtR signaling server address (host:port)
+        #[arg(long)]
+        signaling_server: Option<String>,
+
+        /// Target peer ID to connect to
+        #[arg(long)]
+        peer_id: Option<String>,
+
+        /// Our client ID (auto-generated if not specified)
+        #[arg(long)]
+        client_id: Option<String>,
+
+        /// STUN server (repeatable). Uses default servers if not specified.
+        #[arg(long = "stun-server")]
+        stun_servers: Vec<String>,
+
+        /// Disable STUN (no external infrastructure)
+        #[arg(long)]
+        no_stun: bool,
+    },
 }
 
 /// Load server config based on flags. Returns (config, was_loaded_from_file).
@@ -555,13 +603,14 @@ async fn main() -> Result<()> {
                     ServerMode::IrohManual { .. } => "iroh-manual",
                     ServerMode::CustomManual { .. } => "custom-manual",
                     ServerMode::Nostr { .. } => "nostr",
+                    ServerMode::DCUtR { .. } => "dcutr",
                 }),
                 (None, Some(m)) => Some(m.as_str()),
                 (None, None) => None,
             };
 
             let effective_mode = effective_mode.context(
-                "No mode specified. Either use a subcommand (iroh, iroh-manual, custom-manual, nostr) or provide a config file with 'mode' field.",
+                "No mode specified. Either use a subcommand (iroh, iroh-manual, custom-manual, nostr, dcutr) or provide a config file with 'mode' field.",
             )?;
 
             // Validate config if loaded from file
@@ -737,7 +786,48 @@ async fn main() -> Result<()> {
                     // Run both TCP and UDP senders concurrently
                     nostr::run_nostr_server(allowed_tcp, allowed_udp, stun_servers, nsec, peer_npub, relays, republish_interval, max_wait, max_sessions).await
                 }
-                _ => anyhow::bail!("Invalid mode '{}'. Use: iroh, iroh-manual, custom-manual, or nostr", effective_mode),
+                "dcutr" => {
+                    // Extract DCUtR-specific args from CLI
+                    let (source, signaling_server, server_id, stun_servers) = match &mode {
+                        Some(ServerMode::DCUtR { source: src, signaling_server: ss, server_id: si, stun_servers: stun, no_stun }) => {
+                            (
+                                src.clone(),
+                                ss.clone(),
+                                si.clone(),
+                                resolve_stun_servers(stun, None, *no_stun)?,
+                            )
+                        },
+                        _ => {
+                            // Fallback to empty defaults (would require config support)
+                            (
+                                None,
+                                None,
+                                None,
+                                resolve_stun_servers(&[], None, false)?,
+                            )
+                        },
+                    };
+
+                    // Require source
+                    let source = source.context(
+                        "--source is required for dcutr server mode. Specify the source address (e.g., --source tcp://127.0.0.1:22)"
+                    )?;
+
+                    // Require signaling server
+                    let signaling_server = signaling_server.context(
+                        "signaling-server is required for dcutr mode. Provide via --signaling-server."
+                    )?;
+
+                    // Determine protocol from source
+                    let (protocol, _) = parse_endpoint(&source)
+                        .with_context(|| format!("Invalid source '{}'. Expected format: tcp://host:port or udp://host:port", source))?;
+
+                    match protocol {
+                        Protocol::Tcp => custom::run_dcutr_tcp_server(source, signaling_server, server_id, stun_servers).await,
+                        Protocol::Udp => custom::run_dcutr_udp_server(source, signaling_server, server_id, stun_servers).await,
+                    }
+                }
+                _ => anyhow::bail!("Invalid mode '{}'. Use: iroh, iroh-manual, custom-manual, nostr, or dcutr", effective_mode),
             }
         }
         Command::Client {
@@ -754,13 +844,14 @@ async fn main() -> Result<()> {
                     ClientMode::IrohManual { .. } => "iroh-manual",
                     ClientMode::CustomManual { .. } => "custom-manual",
                     ClientMode::Nostr { .. } => "nostr",
+                    ClientMode::DCUtR { .. } => "dcutr",
                 }),
                 (None, Some(m)) => Some(m.as_str()),
                 (None, None) => None,
             };
 
             let effective_mode = effective_mode.context(
-                "No mode specified. Either use a subcommand (iroh, iroh-manual, custom-manual, nostr) or provide a config file with 'mode' field.",
+                "No mode specified. Either use a subcommand (iroh, iroh-manual, custom-manual, nostr, dcutr) or provide a config file with 'mode' field.",
             )?;
 
             // Validate config if loaded from file
@@ -945,7 +1036,32 @@ async fn main() -> Result<()> {
                         nostr::run_nostr_tcp_client(listen, source, stun_servers, nsec, peer_npub, relays, republish_interval, max_wait).await
                     }
                 }
-                _ => anyhow::bail!("Invalid mode '{}'. Use: iroh, iroh-manual, custom-manual, or nostr", effective_mode),
+                "dcutr" => {
+                    let (target, signaling_server, peer_id, client_id, stun_servers) = match &mode {
+                        Some(ClientMode::DCUtR { target: t, signaling_server: ss, peer_id: pi, client_id: ci, stun_servers: stun, no_stun }) => (
+                            t.clone(),
+                            ss.clone(),
+                            pi.clone(),
+                            ci.clone(),
+                            resolve_stun_servers(stun, None, *no_stun)?,
+                        ),
+                        _ => (None, None, None, None, default_stun_servers()),
+                    };
+
+                    let target = target.context(
+                        "--target is required for dcutr client mode. Specify the local address to listen on (e.g., --target 127.0.0.1:2222)",
+                    )?;
+                    let signaling_server = signaling_server.context(
+                        "--signaling-server is required for dcutr mode. Specify the signaling server address (e.g., --signaling-server 1.2.3.4:9999)",
+                    )?;
+                    let peer_id = peer_id.context(
+                        "--peer-id is required for dcutr mode. Specify the target peer ID to connect to.",
+                    )?;
+
+                    // DCUtR client uses TCP by default (server determines the actual source)
+                    custom::run_dcutr_tcp_client(target, signaling_server, peer_id, client_id, stun_servers).await
+                }
+                _ => anyhow::bail!("Invalid mode '{}'. Use: iroh, iroh-manual, custom-manual, nostr, or dcutr", effective_mode),
             }
         }
         Command::GenerateIrohKey { output, force } => secret::generate_secret(output, force),

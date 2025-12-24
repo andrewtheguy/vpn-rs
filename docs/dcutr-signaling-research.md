@@ -2,6 +2,32 @@
 
 Research on implementing a lightweight DCUtR-style signaling server for coordinated NAT hole punching in tunnel-rs.
 
+## Implementation Status
+
+**Phase 1 (Plain TCP Server): Implemented** ✅
+
+The DCUtR signaling server and client are now implemented as an experimental mode:
+- Server: `tunnel-rs server dcutr --signaling-server <addr> --source tcp://host:port --server-id <id>`
+- Client: `tunnel-rs client dcutr --signaling-server <addr> --peer-id <id> --target <addr>`
+
+This follows the single-session pattern where the server hardcodes the source address.
+
+### Implemented Features
+- JSON-RPC 2.0 signaling protocol over TCP
+- RTT measurement with true client-measured round-trip time
+- Coordinated timing for simultaneous hole punching
+- Full ICE with fast timing parameters for DCUtR mode
+- Proper client state cleanup on disconnect
+
+### Current Limitations
+- **Experimental status**: Not yet production-ready
+- **No relay fallback**: If ICE fails, connection fails (unlike iroh mode)
+- **Single session per signaling connection**: Multi-session support planned
+
+See [potential-dcutr-improvements.md](potential-dcutr-improvements.md) for detailed improvement documentation.
+
+---
+
 ## Motivation
 
 Current tunnel-rs modes have trade-offs:
@@ -285,13 +311,13 @@ async fn connect_to_signaling_server(onion_addr: &str) -> Result<impl AsyncRead 
 
 | Aspect | Nostr Mode | iroh Mode | DCUtR Signaling |
 |--------|------------|-----------|-----------------|
-| Signaling | Nostr relays | DNS/mDNS + relay | Custom server |
+| Signaling | Nostr relays | DNS/mDNS + relay | Custom TCP server |
 | Timing sync | None | iroh handles | RTT-based coordination |
 | Data relay | None | DERP fallback | None |
-| Hole punch success | ~30-50% | ~95% (with relay) | ~70% (estimated) |
+| Hole punch success | ~30-50% | ~95% (with relay) | Improved (timing coordination) |
 | Bandwidth concern | None | Relay uses bandwidth | None |
 | Server requirement | Public Nostr relays | Public DERP relays | Self-hosted |
-| Phase 2 benefit | N/A | N/A | No public IP needed |
+| Status | Stable | Stable | **Experimental** |
 
 ## Dependencies
 

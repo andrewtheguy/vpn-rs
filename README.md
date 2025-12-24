@@ -41,6 +41,7 @@ tunnel-rs provides multiple modes for establishing tunnels:
 | **iroh-manual** | Manual copy-paste | STUN heuristic | TCP, UDP | Serverless, simple NATs |
 | **custom-manual** | Manual copy-paste | Full ICE | TCP, UDP | Best NAT compatibility |
 | **nostr** | Nostr relays | Full ICE | TCP, UDP | Automated signaling, static keys |
+| **dcutr** *(experimental)* | Signaling server | Full ICE + timing | TCP, UDP | Coordinated hole punching |
 
 > [!TIP]
 > **For containerized environments (Docker, Kubernetes, cloud VMs):** Use `iroh` mode. It includes relay fallback which ensures connectivity even when both peers are behind restrictive NATs (common in cloud environments). The `nostr`, `custom-manual`, and `iroh-manual` modes use STUN-only NAT traversal which may fail when both peers are behind symmetric NAT.
@@ -781,6 +782,77 @@ For `iroh-manual` and `custom-manual`, use separate instances for each tunnel:
 
 ---
 
+# DCUtR Mode (Experimental)
+
+Uses timing-coordinated hole punching with a dedicated signaling server. The server coordinates the exact moment both peers attempt connection, improving NAT traversal success rates.
+
+> [!WARNING]
+> **Experimental:** This mode is under active development. For production use, prefer `iroh` mode which has relay fallback.
+
+## Architecture
+
+```
++-----------------+        +-----------------+        +------------------+        +-----------------+        +-----------------+
+| SSH Client      |  TCP   | client          |  ICE   | Signaling Server |  ICE   | server          |  TCP   | SSH Server      |
+|                 |<------>| (local:2222)    |<======>| (coordinates     |<======>|                 |<------>| (local:22)      |
+|                 |        |                 |  QUIC  |  timing)         |  QUIC  |                 |        |                 |
++-----------------+        +-----------------+        +------------------+        +-----------------+        +-----------------+
+     Client Side                                        Self-hosted                     Server Side
+```
+
+## Quick Start
+
+### 1. Start Signaling Server
+
+```bash
+# Build and run the signaling server binary
+cargo build --release --bin signaling
+./target/release/signaling --bind 0.0.0.0:9999
+```
+
+### 2. Start Tunnel Server
+
+```bash
+# Server specifies the exact source to forward to
+tunnel-rs server dcutr \
+  --signaling-server <signaling-ip>:9999 \
+  --source tcp://127.0.0.1:22 \
+  --server-id my-server
+```
+
+### 3. Start Tunnel Client
+
+```bash
+# Client specifies local listen address and peer to connect to
+tunnel-rs client dcutr \
+  --signaling-server <signaling-ip>:9999 \
+  --peer-id my-server \
+  --target 127.0.0.1:2222
+```
+
+### 4. Connect
+
+```bash
+ssh -p 2222 user@127.0.0.1
+```
+
+## How It Works
+
+1. Both peers register with the signaling server
+2. Server measures RTT to each peer (5 ping rounds)
+3. Client requests connection to server by peer ID
+4. Signaling server calculates synchronized start time
+5. Both peers receive sync_connect with peer's ICE candidates and start time
+6. Both peers begin ICE simultaneously at the coordinated time
+7. Direct QUIC connection established over ICE
+
+**Key optimizations:**
+- True RTT measurement (client-measured, not clock-dependent)
+- Fast ICE timing parameters for coordinated attempts
+- 500ms timing buffer for clock skew and jitter
+
+---
+
 # Utility Commands
 
 ## generate-nostr-key
@@ -889,3 +961,14 @@ All protocol modes and features are available on all platforms.
 7. QUIC connection established over ICE socket
 
 *Advantage: Receiver-initiated flow (like WireGuard) + automated signaling + full ICE NAT traversal.*
+
+### DCUtR Mode (Experimental)
+1. Both peers connect to signaling server and register
+2. Each peer measures RTT to signaling server (5 ping rounds)
+3. Client requests connection to server by peer ID
+4. Signaling server calculates synchronized start time based on RTT
+5. Both peers receive sync_connect notification with peer's ICE candidates
+6. Both peers begin ICE simultaneously at coordinated time (fast timing mode)
+7. QUIC connection established over ICE socket
+
+*Advantage: Timing coordination improves hole punch success. Self-hosted signaling (no third-party relays).*
