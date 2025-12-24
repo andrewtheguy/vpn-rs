@@ -6,9 +6,9 @@ This document provides a comprehensive overview of the tunnel-rs architecture, i
 
 - [System Overview](#system-overview)
 - [Mode Comparison](#mode-comparison)
-- [iroh-default Mode](#iroh-default-mode)
+- [iroh Mode](#iroh-mode)
 - [iroh-manual Mode](#iroh-manual-mode)
-- [Custom Mode](#custom-mode)
+- [Custom-Manual Mode](#custom-manual-mode)
 - [Nostr Mode](#nostr-mode)
 - [Configuration System](#configuration-system)
 - [Security Model](#security-model)
@@ -27,9 +27,9 @@ tunnel-rs is a P2P TCP/UDP port forwarding tool that supports four distinct oper
 ```mermaid
 graph TB
     subgraph "tunnel-rs Modes"
-        A[iroh-default]
+        A[iroh]
         B[iroh-manual]
-        C[custom]
+        C[custom-manual]
         D2[nostr]
     end
 
@@ -111,13 +111,13 @@ graph LR
 
 ## Mode Comparison
 
-> **Tip for Containerized Environments:** Use `iroh-default` mode for Docker, Kubernetes, and cloud VM deployments. It includes relay fallback which ensures connectivity even when both peers are behind restrictive NATs (common in cloud environments). The `nostr`, `custom`, and `iroh-manual` modes use STUN-only NAT traversal which may fail in these environments.
+> **Tip for Containerized Environments:** Use `iroh` mode for Docker, Kubernetes, and cloud VM deployments. It includes relay fallback which ensures connectivity even when both peers are behind restrictive NATs (common in cloud environments). The `nostr`, `custom-manual`, and `iroh-manual` modes use STUN-only NAT traversal which may fail in these environments.
 
 ### Feature Matrix
 
 ```mermaid
 graph TD
-    subgraph "iroh-default"
+    subgraph "iroh"
         A1[Discovery: Automatic]
         A2[NAT: Relay Fallback]
         A3[Setup: Minimal - EndpointId required]
@@ -131,7 +131,7 @@ graph TD
         B4[Infrastructure: STUN Only]
     end
     
-    subgraph "custom"
+    subgraph "custom-manual"
         C1[Discovery: Copy-Paste]
         C2[NAT: Full ICE]
         C3[Setup: Manual Exchange]
@@ -165,7 +165,7 @@ graph LR
         D[Symmetric]
     end
     
-    subgraph "iroh-default"
+    subgraph "iroh"
         E1[✓ Direct/Relay]
         E2[✓ Direct/Relay]
         E3[✓ Direct/Relay]
@@ -179,7 +179,7 @@ graph LR
         F4[✗ May Fail]
     end
     
-    subgraph "custom"
+    subgraph "custom-manual"
         G1[✓ Direct]
         G2[✓ Direct]
         G3[✓ Direct]
@@ -219,7 +219,7 @@ graph LR
 
 ---
 
-## iroh-default Mode
+## iroh Mode
 
 ### Architecture Overview
 
@@ -574,9 +574,9 @@ graph TB
 
 ---
 
-## Custom Mode
+## Custom-Manual Mode
 
-> **Note:** Custom mode implements full ICE with STUN-only connectivity checks. TURN/relay servers are not implemented. This means symmetric NAT peers may still fail to establish a connection without a relay fallback mechanism.
+> **Note:** Custom-manual mode implements full ICE with STUN-only connectivity checks. TURN/relay servers are not implemented. This means symmetric NAT peers may still fail to establish a connection without a relay fallback mechanism.
 
 ### Architecture Overview
 
@@ -873,9 +873,9 @@ graph TB
 
 ## Nostr Mode
 
-Nostr mode combines the full ICE implementation from custom mode with automated signaling via Nostr relays. Instead of manual copy-paste, ICE credentials are exchanged through Nostr events using static keypairs.
+Nostr mode combines the full ICE implementation from custom-manual mode with automated signaling via Nostr relays. Instead of manual copy-paste, ICE credentials are exchanged through Nostr events using static keypairs.
 
-> **Note for Containerized Environments:** Like custom mode, nostr mode uses STUN-only NAT traversal without relay fallback. If both peers are behind restrictive NATs (common in Docker, Kubernetes, or cloud VMs), ICE connectivity may fail. For containerized deployments, consider using `iroh-default` mode which includes automatic relay fallback.
+> **Note for Containerized Environments:** Like custom-manual mode, nostr mode uses STUN-only NAT traversal without relay fallback. If both peers are behind restrictive NATs (common in Docker, Kubernetes, or cloud VMs), ICE connectivity may fail. For containerized deployments, consider using `iroh` mode which includes automatic relay fallback.
 
 ### Receiver-Initiated Dynamic Source
 
@@ -1113,17 +1113,17 @@ graph TB
 graph TB
     subgraph "Config File"
         A[role: sender/receiver]
-        B[mode: iroh-default/iroh-manual/custom]
+        B[mode: iroh/iroh-manual/custom-manual]
         C[source/target: tcp://host:port or udp://host:port]
     end
     
     subgraph "Mode Sections"
-        E[iroh-default]
+        E[iroh]
         F[iroh-manual]
-        G[custom]
+        G[custom-manual]
     end
     
-    subgraph "iroh-default Options"
+    subgraph "iroh Options"
         H[secret_file]
         I[relay_urls]
         J[relay_only]
@@ -1131,7 +1131,7 @@ graph TB
         L[node_id - receiver only]
     end
     
-    subgraph "iroh-manual/custom Options"
+    subgraph "iroh-manual/custom-manual Options"
         M[stun_servers]
     end
     
@@ -1253,7 +1253,7 @@ graph TB
 
 ```mermaid
 graph TB
-    subgraph "iroh-default Mode"
+    subgraph "iroh Mode"
         A[Secret Key File] --> B[Ed25519 Private Key]
         B --> C[EndpointId - Public Key]
         C --> D[Peer Authentication]
@@ -1289,7 +1289,7 @@ graph TB
     
     subgraph "User Responsibility"
         E[Signaling Channel Security<br/>Manual modes]
-        F[Secret Key Protection<br/>iroh-default]
+        F[Secret Key Protection<br/>iroh]
         G[EndpointId Verification<br/>Trust on first use]
     end
     
@@ -1498,7 +1498,7 @@ The `iroh::Endpoint` provides:
 
 ```mermaid
 graph LR
-    subgraph "iroh-default"
+    subgraph "iroh"
         A[Discovery: 1-3s]
         B[Connection: 0.5-2s]
         C[Total: 1.5-5s]
@@ -1511,7 +1511,7 @@ graph LR
         G[Total: 1-2s + manual]
     end
     
-    subgraph "custom"
+    subgraph "custom-manual"
         H[ICE Gather: 1-2s]
         I[Manual: User dependent]
         J[ICE Checks: 1-3s]
@@ -1543,12 +1543,12 @@ graph TB
     B -->|Yes| C[Established]
     B -->|No| D{Mode?}
     
-    D -->|iroh-default| E{Relay available?}
+    D -->|iroh| E{Relay available?}
     E -->|Yes| F[Fallback to relay]
     E -->|No| G[Connection failed]
     
     D -->|iroh-manual| H[STUN/Racing failed]
-    D -->|custom| I[ICE checks failed]
+    D -->|custom-manual| I[ICE checks failed]
     
     F --> C
     H --> G
@@ -1571,10 +1571,10 @@ graph TB
 
 | Mode | Multi-Session | Dynamic Source | Description |
 |------|---------------|----------------|-------------|
-| `iroh-default` | **Yes** | No | Multiple receivers, fixed `--source` on sender |
+| `iroh` | **Yes** | **Yes** | Multiple receivers, receiver specifies `--source` |
 | `nostr` | **Yes** | **Yes** | Multiple receivers, receiver specifies `--source` |
 | `iroh-manual` | No | No | Single session, fixed `--source` on sender |
-| `custom` | No | No | Single session, fixed `--source` on sender |
+| `custom-manual` | No | No | Single session, fixed `--source` on sender |
 
 **Multi-Session** = Multiple concurrent connections to the same sender
 **Dynamic Source** = Receiver specifies which service to tunnel (via `--source`)
@@ -1585,11 +1585,11 @@ graph TB
 
 ### Single Session (Manual Signaling Modes)
 
-The `iroh-manual` and `custom` modes currently support only one tunnel session at a time per sender instance. Each signaling exchange establishes exactly one tunnel.
+The `iroh-manual` and `custom-manual` modes currently support only one tunnel session at a time per sender instance. Each signaling exchange establishes exactly one tunnel.
 
 ```mermaid
 graph TB
-    subgraph "iroh-manual/custom Behavior"
+    subgraph "iroh-manual/custom-manual Behavior"
         A[Sender starts] --> B[Wait for offer]
         B --> C[Establish single tunnel]
         C --> D[Handle streams over this tunnel]
@@ -1599,7 +1599,7 @@ graph TB
     subgraph "Workarounds"
         F[Run multiple sender instances]
         G[Use different keypairs per tunnel]
-        H[Use iroh-default mode]
+        H[Use iroh mode]
     end
 
     style E fill:#FFCCBC
@@ -1612,7 +1612,7 @@ graph TB
 - No mechanism to accept additional signaling while serving existing tunnel
 
 **Workarounds:**
-- Use `iroh-default` mode for multi-receiver support
+- Use `iroh` mode for multi-receiver support
 - Run separate sender instances for each tunnel
 - Use different keypairs for independent tunnels
 

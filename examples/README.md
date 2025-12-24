@@ -3,23 +3,23 @@
 Example configurations for running tunnel-rs in Docker and Kubernetes.
 
 > [!TIP]
-> **Recommended Mode for Containers:** Use `iroh-default` mode for Docker and Kubernetes deployments. It includes relay fallback which ensures connectivity even when both peers are behind restrictive NATs (common in cloud environments). The `nostr` mode uses STUN-only NAT traversal which may fail in containerized environments.
+> **Recommended Mode for Containers:** Use `iroh` mode for Docker and Kubernetes deployments. It includes relay fallback which ensures connectivity even when both peers are behind restrictive NATs (common in cloud environments). The `nostr`, `custom-manual`, and `iroh-manual` modes use STUN-only NAT traversal which may fail in containerized environments.
 
 ## Mode Comparison
 
 | Mode | Multi-Session | Dynamic Source | Use Case |
 |------|---------------|----------------|----------|
-| `iroh-default` | Yes | No | Fixed service, multiple clients |
+| `iroh` | Yes | **Yes** | SSH-like tunneling, receiver chooses destination, relay fallback |
 | `nostr` | Yes | **Yes** | SSH-like tunneling, receiver chooses destination |
 | `iroh-manual` | No | No | Simple one-off tunnels |
-| `custom` | No | No | Best NAT traversal, one-off tunnels |
+| `custom-manual` | No | No | Best NAT traversal, one-off tunnels |
 
 **Multi-Session** = Multiple concurrent connections
-**Dynamic Source** = Receiver specifies destination (only nostr supports this)
+**Dynamic Source** = Receiver specifies destination (iroh and nostr modes)
 
-## Nostr Mode (Dynamic Source)
+## Dynamic Source Modes (iroh and nostr)
 
-Nostr mode uses a **receiver-initiated** model similar to SSH `-L` tunneling:
+Both `iroh` and `nostr` modes use a **receiver-initiated** model similar to SSH `-L` tunneling:
 
 | SSH Equivalent | tunnel-rs | Description |
 |----------------|-----------|-------------|
@@ -33,24 +33,27 @@ Nostr mode uses a **receiver-initiated** model similar to SSH `-L` tunneling:
 
 **Receiver** (initiates connection):
 - Uses `--source` with **hostname:port** (e.g., `tcp://postgres:5432`) to request a specific service
-- Uses `--target` to specify local listen address
+- Uses `--listen` to specify local listen address
 - The source must resolve to an IP within sender's allowed CIDR range
 
-## iroh-default Mode (Fixed Source)
-
-For simpler setups where the sender exposes a single fixed service:
+## iroh Mode Example
 
 ```bash
-# Sender: expose SSH on port 22
-tunnel-rs sender iroh-default --source tcp://127.0.0.1:22
+# Sender: allow localhost and private networks
+tunnel-rs sender iroh \
+  --allowed-tcp 127.0.0.0/8 \
+  --allowed-tcp 192.168.0.0/16
 
-# Receiver: connect and expose locally
-tunnel-rs receiver iroh-default --node-id <ID> --target tcp://127.0.0.1:2222
+# Receiver: request SSH and listen locally
+tunnel-rs receiver iroh \
+  --node-id <sender-node-id> \
+  --source tcp://127.0.0.1:22 \
+  --listen 127.0.0.1:2222
 ```
 
 ## Docker
 
-### Basic Example (iroh-default mode)
+### Basic Example (iroh mode)
 
 Expose an nginx service via tunnel-rs:
 
@@ -63,9 +66,10 @@ docker compose logs tunnel-sender
 # EndpointId: 2xnbkpbc7izsilvewd7c62w7wnwziacmpfwvhcrya5nt76dqkpga
 
 # On remote machine
-tunnel-rs receiver iroh-default \
+tunnel-rs receiver iroh \
   --node-id 2xnbkpbc7izsilvewd7c62w7wnwziacmpfwvhcrya5nt76dqkpga \
-  --target tcp://127.0.0.1:8080
+  --source tcp://nginx:80 \
+  --listen 127.0.0.1:8080
 
 # Access at http://127.0.0.1:8080
 ```
@@ -104,7 +108,10 @@ kubectl apply -f kubernetes/deployment-sidecar.yaml
 kubectl logs -l app=myapp -c tunnel-sender | grep EndpointId
 
 # Connect from remote
-tunnel-rs receiver iroh-default --node-id <ID> --target tcp://127.0.0.1:8080
+tunnel-rs receiver iroh \
+  --node-id <ID> \
+  --source tcp://localhost:8080 \
+  --listen 127.0.0.1:8080
 ```
 
 ### Expose Cluster Services (Multi-Session)
@@ -128,21 +135,21 @@ kubectl apply -f kubernetes/tunnel-service.yaml
 # Tunnel to a web dashboard
 tunnel-rs receiver nostr \
   --source tcp://kubernetes-dashboard.kubernetes-dashboard.svc:443 \
-  --target tcp://127.0.0.1:8443 \
+  --listen 127.0.0.1:8443 \
   --nsec-file ./receiver.nsec \
   --peer-npub <SENDER_NPUB>
 
 # Tunnel to PostgreSQL
 tunnel-rs receiver nostr \
   --source tcp://postgres.database.svc:5432 \
-  --target tcp://127.0.0.1:5432 \
+  --listen 127.0.0.1:5432 \
   --nsec-file ./receiver.nsec \
   --peer-npub <SENDER_NPUB>
 
 # Tunnel to Redis
 tunnel-rs receiver nostr \
   --source tcp://redis.cache.svc:6379 \
-  --target tcp://127.0.0.1:6379 \
+  --listen 127.0.0.1:6379 \
   --nsec-file ./receiver.nsec \
   --peer-npub <SENDER_NPUB>
 ```
@@ -162,7 +169,7 @@ Tunnel UDP services like DNS or WireGuard:
 # Expose cluster DNS (receiver requests source, sender must allow it)
 tunnel-rs receiver nostr \
   --source udp://kube-dns.kube-system.svc.cluster.local:53 \
-  --target udp://127.0.0.1:5353 \
+  --listen 127.0.0.1:5353 \
   --nsec-file ./receiver.nsec \
   --peer-npub <SENDER_NPUB>
 
@@ -174,9 +181,9 @@ dig @127.0.0.1 -p 5353 kubernetes.default.svc.cluster.local
 
 | Scenario | Mode | Description |
 |----------|------|-------------|
-| Quick dev access | iroh-default | Simple setup, ephemeral EndpointId |
+| Quick dev access | iroh | Simple setup, relay fallback |
 | Persistent tunnel | nostr | Static keys, automated signaling |
-| Dynamic service access | nostr (multi-session) | Receiver chooses what to tunnel |
-| Sidecar debugging | iroh-default | Access pod services directly |
-| Cluster-wide access | nostr | Single sender, multiple services |
+| Dynamic service access | iroh/nostr | Receiver chooses what to tunnel |
+| Sidecar debugging | iroh | Access pod services directly |
+| Cluster-wide access | iroh/nostr | Single sender, multiple services |
 | UDP tunneling | any | DNS, WireGuard, game servers |

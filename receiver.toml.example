@@ -6,19 +6,26 @@
 # Mode is inferred from the 'mode' field below.
 # CLI arguments take precedence over config file values.
 #
-# This file shows iroh-default mode. See commented sections below for other modes.
+# This file shows iroh mode. See commented sections below for other modes.
 
 # Required: validates config matches CLI command
 role = "receiver"
-mode = "iroh-default"  # or "iroh-manual", "custom", or "nostr"
+mode = "iroh"  # or "iroh-manual", "custom-manual", or "nostr"
 
-# Shared options
-# target is optional here, but required at runtime (via config or CLI)
-# target = "tcp://127.0.0.1:2222"
+# NOTE: For multi-source modes (iroh, nostr), use request_source in the mode section.
+# For single-target modes (iroh-manual, custom-manual), use target at top level.
+# target = "tcp://127.0.0.1:2222"  # For single-target modes only
 
-[iroh-default]
-# NodeId of the sender to connect to (required for iroh-default)
+[iroh]
+# NodeId of the sender to connect to (required for iroh)
 node_id = "2xnbkpbc7izsilvewd7c62w7wnwziacmpfwvhcrya5nt76dqkpga"
+
+# Source address to request from sender (REQUIRED for iroh mode)
+# Must be in sender's allowed_sources list (--allowed-tcp or --allowed-udp)
+request_source = "tcp://127.0.0.1:22"
+
+# Local address to listen on (REQUIRED for iroh mode)
+listen = "127.0.0.1:2222"
 
 # Custom relay server URL(s) for failover
 # Must match the sender's relay configuration
@@ -36,6 +43,7 @@ relay_only = false
 # dns_server = "https://dns.example.com/pkarr"
 
 # [iroh-manual]
+# # Single-target mode: use target at top level
 # # Set to [] to disable STUN entirely
 # stun_servers = [
 #     "stun.l.google.com:19302",
@@ -43,7 +51,8 @@ relay_only = false
 #     "stun.services.mozilla.com:3478",
 # ]
 
-# [custom]
+# [custom-manual]
+# # Single-target mode: use target at top level
 # # Set to [] to disable STUN entirely
 # stun_servers = [
 #     "stun.l.google.com:19302",
