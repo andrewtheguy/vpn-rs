@@ -46,6 +46,7 @@ fn generate_client_id() -> String {
 ///
 /// Connects to signaling server, registers, requests connection to peer,
 /// performs coordinated ICE hole punch, establishes QUIC tunnel as CLIENT.
+/// Retries on failure.
 pub async fn run_dcutr_tcp_client(
     listen: String,
     _source: String, // Source is requested from server, not used directly by client
@@ -70,8 +71,37 @@ pub async fn run_dcutr_tcp_client(
     log::info!("Peer ID: {}", peer_id);
     log::info!("Signaling server: {}", signaling_server);
 
+    loop {
+        match run_dcutr_tcp_client_session(
+            listen_addr,
+            &signaling_server,
+            &peer_id,
+            &client_id,
+            &stun_servers,
+        )
+        .await
+        {
+            Ok(()) => {
+                log::info!("Session ended normally, reconnecting...");
+            }
+            Err(e) => {
+                log::warn!("Session error: {}. Retrying in 5 seconds...", e);
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            }
+        }
+    }
+}
+
+/// Run a single DCUtR TCP client session
+async fn run_dcutr_tcp_client_session(
+    listen_addr: SocketAddr,
+    signaling_server: &str,
+    peer_id: &str,
+    client_id: &str,
+    stun_servers: &[String],
+) -> Result<()> {
     // 1. Gather ICE candidates first
-    let ice = IceEndpoint::gather(&stun_servers).await?;
+    let ice = IceEndpoint::gather(stun_servers).await?;
     let local_creds = ice.local_credentials();
     let local_candidates = ice.local_candidates();
 
@@ -81,12 +111,12 @@ pub async fn run_dcutr_tcp_client(
     );
 
     // 2. Connect to signaling server
-    let mut signaling = DCUtRSignaling::connect(&signaling_server).await?;
+    let mut signaling = DCUtRSignaling::connect(signaling_server).await?;
 
     // 3. Register with signaling server (client doesn't need QUIC fingerprint)
     signaling
         .register(
-            &client_id,
+            client_id,
             &local_creds.ufrag,
             &local_creds.pass,
             local_candidates.clone(),
@@ -101,7 +131,7 @@ pub async fn run_dcutr_tcp_client(
     // 5. Request connection to peer
     signaling
         .connect_request(
-            &peer_id,
+            peer_id,
             &local_creds.ufrag,
             &local_creds.pass,
             local_candidates,
@@ -275,6 +305,7 @@ pub async fn run_dcutr_tcp_client(
 ///
 /// Connects to signaling server, registers, requests connection to peer,
 /// performs coordinated ICE hole punch, establishes QUIC tunnel as CLIENT for UDP.
+/// Retries on failure.
 pub async fn run_dcutr_udp_client(
     listen: String,
     _source: String, // Source is requested from server, not used directly by client
@@ -299,8 +330,37 @@ pub async fn run_dcutr_udp_client(
     log::info!("Peer ID: {}", peer_id);
     log::info!("Signaling server: {}", signaling_server);
 
+    loop {
+        match run_dcutr_udp_client_session(
+            listen_addr,
+            &signaling_server,
+            &peer_id,
+            &client_id,
+            &stun_servers,
+        )
+        .await
+        {
+            Ok(()) => {
+                log::info!("Session ended normally, reconnecting...");
+            }
+            Err(e) => {
+                log::warn!("Session error: {}. Retrying in 5 seconds...", e);
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            }
+        }
+    }
+}
+
+/// Run a single DCUtR UDP client session
+async fn run_dcutr_udp_client_session(
+    listen_addr: SocketAddr,
+    signaling_server: &str,
+    peer_id: &str,
+    client_id: &str,
+    stun_servers: &[String],
+) -> Result<()> {
     // 1. Gather ICE candidates first
-    let ice = IceEndpoint::gather(&stun_servers).await?;
+    let ice = IceEndpoint::gather(stun_servers).await?;
     let local_creds = ice.local_credentials();
     let local_candidates = ice.local_candidates();
 
@@ -310,12 +370,12 @@ pub async fn run_dcutr_udp_client(
     );
 
     // 2. Connect to signaling server
-    let mut signaling = DCUtRSignaling::connect(&signaling_server).await?;
+    let mut signaling = DCUtRSignaling::connect(signaling_server).await?;
 
     // 3. Register with signaling server (client doesn't need QUIC fingerprint)
     signaling
         .register(
-            &client_id,
+            client_id,
             &local_creds.ufrag,
             &local_creds.pass,
             local_candidates.clone(),
@@ -330,7 +390,7 @@ pub async fn run_dcutr_udp_client(
     // 5. Request connection to peer
     signaling
         .connect_request(
-            &peer_id,
+            peer_id,
             &local_creds.ufrag,
             &local_creds.pass,
             local_candidates,
