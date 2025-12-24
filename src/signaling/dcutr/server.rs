@@ -220,12 +220,13 @@ async fn handle_register(
 
     let mut state = state.write().await;
 
-    // Check if already registered
-    if state.clients.contains_key(&params.client_id) {
-        return Err(JsonRpcError::already_registered(&params.client_id));
+    // Check if already registered - allow re-registration (overwrite)
+    let is_reregister = state.clients.contains_key(&params.client_id);
+    if is_reregister {
+        info!("Client re-registering (overwriting): {}", params.client_id);
     }
 
-    // Register client
+    // Register client (overwrites existing registration if any)
     let client_state = ClientState {
         client_id: params.client_id.clone(),
         ice_ufrag: params.ice_ufrag,
@@ -240,7 +241,9 @@ async fn handle_register(
     state.clients.insert(params.client_id.clone(), client_state);
     *client_id = Some(params.client_id.clone());
 
-    info!("Client registered: {}", params.client_id);
+    if !is_reregister {
+        info!("Client registered: {}", params.client_id);
+    }
 
     Ok(serde_json::to_value(RegisterResult { success: true }).unwrap())
 }
