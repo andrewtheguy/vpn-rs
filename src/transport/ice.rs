@@ -57,18 +57,40 @@ struct IceSocket {
 }
 
 impl IceEndpoint {
+    /// Gather ICE candidates with standard (conservative) timing.
+    /// Use this for normal connections where one side may connect faster.
     pub async fn gather(stun_servers: &[String]) -> Result<Self> {
+        Self::gather_with_timing(stun_servers, false).await
+    }
+
+    /// Gather ICE candidates with fast timing for coordinated hole punching (DCUtR).
+    /// Both peers should call this at the same time for best results.
+    pub async fn gather_fast(stun_servers: &[String]) -> Result<Self> {
+        Self::gather_with_timing(stun_servers, true).await
+    }
+
+    async fn gather_with_timing(stun_servers: &[String], fast_timing: bool) -> Result<Self> {
         let provider = str0m::crypto::from_feature_flags();
         let sha1 = provider.sha1_hmac_provider;
         provider.install_process_default();
 
         let mut ice = IceAgent::new(IceCreds::new(), sha1);
-        // Use more conservative timing (similar to webrtc crate defaults)
-        // Aggressive timing causes issues when one side connects faster than the other
-        ice.set_timing_advance(Duration::from_millis(50));
-        ice.set_initial_stun_rto(Duration::from_millis(250));
-        ice.set_max_stun_rto(Duration::from_millis(3000));
-        ice.set_max_stun_retransmits(7);
+
+        if fast_timing {
+            // Fast timing for coordinated hole punching (DCUtR)
+            // Both peers start at synchronized time, so we can be more aggressive
+            ice.set_timing_advance(Duration::from_millis(20));      // Faster polling
+            ice.set_initial_stun_rto(Duration::from_millis(100));   // Quicker retries
+            ice.set_max_stun_rto(Duration::from_millis(1000));      // Shorter max timeout
+            ice.set_max_stun_retransmits(5);                        // Fewer retries per attempt
+        } else {
+            // Conservative timing (similar to webrtc crate defaults)
+            // Aggressive timing causes issues when one side connects faster than the other
+            ice.set_timing_advance(Duration::from_millis(50));
+            ice.set_initial_stun_rto(Duration::from_millis(250));
+            ice.set_max_stun_rto(Duration::from_millis(3000));
+            ice.set_max_stun_retransmits(7);
+        }
         ice.set_local_preference(|c: &str0m::Candidate, same_kind| {
             use str0m::CandidateKind;
             let ip = c.addr();

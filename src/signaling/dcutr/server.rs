@@ -17,7 +17,8 @@ use super::framing::{read_message, write_message};
 use super::protocol::*;
 
 /// Buffer time added to RTT for timing coordination (milliseconds)
-const TIMING_BUFFER_MS: u64 = 200;
+/// Increased from 200ms to 500ms to account for clock skew, network jitter, and processing delays
+const TIMING_BUFFER_MS: u64 = 500;
 
 /// Maximum RTT samples to keep per client
 const MAX_RTT_SAMPLES: usize = 10;
