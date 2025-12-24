@@ -47,6 +47,9 @@ pub struct IrohConfig {
     /// Local address to listen on (client only).
     /// Format: host:port
     pub target: Option<String>,
+    /// SOCKS5 proxy URL for relay connections (e.g., socks5://127.0.0.1:9050).
+    /// Required when using .onion relay URLs with Tor.
+    pub socks5_proxy: Option<String>,
 }
 
 /// iroh-manual mode configuration.

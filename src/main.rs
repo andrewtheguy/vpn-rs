@@ -29,6 +29,7 @@ use tunnel_rs::custom;
 use tunnel_rs::iroh;
 use tunnel_rs::nostr;
 use tunnel_rs::secret;
+use tunnel_rs::socks5_bridge;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
@@ -284,6 +285,11 @@ enum ServerMode {
         /// Custom DNS server URL for peer discovery
         #[arg(long)]
         dns_server: Option<String>,
+
+        /// SOCKS5 proxy for relay connections (required for .onion URLs)
+        /// E.g., socks5://127.0.0.1:9050 for Tor
+        #[arg(long)]
+        socks5_proxy: Option<String>,
     },
     /// Client-initiated mode: iroh with STUN-based manual signaling (may fail on symmetric NAT)
     #[command(name = "iroh-manual")]
@@ -432,6 +438,11 @@ enum ClientMode {
         /// Custom DNS server URL for peer discovery
         #[arg(long)]
         dns_server: Option<String>,
+
+        /// SOCKS5 proxy for relay connections (required for .onion URLs)
+        /// E.g., socks5://127.0.0.1:9050 for Tor
+        #[arg(long)]
+        socks5_proxy: Option<String>,
     },
     /// Client-initiated mode: iroh with STUN-based manual signaling (may fail on symmetric NAT)
     #[command(name = "iroh-manual")]
@@ -622,8 +633,8 @@ async fn main() -> Result<()> {
                 "iroh" => {
                     let iroh_cfg = cfg.iroh();
                     // Extract common fields (relay_only is CLI-only, requires test-utils feature)
-                    let (allowed_tcp, allowed_udp, max_sessions, secret, secret_file, relay_urls, dns_server) = match &mode {
-                        Some(ServerMode::Iroh { allowed_tcp: at, allowed_udp: au, max_sessions: ms, secret: se, secret_file: sf, relay_urls: r, dns_server: d, .. }) => {
+                    let (allowed_tcp, allowed_udp, max_sessions, secret, secret_file, relay_urls, dns_server, socks5_proxy) = match &mode {
+                        Some(ServerMode::Iroh { allowed_tcp: at, allowed_udp: au, max_sessions: ms, secret: se, secret_file: sf, relay_urls: r, dns_server: d, socks5_proxy: sp, .. }) => {
                             let cfg_allowed = iroh_cfg.and_then(|c| c.allowed_sources.clone()).unwrap_or_default();
                             let cfg_secret = iroh_cfg.and_then(|c| c.secret.clone());
                             let cfg_secret_file = iroh_cfg.and_then(|c| c.secret_file.clone());
@@ -640,6 +651,7 @@ async fn main() -> Result<()> {
                                 secret_file,
                                 if r.is_empty() { iroh_cfg.and_then(|c| c.relay_urls.clone()).unwrap_or_default() } else { r.clone() },
                                 d.clone().or_else(|| iroh_cfg.and_then(|c| c.dns_server.clone())),
+                                sp.clone().or_else(|| iroh_cfg.and_then(|c| c.socks5_proxy.clone())),
                             )
                         }
                         _ => {
@@ -652,6 +664,7 @@ async fn main() -> Result<()> {
                                 iroh_cfg.and_then(|c| c.secret_file.clone()),
                                 iroh_cfg.and_then(|c| c.relay_urls.clone()).unwrap_or_default(),
                                 iroh_cfg.and_then(|c| c.dns_server.clone()),
+                                iroh_cfg.and_then(|c| c.socks5_proxy.clone()),
                             )
                         },
                     };
@@ -665,6 +678,12 @@ async fn main() -> Result<()> {
                     let relay_only = false;
 
                     let secret = resolve_iroh_secret(secret, secret_file)?;
+
+                    // Set up SOCKS5 bridges for .onion relay URLs
+                    let (relay_urls, _bridges) = socks5_bridge::setup_relay_bridges(
+                        relay_urls,
+                        socks5_proxy.as_deref(),
+                    ).await?;
 
                     iroh::run_multi_source_server(allowed_tcp, allowed_udp, max_sessions, secret, relay_urls, relay_only, dns_server).await
                 }
@@ -864,13 +883,14 @@ async fn main() -> Result<()> {
                     let iroh_cfg = cfg.iroh();
                     // Override with CLI values if provided
                     // Note: relay_only is CLI-only (not in config), requires test-utils feature
-                    let (node_id, source, target, relay_urls, dns_server) = match &mode {
-                        Some(ClientMode::Iroh { node_id: n, source: src, target: t, relay_urls: r, dns_server: d, .. }) => (
+                    let (node_id, source, target, relay_urls, dns_server, socks5_proxy) = match &mode {
+                        Some(ClientMode::Iroh { node_id: n, source: src, target: t, relay_urls: r, dns_server: d, socks5_proxy: sp, .. }) => (
                             n.clone().or_else(|| iroh_cfg.and_then(|c| c.node_id.clone())),
                             normalize_optional_endpoint(src.clone()).or_else(|| iroh_cfg.and_then(|c| c.request_source.clone())),
                             t.clone().or_else(|| iroh_cfg.and_then(|c| c.target.clone())),
                             if r.is_empty() { iroh_cfg.and_then(|c| c.relay_urls.clone()).unwrap_or_default() } else { r.clone() },
                             d.clone().or_else(|| iroh_cfg.and_then(|c| c.dns_server.clone())),
+                            sp.clone().or_else(|| iroh_cfg.and_then(|c| c.socks5_proxy.clone())),
                         ),
                         _ => (
                             iroh_cfg.and_then(|c| c.node_id.clone()),
@@ -878,6 +898,7 @@ async fn main() -> Result<()> {
                             iroh_cfg.and_then(|c| c.target.clone()),
                             iroh_cfg.and_then(|c| c.relay_urls.clone()).unwrap_or_default(),
                             iroh_cfg.and_then(|c| c.dns_server.clone()),
+                            iroh_cfg.and_then(|c| c.socks5_proxy.clone()),
                         ),
                     };
                     // relay_only: CLI-only, requires test-utils feature
@@ -898,6 +919,12 @@ async fn main() -> Result<()> {
                     let target = target.context(
                         "--target is required. Provide the local address to listen on (e.g., --target 127.0.0.1:2222)",
                     )?;
+
+                    // Set up SOCKS5 bridges for .onion relay URLs
+                    let (relay_urls, _bridges) = socks5_bridge::setup_relay_bridges(
+                        relay_urls,
+                        socks5_proxy.as_deref(),
+                    ).await?;
 
                     iroh::run_multi_source_client(node_id, source, target, relay_urls, relay_only, dns_server).await
                 }

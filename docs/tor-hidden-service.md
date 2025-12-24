@@ -25,9 +25,9 @@ Run iroh-relay as a Tor hidden service (.onion) to avoid needing a public IP add
 - Direct P2P (QUIC/UDP) bypasses Tor entirely - no performance impact
 - If direct P2P fails, traffic falls back through relay (via Tor)
 
-## Phase 1: External Tor Daemon (Current)
+## Phase 1: External Tor Daemon (Recommended)
 
-No code changes required. Use external `tor` daemon and `torsocks` wrapper.
+Use external `tor` daemon with native `--socks5-proxy` support.
 
 ### Prerequisites
 
@@ -102,13 +102,14 @@ tunnel-rs server iroh \
 tor
 ```
 
-#### Step 2: Connect via torsocks
+#### Step 2: Connect with Native SOCKS5 Proxy
 
 ```bash
-# torsocks wraps the command to route through Tor SOCKS5 proxy
+# Use --socks5-proxy to route .onion relay connections through Tor
 # Note: Only relay connection goes through Tor, direct P2P bypasses it
-torsocks tunnel-rs client iroh \
+tunnel-rs client iroh \
   --relay-url http://YOUR_ADDRESS.onion \
+  --socks5-proxy socks5://127.0.0.1:9050 \
   --node-id <SERVER_ENDPOINT_ID> \
   --source tcp://127.0.0.1:22 \
   --target 127.0.0.1:2222
@@ -128,10 +129,10 @@ ssh -p 2222 user@127.0.0.1
 curl --socks5-hostname 127.0.0.1:9050 https://check.torproject.org/api/ip
 
 # 2. Verify .onion is reachable
-torsocks curl -v http://YOUR_ADDRESS.onion/
+curl --socks5-hostname 127.0.0.1:9050 http://YOUR_ADDRESS.onion/
 
-# 3. Test WebSocket upgrade
-torsocks websocat ws://YOUR_ADDRESS.onion/relay
+# 3. Test WebSocket upgrade (optional, requires websocat with SOCKS5 support)
+websocat --socks5 127.0.0.1:9050 ws://YOUR_ADDRESS.onion/relay
 ```
 
 ### Troubleshooting
@@ -141,12 +142,9 @@ torsocks websocat ws://YOUR_ADDRESS.onion/relay
 - Check hidden service directory permissions: `ls -la /var/lib/tor/iroh-relay/`
 - Verify iroh-relay is listening: `ss -tlnp | grep 3340`
 
-**torsocks not working with async Rust:**
-- Try using environment variables instead:
-  ```bash
-  ALL_PROXY=socks5h://127.0.0.1:9050 tunnel-rs client iroh ...
-  ```
-- Or use `torify` as an alternative to `torsocks`
+**"SOCKS5 proxy required for .onion relay URLs":**
+- Add `--socks5-proxy socks5://127.0.0.1:9050` to your command
+- Or add `socks5_proxy = "socks5://127.0.0.1:9050"` to your config file
 
 **Direct P2P not working:**
 - This is expected if both peers are behind symmetric NAT
@@ -155,33 +153,34 @@ torsocks websocat ws://YOUR_ADDRESS.onion/relay
 
 ---
 
-## Phase 2: Native SOCKS5 Proxy Support (Planned)
+## Technical Details: SOCKS5 Bridge
 
-Add `--socks5-proxy` CLI option for native .onion URL handling without external wrappers.
+The native SOCKS5 proxy support works by creating a local TCP bridge:
 
-### Planned Implementation
-
-```bash
-# No torsocks needed - native proxy support
-tunnel-rs client iroh \
-  --relay-url http://YOUR_ADDRESS.onion \
-  --socks5-proxy socks5h://127.0.0.1:9050 \
-  --node-id <SERVER_ID> \
-  --source tcp://127.0.0.1:22 \
-  --target 127.0.0.1:2222
+```
+iroh → localhost:random_port → SOCKS5 proxy → .onion:port → iroh-relay
 ```
 
-### Files to Modify
-- `src/main.rs` - Add `--socks5-proxy` CLI option
-- `src/config.rs` - Add `socks5_proxy` config field
-- `src/iroh/endpoint.rs` - Pass proxy config to iroh endpoint
+When you specify `--socks5-proxy` with a `.onion` relay URL:
+1. tunnel-rs starts a local TCP listener on a random port
+2. The relay URL is rewritten to `http://127.0.0.1:<random_port>`
+3. When iroh connects to the local listener, traffic is forwarded through SOCKS5 to the .onion address
+4. This bridges TCP traffic transparently - iroh doesn't need native SOCKS5 support
 
-### Status
-Not yet implemented. Use Phase 1 (torsocks) for now.
+### Config File Support
+
+You can also specify the SOCKS5 proxy in config files:
+
+```toml
+# server.toml or client.toml
+[iroh]
+relay_urls = ["http://abc123...xyz.onion"]
+socks5_proxy = "socks5://127.0.0.1:9050"
+```
 
 ---
 
-## Phase 3: Embedded Arti (Future)
+## Phase 2: Embedded Arti (Future)
 
 Single-binary deployment with Tor built-in using [Arti](https://gitlab.torproject.org/tpo/core/arti) (Rust Tor implementation).
 
