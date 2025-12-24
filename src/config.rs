@@ -200,6 +200,40 @@ fn validate_tcp_udp_url(value: &str, field_name: &str) -> Result<()> {
     Ok(())
 }
 
+/// Validate that a string is a valid host:port address.
+fn validate_host_port(value: &str, field_name: &str) -> Result<()> {
+    if !value.contains(':') {
+        anyhow::bail!(
+            "{} '{}' missing port. Expected format: host:port",
+            field_name,
+            value
+        );
+    }
+
+    // Use rsplitn to split from the right (handles IPv6 addresses like [::1]:8080)
+    let parts: Vec<&str> = value.rsplitn(2, ':').collect();
+    if parts.len() != 2 {
+        anyhow::bail!(
+            "{} '{}' has invalid format. Expected format: host:port",
+            field_name,
+            value
+        );
+    }
+
+    let port_str = parts[0];
+    let host = parts[1];
+
+    if host.is_empty() {
+        anyhow::bail!("{} '{}' missing host", field_name, value);
+    }
+
+    port_str
+        .parse::<u16>()
+        .with_context(|| format!("{} '{}' has invalid port number", field_name, value))?;
+
+    Ok(())
+}
+
 /// Validate AllowedSources CIDR lists.
 fn validate_allowed_sources(allowed: &AllowedSources) -> Result<()> {
     for cidr in &allowed.tcp {
@@ -460,6 +494,10 @@ impl ReceiverConfig {
                 if let Some(ref source) = iroh.request_source {
                     validate_tcp_udp_url(source, "request_source")?;
                 }
+                // Validate target format (host:port)
+                if let Some(ref target) = iroh.target {
+                    validate_host_port(target, "target")?;
+                }
             }
         }
         if expected_mode == "nostr" {
@@ -484,6 +522,10 @@ impl ReceiverConfig {
                     validate_tcp_udp_url(source, "request_source")?;
                 }
             }
+            // Validate top-level target format (host:port) for nostr mode
+            if let Some(ref target) = self.target {
+                validate_host_port(target, "target")?;
+            }
         }
 
         if expected_mode == "iroh-manual" {
@@ -499,7 +541,10 @@ impl ReceiverConfig {
                 if let Some(ref source) = iroh_manual.request_source {
                     validate_tcp_udp_url(source, "request_source")?;
                 }
-                // target is just host:port, no protocol validation needed
+                // Validate target format (host:port)
+                if let Some(ref target) = iroh_manual.target {
+                    validate_host_port(target, "target")?;
+                }
             }
         }
         if expected_mode == "custom-manual" {
@@ -515,7 +560,10 @@ impl ReceiverConfig {
                 if let Some(ref source) = custom_manual.request_source {
                     validate_tcp_udp_url(source, "request_source")?;
                 }
-                // target is just host:port, no protocol validation needed
+                // Validate target format (host:port)
+                if let Some(ref target) = custom_manual.target {
+                    validate_host_port(target, "target")?;
+                }
             }
         }
 
