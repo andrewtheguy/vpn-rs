@@ -24,14 +24,11 @@
 //!   tunnel-rs server nostr --allowed-tcp 127.0.0.0/8 --nsec <NSEC> --peer-npub <NPUB>
 //!   tunnel-rs client nostr --source tcp://127.0.0.1:22 --target 127.0.0.1:2222 --nsec <NSEC> --peer-npub <NPUB>
 
-mod config;
-mod custom;
-mod iroh;
-mod nostr;
-mod secret;
-mod signaling;
-mod transport;
-mod tunnel_common;
+use tunnel_rs::config;
+use tunnel_rs::custom;
+use tunnel_rs::iroh;
+use tunnel_rs::nostr;
+use tunnel_rs::secret;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
