@@ -12,9 +12,7 @@ use std::path::Path;
 use std::time::Duration;
 use url::Url;
 
-pub const UDP_ALPN: &[u8] = b"udp-forward/1";
-pub const TCP_ALPN: &[u8] = b"tcp-forward/1";
-/// ALPN for iroh multi-source mode (receiver requests source)
+/// ALPN for all iroh modes (receiver requests source)
 pub const MULTI_ALPN: &[u8] = b"multi-forward/1";
 pub const RELAY_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 

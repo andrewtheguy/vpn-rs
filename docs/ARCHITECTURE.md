@@ -879,7 +879,7 @@ Nostr mode combines the full ICE implementation from custom-manual mode with aut
 
 ### Receiver-Initiated Dynamic Source
 
-Unlike other modes where the sender specifies a fixed `--source`, nostr mode uses a **receiver-initiated** model:
+All modes use a **receiver-initiated** model for consistent UX:
 
 - **Sender**: Whitelists allowed networks with `--allowed-tcp`/`--allowed-udp` (CIDR notation)
 - **Receiver**: Specifies which service to tunnel with `--source` (hostname:port)
@@ -1573,8 +1573,8 @@ graph TB
 |------|---------------|----------------|-------------|
 | `iroh` | **Yes** | **Yes** | Multiple receivers, receiver specifies `--source` |
 | `nostr` | **Yes** | **Yes** | Multiple receivers, receiver specifies `--source` |
-| `iroh-manual` | No | No | Single session, fixed `--source` on sender |
-| `custom-manual` | No | No | Single session, fixed `--source` on sender |
+| `iroh-manual` | No | **Yes** | Single session, receiver specifies `--source` |
+| `custom-manual` | No | **Yes** | Single session, receiver specifies `--source` |
 
 **Multi-Session** = Multiple concurrent connections to the same sender
 **Dynamic Source** = Receiver specifies which service to tunnel (via `--source`)
@@ -1590,20 +1590,21 @@ The `iroh-manual` and `custom-manual` modes currently support only one tunnel se
 ```mermaid
 graph TB
     subgraph "iroh-manual/custom-manual Behavior"
-        A[Sender starts] --> B[Wait for offer]
-        B --> C[Establish single tunnel]
-        C --> D[Handle streams over this tunnel]
-        D --> E[Additional receivers timeout]
+        A[Sender starts] --> B[Wait for receiver offer]
+        B --> C[Validate source request]
+        C --> D[Establish single tunnel]
+        D --> E[Handle streams over this tunnel]
+        E --> F[Additional receivers timeout]
     end
 
     subgraph "Workarounds"
-        F[Run multiple sender instances]
-        G[Use different keypairs per tunnel]
-        H[Use iroh mode]
+        G[Run multiple sender instances]
+        H[Use different keypairs per tunnel]
+        I[Use iroh mode]
     end
 
-    style E fill:#FFCCBC
-    style H fill:#C8E6C9
+    style F fill:#FFCCBC
+    style I fill:#C8E6C9
 ```
 
 **Why this limitation exists:**

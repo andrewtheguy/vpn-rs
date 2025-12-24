@@ -56,24 +56,30 @@ udp = [
 ]
 
 # [iroh-manual]
-# # Single-target mode: source is required
-# # source = "tcp://127.0.0.1:22"  # Set at top level
+# # Receiver-initiated mode: receivers request sources, sender validates
 # # Set to [] to disable STUN entirely
 # stun_servers = [
 #     "stun.l.google.com:19302",
 #     "stun1.l.google.com:19302",
 #     "stun.services.mozilla.com:3478",
 # ]
+# # Allowed source networks that receivers can request (CIDR notation)
+# [iroh-manual.allowed_sources]
+# tcp = ["127.0.0.0/8", "192.168.0.0/16"]
+# udp = ["10.0.0.0/8"]
 
 # [custom-manual]
-# # Single-target mode: source is required
-# # source = "tcp://127.0.0.1:22"  # Set at top level
+# # Receiver-initiated mode: receivers request sources, sender validates
 # # Set to [] to disable STUN entirely
 # stun_servers = [
 #     "stun.l.google.com:19302",
 #     "stun1.l.google.com:19302",
 #     "stun.services.mozilla.com:3478",
 # ]
+# # Allowed source networks that receivers can request (CIDR notation)
+# [custom-manual.allowed_sources]
+# tcp = ["127.0.0.0/8", "192.168.0.0/16"]
+# udp = ["10.0.0.0/8"]
 
 # [nostr]
 # # NOTE: For nostr mode, do NOT set 'source' above - receivers request sources dynamically.

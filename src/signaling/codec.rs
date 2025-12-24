@@ -34,6 +34,10 @@ pub struct ManualOffer {
     /// Session ID to distinguish between different signaling sessions (for nostr mode)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
+    /// Requested source endpoint (e.g., "tcp://127.0.0.1:22")
+    /// Required for receiver-initiated handshake in manual modes
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -113,7 +117,7 @@ impl ManualReject {
 // Iroh Manual Mode (v2) - Iroh endpoint
 // ============================================================================
 
-/// Iroh manual mode offer (sender -> receiver)
+/// Iroh manual mode offer (receiver -> sender, receiver-first pattern)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IrohManualOffer {
     pub version: u16,
@@ -121,9 +125,13 @@ pub struct IrohManualOffer {
     pub node_id: String,
     /// Direct socket addresses (from STUN/local interfaces)
     pub direct_addresses: Vec<String>,
+    /// Requested source endpoint (e.g., "tcp://127.0.0.1:22")
+    /// Required for receiver-initiated handshake
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
 }
 
-/// Iroh manual mode answer (receiver -> sender)
+/// Iroh manual mode answer (sender -> receiver, sender validates source)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IrohManualAnswer {
     pub version: u16,

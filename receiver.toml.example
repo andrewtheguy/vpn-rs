@@ -12,9 +12,8 @@
 role = "receiver"
 mode = "iroh"  # or "iroh-manual", "custom-manual", or "nostr"
 
-# NOTE: For multi-source modes (iroh, nostr), use request_source in the mode section.
-# For single-target modes (iroh-manual, custom-manual), use target at top level.
-# target = "tcp://127.0.0.1:2222"  # For single-target modes only
+# All modes use receiver-initiated source requests with consistent config structure.
+# Each mode section has request_source and target fields.
 
 [iroh]
 # NodeId of the sender to connect to (required for iroh)
@@ -43,7 +42,11 @@ relay_only = false
 # dns_server = "https://dns.example.com/pkarr"
 
 # [iroh-manual]
-# # Single-target mode: use target at top level
+# # Receiver-initiated mode: request source from sender, listen locally
+# # Source address to request from sender (REQUIRED)
+# request_source = "tcp://127.0.0.1:22"
+# # Local address to listen on (REQUIRED)
+# target = "127.0.0.1:2222"
 # # Set to [] to disable STUN entirely
 # stun_servers = [
 #     "stun.l.google.com:19302",
@@ -52,7 +55,11 @@ relay_only = false
 # ]
 
 # [custom-manual]
-# # Single-target mode: use target at top level
+# # Receiver-initiated mode: request source from sender, listen locally
+# # Source address to request from sender (REQUIRED)
+# request_source = "tcp://127.0.0.1:22"
+# # Local address to listen on (REQUIRED)
+# target = "127.0.0.1:2222"
 # # Set to [] to disable STUN entirely
 # stun_servers = [
 #     "stun.l.google.com:19302",

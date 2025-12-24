@@ -357,23 +357,23 @@ Uses iroh's QUIC transport with manual copy-paste signaling. No discovery server
 
 ## Quick Start
 
-1. **Sender** starts and outputs an offer:
+1. **Receiver** starts first and outputs an offer:
    ```bash
-   tunnel-rs sender iroh-manual --source tcp://127.0.0.1:22
+   tunnel-rs receiver iroh-manual --source tcp://127.0.0.1:22 --target 127.0.0.1:2222
    ```
 
    Copy the `-----BEGIN TUNNEL-RS IROH OFFER-----` block.
 
-2. **Receiver** starts and pastes the offer:
+2. **Sender** validates the source request and outputs an answer:
    ```bash
-   tunnel-rs receiver iroh-manual --target tcp://127.0.0.1:2222
+   tunnel-rs sender iroh-manual --allowed-tcp 127.0.0.0/8
    ```
 
    Paste the offer, then copy the `-----BEGIN TUNNEL-RS IROH ANSWER-----` block.
 
-3. **Sender** receives the answer:
+3. **Receiver** receives the answer:
 
-   Paste the answer into the sender terminal.
+   Paste the answer into the receiver terminal.
 
 4. **Connect**:
    ```bash
@@ -386,7 +386,8 @@ Uses iroh's QUIC transport with manual copy-paste signaling. No discovery server
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--source`, `-s` | required | Source address to forward traffic to (hostname allowed) |
+| `--allowed-tcp` | none | Allowed TCP networks in CIDR notation (repeatable) |
+| `--allowed-udp` | none | Allowed UDP networks in CIDR notation (repeatable) |
 | `--stun-server` | public | STUN server(s), repeatable |
 | `--no-stun` | false | Disable STUN (no external infrastructure, CLI only) |
 
@@ -394,7 +395,8 @@ Uses iroh's QUIC transport with manual copy-paste signaling. No discovery server
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--target`, `-t` | required | Local address to listen on |
+| `--source`, `-s` | required | Source to request from sender (e.g., tcp://127.0.0.1:22) |
+| `--target`, `-t` | required | Local address to listen on (e.g., 127.0.0.1:2222) |
 | `--stun-server` | public | STUN server(s), repeatable |
 | `--no-stun` | false | Disable STUN (no external infrastructure, CLI only) |
 
@@ -410,7 +412,8 @@ Use `--no-stun` on the CLI, or set `stun_servers = []` in your config. If you om
 
 Example (CLI only):
 ```bash
-tunnel-rs sender iroh-manual --no-stun --source tcp://127.0.0.1:22
+tunnel-rs receiver iroh-manual --no-stun --source tcp://127.0.0.1:22 --target 127.0.0.1:2222
+tunnel-rs sender iroh-manual --no-stun --allowed-tcp 127.0.0.0/8
 ```
 
 ## UDP Example
@@ -418,11 +421,11 @@ tunnel-rs sender iroh-manual --no-stun --source tcp://127.0.0.1:22
 All modes support TCP and UDP tunneling; example below uses UDP:
 
 ```bash
-# Sender
-tunnel-rs sender iroh-manual --source udp://127.0.0.1:51820
+# Receiver (starts first)
+tunnel-rs receiver iroh-manual --source udp://127.0.0.1:51820 --target 0.0.0.0:51820
 
-# Receiver
-tunnel-rs receiver iroh-manual --target udp://0.0.0.0:51820
+# Sender (validates and responds)
+tunnel-rs sender iroh-manual --allowed-udp 127.0.0.0/8
 ```
 
 ---
@@ -446,23 +449,24 @@ Uses full ICE (Interactive Connectivity Establishment) with str0m + quinn QUIC.
 
 ## Quick Start
 
-1. **Sender** starts and outputs an offer:
+1. **Receiver** starts first and outputs an offer:
    ```bash
-   tunnel-rs sender custom-manual --source tcp://127.0.0.1:22
+   tunnel-rs receiver custom-manual --source tcp://127.0.0.1:22 --target 127.0.0.1:2222
    ```
 
    Copy the `-----BEGIN TUNNEL-RS MANUAL OFFER-----` block.
 
-2. **Receiver** starts and pastes the offer:
+2. **Sender** validates the source request and outputs an answer:
    ```bash
-   tunnel-rs receiver custom-manual --target tcp://127.0.0.1:2222
+   tunnel-rs sender custom-manual --allowed-tcp 127.0.0.0/8
    ```
 
-   Paste the offer, then copy the `-----BEGIN TUNNEL-RS MANUAL ANSWER-----` block.
+   Paste the offer. The sender displays an answer block plus a QUIC fingerprint.
+   Copy the `-----BEGIN TUNNEL-RS MANUAL ANSWER-----` block.
 
-3. **Sender** receives the answer:
+3. **Receiver** receives the answer:
 
-   Paste the answer into the sender terminal.
+   Paste the answer into the receiver terminal, then enter the QUIC fingerprint when prompted.
 
 4. **Connect**:
    ```bash
@@ -472,11 +476,11 @@ Uses full ICE (Interactive Connectivity Establishment) with str0m + quinn QUIC.
 ## UDP Tunnel (e.g., WireGuard)
 
 ```bash
-# Sender
-tunnel-rs sender custom-manual --source udp://127.0.0.1:51820
+# Receiver (starts first)
+tunnel-rs receiver custom-manual --source udp://127.0.0.1:51820 --target 0.0.0.0:51820
 
-# Receiver
-tunnel-rs receiver custom-manual --target udp://0.0.0.0:51820
+# Sender (validates and responds)
+tunnel-rs sender custom-manual --allowed-udp 127.0.0.0/8
 ```
 
 ## CLI Options
@@ -485,7 +489,8 @@ tunnel-rs receiver custom-manual --target udp://0.0.0.0:51820
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--source`, `-s` | required | Source address to forward traffic to (hostname allowed) |
+| `--allowed-tcp` | none | Allowed TCP networks in CIDR notation (repeatable) |
+| `--allowed-udp` | none | Allowed UDP networks in CIDR notation (repeatable) |
 | `--stun-server` | public | STUN server(s), repeatable |
 | `--no-stun` | false | Disable STUN (no external infrastructure, CLI only) |
 
@@ -493,7 +498,8 @@ tunnel-rs receiver custom-manual --target udp://0.0.0.0:51820
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--target`, `-t` | required | Local address to listen on |
+| `--source`, `-s` | required | Source to request from sender (e.g., tcp://127.0.0.1:22) |
+| `--target`, `-t` | required | Local address to listen on (e.g., 127.0.0.1:2222) |
 | `--stun-server` | public | STUN server(s), repeatable |
 | `--no-stun` | false | Disable STUN (no external infrastructure, CLI only) |
 

@@ -2,8 +2,8 @@
 //!
 //! Configuration structure:
 //! - `role` and `mode` fields for validation
-//! - Shared options at top level (source/target)
 //! - Mode-specific sections: [iroh], [iroh-manual], [custom-manual], [nostr]
+//! - All modes use receiver-initiated source requests
 //!
 //! Role-based field semantics are enforced by `validate()` at parse time:
 //! - Sender-only fields are rejected when role=receiver
@@ -51,15 +51,43 @@ pub struct IrohConfig {
 }
 
 /// iroh-manual mode configuration.
+///
+/// Some fields are role-specific (enforced by validate()):
+/// - Sender-only: `allowed_sources`
+/// - Receiver-only: `request_source`, `target`
 #[derive(Deserialize, Default, Clone)]
 pub struct IrohManualConfig {
     pub stun_servers: Option<Vec<String>>,
+    /// Allowed source networks in CIDR notation (sender only).
+    /// Receivers must request sources within these networks.
+    pub allowed_sources: Option<AllowedSources>,
+    /// Source URL to request from sender (receiver only, required).
+    /// Format: tcp://host:port or udp://host:port
+    #[serde(alias = "source")]
+    pub request_source: Option<String>,
+    /// Local address to listen on (receiver only, required).
+    /// Format: host:port (no protocol prefix)
+    pub target: Option<String>,
 }
 
 /// custom-manual mode configuration.
+///
+/// Some fields are role-specific (enforced by validate()):
+/// - Sender-only: `allowed_sources`
+/// - Receiver-only: `request_source`, `target`
 #[derive(Deserialize, Default, Clone)]
 pub struct CustomManualConfig {
     pub stun_servers: Option<Vec<String>>,
+    /// Allowed source networks in CIDR notation (sender only).
+    /// Receivers must request sources within these networks.
+    pub allowed_sources: Option<AllowedSources>,
+    /// Source URL to request from sender (receiver only, required).
+    /// Format: tcp://host:port or udp://host:port
+    #[serde(alias = "source")]
+    pub request_source: Option<String>,
+    /// Local address to listen on (receiver only, required).
+    /// Format: host:port (no protocol prefix)
+    pub target: Option<String>,
 }
 
 /// Allowed source networks for receiver-requested source feature.
@@ -301,10 +329,49 @@ impl SenderConfig {
                     Use [nostr.allowed_sources] to restrict what receivers can request."
                 );
             }
-        } else if expected_mode == "iroh-manual" || expected_mode == "custom-manual" {
-            // Single-target modes: validate source URL format if present
-            if let Some(ref source) = self.source {
-                validate_tcp_udp_url(source, "source")?;
+        }
+        if expected_mode == "iroh-manual" {
+            if let Some(ref iroh_manual) = self.iroh_manual {
+                // Reject receiver-only fields
+                if iroh_manual.request_source.is_some() || iroh_manual.target.is_some() {
+                    anyhow::bail!(
+                        "[iroh-manual] 'source' / 'request_source' / 'target' are receiver-only fields. \
+                        Senders use 'allowed_sources' to restrict what receivers can request."
+                    );
+                }
+                // Validate CIDR format
+                if let Some(ref allowed) = iroh_manual.allowed_sources {
+                    validate_allowed_sources(allowed)?;
+                }
+            }
+            // Reject top-level source for iroh-manual sender
+            if self.source.is_some() {
+                anyhow::bail!(
+                    "Top-level 'source' is not allowed for iroh-manual sender mode. \
+                    Use [iroh-manual.allowed_sources] to restrict what receivers can request."
+                );
+            }
+        }
+        if expected_mode == "custom-manual" {
+            if let Some(ref custom_manual) = self.custom_manual {
+                // Reject receiver-only fields
+                if custom_manual.request_source.is_some() || custom_manual.target.is_some() {
+                    anyhow::bail!(
+                        "[custom-manual] 'source' / 'request_source' / 'target' are receiver-only fields. \
+                        Senders use 'allowed_sources' to restrict what receivers can request."
+                    );
+                }
+                // Validate CIDR format
+                if let Some(ref allowed) = custom_manual.allowed_sources {
+                    validate_allowed_sources(allowed)?;
+                }
+            }
+            // Reject top-level source for custom-manual sender
+            if self.source.is_some() {
+                anyhow::bail!(
+                    "Top-level 'source' is not allowed for custom-manual sender mode. \
+                    Use [custom-manual.allowed_sources] to restrict what receivers can request."
+                );
             }
         }
 
@@ -419,10 +486,36 @@ impl ReceiverConfig {
             }
         }
 
-        // Validate target URL format if present (for single-target modes)
-        if expected_mode == "iroh-manual" || expected_mode == "custom-manual" {
-            if let Some(ref target) = self.target {
-                validate_tcp_udp_url(target, "target")?;
+        if expected_mode == "iroh-manual" {
+            if let Some(ref iroh_manual) = self.iroh_manual {
+                // Reject sender-only fields
+                if iroh_manual.allowed_sources.is_some() {
+                    anyhow::bail!(
+                        "[iroh-manual] 'allowed_sources' is a sender-only field. \
+                        Receivers use 'source' to specify what to request from sender."
+                    );
+                }
+                // Validate request_source URL format
+                if let Some(ref source) = iroh_manual.request_source {
+                    validate_tcp_udp_url(source, "request_source")?;
+                }
+                // target is just host:port, no protocol validation needed
+            }
+        }
+        if expected_mode == "custom-manual" {
+            if let Some(ref custom_manual) = self.custom_manual {
+                // Reject sender-only fields
+                if custom_manual.allowed_sources.is_some() {
+                    anyhow::bail!(
+                        "[custom-manual] 'allowed_sources' is a sender-only field. \
+                        Receivers use 'source' to specify what to request from sender."
+                    );
+                }
+                // Validate request_source URL format
+                if let Some(ref source) = custom_manual.request_source {
+                    validate_tcp_udp_url(source, "request_source")?;
+                }
+                // target is just host:port, no protocol validation needed
             }
         }
 

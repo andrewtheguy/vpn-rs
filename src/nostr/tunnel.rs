@@ -448,6 +448,7 @@ async fn handle_nostr_tcp_session_impl(
         candidates: local_candidates,
         quic_fingerprint: quic_identity.fingerprint.clone(),
         session_id: Some(session_id.clone()),
+        source: None, // Source is communicated via SourceRequest in nostr mode
     };
 
     // Publish offer once - we already have receiver's ICE credentials from the REQUEST,
@@ -580,6 +581,7 @@ async fn handle_nostr_udp_session_impl(
         candidates: local_candidates,
         quic_fingerprint: quic_identity.fingerprint.clone(),
         session_id: Some(session_id.clone()),
+        source: None, // Source is communicated via SourceRequest in nostr mode
     };
 
     // Publish offer once - we already have receiver's ICE credentials from the REQUEST,
