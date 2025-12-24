@@ -625,6 +625,7 @@ async fn handle_nostr_udp_session_impl(
     log::info!("[{}] ICE connection established", short_id);
 
     // Spawn the ICE keeper
+    let mut ice_disconnect_rx = ice_conn.disconnect_rx.clone();
     let ice_keeper_handle = tokio::spawn(ice_conn.ice_keeper.run());
 
     let endpoint = quic::make_server_endpoint(ice_conn.socket, quic_identity.server_config)?;
@@ -658,10 +659,50 @@ async fn handle_nostr_udp_session_impl(
             .context("Failed to bind UDP socket")?,
     );
 
-    forward_stream_to_udp_sender(recv_stream, send_stream, udp_socket, target_addr).await?;
+    let disconnect_short_id = short_id.clone();
+    let disconnect_conn = conn.clone();
+    let disconnect_task = tokio::spawn(async move {
+        match ice_disconnect_rx.changed().await {
+            Ok(()) => {
+                if *ice_disconnect_rx.borrow() {
+                    log::warn!(
+                        "[{}] ICE disconnected; closing QUIC connection.",
+                        disconnect_short_id
+                    );
+                    disconnect_conn.close(0u32.into(), b"ice disconnected");
+                }
+            }
+            Err(_) => {
+                log::warn!(
+                    "[{}] ICE disconnect watcher closed; closing QUIC connection.",
+                    disconnect_short_id
+                );
+                disconnect_conn.close(0u32.into(), b"ice watcher closed");
+            }
+        }
+    });
+
+    let forward_result = tokio::select! {
+        result = forward_stream_to_udp_sender(recv_stream, send_stream, udp_socket, target_addr) => {
+            result
+        }
+        error = conn.closed() => {
+            log::info!("[{}] QUIC connection closed: {}", short_id, error);
+            Ok(())
+        }
+    };
 
     conn.close(0u32.into(), b"done");
     log::info!("[{}] UDP session closed", short_id);
+
+    if !disconnect_task.is_finished() {
+        disconnect_task.abort();
+    }
+    match disconnect_task.await {
+        Ok(()) => {}
+        Err(e) if e.is_cancelled() => {}
+        Err(e) => log::warn!("[{}] ICE disconnect task failed: {}", short_id, e),
+    }
 
     // Clean up the ICE keeper task
     ice_keeper_handle.abort();
@@ -671,7 +712,7 @@ async fn handle_nostr_udp_session_impl(
         Err(e) => log::warn!("[{}] ICE keeper task failed: {}", short_id, e),
     }
 
-    Ok(())
+    forward_result
 }
 
 // ============================================================================
