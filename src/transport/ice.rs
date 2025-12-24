@@ -246,9 +246,23 @@ impl IceEndpoint {
         self.ice.set_controlling(matches!(role, IceRole::Controlling));
         self.ice.set_remote_credentials(remote_creds);
 
+        info!("Starting ICE connectivity check with {} remote candidates", remote_candidates.len());
         debug!("Adding {} remote candidates:", remote_candidates.len());
-        for candidate in remote_candidates {
+        for candidate in &remote_candidates {
             debug!("  Remote: {}", candidate);
+        }
+
+        // Analyze remote candidates for diagnostic purposes
+        let has_remote_srflx = remote_candidates.iter().any(|c| c.contains(" srflx "));
+        let has_remote_host = remote_candidates.iter().any(|c| c.contains(" host "));
+        if !has_remote_srflx {
+            debug!("Note: No server-reflexive (STUN) candidates from remote peer - they may be on a local network");
+        }
+        if !has_remote_host {
+            warn!("Warning: No host candidates from remote peer - this is unusual");
+        }
+
+        for candidate in remote_candidates {
             let parsed = str0m::Candidate::from_sdp_string(&candidate)
                 .with_context(|| format!("Invalid ICE candidate: {}", candidate))?;
             self.ice.add_remote_candidate(parsed);
@@ -256,8 +270,13 @@ impl IceEndpoint {
 
         let mut nominated_source: Option<SocketAddr> = None;
         let mut nominated_dest: Option<SocketAddr> = None;
+        let mut ice_failed = false;
         let mut buf = vec![0u8; 2000];
         let mut tick = interval(Duration::from_millis(50)); // Slower tick to match conservative timing
+
+        // ICE connection timeout: 30 seconds is enough for STUN-based NAT traversal
+        const ICE_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+        let connect_deadline = Instant::now() + ICE_CONNECT_TIMEOUT;
 
         self.ice.handle_timeout(Instant::now());
 
@@ -302,9 +321,26 @@ impl IceEndpoint {
         drop(done_tx); // Drop our copy so done_rx completes when all tasks finish
 
         loop {
+            // Check for timeout
+            if Instant::now() >= connect_deadline {
+                warn!("ICE connection timeout after {:?}", ICE_CONNECT_TIMEOUT);
+                return Err(anyhow!("ICE connection timeout - NAT traversal may have failed. Consider using iroh-default mode for more reliable connectivity."));
+            }
+
             let socket_map = socket_map(&self.sockets);
             drain_transmit(&mut self.ice, &socket_map).await?;
-            drain_events(&mut self.ice, &mut nominated_source, &mut nominated_dest);
+            drain_events(&mut self.ice, &mut nominated_source, &mut nominated_dest, &mut ice_failed);
+
+            // Check if ICE has failed (Disconnected or Failed state)
+            if ice_failed {
+                warn!("ICE connectivity check failed - likely behind incompatible NAT");
+                warn!("Possible causes:");
+                warn!("  - Both peers behind symmetric NAT (common in enterprise/cloud networks)");
+                warn!("  - Firewall blocking UDP traffic");
+                warn!("  - STUN-only mode has no relay fallback (unlike iroh-default)");
+                warn!("Recommendation: Use iroh-default mode for more reliable connectivity");
+                return Err(anyhow!("ICE connectivity failed - peers may be behind incompatible NAT types. Consider using iroh-default mode for more reliable connectivity."));
+            }
 
             if self.ice.state().is_connected() {
                 if let (Some(source), Some(destination)) = (nominated_source, nominated_dest) {
@@ -468,13 +504,18 @@ fn drain_events(
     ice: &mut IceAgent,
     nominated_source: &mut Option<SocketAddr>,
     nominated_dest: &mut Option<SocketAddr>,
+    ice_failed: &mut bool,
 ) {
     while let Some(event) = ice.poll_event() {
         match event {
             IceAgentEvent::IceConnectionStateChange(state) => {
                 info!("ICE state: {:?}", state);
+                // Detect terminal failure state
+                // Note: str0m uses Disconnected for connectivity failures
+                // (Failed variant is not implemented in str0m)
                 if state == IceConnectionState::Disconnected {
-                    debug!("ICE disconnected");
+                    debug!("ICE disconnected - connectivity check failed");
+                    *ice_failed = true;
                 }
             }
             IceAgentEvent::NominatedSend {

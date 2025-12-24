@@ -4,6 +4,7 @@
 //! with Nostr relay-based automated signaling.
 
 use anyhow::{Context, Result};
+use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
@@ -178,6 +179,11 @@ async fn run_nostr_sender_loop(
 
     let mut session_tasks: JoinSet<Result<()>> = JoinSet::new();
 
+    // Track recently-processed session IDs to avoid duplicate processing
+    // Nostr relays may deliver the same request multiple times
+    let mut processed_sessions: HashSet<String> = HashSet::new();
+    const MAX_PROCESSED_SESSIONS: usize = 1000; // Limit memory usage
+
     let limit_str = if max_sessions == 0 {
         "unlimited".to_string()
     } else {
@@ -227,6 +233,22 @@ async fn run_nostr_sender_loop(
         }
 
         let session_id = request.session_id.clone();
+
+        // Skip duplicate requests (Nostr relays may deliver the same event multiple times)
+        if processed_sessions.contains(&session_id) {
+            log::debug!(
+                "Ignoring duplicate request for session {}",
+                short_session_id(&session_id)
+            );
+            continue;
+        }
+
+        // Limit memory usage by clearing old entries when reaching capacity
+        if processed_sessions.len() >= MAX_PROCESSED_SESSIONS {
+            processed_sessions.clear();
+            log::debug!("Cleared processed sessions cache (reached {} entries)", MAX_PROCESSED_SESSIONS);
+        }
+        processed_sessions.insert(session_id.clone());
         let protocol = request
             .source
             .as_ref()
