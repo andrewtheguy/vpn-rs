@@ -28,7 +28,8 @@
       "Bash(./target/release/tunnel-rs:*)",
       "Bash(mkdir:*)",
       "Bash(perl:*)",
-      "Bash(./target/debug/tunnel-rs:*)"
+      "Bash(./target/debug/tunnel-rs:*)",
+      "Bash(cat:*)"
     ]
   }
 }
