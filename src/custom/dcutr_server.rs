@@ -19,11 +19,6 @@ use crate::tunnel_common::{
     handle_tcp_server_stream, resolve_all_target_addrs, QUIC_CONNECTION_TIMEOUT,
 };
 
-/// Maximum ICE connection attempts per signaling session
-const MAX_ICE_ATTEMPTS: usize = 3;
-
-/// Delay between ICE retry attempts (milliseconds)
-const ICE_RETRY_DELAY_MS: u64 = 500;
 
 /// Get current time in milliseconds since Unix epoch
 fn current_time_ms() -> u64 {
@@ -92,9 +87,9 @@ async fn run_dcutr_tcp_server_session(
     stun_servers: &[String],
 ) -> Result<()> {
     // 1. Gather ICE candidates first (use fast timing for coordinated hole punching)
-    let mut initial_ice = Some(IceEndpoint::gather_fast(stun_servers).await?);
-    let local_creds = initial_ice.as_ref().unwrap().local_credentials();
-    let local_candidates = initial_ice.as_ref().unwrap().local_candidates();
+    let ice = IceEndpoint::gather_fast(stun_servers).await?;
+    let local_creds = ice.local_credentials();
+    let local_candidates = ice.local_candidates();
 
     log::info!("Gathered {} ICE candidates", local_candidates.len());
 
@@ -153,46 +148,14 @@ async fn run_dcutr_tcp_server_session(
         pass: sync_params.peer_ice_pwd.clone(),
     };
 
-    // ICE retry loop - try multiple times with fresh candidates
-    let mut ice_conn = None;
-    let mut last_error = None;
-
-    for attempt in 0..MAX_ICE_ATTEMPTS {
-        // Use initial ice on first attempt, re-gather with fast timing on retries
-        let ice_endpoint = if let Some(ice) = initial_ice.take() {
-            ice
-        } else {
-            log::info!("ICE attempt {} failed, re-gathering candidates...", attempt);
-            tokio::time::sleep(Duration::from_millis(ICE_RETRY_DELAY_MS)).await;
-            IceEndpoint::gather_fast(stun_servers).await?
-        };
-
-        // As server (responder), we are the controlled agent
-        match ice_endpoint
-            .connect(
-                IceRole::Controlled,
-                remote_creds.clone(),
-                sync_params.peer_candidates.clone(),
-            )
-            .await
-        {
-            Ok(conn) => {
-                if attempt > 0 {
-                    log::info!("ICE succeeded on attempt {}", attempt + 1);
-                }
-                ice_conn = Some(conn);
-                break;
-            }
-            Err(e) => {
-                log::warn!("ICE attempt {} failed: {}", attempt + 1, e);
-                last_error = Some(e);
-            }
-        }
-    }
-
-    let ice_conn = ice_conn.ok_or_else(|| {
-        last_error.unwrap_or_else(|| anyhow!("ICE connection failed after {} attempts", MAX_ICE_ATTEMPTS))
-    })?;
+    // As server (responder), we are the controlled agent
+    let ice_conn = ice
+        .connect(
+            IceRole::Controlled,
+            remote_creds,
+            sync_params.peer_candidates.clone(),
+        )
+        .await?;
 
     log::info!("ICE connection established");
 
@@ -376,9 +339,9 @@ async fn run_dcutr_udp_server_session(
     stun_servers: &[String],
 ) -> Result<()> {
     // 1. Gather ICE candidates first (use fast timing for coordinated hole punching)
-    let mut initial_ice = Some(IceEndpoint::gather_fast(stun_servers).await?);
-    let local_creds = initial_ice.as_ref().unwrap().local_credentials();
-    let local_candidates = initial_ice.as_ref().unwrap().local_candidates();
+    let ice = IceEndpoint::gather_fast(stun_servers).await?;
+    let local_creds = ice.local_credentials();
+    let local_candidates = ice.local_candidates();
 
     log::info!("Gathered {} ICE candidates", local_candidates.len());
 
@@ -437,46 +400,14 @@ async fn run_dcutr_udp_server_session(
         pass: sync_params.peer_ice_pwd.clone(),
     };
 
-    // ICE retry loop - try multiple times with fresh candidates
-    let mut ice_conn = None;
-    let mut last_error = None;
-
-    for attempt in 0..MAX_ICE_ATTEMPTS {
-        // Use initial ice on first attempt, re-gather with fast timing on retries
-        let ice_endpoint = if let Some(ice) = initial_ice.take() {
-            ice
-        } else {
-            log::info!("ICE attempt {} failed, re-gathering candidates...", attempt);
-            tokio::time::sleep(Duration::from_millis(ICE_RETRY_DELAY_MS)).await;
-            IceEndpoint::gather_fast(stun_servers).await?
-        };
-
-        // As server (responder), we are the controlled agent
-        match ice_endpoint
-            .connect(
-                IceRole::Controlled,
-                remote_creds.clone(),
-                sync_params.peer_candidates.clone(),
-            )
-            .await
-        {
-            Ok(conn) => {
-                if attempt > 0 {
-                    log::info!("ICE succeeded on attempt {}", attempt + 1);
-                }
-                ice_conn = Some(conn);
-                break;
-            }
-            Err(e) => {
-                log::warn!("ICE attempt {} failed: {}", attempt + 1, e);
-                last_error = Some(e);
-            }
-        }
-    }
-
-    let ice_conn = ice_conn.ok_or_else(|| {
-        last_error.unwrap_or_else(|| anyhow!("ICE connection failed after {} attempts", MAX_ICE_ATTEMPTS))
-    })?;
+    // As server (responder), we are the controlled agent
+    let ice_conn = ice
+        .connect(
+            IceRole::Controlled,
+            remote_creds,
+            sync_params.peer_candidates.clone(),
+        )
+        .await?;
 
     log::info!("ICE connection established");
 
