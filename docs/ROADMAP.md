@@ -4,13 +4,61 @@ This document outlines planned features and improvements for tunnel-rs.
 
 ## Current Status
 
-tunnel-rs currently supports four operational modes:
+tunnel-rs currently supports four stable operational modes:
 - **iroh**: Persistent identity with automatic discovery, relay fallback, and receiver-requested sources
 - **nostr**: Full ICE with automated Nostr relay signaling and receiver-requested sources
 - **iroh-manual**: Serverless with manual signaling (single-target)
 - **custom-manual**: Full ICE with manual signaling (single-target)
 
+And one experimental mode:
+- **dcutr**: Full ICE with DCUtR-style signaling server for coordinated NAT hole punching
+
 All modes support TCP and UDP tunneling with end-to-end encryption via QUIC/TLS 1.3.
+
+---
+
+## Experimental: DCUtR Mode
+
+**Status:** Experimental
+
+The `dcutr` mode provides timing-coordinated NAT hole punching using a lightweight signaling server.
+
+**How it works:**
+1. Both peers connect to the signaling server
+2. Server measures RTT to each peer
+3. Server coordinates simultaneous hole punch attempt
+4. Full ICE with fast timing parameters for better success
+
+**Advantages over nostr/custom-manual:**
+- Timing coordination for higher hole punch success
+- No data relay (signaling only, low bandwidth)
+- Self-hosted signaling server
+
+**Limitations:**
+- No relay fallback (fails if ICE fails)
+- Requires running a signaling server
+- Single session per signaling connection
+
+**Usage:**
+```bash
+# Start signaling server (separate binary)
+tunnel-rs-signaling --bind 0.0.0.0:9999
+
+# Server
+tunnel-rs server dcutr \
+  --signaling-server 1.2.3.4:9999 \
+  --allowed-tcp 127.0.0.0/8 \
+  --server-id my-server
+
+# Client
+tunnel-rs client dcutr \
+  --signaling-server 1.2.3.4:9999 \
+  --peer-id my-server \
+  --source tcp://127.0.0.1:22 \
+  --target 127.0.0.1:2222
+```
+
+See [dcutr-signaling-research.md](dcutr-signaling-research.md) for protocol details.
 
 ---
 
