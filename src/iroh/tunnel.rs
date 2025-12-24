@@ -26,26 +26,27 @@ use crate::signaling::{
     SourceRequest, SourceResponse, IROH_SIGNAL_VERSION,
 };
 use crate::tunnel_common::{
-    copy_stream, extract_addr_from_source, is_source_allowed, resolve_all_target_addrs,
-    resolve_stun_addrs, resolve_target_addr, retry_with_backoff, validate_allowed_networks,
-    STREAM_OPEN_BASE_DELAY_MS, STREAM_OPEN_MAX_ATTEMPTS,
+    bind_udp_for_targets, copy_stream, extract_addr_from_source, is_source_allowed,
+    order_udp_addresses, resolve_all_target_addrs, resolve_stun_addrs, retry_with_backoff,
+    validate_allowed_networks, STREAM_OPEN_BASE_DELAY_MS, STREAM_OPEN_MAX_ATTEMPTS,
 };
 
 
 async fn handle_tcp_sender_stream(
     send_stream: iroh::endpoint::SendStream,
     recv_stream: iroh::endpoint::RecvStream,
-    target_addr: SocketAddr,
+    target_addrs: Arc<Vec<SocketAddr>>,
 ) -> Result<()> {
-    let tcp_stream = TcpStream::connect(target_addr)
+    let tcp_stream = crate::tunnel_common::try_connect_tcp(&target_addrs)
         .await
         .context("Failed to connect to target TCP service")?;
 
-    log::info!("-> Connected to target {}", target_addr);
+    let target_addr = tcp_stream.peer_addr().ok();
+    log::info!("-> Connected to target {:?}", target_addr);
 
     bridge_streams(recv_stream, send_stream, tcp_stream).await?;
 
-    log::info!("<- TCP connection to {} closed", target_addr);
+    log::info!("<- TCP connection to {:?} closed", target_addr);
     Ok(())
 }
 
@@ -312,24 +313,27 @@ async fn handle_multi_source_stream(
         bridge_streams(recv_stream, send_stream, tcp_stream).await?;
         log::info!("<- TCP connection to {} closed", target_addr);
     } else {
-        // UDP forwarding
-        let target_addr = resolve_target_addr(&target_addr).await?;
+        // UDP forwarding with multi-address fallback
+        let target_addrs = Arc::new(resolve_all_target_addrs(&target_addr).await?);
+        if target_addrs.is_empty() {
+            anyhow::bail!("No target addresses resolved for '{}'", target_addr);
+        }
+        let primary_addr = target_addrs.first().copied().unwrap();
 
-        // Bind UDP socket matching target address family
-        let bind_addr: SocketAddr = if target_addr.is_ipv6() {
-            "[::]:0".parse().unwrap()
-        } else {
-            "0.0.0.0:0".parse().unwrap()
-        };
+        // Bind UDP socket with appropriate address family
         let udp_socket = Arc::new(
-            UdpSocket::bind(bind_addr)
+            bind_udp_for_targets(&target_addrs)
                 .await
                 .context("Failed to bind UDP socket")?,
         );
 
-        log::info!("-> Forwarding UDP to {}", target_addr);
-        forward_stream_to_udp_sender(recv_stream, send_stream, udp_socket, target_addr).await?;
-        log::info!("<- UDP forwarding to {} closed", target_addr);
+        log::info!(
+            "-> Forwarding UDP to {} ({} address(es) resolved)",
+            primary_addr,
+            target_addrs.len()
+        );
+        forward_stream_to_udp_sender(recv_stream, send_stream, udp_socket, target_addrs).await?;
+        log::info!("<- UDP forwarding to {} closed", primary_addr);
     }
 
     Ok(())
@@ -618,10 +622,18 @@ pub async fn run_iroh_manual_sender(
         );
     }
 
-    // Resolve target address
-    let target_addr = extract_addr_from_source(source)
-        .and_then(|addr| addr.parse::<SocketAddr>().ok())
-        .context("Failed to parse source address")?;
+    // Resolve target addresses (supports both IP addresses and hostnames)
+    let addr_str = extract_addr_from_source(source)
+        .context("Failed to parse source URL")?;
+    let target_addrs = Arc::new(
+        resolve_all_target_addrs(&addr_str)
+            .await
+            .with_context(|| format!("Invalid source address '{}'", source))?,
+    );
+    if target_addrs.is_empty() {
+        anyhow::bail!("No target addresses resolved for '{}'", source);
+    }
+    let primary_addr = target_addrs.first().copied().unwrap();
 
     // Generate and display answer
     let answer = IrohManualAnswer {
@@ -657,7 +669,11 @@ pub async fn run_iroh_manual_sender(
 
     // Handle connections based on protocol
     if is_tcp {
-        log::info!("Forwarding TCP connections to {}", target_addr);
+        log::info!(
+            "Forwarding TCP connections to {} ({} address(es) resolved)",
+            primary_addr,
+            target_addrs.len()
+        );
         loop {
             tokio::select! {
                 accept_result = conn.accept_bi() => {
@@ -668,7 +684,7 @@ pub async fn run_iroh_manual_sender(
                             break;
                         }
                     };
-                    let target = target_addr;
+                    let target = Arc::clone(&target_addrs);
                     tokio::spawn(async move {
                         if let Err(e) = handle_tcp_sender_stream(send_stream, recv_stream, target).await {
                             log::warn!("TCP connection error: {}", e);
@@ -682,26 +698,25 @@ pub async fn run_iroh_manual_sender(
             }
         }
     } else {
-        // UDP mode
-        log::info!("Forwarding UDP traffic to {}", target_addr);
+        // UDP mode with multi-address fallback
+        log::info!(
+            "Forwarding UDP traffic to {} ({} address(es) resolved)",
+            primary_addr,
+            target_addrs.len()
+        );
         let (send_stream, recv_stream) = conn
             .accept_bi()
             .await
             .context("Failed to accept stream from receiver")?;
 
-        let bind_addr: SocketAddr = if target_addr.is_ipv6() {
-            "[::]:0".parse().unwrap()
-        } else {
-            "0.0.0.0:0".parse().unwrap()
-        };
         let udp_socket = Arc::new(
-            UdpSocket::bind(bind_addr)
+            bind_udp_for_targets(&target_addrs)
                 .await
                 .context("Failed to bind UDP socket")?,
         );
 
         tokio::select! {
-            result = forward_stream_to_udp_sender(recv_stream, send_stream, udp_socket, target_addr) => {
+            result = forward_stream_to_udp_sender(recv_stream, send_stream, udp_socket, Arc::clone(&target_addrs)) => {
                 result?;
             }
             error = conn.closed() => {
@@ -1150,15 +1165,26 @@ async fn forward_udp_to_stream(
     }
 }
 
-/// Read from iroh stream, forward to UDP target, and send responses back (sender mode)
+/// Read from iroh stream, forward to UDP target, and send responses back (sender mode).
+///
+/// Supports multiple target addresses with fallback:
+/// - Addresses are tried in Happy Eyeballs order (IPv6 first)
+/// - On send error, falls back to the next address
+/// - Aggregates errors if all addresses fail
 async fn forward_stream_to_udp_sender(
     mut recv_stream: iroh::endpoint::RecvStream,
     mut send_stream: iroh::endpoint::SendStream,
     udp_socket: Arc<UdpSocket>,
-    target_addr: SocketAddr,
+    target_addrs: Arc<Vec<SocketAddr>>,
 ) -> Result<()> {
-    let udp_clone = udp_socket.clone();
+    if target_addrs.is_empty() {
+        anyhow::bail!("No target addresses provided for UDP forwarding");
+    }
 
+    // Order addresses for connection attempts
+    let ordered_addrs = order_udp_addresses(&target_addrs);
+
+    let udp_clone = udp_socket.clone();
     let response_task = tokio::spawn(async move {
         let mut buf = vec![0u8; 65535];
         while let Ok((len, _addr)) = udp_clone.recv_from(&mut buf).await {
@@ -1172,6 +1198,11 @@ async fn forward_stream_to_udp_sender(
             log::debug!("-> Sent {} bytes back to receiver", len);
         }
     });
+
+    // Track errors for each address for aggregate reporting
+    let mut errors: Vec<(SocketAddr, std::io::Error)> = Vec::new();
+    let mut active_addr_idx = 0;
+    let mut logged_active = false;
 
     loop {
         let mut len_buf = [0u8; 2];
@@ -1194,12 +1225,53 @@ async fn forward_stream_to_udp_sender(
             .await
             .context("Failed to read frame payload")?;
 
-        udp_socket
-            .send_to(&buf, target_addr)
-            .await
-            .context("Failed to send UDP packet")?;
+        // Try to send to current address, falling back on error
+        let mut sent = false;
+        while active_addr_idx < ordered_addrs.len() {
+            let target_addr = ordered_addrs[active_addr_idx];
 
-        log::debug!("<- Forwarded {} bytes to {}", len, target_addr);
+            match udp_socket.send_to(&buf, target_addr).await {
+                Ok(_) => {
+                    if !logged_active {
+                        if active_addr_idx > 0 {
+                            log::info!(
+                                "UDP fallback: using {} after {} failed address(es)",
+                                target_addr,
+                                active_addr_idx
+                            );
+                        }
+                        logged_active = true;
+                    }
+                    log::debug!("<- Forwarded {} bytes to {}", len, target_addr);
+                    sent = true;
+                    break;
+                }
+                Err(e) => {
+                    log::warn!("UDP send to {} failed: {}", target_addr, e);
+                    errors.push((target_addr, e));
+                    active_addr_idx += 1;
+                    logged_active = false;
+                }
+            }
+        }
+
+        if !sent {
+            // All addresses failed
+            response_task.abort();
+            if errors.len() == 1 {
+                let (addr, e) = errors.remove(0);
+                anyhow::bail!("Failed to send UDP packet to {}: {}", addr, e);
+            } else {
+                let error_details: Vec<String> = errors
+                    .iter()
+                    .map(|(addr, e)| format!("{}: {}", addr, e))
+                    .collect();
+                anyhow::bail!(
+                    "Failed to send UDP packet to any address:\n  {}",
+                    error_details.join("\n  ")
+                );
+            }
+        }
     }
 
     response_task.abort();

@@ -20,10 +20,10 @@ use crate::signaling::{
 use crate::transport::ice::{IceEndpoint, IceRole};
 use crate::transport::quic;
 use crate::tunnel_common::{
-    current_timestamp, extract_addr_from_source, forward_stream_to_udp_receiver,
-    forward_stream_to_udp_sender, forward_udp_to_stream, generate_session_id,
-    handle_tcp_receiver_connection, handle_tcp_sender_stream, is_source_allowed,
-    open_bi_with_retry, resolve_all_target_addrs, resolve_target_addr, short_session_id,
+    bind_udp_for_targets, current_timestamp, extract_addr_from_source,
+    forward_stream_to_udp_receiver, forward_stream_to_udp_sender, forward_udp_to_stream,
+    generate_session_id, handle_tcp_receiver_connection, handle_tcp_sender_stream,
+    is_source_allowed, open_bi_with_retry, resolve_all_target_addrs, short_session_id,
     validate_allowed_networks, MAX_REQUEST_AGE_SECS, QUIC_CONNECTION_TIMEOUT,
 };
 
@@ -558,9 +558,14 @@ async fn handle_nostr_udp_session_impl(
         .ok_or_else(|| anyhow::anyhow!("[{}] Invalid source format '{}'", short_id, requested_source))?;
 
     log::info!("[{}] Forwarding to: {}", short_id, requested_source);
-    let target_addr = resolve_target_addr(&target_hostport)
-        .await
-        .with_context(|| format!("Invalid source '{}'", requested_source))?;
+    let target_addrs = Arc::new(
+        resolve_all_target_addrs(&target_hostport)
+            .await
+            .with_context(|| format!("Invalid source '{}'", requested_source))?,
+    );
+    if target_addrs.is_empty() {
+        anyhow::bail!("[{}] No target addresses resolved for '{}'", short_id, requested_source);
+    }
 
     // Gather ICE candidates
     let ice = IceEndpoint::gather(&stun_servers).await?;
@@ -622,16 +627,17 @@ async fn handle_nostr_udp_session_impl(
         .await
         .context("Failed to accept stream from receiver")?;
 
-    log::info!("[{}] Forwarding UDP traffic to {}", short_id, target_addr);
+    let primary_addr = target_addrs.first().copied().unwrap();
+    log::info!(
+        "[{}] Forwarding UDP traffic to {} ({} address(es) resolved)",
+        short_id,
+        primary_addr,
+        target_addrs.len()
+    );
 
-    // Bind to the same address family as the target
-    let bind_addr: SocketAddr = if target_addr.is_ipv6() {
-        "[::]:0".parse().unwrap()
-    } else {
-        "0.0.0.0:0".parse().unwrap()
-    };
+    // Bind to appropriate address family based on all resolved targets
     let udp_socket = Arc::new(
-        UdpSocket::bind(bind_addr)
+        bind_udp_for_targets(&target_addrs)
             .await
             .context("Failed to bind UDP socket")?,
     );
@@ -660,7 +666,7 @@ async fn handle_nostr_udp_session_impl(
     });
 
     let forward_result = tokio::select! {
-        result = forward_stream_to_udp_sender(recv_stream, send_stream, udp_socket, target_addr) => {
+        result = forward_stream_to_udp_sender(recv_stream, send_stream, udp_socket, Arc::clone(&target_addrs)) => {
             result
         }
         error = conn.closed() => {

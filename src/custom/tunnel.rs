@@ -18,9 +18,10 @@ use crate::signaling::{
 use crate::transport::ice::{IceEndpoint, IceRole};
 use crate::transport::quic;
 use crate::tunnel_common::{
-    extract_addr_from_source, forward_stream_to_udp_receiver, forward_stream_to_udp_sender,
-    forward_udp_to_stream, handle_tcp_receiver_connection, handle_tcp_sender_stream,
-    is_source_allowed, open_bi_with_retry, resolve_all_target_addrs, QUIC_CONNECTION_TIMEOUT,
+    bind_udp_for_targets, extract_addr_from_source, forward_stream_to_udp_receiver,
+    forward_stream_to_udp_sender, forward_udp_to_stream, handle_tcp_receiver_connection,
+    handle_tcp_sender_stream, is_source_allowed, open_bi_with_retry, resolve_all_target_addrs,
+    QUIC_CONNECTION_TIMEOUT,
 };
 
 // ============================================================================
@@ -86,7 +87,9 @@ pub async fn run_manual_sender(
             .await
             .with_context(|| format!("Invalid source address '{}'", source))?,
     );
-    let target_addr = *target_addrs.first().context("No target addresses resolved")?;
+    if target_addrs.is_empty() {
+        anyhow::bail!("No target addresses resolved for '{}'", source);
+    }
 
     // Generate and display answer with QUIC fingerprint included
     let answer = ManualAnswer {
@@ -132,7 +135,12 @@ pub async fn run_manual_sender(
 
     // Handle connections based on protocol
     if is_tcp {
-        log::info!("Forwarding TCP connections to {}", target_addr);
+        let primary_addr = target_addrs.first().copied().unwrap();
+        log::info!(
+            "Forwarding TCP connections to {} ({} address(es) resolved)",
+            primary_addr,
+            target_addrs.len()
+        );
         loop {
             tokio::select! {
                 accept_result = conn.accept_bi() => {
@@ -170,25 +178,25 @@ pub async fn run_manual_sender(
         }
     } else {
         // UDP mode
-        log::info!("Forwarding UDP traffic to {}", target_addr);
+        let primary_addr = target_addrs.first().copied().unwrap();
+        log::info!(
+            "Forwarding UDP traffic to {} ({} address(es) resolved)",
+            primary_addr,
+            target_addrs.len()
+        );
         let (send_stream, recv_stream) = conn
             .accept_bi()
             .await
             .context("Failed to accept stream from receiver")?;
 
-        let bind_addr: SocketAddr = if target_addr.is_ipv6() {
-            "[::]:0".parse().unwrap()
-        } else {
-            "0.0.0.0:0".parse().unwrap()
-        };
         let udp_socket = Arc::new(
-            UdpSocket::bind(bind_addr)
+            bind_udp_for_targets(&target_addrs)
                 .await
                 .context("Failed to bind UDP socket")?,
         );
 
         tokio::select! {
-            result = forward_stream_to_udp_sender(recv_stream, send_stream, udp_socket, target_addr) => {
+            result = forward_stream_to_udp_sender(recv_stream, send_stream, udp_socket, Arc::clone(&target_addrs)) => {
                 result?;
             }
             result = ice_disconnect_rx.changed() => {
