@@ -106,7 +106,7 @@ pub struct AllowedSources {
 ///
 /// Some fields are role-specific (enforced by validate()):
 /// - Sender-only: `allowed_sources`, `max_sessions`
-/// - Receiver-only: `request_source`
+/// - Receiver-only: `request_source`, `target`
 #[derive(Deserialize, Default, Clone)]
 pub struct NostrConfig {
     /// Nostr relay URLs for signaling
@@ -128,6 +128,9 @@ pub struct NostrConfig {
     /// Format: tcp://host:port or udp://host:port
     #[serde(alias = "source")]
     pub request_source: Option<String>,
+    /// Local address to listen on (receiver only, required).
+    /// Format: host:port (no protocol prefix)
+    pub target: Option<String>,
 }
 
 /// Unified sender configuration.
@@ -156,10 +159,7 @@ pub struct ReceiverConfig {
     pub role: Option<String>,
     pub mode: Option<String>,
 
-    // Shared options
-    pub target: Option<String>,
-
-    // Mode-specific sections
+    // Mode-specific sections (each mode has its own target field)
     pub iroh: Option<IrohConfig>,
     #[serde(rename = "iroh-manual")]
     pub iroh_manual: Option<IrohManualConfig>,
@@ -521,10 +521,10 @@ impl ReceiverConfig {
                 if let Some(ref source) = nostr.request_source {
                     validate_tcp_udp_url(source, "request_source")?;
                 }
-            }
-            // Validate top-level target format (host:port) for nostr mode
-            if let Some(ref target) = self.target {
-                validate_host_port(target, "target")?;
+                // Validate target format (host:port)
+                if let Some(ref target) = nostr.target {
+                    validate_host_port(target, "target")?;
+                }
             }
         }
 

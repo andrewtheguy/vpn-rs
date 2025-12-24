@@ -758,9 +758,6 @@ async fn main() -> Result<()> {
                 cfg.validate(effective_mode)?;
             }
 
-            // Get common values from config
-            let target = normalize_optional_endpoint(cfg.target.clone());
-
             match effective_mode {
                 "iroh" => {
                     let iroh_cfg = cfg.iroh();
@@ -872,7 +869,7 @@ async fn main() -> Result<()> {
                                 (cfg_nsec, cfg_nsec_file)
                             };
                             (
-                                normalize_optional_endpoint(t.clone()).or(target),
+                                normalize_optional_endpoint(t.clone()).or_else(|| nostr_cfg.and_then(|c| c.target.clone())),
                                 normalize_optional_endpoint(src.clone()).or_else(|| nostr_cfg.and_then(|c| c.request_source.clone())),
                                 resolve_stun_servers(ss, nostr_cfg.and_then(|c| c.stun_servers.clone()), *no_stun)?,
                                 nsec,
@@ -884,7 +881,7 @@ async fn main() -> Result<()> {
                             )
                         }
                         _ => (
-                            target,
+                            nostr_cfg.and_then(|c| c.target.clone()),
                             nostr_cfg.and_then(|c| c.request_source.clone()),
                             resolve_stun_servers(&[], nostr_cfg.and_then(|c| c.stun_servers.clone()), false)?,
                             nostr_cfg.and_then(|c| c.nsec.clone()),
