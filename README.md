@@ -406,6 +406,21 @@ iroh mode uses the relay for both **signaling/coordination** and as a **data tra
 >
 > **Alternative for signaling-only:** Use `nostr` mode with self-hosted Nostr relays. Nostr relays only handle signaling (small encrypted messages), never tunnel traffic. If hole punching fails, the connection fails — no traffic is ever forwarded through the relay.
 
+### Tor Hidden Service (No Public IP)
+
+If you can't get a public IP or Cloudflare tunnel doesn't work (HTTP/2 breaks WebSocket upgrades), you can run iroh-relay as a Tor hidden service:
+
+```bash
+# Server side: configure tor hidden service pointing to localhost:3340
+# Then start iroh-relay and tunnel-rs with the .onion URL
+tunnel-rs server iroh --relay-url http://YOUR_ADDRESS.onion --secret-file ./server.key --allowed-tcp 127.0.0.0/8
+
+# Client side: use torsocks to reach .onion relay (direct P2P bypasses Tor)
+torsocks tunnel-rs client iroh --relay-url http://YOUR_ADDRESS.onion --node-id <ID> --source tcp://127.0.0.1:22 --target 127.0.0.1:2222
+```
+
+See [docs/tor-hidden-service.md](docs/tor-hidden-service.md) for complete setup guide with phased implementation.
+
 ---
 
 # iroh-manual Mode
