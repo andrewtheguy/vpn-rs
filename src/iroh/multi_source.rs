@@ -1,8 +1,8 @@
 //! Iroh multi-source tunnel mode.
 //!
 //! This mode provides relay-based tunneling with automatic discovery.
-//! Receivers can request specific sources (tcp://host:port or udp://host:port),
-//! and senders validate requests against allowed CIDR lists.
+//! Clients can request specific sources (tcp://host:port or udp://host:port),
+//! and servers validate requests against allowed CIDR lists.
 
 use anyhow::{Context, Result};
 use iroh::{EndpointId, SecretKey};
@@ -14,11 +14,11 @@ use tokio::sync::Mutex;
 use tokio::task::JoinSet;
 
 use crate::iroh::endpoint::{
-    connect_to_sender, create_receiver_endpoint, create_sender_endpoint, print_connection_type,
+    connect_to_server, create_client_endpoint, create_server_endpoint, print_connection_type,
     validate_relay_only, MULTI_ALPN,
 };
 use crate::iroh::helpers::{
-    bridge_streams, forward_stream_to_udp_receiver, forward_stream_to_udp_sender,
+    bridge_streams, forward_stream_to_udp_client, forward_stream_to_udp_server,
     forward_udp_to_stream, open_bi_with_retry,
 };
 use crate::signaling::{
@@ -34,14 +34,14 @@ use crate::tunnel_common::{
 const DEFAULT_MAX_SESSIONS: usize = 100;
 
 // ============================================================================
-// Sender
+// Server
 // ============================================================================
 
-/// Run iroh multi-source sender.
+/// Run iroh multi-source server.
 ///
-/// This mode allows receivers to request specific sources (tcp://host:port or udp://host:port).
-/// The sender validates requests against allowed_tcp and allowed_udp CIDR lists.
-pub async fn run_multi_source_sender(
+/// This mode allows clients to request specific sources (tcp://host:port or udp://host:port).
+/// The server validates requests against allowed_tcp and allowed_udp CIDR lists.
+pub async fn run_multi_source_server(
     allowed_tcp: Vec<String>,
     allowed_udp: Vec<String>,
     max_sessions: Option<usize>,
@@ -63,11 +63,11 @@ pub async fn run_multi_source_sender(
 
     validate_relay_only(relay_only, &relay_urls)?;
 
-    log::info!("Multi-Source Tunnel - Sender Mode");
+    log::info!("Multi-Source Tunnel - Server Mode");
     log::info!("==================================");
     log::info!("Creating iroh endpoint...");
 
-    let endpoint = create_sender_endpoint(
+    let endpoint = create_server_endpoint(
         &relay_urls,
         relay_only,
         secret,
@@ -83,12 +83,12 @@ pub async fn run_multi_source_sender(
     log::info!("Allowed TCP networks: {:?}", allowed_tcp);
     log::info!("Allowed UDP networks: {:?}", allowed_udp);
     log::info!("Max concurrent sessions: {}", max_sessions);
-    log::info!("\nOn the receiver side, run:");
+    log::info!("\nOn the client side, run:");
     log::info!(
-        "  tunnel-rs receiver iroh --node-id {} --source tcp://target:port --target 127.0.0.1:port\n",
+        "  tunnel-rs client iroh --node-id {} --source tcp://target:port --target 127.0.0.1:port\n",
         endpoint_id
     );
-    log::info!("Waiting for receivers to connect...");
+    log::info!("Waiting for clients to connect...");
 
     // Session management with semaphore for concurrency limit
     let session_semaphore = Arc::new(tokio::sync::Semaphore::new(max_sessions));
@@ -115,7 +115,7 @@ pub async fn run_multi_source_sender(
         };
 
         let remote_id = conn.remote_id();
-        log::info!("Receiver connected from: {}", remote_id);
+        log::info!("Client connected from: {}", remote_id);
 
         // Clone for the spawned task
         let allowed_tcp = allowed_tcp.clone();
@@ -134,7 +134,7 @@ pub async fn run_multi_source_sender(
     // Wait for remaining tasks to complete
     connection_tasks.shutdown().await;
     endpoint.close().await;
-    log::info!("Multi-source sender stopped.");
+    log::info!("Multi-source server stopped.");
 
     Ok(())
 }
@@ -156,7 +156,7 @@ async fn handle_multi_source_connection(
                 let (send_stream, recv_stream) = match accept_result {
                     Ok(streams) => streams,
                     Err(e) => {
-                        log::info!("Receiver {} disconnected: {}", remote_id, e);
+                        log::info!("Client {} disconnected: {}", remote_id, e);
                         break;
                     }
                 };
@@ -165,21 +165,21 @@ async fn handle_multi_source_connection(
                 let permit = match semaphore.clone().try_acquire_owned() {
                     Ok(permit) => permit,
                     Err(_) => {
-                        log::warn!("Session limit reached, rejecting stream from {}", remote_id);
+                        log::warn!("Session limit reached, rejecting stream from client {}", remote_id);
                         // Send rejection and close stream
                         let response = SourceResponse::rejected("Session limit reached");
                         match encode_source_response(&response) {
                             Ok(encoded) => {
                                 let mut send = send_stream;
                                 if let Err(e) = send.write_all(&encoded).await {
-                                    log::warn!("Failed to write rejection response to {}: {}", remote_id, e);
+                                    log::warn!("Failed to write rejection response to client {}: {}", remote_id, e);
                                 }
                                 if let Err(e) = send.finish() {
-                                    log::warn!("Failed to finish rejection stream to {}: {}", remote_id, e);
+                                    log::warn!("Failed to finish rejection stream to client {}: {}", remote_id, e);
                                 }
                             }
                             Err(e) => {
-                                log::error!("Failed to encode rejection response for {}: {}", remote_id, e);
+                                log::error!("Failed to encode rejection response for client {}: {}", remote_id, e);
                             }
                         }
                         continue;
@@ -202,7 +202,7 @@ async fn handle_multi_source_connection(
                 });
             }
             error = conn.closed() => {
-                log::info!("Receiver {} disconnected: {}", remote_id, error);
+                log::info!("Client {} disconnected: {}", remote_id, error);
                 break;
             }
         }
@@ -302,7 +302,7 @@ async fn handle_multi_source_stream(
             primary_addr,
             target_addrs.len()
         );
-        forward_stream_to_udp_sender(recv_stream, send_stream, udp_socket, target_addrs).await?;
+        forward_stream_to_udp_server(recv_stream, send_stream, udp_socket, target_addrs).await?;
         log::info!("<- UDP forwarding to {} closed", primary_addr);
     }
 
@@ -310,14 +310,14 @@ async fn handle_multi_source_stream(
 }
 
 // ============================================================================
-// Receiver
+// Client
 // ============================================================================
 
-/// Run iroh multi-source receiver.
+/// Run iroh multi-source client.
 ///
-/// Connects to a sender and requests a specific source (tcp://host:port or udp://host:port).
-/// The sender validates the request and either accepts or rejects it.
-pub async fn run_multi_source_receiver(
+/// Connects to a server and requests a specific source (tcp://host:port or udp://host:port).
+/// The server validates the request and either accepts or rejects it.
+pub async fn run_multi_source_client(
     node_id: String,
     source: String,
     target: String,
@@ -341,40 +341,40 @@ pub async fn run_multi_source_receiver(
         "Invalid target address format. Use format like 127.0.0.1:2222 or [::]:2222",
     )?;
 
-    let sender_id: EndpointId = node_id
+    let server_id: EndpointId = node_id
         .parse()
         .context("Invalid EndpointId format. Should be a 52-character base32 string.")?;
 
-    log::info!("Multi-Source Tunnel - Receiver Mode");
-    log::info!("====================================");
+    log::info!("Multi-Source Tunnel - Client Mode");
+    log::info!("==================================");
     log::info!("Requesting source: {}", source);
     log::info!("Creating iroh endpoint...");
 
-    let endpoint = create_receiver_endpoint(&relay_urls, relay_only, dns_server.as_deref()).await?;
+    let endpoint = create_client_endpoint(&relay_urls, relay_only, dns_server.as_deref()).await?;
 
-    let conn = connect_to_sender(&endpoint, sender_id, &relay_urls, relay_only, MULTI_ALPN).await?;
+    let conn = connect_to_server(&endpoint, server_id, &relay_urls, relay_only, MULTI_ALPN).await?;
 
-    log::info!("Connected to sender!");
+    log::info!("Connected to server!");
     print_connection_type(&endpoint, conn.remote_id());
 
     let conn = Arc::new(conn);
     let tunnel_established = Arc::new(AtomicBool::new(false));
 
     if is_tcp {
-        run_multi_source_tcp_receiver(conn, source, listen_addr, tunnel_established).await?;
+        run_multi_source_tcp_client(conn, source, listen_addr, tunnel_established).await?;
     } else {
-        run_multi_source_udp_receiver(conn, source, listen_addr).await?;
+        run_multi_source_udp_client(conn, source, listen_addr).await?;
     }
 
     endpoint.close().await;
-    log::info!("Multi-source receiver stopped.");
+    log::info!("Multi-source client stopped.");
 
     Ok(())
 }
 
-/// Run TCP receiver for multi-source mode.
+/// Run TCP client for multi-source mode.
 /// Opens streams for each local connection and sends source requests.
-async fn run_multi_source_tcp_receiver(
+async fn run_multi_source_tcp_client(
     conn: Arc<iroh::endpoint::Connection>,
     source: String,
     listen_addr: SocketAddr,
@@ -408,7 +408,7 @@ async fn run_multi_source_tcp_receiver(
                 let established = tunnel_established.clone();
 
                 connection_tasks.spawn(async move {
-                    match handle_multi_source_tcp_receiver_connection(
+                    match handle_multi_source_tcp_client_connection(
                         conn_clone,
                         tcp_stream,
                         peer_addr,
@@ -438,13 +438,13 @@ async fn run_multi_source_tcp_receiver(
 
     connection_tasks.shutdown().await;
     conn.close(0u32.into(), b"done");
-    log::info!("TCP receiver stopped.");
+    log::info!("TCP client stopped.");
 
     Ok(())
 }
 
-/// Handle a single TCP connection in multi-source receiver mode.
-async fn handle_multi_source_tcp_receiver_connection(
+/// Handle a single TCP connection in multi-source client mode.
+async fn handle_multi_source_tcp_client_connection(
     conn: Arc<iroh::endpoint::Connection>,
     tcp_stream: TcpStream,
     peer_addr: SocketAddr,
@@ -471,7 +471,7 @@ async fn handle_multi_source_tcp_receiver_connection(
 
     // Print success message only on first successful stream
     if !tunnel_established.swap(true, Ordering::Relaxed) {
-        log::info!("Tunnel to sender established! Source: {}", source);
+        log::info!("Tunnel to server established! Source: {}", source);
     }
     log::info!("-> Opened tunnel for {}", peer_addr);
 
@@ -481,9 +481,9 @@ async fn handle_multi_source_tcp_receiver_connection(
     Ok(())
 }
 
-/// Run UDP receiver for multi-source mode.
+/// Run UDP client for multi-source mode.
 /// Opens a single stream and sends source request, then forwards UDP traffic.
-async fn run_multi_source_udp_receiver(
+async fn run_multi_source_udp_client(
     conn: Arc<iroh::endpoint::Connection>,
     source: String,
     listen_addr: SocketAddr,
@@ -529,7 +529,7 @@ async fn run_multi_source_udp_receiver(
                 log::warn!("UDP to stream error: {}", e);
             }
         }
-        result = forward_stream_to_udp_receiver(recv_stream, udp_socket, client_addr) => {
+        result = forward_stream_to_udp_client(recv_stream, udp_socket, client_addr) => {
             if let Err(e) = result {
                 log::warn!("Stream to UDP error: {}", e);
             }
@@ -540,7 +540,7 @@ async fn run_multi_source_udp_receiver(
     }
 
     conn.close(0u32.into(), b"done");
-    log::info!("UDP receiver stopped.");
+    log::info!("UDP client stopped.");
 
     Ok(())
 }

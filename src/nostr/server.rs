@@ -1,6 +1,6 @@
-//! Nostr mode sender implementation.
+//! Nostr mode server implementation.
 //!
-//! This module provides the sender-side logic for nostr tunnels:
+//! This module provides the server-side logic for nostr tunnels:
 //! - Multi-session management with concurrency limits
 //! - TCP and UDP session handlers
 //! - Session request validation and routing
@@ -19,12 +19,12 @@ use crate::transport::ice::{IceEndpoint, IceRole};
 use crate::transport::quic;
 use crate::tunnel_common::{
     bind_udp_for_targets, check_source_allowed, extract_addr_from_source,
-    forward_stream_to_udp_sender, handle_tcp_sender_stream, resolve_all_target_addrs,
+    forward_stream_to_udp_server, handle_tcp_server_stream, resolve_all_target_addrs,
     short_session_id, validate_allowed_networks, MAX_REQUEST_AGE_SECS, QUIC_CONNECTION_TIMEOUT,
 };
 
 // ============================================================================
-// Nostr Sender Loop (shared session management for TCP/UDP)
+// Nostr Server Loop (shared session management for TCP/UDP)
 // ============================================================================
 
 /// Session handler function type for nostr mode.
@@ -38,8 +38,8 @@ type SessionHandler = fn(
     max_wait_secs: u64,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>>;
 
-/// Generic nostr sender loop that handles session management.
-async fn run_nostr_sender_loop(
+/// Generic nostr server loop that handles session management.
+async fn run_nostr_server_loop(
     allowed_tcp: Vec<String>,
     allowed_udp: Vec<String>,
     signaling: Arc<NostrSignaling>,
@@ -87,7 +87,7 @@ async fn run_nostr_sender_loop(
             }
         }
 
-        // Wait for fresh request from receiver (no timeout for multi-session mode)
+        // Wait for fresh request from client (no timeout for multi-session mode)
         let request = match signaling
             .wait_for_fresh_request_forever(MAX_REQUEST_AGE_SECS)
             .await
@@ -185,7 +185,7 @@ async fn run_nostr_sender_loop(
                     let reject = ManualReject::new(
                         session_id.clone(),
                         format!(
-                            "Sender at capacity ({}/{} sessions)",
+                            "Server at capacity ({}/{} sessions)",
                             max_sessions, max_sessions
                         ),
                     );
@@ -270,7 +270,7 @@ async fn handle_nostr_session_impl(
     let session_id = request.session_id.clone();
     let short_id = short_session_id(&session_id).to_string();
 
-    // source is required - receiver must specify which source to connect to
+    // source is required - client must specify which source to connect to
     let requested_source = request.source.as_ref().ok_or_else(|| {
         anyhow::anyhow!("[{}] Request missing required 'source' field", short_id)
     })?;
@@ -386,13 +386,13 @@ async fn handle_nostr_tcp_session_impl(
         source: None, // Source is communicated via SourceRequest in nostr mode
     };
 
-    // Publish offer once - we already have receiver's ICE credentials from the REQUEST,
+    // Publish offer once - we already have client's ICE credentials from the REQUEST,
     // so we can start ICE immediately without waiting for the answer.
     // The answer is only a confirmation that receiver got the offer.
     signaling.publish_offer(&offer).await?;
     log::info!("[{}] Published offer, starting ICE immediately", short_id);
 
-    // Use receiver's ICE credentials from the REQUEST (not from answer)
+    // Use client's ICE credentials from the REQUEST (not from answer)
     let remote_creds = str0m::IceCreds {
         ufrag: request.ice_ufrag,
         pass: request.ice_pwd,
@@ -437,7 +437,7 @@ async fn handle_nostr_tcp_session_impl(
                 let target = Arc::clone(&target_addrs);
                 let sid = short_id.to_string();
                 tokio::spawn(async move {
-                    if let Err(e) = handle_tcp_sender_stream(send_stream, recv_stream, target).await {
+                    if let Err(e) = handle_tcp_server_stream(send_stream, recv_stream, target).await {
                         log::warn!("[{}] TCP connection error: {}", sid, e);
                     }
                 });
@@ -524,13 +524,13 @@ async fn handle_nostr_udp_session_impl(
         source: None, // Source is communicated via SourceRequest in nostr mode
     };
 
-    // Publish offer once - we already have receiver's ICE credentials from the REQUEST,
+    // Publish offer once - we already have client's ICE credentials from the REQUEST,
     // so we can start ICE immediately without waiting for the answer.
     // The answer is only a confirmation that receiver got the offer.
     signaling.publish_offer(&offer).await?;
     log::info!("[{}] Published offer, starting ICE immediately", short_id);
 
-    // Use receiver's ICE credentials from the REQUEST (not from answer)
+    // Use client's ICE credentials from the REQUEST (not from answer)
     let remote_creds = str0m::IceCreds {
         ufrag: request.ice_ufrag,
         pass: request.ice_pwd,
@@ -560,7 +560,7 @@ async fn handle_nostr_udp_session_impl(
     let (send_stream, recv_stream) = conn
         .accept_bi()
         .await
-        .context("Failed to accept stream from receiver")?;
+        .context("Failed to accept stream from client")?;
 
     let primary_addr = target_addrs.first().copied().unwrap();
     log::info!(
@@ -601,7 +601,7 @@ async fn handle_nostr_udp_session_impl(
     });
 
     let forward_result = tokio::select! {
-        result = forward_stream_to_udp_sender(recv_stream, send_stream, udp_socket, Arc::clone(&target_addrs)) => {
+        result = forward_stream_to_udp_server(recv_stream, send_stream, udp_socket, Arc::clone(&target_addrs)) => {
             result
         }
         error = conn.closed() => {
@@ -637,8 +637,8 @@ async fn handle_nostr_udp_session_impl(
 // Public API
 // ============================================================================
 
-/// Unified nostr sender that handles both TCP and UDP requests.
-pub async fn run_nostr_sender(
+/// Unified nostr server that handles both TCP and UDP requests.
+pub async fn run_nostr_server(
     allowed_tcp: Vec<String>,
     allowed_udp: Vec<String>,
     stun_servers: Vec<String>,
@@ -656,7 +656,7 @@ pub async fn run_nostr_sender(
     validate_allowed_networks(&allowed_tcp, "--allowed-tcp")?;
     validate_allowed_networks(&allowed_udp, "--allowed-udp")?;
 
-    log::info!("Nostr Tunnel - Sender Mode (Multi-Session)");
+    log::info!("Nostr Tunnel - Server Mode (Multi-Session)");
     log::info!("==========================================");
 
     // Create Nostr signaling client
@@ -681,7 +681,7 @@ pub async fn run_nostr_sender(
     signaling.subscribe().await?;
 
     // Run the session management loop
-    run_nostr_sender_loop(
+    run_nostr_server_loop(
         allowed_tcp,
         allowed_udp,
         signaling,

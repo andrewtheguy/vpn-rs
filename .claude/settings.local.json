@@ -26,7 +26,8 @@
       "Bash(mv:*)",
       "Bash(./target/release/tunnel-rs sender nostr:*)",
       "Bash(./target/release/tunnel-rs:*)",
-      "Bash(mkdir:*)"
+      "Bash(mkdir:*)",
+      "Bash(perl:*)"
     ]
   }
 }

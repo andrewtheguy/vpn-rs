@@ -2,12 +2,12 @@
 //!
 //! This module provides tunnel implementations using custom ICE (str0m) + QUIC (quinn)
 //! with Nostr relay-based automated signaling:
-//! - `sender`: Multi-session sender with TCP/UDP support
-//! - `receiver`: TCP and UDP receiver implementations
+//! - `server`: Multi-session server with TCP/UDP support
+//! - `client`: TCP and UDP client implementations
 
-mod receiver;
-mod sender;
+mod client;
+mod server;
 
 // Re-export public API
-pub use receiver::{run_nostr_tcp_receiver, run_nostr_udp_receiver};
-pub use sender::run_nostr_sender;
+pub use client::{run_nostr_tcp_client, run_nostr_udp_client};
+pub use server::run_nostr_server;

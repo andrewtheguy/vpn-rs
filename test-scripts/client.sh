@@ -1,8 +1,8 @@
 #!/bin/bash
-# Start tunnel receiver(s) - receiver-initiated mode
-# Usage: ./test-scripts/receiver.sh [NUM_SESSIONS] [BASE_PORT] [SOURCE_PORT]
+# Start tunnel client(s) - client-initiated mode
+# Usage: ./test-scripts/client.sh [NUM_SESSIONS] [BASE_PORT] [SOURCE_PORT]
 #
-# In receiver-initiated mode, the receiver specifies the source service
+# In client-initiated mode, the client specifies the source service
 # to tunnel (--source) and exposes it on local target ports (--target).
 
 set -e
@@ -18,24 +18,24 @@ TUNNEL_BIN="$SCRIPT_DIR/../target/release/tunnel-rs"
 
 PIDS=()
 cleanup() {
-    echo "Stopping all receivers..."
+    echo "Stopping all clients..."
     for pid in "${PIDS[@]}"; do kill $pid 2>/dev/null || true; done
 }
 trap cleanup EXIT
 
-echo "=== Receiver ==="
-echo "Source: tcp://localhost:$SOURCE_PORT (on sender's side)"
+echo "=== Client ==="
+echo "Source: tcp://localhost:$SOURCE_PORT (on server's side)"
 echo "Sessions: $NUM_SESSIONS (local ports $BASE_PORT-$((BASE_PORT + NUM_SESSIONS - 1)))"
 echo ""
 
 for i in $(seq 1 $NUM_SESSIONS); do
     PORT=$((BASE_PORT + i - 1))
-    echo "[$i] Starting receiver on port $PORT..."
-    "$TUNNEL_BIN" receiver nostr \
+    echo "[$i] Starting client on port $PORT..."
+    "$TUNNEL_BIN" client nostr \
         --source "tcp://localhost:$SOURCE_PORT" \
         --target "127.0.0.1:$PORT" \
-        --nsec-file "$RECEIVER_NSEC_FILE" \
-        --peer-npub "$SENDER_NPUB" &
+        --nsec-file "$CLIENT_NSEC_FILE" \
+        --peer-npub "$SERVER_NPUB" &
     PIDS+=($!)
     [ $NUM_SESSIONS -gt 1 ] && sleep 2  # Stagger for rate limits
 done

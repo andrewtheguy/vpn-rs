@@ -6,4 +6,4 @@
 pub mod tunnel;
 
 // Re-export commonly used items
-pub use tunnel::{run_manual_receiver, run_manual_sender};
+pub use tunnel::{run_manual_client, run_manual_server};
