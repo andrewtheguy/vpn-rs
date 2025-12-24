@@ -494,13 +494,13 @@ pub async fn run_manual_udp_receiver(listen: String, stun_servers: Vec<String>) 
     // losing buffered data on shutdown is acceptable.
     let forward_res = tokio::select! {
         result = forward_udp_to_stream(udp_clone, send_stream, client_clone) => {
-            if let Err(e) = result {
+            if let Err(ref e) = result {
                 log::warn!("UDP to stream error: {}", e);
             }
             result
         }
         result = forward_stream_to_udp_receiver(recv_stream, udp_socket, client_addr) => {
-            if let Err(e) = result {
+            if let Err(ref e) = result {
                 log::warn!("Stream to UDP error: {}", e);
             }
             result
@@ -518,7 +518,7 @@ pub async fn run_manual_udp_receiver(listen: String, stun_servers: Vec<String>) 
             }
             Ok(())
         }
-    }
+    };
 
     conn.close(0u32.into(), b"done");
     log::info!("Connection closed.");
