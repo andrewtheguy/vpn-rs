@@ -44,17 +44,16 @@ The `dcutr` mode provides timing-coordinated NAT hole punching using a lightweig
 # Start signaling server (separate binary)
 tunnel-rs-signaling --bind 0.0.0.0:9999
 
-# Server
+# Server (specifies exact source address)
 tunnel-rs server dcutr \
   --signaling-server 1.2.3.4:9999 \
-  --allowed-tcp 127.0.0.0/8 \
+  --source tcp://127.0.0.1:22 \
   --server-id my-server
 
-# Client
+# Client (just specifies local listen address)
 tunnel-rs client dcutr \
   --signaling-server 1.2.3.4:9999 \
   --peer-id my-server \
-  --source tcp://127.0.0.1:22 \
   --target 127.0.0.1:2222
 ```
 
