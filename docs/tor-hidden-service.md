@@ -5,6 +5,35 @@ Run iroh-relay as a Tor hidden service (.onion) to avoid needing a public IP add
 - Cloudflare tunnel doesn't work (HTTP/2 breaks WebSocket upgrades)
 - You want to self-host relay infrastructure without exposing servers
 
+---
+
+## When to Use This
+
+> **TL;DR:** Use `--socks5-proxy` when you're self-hosting your own iroh-relay as a Tor hidden service (.onion). This is the **only** supported use case for SOCKS5 proxy.
+
+### ✅ Use SOCKS5 Proxy When:
+- You're running your own iroh-relay behind Tor
+- All your relay URLs are `.onion` addresses
+- You want to avoid exposing public IP addresses for your relay infrastructure
+
+### ❌ Do NOT Use SOCKS5 Proxy When:
+- You're using public iroh relays (default behavior)
+- You want to proxy regular HTTPS traffic through Tor
+- You're trying to anonymize your tunnel traffic (direct P2P bypasses Tor anyway)
+
+### Design Rationale
+
+The `--socks5-proxy` option is intentionally limited to Tor hidden services because:
+
+1. **Self-hosted relay scenario**: When self-hosting a relay, Tor hidden services provide a way to make it accessible without a public IP
+2. **No DNS needed**: With a self-hosted relay, the relay itself handles peer discovery — no external DNS server is required
+3. **Tor validation**: At startup, tunnel-rs validates the proxy is a real Tor proxy (via `check.torproject.org`) to prevent misconfiguration
+4. **Clear use case**: Limiting to `.onion` URLs eliminates ambiguity about what the proxy is for
+
+If you need a general-purpose SOCKS5 proxy for other purposes, that's outside the scope of tunnel-rs.
+
+---
+
 ## Architecture
 
 ```
