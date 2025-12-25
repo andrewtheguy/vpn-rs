@@ -587,15 +587,14 @@ async fn main() -> Result<()> {
 
                     let secret = resolve_iroh_secret(secret, secret_file)?;
 
+                    // Validate Tor proxy if SOCKS5 proxy is specified
+                    if let Some(ref proxy) = socks5_proxy {
+                        socks5_bridge::validate_tor_proxy(proxy).await?;
+                    }
+
                     // Set up SOCKS5 bridges for .onion relay URLs
                     let (relay_urls, _relay_bridges) = socks5_bridge::setup_relay_bridges(
                         relay_urls,
-                        socks5_proxy.as_deref(),
-                    ).await?;
-
-                    // Set up SOCKS5 bridge for .onion DNS server URL
-                    let (dns_server, _dns_bridge) = socks5_bridge::setup_dns_bridge(
-                        dns_server,
                         socks5_proxy.as_deref(),
                     ).await?;
 
@@ -766,15 +765,14 @@ async fn main() -> Result<()> {
                         "--target is required. Provide the local address to listen on (e.g., --target 127.0.0.1:2222)",
                     )?;
 
+                    // Validate Tor proxy if SOCKS5 proxy is specified
+                    if let Some(ref proxy) = socks5_proxy {
+                        socks5_bridge::validate_tor_proxy(proxy).await?;
+                    }
+
                     // Set up SOCKS5 bridges for .onion relay URLs
                     let (relay_urls, _relay_bridges) = socks5_bridge::setup_relay_bridges(
                         relay_urls,
-                        socks5_proxy.as_deref(),
-                    ).await?;
-
-                    // Set up SOCKS5 bridge for .onion DNS server URL
-                    let (dns_server, _dns_bridge) = socks5_bridge::setup_dns_bridge(
-                        dns_server,
                         socks5_proxy.as_deref(),
                     ).await?;
 

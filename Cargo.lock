@@ -4743,9 +4743,11 @@ dependencies = [
  "str0m",
  "stunclient",
  "tokio",
+ "tokio-rustls",
  "tokio-socks",
  "toml 0.8.23",
  "url",
+ "webpki-roots 0.26.11",
 ]
 
 [[package]]

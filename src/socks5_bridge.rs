@@ -226,6 +226,122 @@ pub fn parse_relay_url(url: &str) -> Result<(String, u16)> {
     Ok((host, port))
 }
 
+/// Validates that the SOCKS5 proxy is a real Tor proxy.
+///
+/// Uses the official Tor Project API: https://check.torproject.org/api/ip
+/// Returns Ok(()) if the proxy is Tor, error otherwise.
+pub async fn validate_tor_proxy(proxy_url: &str) -> Result<()> {
+    use rustls::pki_types::ServerName;
+    use std::sync::Arc;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::time::{timeout, Duration};
+    use tokio_rustls::TlsConnector;
+
+    info!("Validating Tor proxy at {}", proxy_url);
+
+    let proxy_addr = parse_socks5_url(proxy_url)?;
+    let target_host = "check.torproject.org";
+    let target_port = 443u16;
+
+    // Install crypto provider if not already installed
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
+    // Set up TLS config with webpki root certificates
+    let root_store = rustls::RootCertStore::from_iter(
+        webpki_roots::TLS_SERVER_ROOTS.iter().cloned()
+    );
+    let tls_config = rustls::ClientConfig::builder()
+        .with_root_certificates(root_store)
+        .with_no_client_auth();
+    let connector = TlsConnector::from(Arc::new(tls_config));
+
+    // Connect through SOCKS5 with 30 second timeout (Tor can be slow)
+    let connect_future = async {
+        let socks_stream = Socks5Stream::connect(
+            proxy_addr.as_str(),
+            (target_host, target_port),
+        )
+        .await
+        .context("Failed to connect through SOCKS5 proxy to check.torproject.org")?;
+
+        let tcp_stream = socks_stream.into_inner();
+
+        // Establish TLS connection
+        let server_name = ServerName::try_from(target_host.to_string())
+            .map_err(|_| anyhow::anyhow!("Invalid server name"))?;
+        let tls_stream = connector.connect(server_name, tcp_stream)
+            .await
+            .context("TLS handshake failed with check.torproject.org")?;
+
+        Ok::<_, anyhow::Error>(tls_stream)
+    };
+
+    let mut tls_stream = timeout(Duration::from_secs(30), connect_future)
+        .await
+        .context("Timeout connecting to check.torproject.org (30s)")?
+        .context("Failed to establish connection")?;
+
+    // Send HTTP request
+    let request = format!(
+        "GET /api/ip HTTP/1.1\r\n\
+         Host: {}\r\n\
+         Connection: close\r\n\
+         User-Agent: tunnel-rs\r\n\
+         \r\n",
+        target_host
+    );
+    tls_stream.write_all(request.as_bytes()).await
+        .context("Failed to send HTTP request")?;
+
+    // Read response with timeout
+    let read_future = async {
+        let mut reader = BufReader::new(tls_stream);
+        let mut response = String::new();
+
+        // Read headers
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).await?;
+            if line == "\r\n" || line.is_empty() {
+                break;
+            }
+        }
+
+        // Read body
+        reader.read_line(&mut response).await?;
+        Ok::<_, std::io::Error>(response)
+    };
+
+    let response_body = timeout(Duration::from_secs(10), read_future)
+        .await
+        .context("Timeout reading response from check.torproject.org")?
+        .context("Failed to read HTTP response")?;
+
+    // Parse JSON response: {"IsTor":true,"IP":"..."}
+    #[derive(serde::Deserialize)]
+    struct TorCheckResponse {
+        #[serde(rename = "IsTor")]
+        is_tor: bool,
+        #[serde(rename = "IP")]
+        ip: Option<String>,
+    }
+
+    let check: TorCheckResponse = serde_json::from_str(&response_body)
+        .with_context(|| format!("Failed to parse check.torproject.org response: {}", response_body))?;
+
+    if check.is_tor {
+        info!("Tor proxy validated successfully (exit IP: {})", check.ip.as_deref().unwrap_or("unknown"));
+        Ok(())
+    } else {
+        anyhow::bail!(
+            "SOCKS5 proxy at {} is not a Tor proxy.\n\
+             Verified via https://check.torproject.org/api/ip - IsTor: false\n\
+             The --socks5-proxy option requires a Tor SOCKS5 proxy (default: 127.0.0.1:9050).",
+            proxy_url
+        )
+    }
+}
+
 /// Set up SOCKS5 bridges for .onion relay URLs.
 ///
 /// Returns:
@@ -270,47 +386,6 @@ pub async fn setup_relay_bridges(
     }
 
     Ok((rewritten_urls, bridges))
-}
-
-/// Set up a SOCKS5 bridge for a .onion DNS server URL.
-///
-/// Returns:
-/// - The DNS server URL, rewritten to local bridge address if it was a .onion URL
-/// - An optional bridge handle that must be kept alive
-pub async fn setup_dns_bridge(
-    dns_server: Option<String>,
-    socks5_proxy: Option<&str>,
-) -> Result<(Option<String>, Option<Socks5Bridge>)> {
-    let Some(dns_url) = dns_server else {
-        return Ok((None, None));
-    };
-
-    if !is_onion_url(&dns_url) {
-        return Ok((Some(dns_url), None));
-    }
-
-    // Require SOCKS5 proxy for .onion DNS URLs
-    let proxy = socks5_proxy.context(
-        "SOCKS5 proxy required for .onion DNS server URLs"
-    )?;
-    let proxy_addr = parse_socks5_url(proxy)?;
-    let (target_host, target_port) = parse_relay_url(&dns_url)?;
-
-    let config = Socks5BridgeConfig {
-        proxy_addr,
-        target_host,
-        target_port,
-    };
-
-    let bridge = Socks5Bridge::start(config).await?;
-    let local_addr = bridge.local_addr;
-
-    // Rewrite the URL to use the local bridge
-    let parsed = Url::parse(&dns_url)?;
-    let new_url = format!("{}://127.0.0.1:{}{}", parsed.scheme(), local_addr.port(), parsed.path());
-    info!("Rewriting DNS server URL: {} -> {}", dns_url, new_url);
-
-    Ok((Some(new_url), Some(bridge)))
 }
 
 #[cfg(test)]
