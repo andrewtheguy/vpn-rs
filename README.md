@@ -37,8 +37,8 @@ tunnel-rs provides multiple modes for establishing tunnels:
 
 | Mode | Discovery | NAT Traversal | Protocols | Use Case |
 |------|-----------|---------------|-----------|----------|
-| **iroh** | Automatic (Pkarr/DNS/mDNS) | Relay fallback | TCP, UDP | Persistent, multi-source tunnels |
-| **custom-manual** | Manual copy-paste | Full ICE | TCP, UDP | Best NAT compatibility |
+| **iroh** | Automatic (Pkarr/DNS/mDNS) | Relay fallback (best) | TCP, UDP | Persistent, multi-source tunnels |
+| **custom-manual** | Manual copy-paste | Full ICE | TCP, UDP | Manual signaling without relay |
 | **nostr** | Nostr relays | Full ICE | TCP, UDP | Automated signaling, static keys |
 | **dcutr** *(experimental)* | Signaling server | Full ICE + timing | TCP, UDP | Coordinated hole punching |
 
@@ -57,7 +57,7 @@ The `custom-manual` and `nostr` modes don't require iroh discovery/relay infrast
 | Keys | Ephemeral | Static (WireGuard-like) |
 | QUIC stack | str0m + quinn | str0m + quinn |
 
-**Recommendation:** Use `nostr` mode for automated signaling with persistent identity, or `custom-manual` mode for best NAT traversal without external dependencies.
+**Recommendation:** Use `nostr` mode for automated signaling with persistent identity, or `custom-manual` mode for manual signaling without external dependencies.
 
 ## Installation
 
@@ -441,7 +441,7 @@ See [docs/tor-hidden-service.md](docs/tor-hidden-service.md) for complete setup 
 
 Uses full ICE (Interactive Connectivity Establishment) with str0m + quinn QUIC.
 
-**NAT Traversal:** Full ICE implementation with STUN candidate gathering and connectivity checks. This provides the best NAT traversal success rate, including support for symmetric NATs that fail with simpler STUN-only approaches.
+**NAT Traversal:** Full ICE implementation with STUN candidate gathering and connectivity checks. This provides reliable NAT traversal for most scenarios, including support for symmetric NATs that fail with simpler STUN-only approaches.
 
 ## Architecture
 
@@ -528,7 +528,7 @@ ICE connection established!
 
 ## Notes
 
-- Full ICE provides best NAT traversal - works with most symmetric NATs
+- Full ICE provides reliable NAT traversal - works with most symmetric NATs
 - Signaling payloads include a version number; mismatches are rejected
 
 ---
@@ -674,7 +674,7 @@ When no relays are specified, these public relays are used:
 - Keys are static like WireGuard — generate once, use repeatedly
 - Transfer ID is derived from SHA256 of sorted pubkeys — both peers compute the same ID
 - Signaling uses Nostr event kind 24242 with tags for transfer ID and peer pubkey
-- Full ICE provides best NAT traversal (same as custom mode)
+- Full ICE provides reliable NAT traversal (same as custom mode)
 - **Client-first protocol:** The client initiates the connection by publishing a request first; server waits for a request before publishing its offer
 
 > [!WARNING]

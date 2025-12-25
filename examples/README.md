@@ -9,9 +9,9 @@ Example configurations for running tunnel-rs in Docker and Kubernetes.
 
 | Mode | Multi-Session | Dynamic Source | Use Case |
 |------|---------------|----------------|----------|
-| `iroh` | Yes | **Yes** | SSH-like tunneling, receiver chooses destination, relay fallback |
+| `iroh` | Yes | **Yes** | SSH-like tunneling, receiver chooses destination, best NAT traversal with relay fallback |
 | `nostr` | Yes | **Yes** | SSH-like tunneling, receiver chooses destination |
-| `custom-manual` | No | No | Best NAT traversal, one-off tunnels |
+| `custom-manual` | No | No | Manual signaling, one-off tunnels |
 
 **Multi-Session** = Multiple concurrent connections
 **Dynamic Source** = Receiver specifies destination (iroh and nostr modes)

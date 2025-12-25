@@ -34,8 +34,8 @@ graph TB
     end
 
     subgraph "Use Cases"
-        D[Persistent<br/>Always-on tunnels]
-        F[Best NAT Traversal<br/>Symmetric NATs]
+        D[Persistent<br/>Best NAT Traversal]
+        F[Manual Signaling<br/>Full ICE]
         F2[Automated Signaling<br/>Static Keys]
         F3[Timing Coordination<br/>Self-hosted]
     end

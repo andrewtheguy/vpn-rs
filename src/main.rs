@@ -4,8 +4,8 @@
 //! All modes use client-initiated source requests for consistent UX.
 //!
 //! Modes:
-//!   - iroh:          Automatic iroh P2P discovery with relay fallback
-//!   - custom-manual: Full ICE with manual signaling (best NAT traversal)
+//!   - iroh:          Automatic iroh P2P discovery with relay fallback (best NAT traversal)
+//!   - custom-manual: Full ICE with manual signaling
 //!   - nostr:         Full ICE with Nostr-based signaling
 //!   - dcutr:         Experimental DCUtR with timing-coordinated NAT hole punching
 //!
@@ -288,7 +288,7 @@ enum ServerMode {
         #[arg(long)]
         socks5_proxy: Option<String>,
     },
-    /// Client-initiated mode: Full ICE with manual signaling - best NAT traversal (str0m+quinn)
+    /// Client-initiated mode: Full ICE with manual signaling (str0m+quinn)
     #[command(name = "custom-manual")]
     CustomManual {
         /// Allowed TCP source networks in CIDR notation (repeatable)
@@ -420,7 +420,7 @@ enum ClientMode {
         #[arg(long)]
         socks5_proxy: Option<String>,
     },
-    /// Client-initiated mode: Full ICE with manual signaling - best NAT traversal (str0m+quinn)
+    /// Client-initiated mode: Full ICE with manual signaling (str0m+quinn)
     #[command(name = "custom-manual")]
     CustomManual {
         /// Source address to request from server (tcp://host:port or udp://host:port)
