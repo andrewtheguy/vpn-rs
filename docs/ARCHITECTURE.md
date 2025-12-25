@@ -1042,14 +1042,14 @@ sequenceDiagram
 graph TB
     subgraph "Config File"
         A[role: sender/receiver]
-        B[mode: iroh/ice-manual/nostr]
+        B[mode: iroh/ice-manual/ice-nostr]
         C[source/target: tcp://host:port or udp://host:port]
     end
 
     subgraph "Mode Sections"
         E[iroh]
         G[ice-manual]
-        H[nostr]
+        H[ice-nostr]
     end
 
     subgraph "iroh Options"

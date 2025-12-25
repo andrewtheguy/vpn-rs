@@ -2,7 +2,7 @@
 //!
 //! Configuration structure:
 //! - `role` and `mode` fields for validation
-//! - Mode-specific sections: [iroh], [ice-manual], [nostr]
+//! - Mode-specific sections: [iroh], [ice-manual], [ice-nostr]
 //! - All modes use client-initiated source requests
 //!
 //! Role-based field semantics are enforced by `validate()` at parse time:
@@ -337,12 +337,12 @@ impl ServerConfig {
         if expected_mode == "ice-nostr" {
             if let Some(ref nostr) = self.nostr {
                 if nostr.nsec.is_some() && nostr.nsec_file.is_some() {
-                    anyhow::bail!("[nostr] Use only one of 'nsec' or 'nsec_file'.");
+                    anyhow::bail!("[ice-nostr] Use only one of 'nsec' or 'nsec_file'.");
                 }
                 // Reject client-only fields
                 if nostr.request_source.is_some() {
                     anyhow::bail!(
-                        "[nostr] 'source' / 'request_source' is a client-only field. \
+                        "[ice-nostr] 'source' / 'request_source' is a client-only field. \
                         Servers use 'allowed_sources' to restrict what clients can request."
                     );
                 }
@@ -351,11 +351,11 @@ impl ServerConfig {
                     validate_allowed_sources(allowed)?;
                 }
             }
-            // Server nostr mode should not have top-level source
+            // Server ice-nostr mode should not have top-level source
             if self.source.is_some() {
                 anyhow::bail!(
-                    "Top-level 'source' is not allowed for nostr server mode. \
-                    Use [nostr.allowed_sources] to restrict what clients can request."
+                    "Top-level 'source' is not allowed for ice-nostr server mode. \
+                    Use [ice-nostr.allowed_sources] to restrict what clients can request."
                 );
             }
         }
@@ -470,18 +470,18 @@ impl ClientConfig {
         if expected_mode == "ice-nostr" {
             if let Some(ref nostr) = self.nostr {
                 if nostr.nsec.is_some() && nostr.nsec_file.is_some() {
-                    anyhow::bail!("[nostr] Use only one of 'nsec' or 'nsec_file'.");
+                    anyhow::bail!("[ice-nostr] Use only one of 'nsec' or 'nsec_file'.");
                 }
                 // Reject server-only fields
                 if nostr.allowed_sources.is_some() {
                     anyhow::bail!(
-                        "[nostr] 'allowed_sources' is a server-only field. \
+                        "[ice-nostr] 'allowed_sources' is a server-only field. \
                         Clients use 'source' to specify what to request from server."
                     );
                 }
                 if nostr.max_sessions.is_some() {
                     anyhow::bail!(
-                        "[nostr] 'max_sessions' is a server-only field."
+                        "[ice-nostr] 'max_sessions' is a server-only field."
                     );
                 }
                 // Validate request_source URL format
