@@ -158,17 +158,12 @@ impl Socks5Bridge {
             Ok::<_, std::io::Error>(())
         };
 
-        tokio::select! {
-            result = local_to_remote => {
-                if let Err(e) = result {
-                    debug!("SOCKS5 bridge: local->remote error: {}", e);
-                }
-            }
-            result = remote_to_local => {
-                if let Err(e) = result {
-                    debug!("SOCKS5 bridge: remote->local error: {}", e);
-                }
-            }
+        let (r1, r2) = tokio::join!(local_to_remote, remote_to_local);
+        if let Err(e) = r1 {
+            debug!("SOCKS5 bridge: local->remote error: {}", e);
+        }
+        if let Err(e) = r2 {
+            debug!("SOCKS5 bridge: remote->local error: {}", e);
         }
 
         debug!("SOCKS5 bridge: connection closed");
@@ -241,7 +236,7 @@ pub async fn setup_relay_bridges(
         if is_onion_url(&url) {
             // Require SOCKS5 proxy for .onion URLs
             let proxy = socks5_proxy.context(
-                "SOCKS5 proxy required for .onion relay URLs. Use --socks5-proxy socks5://127.0.0.1:9050"
+                "SOCKS5 proxy required for .onion relay URLs"
             )?;
             let proxy_addr = parse_socks5_url(proxy)?;
             let (target_host, target_port) = parse_relay_url(&url)?;
