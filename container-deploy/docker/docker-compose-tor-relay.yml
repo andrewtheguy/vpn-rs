@@ -25,7 +25,7 @@
 #      # Look for: "Tor hidden service hostname: xxxxxxx.onion"
 #
 #   3. Get your .onion address:
-#      docker compose -f docker-compose-tor-relay.yml exec tor cat /var/lib/tor/hidden_service/hostname
+#      docker compose -f docker-compose-tor-relay.yml exec -it tor cat /var/lib/tor/hidden_service/hostname
 #
 #   4. Get the server's EndpointId:
 #      docker compose -f docker-compose-tor-relay.yml logs tunnel-server
@@ -44,20 +44,20 @@
 services:
   # Tor daemon with hidden service
   tor:
-    image: goldy/tor-hidden-service:latest
-    environment:
-      # Service name and port mapping: .onion:80 -> iroh-relay:3340
-      IROH_RELAY_PORTS: "80:iroh-relay:3340"
+    image: dockurr/tor:latest
     volumes:
-      # Persist hidden service keys (optional but recommended)
-      - tor-keys:/var/lib/tor/hidden_service
+      # Tor configuration
+      - ./torrc:/etc/tor/torrc:ro
+      # Persist hidden service keys (recommended for stable .onion address)
+      - tor-data:/var/lib/tor
     depends_on:
       - iroh-relay
     healthcheck:
-      test: ["CMD", "test", "-f", "/var/lib/tor/hidden_service/hostname"]
-      interval: 10s
-      timeout: 5s
-      retries: 12
+      test: ["CMD-SHELL", "curl -sf -x socks5h://127.0.0.1:9050 'https://check.torproject.org/api/ip' | grep -qm1 -E '\"IsTor\"\\s*:\\s*true'"]
+      interval: 60s
+      timeout: 15s
+      start_period: 60s
+      retries: 3
 
   # iroh-relay server (HTTP only - Tor provides encryption)
   iroh-relay:
@@ -100,4 +100,4 @@ services:
         condition: service_started
 
 volumes:
-  tor-keys:
+  tor-data:

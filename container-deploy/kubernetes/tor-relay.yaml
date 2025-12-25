@@ -24,7 +24,7 @@
 #      kubectl logs -l app=tor-relay -c tor
 #
 #   3. Get your .onion address:
-#      kubectl exec -it deploy/tor-relay -c tor -- cat /var/lib/tor/hidden_service/hostname
+#      kubectl exec deploy/tor-relay -c tor -- cat /var/lib/tor/hidden_service/hostname
 #
 #   4. Get server's EndpointId:
 #      kubectl logs -l app=tor-relay -c tunnel-server
@@ -58,7 +58,7 @@ data:
     # Tor hidden service configuration for iroh-relay
     HiddenServiceDir /var/lib/tor/hidden_service/
     HiddenServiceVersion 3
-    HiddenServicePort 80 127.0.0.1:3340
+    HiddenServicePort 80 localhost:3340
 
     # Logging
     Log notice stdout
@@ -80,18 +80,18 @@ data:
     enable_metrics = false
 
 ---
-# Persistent storage for Tor hidden service keys
+# Persistent storage for Tor data (hidden service keys, etc.)
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: tor-hidden-service-keys
+  name: tor-data
   namespace: tunnel-tor
 spec:
   accessModes:
     - ReadWriteOnce
   resources:
     requests:
-      storage: 10Mi
+      storage: 100Mi
 
 ---
 # Optional: Persistent identity for tunnel-rs server
@@ -131,28 +131,25 @@ spec:
         fsGroup: 100
 
       initContainers:
-        # Fix permissions for Tor hidden service directory
+        # Fix permissions for Tor data directory
         - name: fix-permissions
           image: busybox:latest
-          command: ['sh', '-c', 'chmod 700 /var/lib/tor/hidden_service && chown -R 100:100 /var/lib/tor/hidden_service']
+          command: ['sh', '-c', 'mkdir -p /var/lib/tor/hidden_service && chmod -R 700 /var/lib/tor && chown -R 100:100 /var/lib/tor']
           volumeMounts:
-            - name: tor-hidden-service
-              mountPath: /var/lib/tor/hidden_service
+            - name: tor-data
+              mountPath: /var/lib/tor
 
       containers:
         # Tor daemon with hidden service
         - name: tor
-          image: goldy/tor-hidden-service:latest
-          command: ['tor', '-f', '/etc/tor/torrc']
-          securityContext:
-            runAsUser: 100
-            runAsGroup: 100
+          image: dockurr/tor:latest
           volumeMounts:
             - name: tor-config
-              mountPath: /etc/tor
+              mountPath: /etc/tor/torrc
+              subPath: torrc
               readOnly: true
-            - name: tor-hidden-service
-              mountPath: /var/lib/tor/hidden_service
+            - name: tor-data
+              mountPath: /var/lib/tor
           resources:
             requests:
               memory: "64Mi"
@@ -226,9 +223,9 @@ spec:
         - name: iroh-relay-config
           configMap:
             name: iroh-relay-config
-        - name: tor-hidden-service
+        - name: tor-data
           persistentVolumeClaim:
-            claimName: tor-hidden-service-keys
+            claimName: tor-data
         # Uncomment for persistent identity:
         # - name: server-key
         #   secret:
