@@ -502,6 +502,14 @@ fn resolve_client_config(
     }
 }
 
+/// Validate that the SOCKS5 proxy is a Tor proxy, if one is specified.
+async fn validate_socks5_proxy_if_present(socks5_proxy: &Option<String>) -> Result<()> {
+    if let Some(ref proxy) = socks5_proxy {
+        socks5_bridge::validate_tor_proxy(proxy).await?;
+    }
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn"))
@@ -587,10 +595,7 @@ async fn main() -> Result<()> {
 
                     let secret = resolve_iroh_secret(secret, secret_file)?;
 
-                    // Validate Tor proxy if SOCKS5 proxy is specified
-                    if let Some(ref proxy) = socks5_proxy {
-                        socks5_bridge::validate_tor_proxy(proxy).await?;
-                    }
+                    validate_socks5_proxy_if_present(&socks5_proxy).await?;
 
                     // Set up SOCKS5 bridges for .onion relay URLs
                     let (relay_urls, _relay_bridges) = socks5_bridge::setup_relay_bridges(
@@ -765,10 +770,7 @@ async fn main() -> Result<()> {
                         "--target is required. Provide the local address to listen on (e.g., --target 127.0.0.1:2222)",
                     )?;
 
-                    // Validate Tor proxy if SOCKS5 proxy is specified
-                    if let Some(ref proxy) = socks5_proxy {
-                        socks5_bridge::validate_tor_proxy(proxy).await?;
-                    }
+                    validate_socks5_proxy_if_present(&socks5_proxy).await?;
 
                     // Set up SOCKS5 bridges for .onion relay URLs
                     let (relay_urls, _relay_bridges) = socks5_bridge::setup_relay_bridges(
