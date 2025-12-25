@@ -226,13 +226,40 @@ fn validate_allowed_sources(allowed: &AllowedSources) -> Result<()> {
 }
 
 /// Validate that a string is a valid SOCKS5 proxy URL.
-fn validate_socks5_proxy(value: &str) -> Result<()> {
+///
+/// - When relay_urls contain `.onion` addresses, requires `socks5h://` scheme for DNS resolution through proxy
+/// - Otherwise, accepts both `socks5://` and `socks5h://` schemes:
+///   - `socks5://host:port` - Basic SOCKS5 proxy
+///   - `socks5h://host:port` - SOCKS5 with remote DNS resolution (recommended for .onion addresses)
+fn validate_socks5_proxy(value: &str, relay_urls: Option<&Vec<String>>) -> Result<()> {
     let url = url::Url::parse(value)
-        .with_context(|| format!("Invalid socks5_proxy '{}'. Expected format: socks5://host:port", value))?;
+        .with_context(|| format!("Invalid socks5_proxy '{}'. Expected format: socks5://host:port or socks5h://host:port", value))?;
 
     let scheme = url.scheme();
-    if scheme != "socks5" {
-        anyhow::bail!("Invalid socks5_proxy scheme '{}'. Must be 'socks5'", scheme);
+
+    // Check if any relay URLs contain .onion addresses
+    let has_onion_relay = relay_urls.map_or(false, |urls| {
+        urls.iter().any(|u| u.contains(".onion"))
+    });
+
+    if has_onion_relay {
+        // For .onion relays, socks5h:// is required for DNS resolution through proxy
+        if scheme != "socks5h" {
+            anyhow::bail!(
+                "Invalid socks5_proxy scheme '{}'. When using .onion relay URLs, \
+                 socks5h:// scheme (with remote DNS resolution) is required. \
+                 Change socks5_proxy to use 'socks5h://host:port' format.",
+                scheme
+            );
+        }
+    } else {
+        // For non-.onion relays, both schemes are acceptable
+        if scheme != "socks5" && scheme != "socks5h" {
+            anyhow::bail!(
+                "Invalid socks5_proxy scheme '{}'. Must be 'socks5' or 'socks5h'",
+                scheme
+            );
+        }
     }
 
     if url.host_str().is_none() {
@@ -323,7 +350,7 @@ impl ServerConfig {
                 }
                 // Validate SOCKS5 proxy URL format if present
                 if let Some(ref proxy) = iroh.socks5_proxy {
-                    validate_socks5_proxy(proxy).context("[iroh] Invalid SOCKS5 proxy URL")?;
+                    validate_socks5_proxy(proxy, iroh.relay_urls.as_ref()).context("[iroh] Invalid SOCKS5 proxy URL")?;
                 }
             }
             // Server iroh mode should not have top-level source
@@ -463,7 +490,7 @@ impl ClientConfig {
                 }
                 // Validate SOCKS5 proxy URL format if present
                 if let Some(ref proxy) = iroh.socks5_proxy {
-                    validate_socks5_proxy(proxy).context("[iroh] Invalid SOCKS5 proxy URL")?;
+                    validate_socks5_proxy(proxy, iroh.relay_urls.as_ref()).context("[iroh] Invalid SOCKS5 proxy URL")?;
                 }
             }
         }
