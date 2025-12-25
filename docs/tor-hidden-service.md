@@ -88,11 +88,13 @@ iroh-relay --http-bind-addr 127.0.0.1:3340
 # Replace with your .onion address
 tunnel-rs server iroh \
   --relay-url http://YOUR_ADDRESS.onion \
-  --socks5-proxy socks5://127.0.0.1:9050 \
+  --socks5-proxy socks5h://127.0.0.1:9050 \
   --secret-file ./server.key \
   --allowed-tcp 127.0.0.0/8 \
   --allowed-tcp 10.0.0.0/8
 ```
+
+> **Note:** Use `socks5h://` scheme to ensure .onion hostname resolution happens through the proxy.
 
 ### Client Setup
 
@@ -106,11 +108,11 @@ tor
 #### Step 2: Connect with Native SOCKS5 Proxy
 
 ```bash
-# Use --socks5-proxy to route .onion relay connections through Tor
-# Note: Only relay connection goes through Tor, direct P2P bypasses it
+# Use --socks5-proxy to route .onion relay/DNS connections through Tor
+# Note: Only relay/DNS connections go through Tor, direct P2P bypasses it
 tunnel-rs client iroh \
   --relay-url http://YOUR_ADDRESS.onion \
-  --socks5-proxy socks5://127.0.0.1:9050 \
+  --socks5-proxy socks5h://127.0.0.1:9050 \
   --node-id <SERVER_ENDPOINT_ID> \
   --source tcp://127.0.0.1:22 \
   --target 127.0.0.1:2222
@@ -143,9 +145,10 @@ websocat --socks5 127.0.0.1:9050 ws://YOUR_ADDRESS.onion/relay
 - Check hidden service directory permissions: `ls -la /var/lib/tor/iroh-relay/`
 - Verify iroh-relay is listening: `ss -tlnp | grep 3340`
 
-**"SOCKS5 proxy required for .onion relay URLs":**
-- Add `--socks5-proxy socks5://127.0.0.1:9050` to your command
-- Or add `socks5_proxy = "socks5://127.0.0.1:9050"` to your config file
+**"SOCKS5 proxy required for .onion relay/DNS URLs":**
+- Add `--socks5-proxy socks5h://127.0.0.1:9050` to your command
+- Or add `socks5_proxy = "socks5h://127.0.0.1:9050"` to your config file
+- Use `socks5h://` (not `socks5://`) for .onion addresses
 
 **Direct P2P not working:**
 - This is expected if both peers are behind symmetric NAT
@@ -156,17 +159,20 @@ websocat --socks5 127.0.0.1:9050 ws://YOUR_ADDRESS.onion/relay
 
 ## Technical Details: SOCKS5 Bridge
 
-The native SOCKS5 proxy support works by creating a local TCP bridge:
+The native SOCKS5 proxy support works by creating local TCP bridges:
 
 ```
 iroh → localhost:random_port → SOCKS5 proxy → .onion:port → iroh-relay
+iroh → localhost:random_port → SOCKS5 proxy → .onion:port → iroh-dns-server
 ```
 
-When you specify `--socks5-proxy` with a `.onion` relay URL:
-1. tunnel-rs starts a local TCP listener on a random port
-2. The relay URL is rewritten to `http://127.0.0.1:<random_port>`
+When you specify `--socks5-proxy` with `.onion` relay or DNS server URLs:
+1. tunnel-rs starts a local TCP listener on a random port for each .onion URL
+2. The URLs are rewritten to `http://127.0.0.1:<random_port>` (preserving paths like `/pkarr`)
 3. When iroh connects to the local listener, traffic is forwarded through SOCKS5 to the .onion address
 4. This bridges TCP traffic transparently - iroh doesn't need native SOCKS5 support
+
+Both relay and DNS connections are bridged independently, allowing fully self-hosted infrastructure over Tor.
 
 ### Config File Support
 
@@ -176,8 +182,11 @@ You can also specify the SOCKS5 proxy in config files:
 # server.toml or client.toml
 [iroh]
 relay_urls = ["http://abc123...xyz.onion"]
-socks5_proxy = "socks5://127.0.0.1:9050"
+dns_server = "http://def456...uvw.onion/pkarr"
+socks5_proxy = "socks5h://127.0.0.1:9050"
 ```
+
+> **Note:** Use `socks5h://` (not `socks5://`) for .onion addresses to ensure DNS resolution happens through the proxy.
 
 ---
 
@@ -206,21 +215,50 @@ Not yet implemented. Requires `arti-client` and `tor-hsservice` crates.
 
 ---
 
-## iroh-dns-server via Tor (Optional)
+## iroh-dns-server via Tor
 
-Same approach works for DNS server:
+For fully self-hosted infrastructure over Tor, you can also run iroh-dns-server as a hidden service:
+
+### Setup
 
 ```bash
 # Add to /etc/tor/torrc
 HiddenServiceDir /var/lib/tor/iroh-dns/
 HiddenServiceVersion 3
-HiddenServicePort 443 127.0.0.1:8443
+HiddenServicePort 80 127.0.0.1:8080
+
+# Restart Tor
+sudo systemctl restart tor
+
+# Get your .onion address
+sudo cat /var/lib/tor/iroh-dns/hostname
 
 # Start iroh-dns-server
 iroh-dns-server --config dns.toml
 ```
 
-Lower priority since DNS is low-bandwidth and less problematic with Cloudflare.
+### Usage with tunnel-rs
+
+```bash
+# Server
+tunnel-rs server iroh \
+  --relay-url http://YOUR_RELAY.onion \
+  --dns-server http://YOUR_DNS.onion/pkarr \
+  --socks5-proxy socks5h://127.0.0.1:9050 \
+  --secret-file ./server.key \
+  --allowed-tcp 127.0.0.0/8
+
+# Client
+tunnel-rs client iroh \
+  --relay-url http://YOUR_RELAY.onion \
+  --dns-server http://YOUR_DNS.onion/pkarr \
+  --socks5-proxy socks5h://127.0.0.1:9050 \
+  --node-id <ID> \
+  --source tcp://127.0.0.1:22 \
+  --target 127.0.0.1:2222
+```
+
+This provides a completely self-hosted P2P infrastructure accessible only via Tor.
 
 ---
 

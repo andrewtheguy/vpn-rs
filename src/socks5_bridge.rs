@@ -272,6 +272,47 @@ pub async fn setup_relay_bridges(
     Ok((rewritten_urls, bridges))
 }
 
+/// Set up a SOCKS5 bridge for a .onion DNS server URL.
+///
+/// Returns:
+/// - The DNS server URL, rewritten to local bridge address if it was a .onion URL
+/// - An optional bridge handle that must be kept alive
+pub async fn setup_dns_bridge(
+    dns_server: Option<String>,
+    socks5_proxy: Option<&str>,
+) -> Result<(Option<String>, Option<Socks5Bridge>)> {
+    let Some(dns_url) = dns_server else {
+        return Ok((None, None));
+    };
+
+    if !is_onion_url(&dns_url) {
+        return Ok((Some(dns_url), None));
+    }
+
+    // Require SOCKS5 proxy for .onion DNS URLs
+    let proxy = socks5_proxy.context(
+        "SOCKS5 proxy required for .onion DNS server URLs"
+    )?;
+    let proxy_addr = parse_socks5_url(proxy)?;
+    let (target_host, target_port) = parse_relay_url(&dns_url)?;
+
+    let config = Socks5BridgeConfig {
+        proxy_addr,
+        target_host,
+        target_port,
+    };
+
+    let bridge = Socks5Bridge::start(config).await?;
+    let local_addr = bridge.local_addr;
+
+    // Rewrite the URL to use the local bridge
+    let parsed = Url::parse(&dns_url)?;
+    let new_url = format!("{}://127.0.0.1:{}{}", parsed.scheme(), local_addr.port(), parsed.path());
+    info!("Rewriting DNS server URL: {} -> {}", dns_url, new_url);
+
+    Ok((Some(new_url), Some(bridge)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

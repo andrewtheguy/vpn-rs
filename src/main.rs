@@ -588,8 +588,14 @@ async fn main() -> Result<()> {
                     let secret = resolve_iroh_secret(secret, secret_file)?;
 
                     // Set up SOCKS5 bridges for .onion relay URLs
-                    let (relay_urls, _bridges) = socks5_bridge::setup_relay_bridges(
+                    let (relay_urls, _relay_bridges) = socks5_bridge::setup_relay_bridges(
                         relay_urls,
+                        socks5_proxy.as_deref(),
+                    ).await?;
+
+                    // Set up SOCKS5 bridge for .onion DNS server URL
+                    let (dns_server, _dns_bridge) = socks5_bridge::setup_dns_bridge(
+                        dns_server,
                         socks5_proxy.as_deref(),
                     ).await?;
 
@@ -761,8 +767,14 @@ async fn main() -> Result<()> {
                     )?;
 
                     // Set up SOCKS5 bridges for .onion relay URLs
-                    let (relay_urls, _bridges) = socks5_bridge::setup_relay_bridges(
+                    let (relay_urls, _relay_bridges) = socks5_bridge::setup_relay_bridges(
                         relay_urls,
+                        socks5_proxy.as_deref(),
+                    ).await?;
+
+                    // Set up SOCKS5 bridge for .onion DNS server URL
+                    let (dns_server, _dns_bridge) = socks5_bridge::setup_dns_bridge(
+                        dns_server,
                         socks5_proxy.as_deref(),
                     ).await?;
 

@@ -226,7 +226,7 @@ tunnel-rs client iroh --node-id <ENDPOINT_ID> --source udp://127.0.0.1:51820 --t
 | `--relay-url` | public | Custom relay server URL(s), repeatable |
 | `--relay-only` | false | Force all traffic through relay (requires `test-utils` feature) |
 | `--dns-server` | public | Custom DNS server URL for peer discovery |
-| `--socks5-proxy` | - | SOCKS5 proxy for relay connections (e.g., `socks5://127.0.0.1:9050` for Tor) |
+| `--socks5-proxy` | - | SOCKS5 proxy for .onion relay/DNS connections (e.g., `socks5://127.0.0.1:9050` for Tor) |
 
 ### client
 
@@ -245,7 +245,7 @@ tunnel-rs client iroh --node-id <ENDPOINT_ID> --source udp://127.0.0.1:51820 --t
 | `--relay-url` | public | Custom relay server URL(s), repeatable |
 | `--relay-only` | false | Force all traffic through relay (requires `test-utils` feature) |
 | `--dns-server` | public | Custom DNS server URL for peer discovery |
-| `--socks5-proxy` | - | SOCKS5 proxy for relay connections (e.g., `socks5://127.0.0.1:9050` for Tor) |
+| `--socks5-proxy` | - | SOCKS5 proxy for .onion relay/DNS connections (e.g., `socks5://127.0.0.1:9050` for Tor) |
 
 ## Configuration Files
 
@@ -272,8 +272,8 @@ secret_file = "./server.key"
 relay_urls = ["https://relay.example.com"]
 dns_server = "https://dns.example.com/pkarr"
 max_sessions = 100
-# Optional: SOCKS5 proxy for .onion relay URLs (Tor)
-# socks5_proxy = "socks5://127.0.0.1:9050"
+# Optional: SOCKS5 proxy for .onion relay/DNS URLs (Tor)
+# socks5_proxy = "socks5h://127.0.0.1:9050"
 
 [iroh.allowed_sources]
 tcp = ["127.0.0.0/8", "192.168.0.0/16"]
@@ -306,8 +306,8 @@ request_source = "tcp://127.0.0.1:22"
 target = "127.0.0.1:2222"
 relay_urls = ["https://relay.example.com"]
 dns_server = "https://dns.example.com/pkarr"
-# Optional: SOCKS5 proxy for .onion relay URLs (Tor)
-# socks5_proxy = "socks5://127.0.0.1:9050"
+# Optional: SOCKS5 proxy for .onion relay/DNS URLs (Tor)
+# socks5_proxy = "socks5h://127.0.0.1:9050"
 ```
 
 > [!NOTE]
@@ -429,25 +429,29 @@ iroh mode uses the relay for both **signaling/coordination** and as a **data tra
 
 ### Tor Hidden Service (No Public IP)
 
-If you can't get a public IP or Cloudflare tunnel doesn't work (HTTP/2 breaks WebSocket upgrades), you can run iroh-relay as a Tor hidden service:
+If you can't get a public IP or Cloudflare tunnel doesn't work (HTTP/2 breaks WebSocket upgrades), you can run iroh-relay and iroh-dns-server as Tor hidden services:
 
 ```bash
 # Server side: configure tor hidden service pointing to localhost:3340
 # Then start iroh-relay and tunnel-rs with the .onion URL
 tunnel-rs server iroh \
-  --relay-url http://YOUR_ADDRESS.onion \
-  --socks5-proxy socks5://127.0.0.1:9050 \
+  --relay-url http://YOUR_RELAY.onion \
+  --dns-server http://YOUR_DNS.onion/pkarr \
+  --socks5-proxy socks5h://127.0.0.1:9050 \
   --secret-file ./server.key \
   --allowed-tcp 127.0.0.0/8
 
-# Client side: use --socks5-proxy to reach .onion relay (direct P2P bypasses Tor)
+# Client side: use --socks5-proxy to reach .onion relay/DNS (direct P2P bypasses Tor)
 tunnel-rs client iroh \
-  --relay-url http://YOUR_ADDRESS.onion \
-  --socks5-proxy socks5://127.0.0.1:9050 \
+  --relay-url http://YOUR_RELAY.onion \
+  --dns-server http://YOUR_DNS.onion/pkarr \
+  --socks5-proxy socks5h://127.0.0.1:9050 \
   --node-id <ID> \
   --source tcp://127.0.0.1:22 \
   --target 127.0.0.1:2222
 ```
+
+> **Note:** When using .onion addresses, use `socks5h://` (not `socks5://`) to ensure DNS resolution happens through the proxy.
 
 See [docs/tor-hidden-service.md](docs/tor-hidden-service.md) for complete setup guide.
 
