@@ -274,11 +274,12 @@ The current `--socks5-proxy` approach requires:
 
 A future `--tor-fallback` flag for ice-nostr mode could:
 1. Attempt ICE connection first (direct P2P)
-2. If ICE fails (symmetric NAT, timeout):
+2. If ICE fails (symmetric NAT, timeout) **and tunnel is TCP**:
    - Server creates ephemeral Tor hidden service via Arti
    - Server publishes .onion address via Nostr signaling
    - Client connects via embedded Arti
-3. No external Tor daemon or SOCKS5 proxy needed
+3. If ICE fails **and tunnel is UDP**: connection fails (Tor is TCP-only)
+4. No external Tor daemon or SOCKS5 proxy needed
 
 ### Comparison: SOCKS5 Bridge vs Embedded Arti
 
@@ -300,6 +301,26 @@ tor-hsservice = { version = "0.37" }
 tor-cell = { version = "0.37" }
 ```
 
+### Important Limitation: TCP Only
+
+**Tor only supports TCP streams.** This has significant implications for the Arti fallback:
+
+| Tunnel Type | ICE Succeeds | ICE Fails + Tor Fallback |
+|-------------|--------------|--------------------------|
+| TCP (SSH, HTTP, databases) | ✅ Works | ✅ Falls back to Tor |
+| UDP (DNS, WireGuard, gaming) | ✅ Works | ❌ Connection fails |
+
+**Behavior with `--tor-fallback`:**
+- TCP tunnels: ICE first, Tor fallback if ICE fails
+- UDP tunnels: ICE only, no fallback available
+
+This is an acceptable trade-off because:
+1. Most tunnel use cases are TCP (SSH, databases, web services)
+2. UDP applications (gaming, real-time) have latency requirements incompatible with Tor (~500ms-2s)
+3. UDP-over-TCP encapsulation would add overhead and break UDP semantics
+
+**Workaround for UDP:** Ensure direct connectivity (port forwarding, UPnP, or avoid symmetric NAT on both sides).
+
 ### Trade-offs
 
 | Aspect | Impact |
@@ -308,3 +329,4 @@ tor-cell = { version = "0.37" }
 | Connection latency | Tor adds ~500ms-2s vs direct |
 | Binary size | Arti adds ~5-10MB |
 | No external infra | Uses public Tor network (no self-hosted relay needed) |
+| **TCP only** | UDP tunnels cannot fall back to Tor |
