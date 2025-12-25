@@ -760,6 +760,12 @@ async fn main() -> Result<()> {
                         "--target is required. Provide the local address to listen on (e.g., --target 127.0.0.1:2222)",
                     )?;
 
+                    // Set up SOCKS5 bridges for .onion relay URLs
+                    let (relay_urls, _bridges) = socks5_bridge::setup_relay_bridges(
+                        relay_urls,
+                        socks5_proxy.as_deref(),
+                    ).await?;
+
                     iroh::run_multi_source_client(node_id, source, target, relay_urls, relay_only, dns_server).await
                 }
                 #[cfg(feature = "ice")]
