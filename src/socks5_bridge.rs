@@ -203,8 +203,14 @@ pub fn parse_socks5_url(url: &str) -> Result<String> {
 }
 
 /// Check if a URL is a .onion address.
+///
+/// Parses the URL and checks only the hostname (not paths or other URL parts).
+/// Returns false if the URL is invalid or has no host.
 pub fn is_onion_url(url: &str) -> bool {
-    url.contains(".onion")
+    Url::parse(url)
+        .ok()
+        .and_then(|parsed| parsed.host_str().map(|h| h.ends_with(".onion")))
+        .unwrap_or(false)
 }
 
 /// Parse a relay URL and extract host and port.
