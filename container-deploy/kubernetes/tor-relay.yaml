@@ -142,7 +142,7 @@ spec:
       containers:
         # Tor daemon with hidden service
         - name: tor
-          image: ghcr.io/andrewtheguy/docker-tor-socks5:0.1.2
+          image: ghcr.io/andrewtheguy/tor-socks5:0.1.2
           volumeMounts:
             - name: tor-config
               mountPath: /etc/tor/torrc

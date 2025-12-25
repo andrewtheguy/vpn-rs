@@ -44,7 +44,7 @@
 services:
   # Tor daemon with hidden service
   tor:
-    image: ghcr.io/andrewtheguy/docker-tor-socks5:0.1.2
+    image: ghcr.io/andrewtheguy/tor-socks5:0.1.2
     volumes:
       # Tor configuration
       - ./torrc:/etc/tor/torrc:ro
