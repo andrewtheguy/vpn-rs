@@ -40,10 +40,9 @@ tunnel-rs provides multiple modes for establishing tunnels:
 | **iroh** | Automatic (Pkarr/DNS/mDNS) | Relay fallback (best) | TCP, UDP | Persistent, multi-source tunnels |
 | **ice-manual** | Manual copy-paste | Full ICE | TCP, UDP | Manual signaling without relay |
 | **ice-nostr** | Nostr relays | Full ICE | TCP, UDP | Automated signaling, static keys |
-| **dcutr** *(experimental)* | Signaling server | Full ICE + timing | TCP, UDP | Coordinated hole punching |
 
 > [!TIP]
-> **For containerized environments (Docker, Kubernetes, cloud VMs):** Use `iroh` mode. It includes relay fallback which ensures connectivity even when both peers are behind restrictive NATs (common in cloud environments). The `ice-nostr` and `ice-manual` modes use STUN-only NAT traversal which may fail when both peers are behind symmetric NAT.
+> **For containerized environments (Docker, Kubernetes, cloud VMs):** Use `iroh` mode. It includes relay fallback which ensures connectivity even when both peers are behind restrictive NATs (common in cloud environments). The `ice-nostr` and `ice-manual` modes use full ICE with STUN servers but may have connectivity issues when both peers are behind symmetric NATs without external relay support.
 
 ### Choosing a Serverless Mode
 
@@ -236,7 +235,10 @@ tunnel-rs client iroh --node-id <ENDPOINT_ID> --source udp://127.0.0.1:51820 --t
 
 ## Configuration Files
 
-Use `--default-config` to load from the default location, or `-c <path>` for a custom path. Each mode has its own section (`[iroh]`, `[ice-manual]`, `[nostr]`).
+Use `--default-config` to load from the default location, or `-c <path>` for a custom path. Each mode has its own configuration section:
+- **iroh** mode: `[iroh]` section
+- **ice-manual** mode: `[ice-manual]` section
+- **ice-nostr** mode: `[nostr]` section (note: CLI command is `ice-nostr` but config section is `[nostr]`)
 
 **Default locations:**
 - Server: `~/.config/tunnel-rs/server.toml`
@@ -678,7 +680,7 @@ When no relays are specified, these public relays are used:
 - **Client-first protocol:** The client initiates the connection by publishing a request first; server waits for a request before publishing its offer
 
 > [!WARNING]
-> **Containerized Environments:** ice-nostr mode uses STUN-only NAT traversal without relay fallback. If both peers are behind restrictive NATs (common in Docker, Kubernetes, or cloud VMs), ICE connectivity may fail. For containerized deployments, consider using `iroh` mode which includes automatic relay fallback.
+> **Containerized Environments:** ice-nostr mode uses full ICE but without relay fallback. If both peers are behind restrictive NATs (common in Docker, Kubernetes, or cloud VMs), ICE connectivity may fail. For containerized deployments, consider using `iroh` mode which includes automatic relay fallback.
 
 ## Mode Capabilities
 
@@ -729,58 +731,65 @@ For `ice-manual`, use separate instances for each tunnel:
 
 ---
 
-# DCUtR Mode (Experimental)
-
-Uses timing-coordinated hole punching with a dedicated signaling server. The server coordinates the exact moment both peers attempt connection, improving NAT traversal success rates.
-
-> [!WARNING]
-> **Experimental:** This mode is under active development. For production use, prefer `iroh` mode which has relay fallback.
-
-## Architecture
-
-```
-+-----------------+        +-----------------+        +------------------+        +-----------------+        +-----------------+
-| SSH Client      |  TCP   | client          |  ICE   | Signaling Server |  ICE   | server          |  TCP   | SSH Server      |
-|                 |<------>| (local:2222)    |<======>| (coordinates     |<======>|                 |<------>| (local:22)      |
-|                 |        |                 |  QUIC  |  timing)         |  QUIC  |                 |        |                 |
-+-----------------+        +-----------------+        +------------------+        +-----------------+        +-----------------+
-     Client Side                                        Self-hosted                     Server Side
-```
-
 ## Quick Start
 
-### 1. Start Signaling Server
+### Manual Signaling Mode (ice-manual)
 
+**On server:**
 ```bash
-# Build and run the signaling server binary
-cargo build --release --bin signaling
-./target/release/signaling --bind 0.0.0.0:9999
+tunnel-rs server ice-manual
 ```
+The server will generate an offer. Copy the entire offer block (including BEGIN/END markers).
 
-### 2. Start Tunnel Server
-
+**On client:**
 ```bash
-# Server specifies the exact source to forward to
-tunnel-rs server dcutr \
-  --signaling-server <signaling-ip>:9999 \
-  --source tcp://127.0.0.1:22 \
-  --server-id my-server
+tunnel-rs client ice-manual \
+  --target 127.0.0.1:22
 ```
+The client will generate a request and ask you to paste the server's offer. Paste it, then copy the client's answer and send it to the server.
 
-### 3. Start Tunnel Client
-
-```bash
-# Client specifies local listen address and peer to connect to
-tunnel-rs client dcutr \
-  --signaling-server <signaling-ip>:9999 \
-  --peer-id my-server \
-  --target 127.0.0.1:2222
-```
-
-### 4. Connect
-
+**Back on server:**
+Paste the client's answer. The tunnel will establish and you can now connect:
 ```bash
 ssh -p 2222 user@127.0.0.1
+```
+
+### Nostr-Based Signaling Mode (ice-nostr)
+
+First, generate Nostr keys:
+```bash
+tunnel-rs generate-nostr-key
+# Output: nsec1... (your private key)
+# Output: npub1... (your public key)
+```
+
+**On server (config-based):**
+```toml
+role = "server"
+mode = "ice-nostr"
+
+[nostr]
+nsec = "nsec1..."
+peer_npub = "npub1..."  # Client's public key
+relays = ["wss://relay.damus.io", "wss://nos.lol"]
+```
+
+**On client (config-based):**
+```toml
+role = "client"
+mode = "ice-nostr"
+
+[nostr]
+nsec = "nsec1..."
+peer_npub = "npub1..."  # Server's public key
+relays = ["wss://relay.damus.io", "wss://nos.lol"]
+target = "127.0.0.1:22"
+```
+
+Run tunnel on both peers:
+```bash
+tunnel-rs server --default-config
+tunnel-rs client --default-config
 ```
 
 ## How It Works
@@ -900,14 +909,3 @@ All protocol modes and features are available on all platforms.
 7. QUIC connection established over ICE socket
 
 *Advantage: Receiver-initiated flow (like WireGuard) + automated signaling + full ICE NAT traversal.*
-
-### DCUtR Mode (Experimental)
-1. Both peers connect to signaling server and register
-2. Each peer measures RTT to signaling server (5 ping rounds)
-3. Client requests connection to server by peer ID
-4. Signaling server calculates synchronized start time based on RTT
-5. Both peers receive sync_connect notification with peer's ICE candidates
-6. Both peers begin ICE simultaneously at coordinated time (fast timing mode)
-7. QUIC connection established over ICE socket
-
-*Advantage: Timing coordination improves hole punch success. Self-hosted signaling (no third-party relays).*
