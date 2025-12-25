@@ -10,7 +10,7 @@
 
 # Required: validates config matches CLI command
 role = "client"
-mode = "iroh"  # or "iroh-manual", "custom-manual", or "nostr"
+mode = "iroh"  # or "ice-manual", or "ice-nostr"
 
 # All modes use client-initiated source requests with consistent config structure.
 # Each mode section has request_source and target fields.
@@ -38,7 +38,13 @@ relay_urls = [
 # NOTE: URL must include the /pkarr path
 # dns_server = "https://dns.example.com/pkarr"
 
-# [iroh-manual]
+# SOCKS5 proxy for relay connections
+# REQUIRED: If relay_urls contain .onion addresses, MUST use socks5h:// for DNS through proxy
+# OPTIONAL: For non-.onion relays, can use socks5:// or socks5h://
+# Use with Tor: socks5h://127.0.0.1:9050
+# socks5_proxy = "socks5h://127.0.0.1:9050"
+
+# [ice-manual]
 # # Client-initiated mode: request source from server, listen locally
 # # Source address to request from server (REQUIRED)
 # request_source = "tcp://127.0.0.1:22"
@@ -51,20 +57,7 @@ relay_urls = [
 #     "stun.services.mozilla.com:3478",
 # ]
 
-# [custom-manual]
-# # Client-initiated mode: request source from server, listen locally
-# # Source address to request from server (REQUIRED)
-# request_source = "tcp://127.0.0.1:22"
-# # Local address to listen on (REQUIRED)
-# target = "127.0.0.1:2222"
-# # Set to [] to disable STUN entirely
-# stun_servers = [
-#     "stun.l.google.com:19302",
-#     "stun1.l.google.com:19302",
-#     "stun.services.mozilla.com:3478",
-# ]
-
-# [nostr]
+# [ice-nostr]
 # # Your Nostr private key (generate with: tunnel-rs generate-nostr-key)
 # # Use either nsec or nsec_file (mutually exclusive; config validation will error if both are set)
 # # If using nsec_file, keep permissions tight (e.g., chmod 600) and do not commit to VCS.
@@ -92,10 +85,10 @@ relay_urls = [
 #     "stun.services.mozilla.com:3478",
 # ]
 #
-# # Source address to request from server (REQUIRED for nostr mode)
+# # Source address to request from server (REQUIRED for ice-nostr mode)
 # # Must be in server's allowed_sources list (--allowed-tcp or --allowed-udp)
 # # Can also use 'source' as an alias
 # request_source = "tcp://127.0.0.1:22"
 #
-# # Local address to listen on (REQUIRED for nostr mode)
+# # Local address to listen on (REQUIRED for ice-nostr mode)
 # target = "127.0.0.1:2222"

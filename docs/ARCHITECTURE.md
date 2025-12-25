@@ -7,10 +7,8 @@ This document provides a comprehensive overview of the tunnel-rs architecture, i
 - [System Overview](#system-overview)
 - [Mode Comparison](#mode-comparison)
 - [iroh Mode](#iroh-mode)
-- [iroh-manual Mode](#iroh-manual-mode)
-- [Custom-Manual Mode](#custom-manual-mode)
-- [Nostr Mode](#nostr-mode)
-- [DCUtR Mode (Experimental)](#dcutr-mode-experimental)
+- [ice-manual Mode](#ice-manual-mode)
+- [ice-nostr Mode](#ice-nostr-mode)
 - [Configuration System](#configuration-system)
 - [Security Model](#security-model)
 - [Protocol Support](#protocol-support)
@@ -21,7 +19,7 @@ This document provides a comprehensive overview of the tunnel-rs architecture, i
 
 ## System Overview
 
-tunnel-rs is a P2P TCP/UDP port forwarding tool that supports four distinct operational modes, each optimized for different use cases and network environments.
+tunnel-rs is a P2P TCP/UDP port forwarding tool that supports multiple distinct operational modes, each optimized for different use cases and network environments.
 
 > **Design Goal:** The project's primary goal is to provide a convenient way to connect to different networks for development or homelab purposes without the hassle and security risk of opening a port. It is **not** meant for production setups or designed to be performant at scale.
 
@@ -29,45 +27,33 @@ tunnel-rs is a P2P TCP/UDP port forwarding tool that supports four distinct oper
 graph TB
     subgraph "tunnel-rs Modes"
         A[iroh]
-        B[iroh-manual]
-        C[custom-manual]
-        D2[nostr]
-        D3[dcutr<br/>experimental]
+        C[ice-manual]
+        D2[ice-nostr]
     end
 
     subgraph "Use Cases"
-        D[Persistent<br/>Always-on tunnels]
-        E[Serverless<br/>Simple NATs]
-        F[Best NAT Traversal<br/>Symmetric NATs]
+        D[Persistent<br/>Best NAT Traversal]
+        F[Manual Signaling<br/>Full ICE]
         F2[Automated Signaling<br/>Static Keys]
-        F3[Timing Coordination<br/>Self-hosted]
     end
 
     subgraph "Infrastructure"
         G[Pkarr/DNS<br/>Relay Servers]
-        H[STUN Only]
         I[STUN Only]
         I2[STUN + Nostr Relays]
-        I3[STUN + Signaling Server]
     end
 
     A --> D
-    B --> E
     C --> F
     D2 --> F2
-    D3 --> F3
 
     A --> G
-    B --> H
     C --> I
     D2 --> I2
-    D3 --> I3
 
     style A fill:#4CAF50
-    style B fill:#2196F3
     style C fill:#FF9800
     style D2 fill:#9C27B0
-    style D3 fill:#607D8B
 ```
 
 ### Core Components
@@ -118,7 +104,7 @@ graph LR
 
 ## Mode Comparison
 
-> **Tip for Containerized Environments:** Use `iroh` mode for Docker, Kubernetes, and cloud VM deployments. It includes relay fallback which ensures connectivity even when both peers are behind restrictive NATs (common in cloud environments). The `nostr`, `custom-manual`, and `iroh-manual` modes use STUN-only NAT traversal which may fail in these environments.
+> **Tip for Containerized Environments:** Use `iroh` mode for Docker, Kubernetes, and cloud VM deployments. It includes relay fallback which ensures connectivity even when both peers are behind restrictive NATs (common in cloud environments). The `ice-nostr` and `ice-manual` modes use STUN-only NAT traversal which may fail in these environments.
 
 ### Feature Matrix
 
@@ -130,31 +116,19 @@ graph TD
         A3[Setup: Minimal - EndpointId required]
         A4[Infrastructure: Required]
     end
-    
-    subgraph "iroh-manual"
-        B1[Discovery: Copy-Paste]
-        B2[NAT: STUN Heuristic]
-        B3[Setup: Manual Exchange]
-        B4[Infrastructure: STUN Only]
-    end
-    
-    subgraph "custom-manual"
+
+    subgraph "ice-manual"
         C1[Discovery: Copy-Paste]
         C2[NAT: Full ICE]
         C3[Setup: Manual Exchange]
         C4[Infrastructure: STUN Only]
     end
-    
+
     style A1 fill:#C8E6C9
     style A2 fill:#C8E6C9
     style A3 fill:#C8E6C9
     style A4 fill:#FFCCBC
-    
-    style B1 fill:#BBDEFB
-    style B2 fill:#FFF9C4
-    style B3 fill:#BBDEFB
-    style B4 fill:#C8E6C9
-    
+
     style C1 fill:#FFE0B2
     style C2 fill:#C8E6C9
     style C3 fill:#FFE0B2
@@ -171,53 +145,36 @@ graph LR
         C[Port Restricted]
         D[Symmetric]
     end
-    
+
     subgraph "iroh"
         E1[✓ Direct/Relay]
         E2[✓ Direct/Relay]
         E3[✓ Direct/Relay]
         E4[✓ Relay]
     end
-    
-    subgraph "iroh-manual"
-        F1[✓ Direct]
-        F2[✓ Direct]
-        F3[✓ Direct]
-        F4[✗ May Fail]
-    end
-    
-    subgraph "custom-manual"
+
+    subgraph "ice-manual"
         G1[✓ Direct]
         G2[✓ Direct]
         G3[✓ Direct]
         G4[~ Best-effort<br/>may fail without relay]
     end
-    
+
     A --> E1
     B --> E2
     C --> E3
     D --> E4
-    
-    A --> F1
-    B --> F2
-    C --> F3
-    D --> F4
-    
+
     A --> G1
     B --> G2
     C --> G3
     D --> G4
-    
+
     style E1 fill:#C8E6C9
     style E2 fill:#C8E6C9
     style E3 fill:#C8E6C9
     style E4 fill:#C8E6C9
-    
-    style F1 fill:#C8E6C9
-    style F2 fill:#C8E6C9
-    style F3 fill:#C8E6C9
-    style F4 fill:#FFCCBC
-    
+
     style G1 fill:#C8E6C9
     style G2 fill:#C8E6C9
     style G3 fill:#C8E6C9
@@ -416,174 +373,9 @@ graph TB
 
 ---
 
-## iroh-manual Mode
+## ice-manual Mode
 
-### Architecture Overview
-
-```mermaid
-graph TB
-    subgraph "Sender Side"
-        A[tunnel-rs sender]
-        B[iroh Endpoint<br/>No Discovery]
-        C[STUN Client]
-        D[Target Service]
-    end
-    
-    subgraph "Receiver Side"
-        E[tunnel-rs receiver]
-        F[iroh Endpoint<br/>No Discovery]
-        G[STUN Client]
-        H[Local Client]
-    end
-    
-    subgraph "Manual Exchange"
-        I[Offer<br/>NodeId + Addresses]
-        J[Answer<br/>Addresses]
-    end
-    
-    A --> B
-    B --> C
-    B --> D
-    C -.Query.-> K[STUN Server]
-    
-    E --> F
-    F --> G
-    F --> H
-    G -.Query.-> K
-    
-    B --> I
-    I -.Copy/Paste.-> F
-    F --> J
-    J -.Copy/Paste.-> B
-    
-    B <-.Direct QUIC.-> F
-    
-    style A fill:#E8F5E9
-    style E fill:#E8F5E9
-    style B fill:#BBDEFB
-    style F fill:#BBDEFB
-    style I fill:#FFF9C4
-    style J fill:#FFF9C4
-```
-
-### Signaling Flow
-
-```mermaid
-sequenceDiagram
-    participant S as Sender
-    participant STUN as STUN Server
-    participant User as User (Copy/Paste)
-    participant R as Receiver
-    
-    Note over S: Start sender
-    S->>S: Create iroh Endpoint (no relay)
-    S->>STUN: STUN query
-    STUN-->>S: Public address
-    S->>S: Collect local addresses
-    
-    Note over S: Create Offer
-    S->>S: Encode NodeId + Addresses
-    S->>User: Display Offer Block
-    
-    Note over User: Copy offer
-    Note over R: Start receiver
-    R->>R: Create iroh Endpoint
-    R->>STUN: STUN query
-    STUN-->>R: Public address
-    
-    User->>R: Paste offer
-    R->>R: Decode NodeId + Addresses
-    R->>R: Create Answer with addresses
-    R->>User: Display Answer Block
-    
-    Note over User: Copy answer
-    User->>S: Paste answer
-    S->>S: Decode addresses
-    
-    par Connection Racing
-        S->>R: Attempt connect
-    and
-        R->>S: Attempt connect/accept
-    end
-    
-    Note over S,R: First successful connection wins
-    Note over S,R: QUIC tunnel established
-```
-
-### Offer/Answer Payload Structure
-
-```mermaid
-graph TB
-    subgraph "Offer Payload (v2)"
-        A[Version: 2]
-        B[NodeId: iroh EndpointId]
-        C[Addresses: Vec of SocketAddr]
-    end
-    
-    subgraph "Answer Payload (v2)"
-        D[Version: 2]
-        E[Addresses: Vec of SocketAddr]
-    end
-    
-    subgraph "Encoding"
-        F[Serialize to JSON]
-        G[Base64 Encode]
-        H[Add CRC32 Checksum]
-        I[Wrap in Markers]
-        J[Line Wrap at 76 chars]
-    end
-    
-    A --> F
-    B --> F
-    C --> F
-    F --> G
-    G --> H
-    H --> I
-    I --> J
-    
-    D --> F
-    E --> F
-    
-    style I fill:#FFF9C4
-    style J fill:#FFF9C4
-```
-
-### Connection Establishment
-
-```mermaid
-graph TB
-    subgraph "Sender"
-        A[Decode Answer] --> B[Extract Addresses]
-        B --> C[Create EndpointAddr]
-        C --> D[Add Static Provider]
-        D --> E[Attempt Connect]
-    end
-    
-    subgraph "Receiver"
-        F[Decode Offer] --> G[Extract NodeId + Addresses]
-        G --> H[Create EndpointAddr]
-        H --> I[Add Static Provider]
-        I --> J[Race: Connect + Accept]
-    end
-    
-    subgraph "Connection Racing"
-        E --> K{First Success}
-        J --> K
-        K --> L[QUIC Connection]
-    end
-    
-    L --> M[Open Bi-directional Stream]
-    M --> N[Begin Tunneling]
-    
-    style K fill:#C8E6C9
-    style L fill:#BBDEFB
-```
-
----
-
-## Custom-Manual Mode
-
-> **Note:** Custom-manual mode implements full ICE with STUN-only connectivity checks. TURN/relay servers are not implemented. This means symmetric NAT peers may still fail to establish a connection without a relay fallback mechanism.
+> **Note:** ice-manual mode implements full ICE with STUN-only connectivity checks. TURN/relay servers are not implemented. This means symmetric NAT peers may still fail to establish a connection without a relay fallback mechanism.
 
 ### Architecture Overview
 
@@ -878,11 +670,11 @@ graph TB
 
 ---
 
-## Nostr Mode
+## ice-nostr Mode
 
-Nostr mode combines the full ICE implementation from custom-manual mode with automated signaling via Nostr relays. Instead of manual copy-paste, ICE credentials are exchanged through Nostr events using static keypairs.
+Nostr mode combines the full ICE implementation from ice-manual mode with automated signaling via Nostr relays. Instead of manual copy-paste, ICE credentials are exchanged through Nostr events using static keypairs.
 
-> **Note for Containerized Environments:** Like custom-manual mode, nostr mode uses STUN-only NAT traversal without relay fallback. If both peers are behind restrictive NATs (common in Docker, Kubernetes, or cloud VMs), ICE connectivity may fail. For containerized deployments, consider using `iroh` mode which includes automatic relay fallback.
+> **Note for Containerized Environments:** Like ice-manual mode, nostr mode uses STUN-only NAT traversal without relay fallback. If both peers are behind restrictive NATs (common in Docker, Kubernetes, or cloud VMs), ICE connectivity may fail. For containerized deployments, consider using `iroh` mode which includes automatic relay fallback.
 
 ### Receiver-Initiated Dynamic Source
 
@@ -1112,129 +904,6 @@ graph TB
 
 ---
 
-## DCUtR Mode (Experimental)
-
-DCUtR mode provides timing-coordinated NAT hole punching using a lightweight signaling server. This mode aims to improve hole punch success rates by coordinating the exact moment both peers begin their connection attempts.
-
-> **Experimental:** This mode is under active development. For production use, prefer `iroh` mode which has relay fallback.
-
-### Architecture Overview
-
-```mermaid
-graph TB
-    subgraph "Server Side"
-        A[tunnel-rs server]
-        B[ICE Agent<br/>str0m]
-        C[QUIC Endpoint<br/>quinn]
-        D[Target Service]
-    end
-
-    subgraph "Signaling Server"
-        E[tunnel-rs-signaling]
-        F[RTT Measurement]
-        G[Timing Coordination]
-    end
-
-    subgraph "Client Side"
-        H[tunnel-rs client]
-        I[ICE Agent<br/>str0m]
-        J[QUIC Endpoint<br/>quinn]
-        K[Local Client]
-    end
-
-    A --> B
-    B --> C
-    C --> D
-
-    H --> I
-    I --> J
-    J --> K
-
-    A <-.TCP Signaling.-> E
-    H <-.TCP Signaling.-> E
-    E --> F
-    F --> G
-
-    B <-.ICE Checks.-> I
-    C <-.QUIC/TLS.-> J
-
-    style E fill:#607D8B
-    style F fill:#607D8B
-    style G fill:#607D8B
-    style A fill:#E8F5E9
-    style H fill:#E8F5E9
-```
-
-### Timing Coordination Flow
-
-```mermaid
-sequenceDiagram
-    participant S as Server
-    participant SS as Signaling Server
-    participant C as Client
-    participant STUN as STUN Server
-
-    Note over S: Register with signaling server
-    S->>SS: register(server_id)
-
-    loop RTT Measurement (5 rounds)
-        S->>SS: ping(seq, timestamp)
-        SS-->>S: pong + store client RTT
-        S->>S: Measure RTT locally
-        S->>SS: Send measured RTT in next ping
-    end
-
-    Note over C: Connect and request tunnel
-    C->>SS: register(client_id)
-
-    loop RTT Measurement (5 rounds)
-        C->>SS: ping(seq, timestamp)
-        SS-->>C: pong + store client RTT
-        C->>C: Measure RTT locally
-        C->>SS: Send measured RTT in next ping
-    end
-
-    C->>SS: connect_request(peer_id, candidates)
-
-    Note over SS: Calculate synchronized start time
-    SS->>SS: start_at = now + max(RTT_S, RTT_C)/2 + buffer
-
-    par Send sync_connect to both
-        SS->>S: sync_connect(peer_candidates, start_at)
-    and
-        SS->>C: sync_connect(peer_candidates, start_at)
-    end
-
-    Note over S,C: Both wait until start_at, then begin ICE
-
-    par Simultaneous ICE
-        S->>STUN: Gather candidates (fast timing)
-        C->>STUN: Gather candidates (fast timing)
-    end
-
-    S<-->C: ICE connectivity checks
-
-    Note over S,C: QUIC connection over ICE socket
-```
-
-### Key Implementation Details
-
-**True RTT Measurement:**
-- Client measures round-trip time locally (response_received - request_sent)
-- Client sends measured RTT to server in subsequent pings
-- Avoids clock synchronization issues between peers
-
-**Fast ICE Timing:**
-- Uses aggressive timing parameters for coordinated attempts
-- 20ms timing advance (vs 50ms standard)
-- 100ms initial STUN RTO (vs 250ms standard)
-- 1000ms max STUN RTO (vs 3000ms standard)
-
-**500ms Timing Buffer:**
-- Added to coordinated start time to account for clock skew, jitter, and processing
-
----
-
 ## Configuration System
 
 ### Configuration File Structure
@@ -1243,44 +912,54 @@ sequenceDiagram
 graph TB
     subgraph "Config File"
         A[role: sender/receiver]
-        B[mode: iroh/iroh-manual/custom-manual]
+        B[mode: iroh/ice-manual/ice-nostr]
         C[source/target: tcp://host:port or udp://host:port]
     end
-    
+
     subgraph "Mode Sections"
         E[iroh]
-        F[iroh-manual]
-        G[custom-manual]
+        G[ice-manual]
+        H[ice-nostr]
     end
-    
+
     subgraph "iroh Options"
-        H[secret_file]
-        I[relay_urls]
-        J[relay_only]
-        K[dns_server]
-        L[node_id - receiver only]
+        I[secret_file]
+        J[relay_urls]
+        K[relay_only]
+        L[dns_server]
+        M[node_id - receiver only]
     end
-    
-    subgraph "iroh-manual/custom-manual Options"
-        M[stun_servers]
+
+    subgraph "ice-manual Options"
+        N[stun_servers]
     end
-    
-    A --> N[Validation]
-    B --> N
-    N --> E
-    N --> F
-    N --> G
-    
-    E --> H
+
+    subgraph "ice-nostr Options"
+        O[nsec/nsec_file]
+        P[peer_npub]
+        Q[relays]
+        R[stun_servers]
+    end
+
+    A --> S[Validation]
+    B --> S
+    S --> E
+    S --> G
+    S --> H
+
     E --> I
     E --> J
     E --> K
     E --> L
-    
-    F --> M
-    G --> M
-    
-    style N fill:#FFF9C4
+    E --> M
+
+    G --> N
+    H --> O
+    H --> P
+    H --> Q
+    H --> R
+
+    style S fill:#FFF9C4
 ```
 
 ### Configuration Loading Flow
@@ -1388,21 +1067,15 @@ graph TB
         B --> C[EndpointId - Public Key]
         C --> D[Peer Authentication]
     end
-    
-    subgraph "iroh-manual Mode"
-        E[Ephemeral NodeId] --> F[Session Identity]
-        F --> G[TLS Certificate]
-    end
-    
-    subgraph "Custom Mode"
+
+    subgraph "ice-manual Mode"
         H[ICE Credentials] --> I[ufrag + pwd]
         I --> J[STUN Auth]
         J --> K[QUIC TLS]
     end
-    
+
     style B fill:#FFE0B2
     style C fill:#C8E6C9
-    style G fill:#C8E6C9
     style K fill:#C8E6C9
 ```
 
@@ -1633,24 +1306,16 @@ graph LR
         B[Connection: 0.5-2s]
         C[Total: 1.5-5s]
     end
-    
-    subgraph "iroh-manual"
-        D[STUN: 0.5-1s]
-        E[Manual: User dependent]
-        F[Connection: 0.5-1s]
-        G[Total: 1-2s + manual]
-    end
-    
-    subgraph "custom-manual"
+
+    subgraph "ice-manual"
         H[ICE Gather: 1-2s]
         I[Manual: User dependent]
         J[ICE Checks: 1-3s]
         K[QUIC: 0.5s]
         L[Total: 2.5-5.5s + manual]
     end
-    
+
     style C fill:#FFF9C4
-    style G fill:#C8E6C9
     style L fill:#FFF9C4
 ```
 
@@ -1676,9 +1341,8 @@ graph TB
     D -->|iroh| E{Relay available?}
     E -->|Yes| F[Fallback to relay]
     E -->|No| G[Connection failed]
-    
-    D -->|iroh-manual| H[STUN/Racing failed]
-    D -->|custom-manual| I[ICE checks failed]
+
+    D -->|ice-manual| I[ICE checks failed]
     
     F --> C
     H --> G
@@ -1702,10 +1366,8 @@ graph TB
 | Mode | Multi-Session | Dynamic Source | Description |
 |------|---------------|----------------|-------------|
 | `iroh` | **Yes** | **Yes** | Multiple receivers, receiver specifies `--source` |
-| `nostr` | **Yes** | **Yes** | Multiple receivers, receiver specifies `--source` |
-| `iroh-manual` | No | **Yes** | Single session, receiver specifies `--source` |
-| `custom-manual` | No | **Yes** | Single session, receiver specifies `--source` |
-| `dcutr` | No | **Yes** | Single session, timing-coordinated (experimental) |
+| `ice-nostr` | **Yes** | **Yes** | Multiple receivers, receiver specifies `--source` |
+| `ice-manual` | No | **Yes** | Single session, receiver specifies `--source` |
 
 **Multi-Session** = Multiple concurrent connections to the same sender
 **Dynamic Source** = Receiver specifies which service to tunnel (via `--source`)
@@ -1714,13 +1376,13 @@ graph TB
 
 ## Current Limitations
 
-### Single Session (Manual Signaling Modes)
+### Single Session (Manual Signaling Mode)
 
-The `iroh-manual` and `custom-manual` modes currently support only one tunnel session at a time per sender instance. Each signaling exchange establishes exactly one tunnel.
+The `ice-manual` mode currently supports only one tunnel session at a time per sender instance. Each signaling exchange establishes exactly one tunnel.
 
 ```mermaid
 graph TB
-    subgraph "iroh-manual/custom-manual Behavior"
+    subgraph "ice-manual Behavior"
         A[Sender starts] --> B[Wait for receiver offer]
         B --> C[Validate source request]
         C --> D[Establish single tunnel]
@@ -1730,7 +1392,6 @@ graph TB
 
     subgraph "Workarounds"
         G[Run multiple sender instances]
-        H[Use different keypairs per tunnel]
         I[Use iroh mode]
     end
 
@@ -1739,14 +1400,13 @@ graph TB
 ```
 
 **Why this limitation exists:**
-- Manual signaling modes perform a single offer/answer exchange
+- Manual signaling mode performs a single offer/answer exchange
 - The sender enters a connection handling loop after establishing the tunnel
 - No mechanism to accept additional signaling while serving existing tunnel
 
 **Workarounds:**
 - Use `iroh` mode for multi-receiver support
 - Run separate sender instances for each tunnel
-- Use different keypairs for independent tunnels
 
 See [Roadmap](ROADMAP.md) for planned multi-session support.
 

@@ -2,7 +2,7 @@
 //!
 //! Configuration structure:
 //! - `role` and `mode` fields for validation
-//! - Mode-specific sections: [iroh], [iroh-manual], [custom-manual], [nostr]
+//! - Mode-specific sections: [iroh], [ice-manual], [ice-nostr]
 //! - All modes use client-initiated source requests
 //!
 //! Role-based field semantics are enforced by `validate()` at parse time:
@@ -47,29 +47,12 @@ pub struct IrohConfig {
     /// Local address to listen on (client only).
     /// Format: host:port
     pub target: Option<String>,
+    /// SOCKS5 proxy URL for relay connections (e.g., socks5://127.0.0.1:9050).
+    /// Required when using .onion relay URLs with Tor.
+    pub socks5_proxy: Option<String>,
 }
 
-/// iroh-manual mode configuration.
-///
-/// Some fields are role-specific (enforced by validate()):
-/// - Server-only: `allowed_sources`
-/// - Client-only: `request_source`, `target`
-#[derive(Deserialize, Default, Clone)]
-pub struct IrohManualConfig {
-    pub stun_servers: Option<Vec<String>>,
-    /// Allowed source networks in CIDR notation (server only).
-    /// Clients must request sources within these networks.
-    pub allowed_sources: Option<AllowedSources>,
-    /// Source URL to request from server (client only, required).
-    /// Format: tcp://host:port or udp://host:port
-    #[serde(alias = "source")]
-    pub request_source: Option<String>,
-    /// Local address to listen on (client only, required).
-    /// Format: host:port (no protocol prefix)
-    pub target: Option<String>,
-}
-
-/// custom-manual mode configuration.
+/// ice-manual mode configuration.
 ///
 /// Some fields are role-specific (enforced by validate()):
 /// - Server-only: `allowed_sources`
@@ -101,7 +84,9 @@ pub struct AllowedSources {
     pub udp: Vec<String>,
 }
 
-/// nostr mode configuration.
+/// ice-nostr mode configuration (TOML section: `[ice-nostr]`).
+///
+/// ice-nostr provides full ICE with automated Nostr relay signaling for static peer key exchange.
 ///
 /// Some fields are role-specific (enforced by validate()):
 /// - Server-only: `allowed_sources`, `max_sessions`
@@ -144,10 +129,9 @@ pub struct ServerConfig {
 
     // Mode-specific sections
     pub iroh: Option<IrohConfig>,
-    #[serde(rename = "iroh-manual")]
-    pub iroh_manual: Option<IrohManualConfig>,
-    #[serde(rename = "custom-manual")]
-    pub custom_manual: Option<CustomManualConfig>,
+    #[serde(rename = "ice-manual")]
+    pub ice_manual: Option<CustomManualConfig>,
+    #[serde(rename = "ice-nostr")]
     pub nostr: Option<NostrConfig>,
 }
 
@@ -160,10 +144,9 @@ pub struct ClientConfig {
 
     // Mode-specific sections (each mode has its own target field)
     pub iroh: Option<IrohConfig>,
-    #[serde(rename = "iroh-manual")]
-    pub iroh_manual: Option<IrohManualConfig>,
-    #[serde(rename = "custom-manual")]
-    pub custom_manual: Option<CustomManualConfig>,
+    #[serde(rename = "ice-manual")]
+    pub ice_manual: Option<CustomManualConfig>,
+    #[serde(rename = "ice-nostr")]
     pub nostr: Option<NostrConfig>,
 }
 
@@ -244,6 +227,59 @@ fn validate_allowed_sources(allowed: &AllowedSources) -> Result<()> {
     Ok(())
 }
 
+/// Validate that a string is a valid SOCKS5 proxy URL.
+///
+/// - When relay_urls contain `.onion` addresses, requires `socks5h://` scheme for DNS resolution through proxy
+/// - Otherwise, accepts both `socks5://` and `socks5h://` schemes:
+///   - `socks5://host:port` - Basic SOCKS5 proxy
+///   - `socks5h://host:port` - SOCKS5 with remote DNS resolution (recommended for .onion addresses)
+fn validate_socks5_proxy(value: &str, relay_urls: Option<&Vec<String>>) -> Result<()> {
+    let url = url::Url::parse(value)
+        .with_context(|| format!("Invalid socks5_proxy '{}'. Expected format: socks5://host:port or socks5h://host:port", value))?;
+
+    let scheme = url.scheme();
+
+    // Check if any relay URLs contain .onion addresses (by checking host component)
+    let has_onion_relay = relay_urls.map_or(false, |urls| {
+        urls.iter().any(|u| {
+            url::Url::parse(u)
+                .ok()
+                .and_then(|parsed| parsed.host_str().map(|h| h.ends_with(".onion")))
+                .unwrap_or(false)
+        })
+    });
+
+    if has_onion_relay {
+        // For .onion relays, socks5h:// is required for DNS resolution through proxy
+        if scheme != "socks5h" {
+            anyhow::bail!(
+                "Invalid socks5_proxy scheme '{}'. When using .onion relay URLs, \
+                 socks5h:// scheme (with remote DNS resolution) is required. \
+                 Change socks5_proxy to use 'socks5h://host:port' format.",
+                scheme
+            );
+        }
+    } else {
+        // For non-.onion relays, both schemes are acceptable
+        if scheme != "socks5" && scheme != "socks5h" {
+            anyhow::bail!(
+                "Invalid socks5_proxy scheme '{}'. Must be 'socks5' or 'socks5h'",
+                scheme
+            );
+        }
+    }
+
+    if url.host_str().is_none() {
+        anyhow::bail!("socks5_proxy '{}' missing host", value);
+    }
+
+    if url.port().is_none() {
+        anyhow::bail!("socks5_proxy '{}' missing port", value);
+    }
+
+    Ok(())
+}
+
 // ============================================================================
 // Config Accessor Methods
 // ============================================================================
@@ -252,16 +288,6 @@ impl ServerConfig {
     /// Get iroh config section (multi-source mode).
     pub fn iroh(&self) -> Option<&IrohConfig> {
         self.iroh.as_ref()
-    }
-
-    /// Get iroh-manual config section (single-target mode).
-    pub fn iroh_manual(&self) -> Option<&IrohManualConfig> {
-        self.iroh_manual.as_ref()
-    }
-
-    /// Get custom-manual config section (single-target mode).
-    pub fn custom_manual(&self) -> Option<&CustomManualConfig> {
-        self.custom_manual.as_ref()
     }
 
     /// Get nostr config section.
@@ -289,7 +315,7 @@ impl ServerConfig {
         }
 
         let mode = self.mode.as_deref().context(
-            "Config file missing required 'mode' field. Add: mode = \"iroh\" (or iroh-manual, custom-manual, nostr)",
+            "Config file missing required 'mode' field. Add: mode = \"iroh\" (or \"ice-manual\", \"ice-nostr\")",
         )?;
         if mode != expected_mode {
             anyhow::bail!(
@@ -301,8 +327,8 @@ impl ServerConfig {
 
         // Validate mode is known
         match expected_mode {
-            "iroh" | "iroh-manual" | "custom-manual" | "nostr" => {}
-            _ => anyhow::bail!("Unknown mode '{}'. Valid modes: iroh, iroh-manual, custom-manual, nostr", expected_mode),
+            "iroh" | "ice-manual" | "ice-nostr" => {}
+            _ => anyhow::bail!("Unknown mode '{}'. Valid modes: iroh, ice-manual, ice-nostr", expected_mode),
         }
 
         // Mode-specific validation
@@ -329,6 +355,10 @@ impl ServerConfig {
                 if let Some(ref allowed) = iroh.allowed_sources {
                     validate_allowed_sources(allowed)?;
                 }
+                // Validate SOCKS5 proxy URL format if present
+                if let Some(ref proxy) = iroh.socks5_proxy {
+                    validate_socks5_proxy(proxy, iroh.relay_urls.as_ref()).context("[iroh] Invalid SOCKS5 proxy URL")?;
+                }
             }
             // Server iroh mode should not have top-level source
             if self.source.is_some() {
@@ -338,15 +368,15 @@ impl ServerConfig {
                 );
             }
         }
-        if expected_mode == "nostr" {
+        if expected_mode == "ice-nostr" {
             if let Some(ref nostr) = self.nostr {
                 if nostr.nsec.is_some() && nostr.nsec_file.is_some() {
-                    anyhow::bail!("[nostr] Use only one of 'nsec' or 'nsec_file'.");
+                    anyhow::bail!("[ice-nostr] Use only one of 'nsec' or 'nsec_file'.");
                 }
                 // Reject client-only fields
-                if nostr.request_source.is_some() {
+                if nostr.request_source.is_some() || nostr.target.is_some() {
                     anyhow::bail!(
-                        "[nostr] 'source' / 'request_source' is a client-only field. \
+                        "[ice-nostr] 'source' / 'request_source' / 'target' are client-only fields. \
                         Servers use 'allowed_sources' to restrict what clients can request."
                     );
                 }
@@ -355,55 +385,33 @@ impl ServerConfig {
                     validate_allowed_sources(allowed)?;
                 }
             }
-            // Server nostr mode should not have top-level source
+            // Server ice-nostr mode should not have top-level source
             if self.source.is_some() {
                 anyhow::bail!(
-                    "Top-level 'source' is not allowed for nostr server mode. \
-                    Use [nostr.allowed_sources] to restrict what clients can request."
+                    "Top-level 'source' is not allowed for ice-nostr server mode. \
+                    Use [ice-nostr.allowed_sources] to restrict what clients can request."
                 );
             }
         }
-        if expected_mode == "iroh-manual" {
-            if let Some(ref iroh_manual) = self.iroh_manual {
+        if expected_mode == "ice-manual" {
+            if let Some(ref ice_manual) = self.ice_manual {
                 // Reject client-only fields
-                if iroh_manual.request_source.is_some() || iroh_manual.target.is_some() {
+                if ice_manual.request_source.is_some() || ice_manual.target.is_some() {
                     anyhow::bail!(
-                        "[iroh-manual] 'source' / 'request_source' / 'target' are client-only fields. \
+                        "[ice-manual] 'source' / 'request_source' / 'target' are client-only fields. \
                         Servers use 'allowed_sources' to restrict what clients can request."
                     );
                 }
                 // Validate CIDR format
-                if let Some(ref allowed) = iroh_manual.allowed_sources {
+                if let Some(ref allowed) = ice_manual.allowed_sources {
                     validate_allowed_sources(allowed)?;
                 }
             }
-            // Reject top-level source for iroh-manual server
+            // Reject top-level source for ice-manual server
             if self.source.is_some() {
                 anyhow::bail!(
-                    "Top-level 'source' is not allowed for iroh-manual server mode. \
-                    Use [iroh-manual.allowed_sources] to restrict what clients can request."
-                );
-            }
-        }
-        if expected_mode == "custom-manual" {
-            if let Some(ref custom_manual) = self.custom_manual {
-                // Reject client-only fields
-                if custom_manual.request_source.is_some() || custom_manual.target.is_some() {
-                    anyhow::bail!(
-                        "[custom-manual] 'source' / 'request_source' / 'target' are client-only fields. \
-                        Servers use 'allowed_sources' to restrict what clients can request."
-                    );
-                }
-                // Validate CIDR format
-                if let Some(ref allowed) = custom_manual.allowed_sources {
-                    validate_allowed_sources(allowed)?;
-                }
-            }
-            // Reject top-level source for custom-manual server
-            if self.source.is_some() {
-                anyhow::bail!(
-                    "Top-level 'source' is not allowed for custom-manual server mode. \
-                    Use [custom-manual.allowed_sources] to restrict what clients can request."
+                    "Top-level 'source' is not allowed for ice-manual server mode. \
+                    Use [ice-manual.allowed_sources] to restrict what clients can request."
                 );
             }
         }
@@ -416,16 +424,6 @@ impl ClientConfig {
     /// Get iroh config section (multi-source mode).
     pub fn iroh(&self) -> Option<&IrohConfig> {
         self.iroh.as_ref()
-    }
-
-    /// Get iroh-manual config section (single-target mode).
-    pub fn iroh_manual(&self) -> Option<&IrohManualConfig> {
-        self.iroh_manual.as_ref()
-    }
-
-    /// Get custom-manual config section (single-target mode).
-    pub fn custom_manual(&self) -> Option<&CustomManualConfig> {
-        self.custom_manual.as_ref()
     }
 
     /// Get nostr config section.
@@ -453,7 +451,7 @@ impl ClientConfig {
         }
 
         let mode = self.mode.as_deref().context(
-            "Config file missing required 'mode' field. Add: mode = \"iroh\" (or iroh-manual, custom-manual, nostr)",
+            "Config file missing required 'mode' field. Add: mode = \"iroh\" (or \"ice-manual\", \"ice-nostr\")",
         )?;
         if mode != expected_mode {
             anyhow::bail!(
@@ -465,8 +463,8 @@ impl ClientConfig {
 
         // Validate mode is known
         match expected_mode {
-            "iroh" | "iroh-manual" | "custom-manual" | "nostr" => {}
-            _ => anyhow::bail!("Unknown mode '{}'. Valid modes: iroh, iroh-manual, custom-manual, nostr", expected_mode),
+            "iroh" | "ice-manual" | "ice-nostr" => {}
+            _ => anyhow::bail!("Unknown mode '{}'. Valid modes: iroh, ice-manual, ice-nostr", expected_mode),
         }
 
         // Mode-specific validation
@@ -497,23 +495,27 @@ impl ClientConfig {
                 if let Some(ref target) = iroh.target {
                     validate_host_port(target, "target")?;
                 }
+                // Validate SOCKS5 proxy URL format if present
+                if let Some(ref proxy) = iroh.socks5_proxy {
+                    validate_socks5_proxy(proxy, iroh.relay_urls.as_ref()).context("[iroh] Invalid SOCKS5 proxy URL")?;
+                }
             }
         }
-        if expected_mode == "nostr" {
+        if expected_mode == "ice-nostr" {
             if let Some(ref nostr) = self.nostr {
                 if nostr.nsec.is_some() && nostr.nsec_file.is_some() {
-                    anyhow::bail!("[nostr] Use only one of 'nsec' or 'nsec_file'.");
+                    anyhow::bail!("[ice-nostr] Use only one of 'nsec' or 'nsec_file'.");
                 }
                 // Reject server-only fields
                 if nostr.allowed_sources.is_some() {
                     anyhow::bail!(
-                        "[nostr] 'allowed_sources' is a server-only field. \
+                        "[ice-nostr] 'allowed_sources' is a server-only field. \
                         Clients use 'source' to specify what to request from server."
                     );
                 }
                 if nostr.max_sessions.is_some() {
                     anyhow::bail!(
-                        "[nostr] 'max_sessions' is a server-only field."
+                        "[ice-nostr] 'max_sessions' is a server-only field."
                     );
                 }
                 // Validate request_source URL format
@@ -527,40 +529,21 @@ impl ClientConfig {
             }
         }
 
-        if expected_mode == "iroh-manual" {
-            if let Some(ref iroh_manual) = self.iroh_manual {
+        if expected_mode == "ice-manual" {
+            if let Some(ref ice_manual) = self.ice_manual {
                 // Reject server-only fields
-                if iroh_manual.allowed_sources.is_some() {
+                if ice_manual.allowed_sources.is_some() {
                     anyhow::bail!(
-                        "[iroh-manual] 'allowed_sources' is a server-only field. \
+                        "[ice-manual] 'allowed_sources' is a server-only field. \
                         Clients use 'source' to specify what to request from server."
                     );
                 }
                 // Validate request_source URL format
-                if let Some(ref source) = iroh_manual.request_source {
+                if let Some(ref source) = ice_manual.request_source {
                     validate_tcp_udp_url(source, "request_source")?;
                 }
                 // Validate target format (host:port)
-                if let Some(ref target) = iroh_manual.target {
-                    validate_host_port(target, "target")?;
-                }
-            }
-        }
-        if expected_mode == "custom-manual" {
-            if let Some(ref custom_manual) = self.custom_manual {
-                // Reject server-only fields
-                if custom_manual.allowed_sources.is_some() {
-                    anyhow::bail!(
-                        "[custom-manual] 'allowed_sources' is a server-only field. \
-                        Clients use 'source' to specify what to request from server."
-                    );
-                }
-                // Validate request_source URL format
-                if let Some(ref source) = custom_manual.request_source {
-                    validate_tcp_udp_url(source, "request_source")?;
-                }
-                // Validate target format (host:port)
-                if let Some(ref target) = custom_manual.target {
+                if let Some(ref target) = ice_manual.target {
                     validate_host_port(target, "target")?;
                 }
             }

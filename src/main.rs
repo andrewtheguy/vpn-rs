@@ -4,31 +4,28 @@
 //! All modes use client-initiated source requests for consistent UX.
 //!
 //! Modes:
-//!   - iroh:         Automatic iroh P2P discovery with relay fallback
-//!   - iroh-manual:  Iroh with manual copy-paste signaling (client-first)
-//!   - custom-manual: Full ICE with manual signaling (best NAT traversal)
-//!   - nostr:        Full ICE with Nostr-based signaling
+//!   - iroh:        Automatic iroh P2P discovery with relay fallback (best NAT traversal)
+//!   - ice-manual:  Full ICE with manual signaling
+//!   - ice-nostr:   Full ICE with Nostr-based signaling
 //!
 //! Usage (iroh - automatic discovery):
 //!   tunnel-rs server iroh --allowed-tcp 127.0.0.0/8 --allowed-udp 10.0.0.0/8
 //!   tunnel-rs client iroh --node-id <NODE_ID> --source tcp://127.0.0.1:22 --target 127.0.0.1:2222
 //!
 //! Usage (manual modes - copy-paste signaling):
-//!   tunnel-rs client iroh-manual --source tcp://127.0.0.1:22 --target 127.0.0.1:2222
-//!   tunnel-rs server iroh-manual --allowed-tcp 127.0.0.0/8
-//!
-//!   tunnel-rs client custom-manual --source tcp://127.0.0.1:22 --target 127.0.0.1:2222
-//!   tunnel-rs server custom-manual --allowed-tcp 127.0.0.0/8
+//!   tunnel-rs client ice-manual --source tcp://127.0.0.1:22 --target 127.0.0.1:2222
+//!   tunnel-rs server ice-manual --allowed-tcp 127.0.0.0/8
 //!
 //! Usage (nostr - automated signaling):
-//!   tunnel-rs server nostr --allowed-tcp 127.0.0.0/8 --nsec <NSEC> --peer-npub <NPUB>
-//!   tunnel-rs client nostr --source tcp://127.0.0.1:22 --target 127.0.0.1:2222 --nsec <NSEC> --peer-npub <NPUB>
+//!   tunnel-rs server ice-nostr --allowed-tcp 127.0.0.0/8 --nsec <NSEC> --peer-npub <NPUB>
+//!   tunnel-rs client ice-nostr --source tcp://127.0.0.1:22 --target 127.0.0.1:2222 --nsec <NSEC> --peer-npub <NPUB>
 
 use tunnel_rs::config;
 use tunnel_rs::custom;
 use tunnel_rs::iroh;
 use tunnel_rs::nostr;
 use tunnel_rs::secret;
+use tunnel_rs::socks5_bridge;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
@@ -284,30 +281,14 @@ enum ServerMode {
         /// Custom DNS server URL for peer discovery
         #[arg(long)]
         dns_server: Option<String>,
-    },
-    /// Client-initiated mode: iroh with STUN-based manual signaling (may fail on symmetric NAT)
-    #[command(name = "iroh-manual")]
-    IrohManual {
-        /// Allowed TCP source networks in CIDR notation (repeatable)
-        /// E.g., --allowed-tcp 127.0.0.0/8 --allowed-tcp 192.168.0.0/16
-        #[arg(long = "allowed-tcp")]
-        allowed_tcp: Vec<String>,
 
-        /// Allowed UDP source networks in CIDR notation (repeatable)
-        /// E.g., --allowed-udp 10.0.0.0/8 --allowed-udp ::1/128
-        #[arg(long = "allowed-udp")]
-        allowed_udp: Vec<String>,
-
-        /// STUN server (repeatable, e.g., stun.l.google.com:19302)
-        #[arg(long = "stun-server")]
-        stun_servers: Vec<String>,
-
-        /// Disable STUN (no external infrastructure)
+        /// SOCKS5 proxy for relay connections (required for .onion URLs)
+        /// E.g., socks5://127.0.0.1:9050 for Tor
         #[arg(long)]
-        no_stun: bool,
+        socks5_proxy: Option<String>,
     },
-    /// Client-initiated mode: Full ICE with manual signaling - best NAT traversal (str0m+quinn)
-    #[command(name = "custom-manual")]
+    /// Client-initiated mode: Full ICE with manual signaling (str0m+quinn)
+    #[command(name = "ice-manual")]
     CustomManual {
         /// Allowed TCP source networks in CIDR notation (repeatable)
         /// E.g., --allowed-tcp 127.0.0.0/8 --allowed-tcp 192.168.0.0/16
@@ -328,6 +309,7 @@ enum ServerMode {
         no_stun: bool,
     },
     /// Full ICE with Nostr-based signaling (WireGuard-like static keys)
+    #[command(name = "ice-nostr")]
     Nostr {
         /// Allowed TCP source networks in CIDR notation (repeatable)
         /// E.g., --allowed-tcp 127.0.0.0/8 --allowed-tcp 192.168.0.0/16
@@ -375,30 +357,6 @@ enum ServerMode {
         #[arg(long, default_value = "10")]
         max_sessions: usize,
     },
-    /// Full ICE with DCUtR signaling server (coordinated NAT hole punching)
-    #[command(name = "dcutr")]
-    DCUtR {
-        /// Source address to forward to (tcp://host:port or udp://host:port)
-        /// E.g., --source tcp://127.0.0.1:22 or --source udp://127.0.0.1:51820
-        #[arg(short, long)]
-        source: Option<String>,
-
-        /// DCUtR signaling server address (host:port)
-        #[arg(long)]
-        signaling_server: Option<String>,
-
-        /// Server ID to register with signaling server
-        #[arg(long)]
-        server_id: Option<String>,
-
-        /// STUN server (repeatable, e.g., stun.l.google.com:19302)
-        #[arg(long = "stun-server")]
-        stun_servers: Vec<String>,
-
-        /// Disable STUN (no external infrastructure)
-        #[arg(long)]
-        no_stun: bool,
-    },
 }
 
 #[derive(Subcommand)]
@@ -432,29 +390,14 @@ enum ClientMode {
         /// Custom DNS server URL for peer discovery
         #[arg(long)]
         dns_server: Option<String>,
-    },
-    /// Client-initiated mode: iroh with STUN-based manual signaling (may fail on symmetric NAT)
-    #[command(name = "iroh-manual")]
-    IrohManual {
-        /// Source address to request from server (tcp://host:port or udp://host:port)
-        /// The server must have this in its --allowed-tcp or --allowed-udp list
-        #[arg(short, long)]
-        source: Option<String>,
 
-        /// Local address to listen on (e.g., 127.0.0.1:2222)
-        #[arg(short, long)]
-        target: Option<String>,
-
-        /// STUN server (repeatable, e.g., stun.l.google.com:19302)
-        #[arg(long = "stun-server")]
-        stun_servers: Vec<String>,
-
-        /// Disable STUN (no external infrastructure)
+        /// SOCKS5 proxy for relay connections (required for .onion URLs)
+        /// E.g., socks5://127.0.0.1:9050 for Tor
         #[arg(long)]
-        no_stun: bool,
+        socks5_proxy: Option<String>,
     },
-    /// Client-initiated mode: Full ICE with manual signaling - best NAT traversal (str0m+quinn)
-    #[command(name = "custom-manual")]
+    /// Client-initiated mode: Full ICE with manual signaling (str0m+quinn)
+    #[command(name = "ice-manual")]
     CustomManual {
         /// Source address to request from server (tcp://host:port or udp://host:port)
         /// The server must have this in its --allowed-tcp or --allowed-udp list
@@ -474,6 +417,7 @@ enum ClientMode {
         no_stun: bool,
     },
     /// Full ICE with Nostr-based signaling (WireGuard-like static keys)
+    #[command(name = "ice-nostr")]
     Nostr {
         /// Local address to listen on (e.g., 127.0.0.1:2222 for TCP, udp://127.0.0.1:5353 for UDP)
         #[arg(short, long)]
@@ -515,33 +459,6 @@ enum ClientMode {
         /// Maximum time in seconds to wait for offer before giving up (default: 120)
         #[arg(long, default_value = "120")]
         max_wait: u64,
-    },
-    /// Full ICE with DCUtR signaling server (coordinated NAT hole punching)
-    #[command(name = "dcutr")]
-    DCUtR {
-        /// Local address to listen on (e.g., 127.0.0.1:2222)
-        #[arg(short, long)]
-        target: Option<String>,
-
-        /// DCUtR signaling server address (host:port)
-        #[arg(long)]
-        signaling_server: Option<String>,
-
-        /// Target peer ID to connect to
-        #[arg(long)]
-        peer_id: Option<String>,
-
-        /// Our client ID (auto-generated if not specified)
-        #[arg(long)]
-        client_id: Option<String>,
-
-        /// STUN server (repeatable). Uses default servers if not specified.
-        #[arg(long = "stun-server")]
-        stun_servers: Vec<String>,
-
-        /// Disable STUN (no external infrastructure)
-        #[arg(long)]
-        no_stun: bool,
     },
 }
 
@@ -600,17 +517,15 @@ async fn main() -> Result<()> {
             let effective_mode = match (&mode, &cfg.mode) {
                 (Some(_), _) => mode.as_ref().map(|m| match m {
                     ServerMode::Iroh { .. } => "iroh",
-                    ServerMode::IrohManual { .. } => "iroh-manual",
-                    ServerMode::CustomManual { .. } => "custom-manual",
-                    ServerMode::Nostr { .. } => "nostr",
-                    ServerMode::DCUtR { .. } => "dcutr",
+                    ServerMode::CustomManual { .. } => "ice-manual",
+                    ServerMode::Nostr { .. } => "ice-nostr",
                 }),
                 (None, Some(m)) => Some(m.as_str()),
                 (None, None) => None,
             };
 
             let effective_mode = effective_mode.context(
-                "No mode specified. Either use a subcommand (iroh, iroh-manual, custom-manual, nostr, dcutr) or provide a config file with 'mode' field.",
+                "No mode specified. Either use a subcommand (iroh, ice-manual, ice-nostr) or provide a config file with 'mode' field.",
             )?;
 
             // Validate config if loaded from file
@@ -622,8 +537,8 @@ async fn main() -> Result<()> {
                 "iroh" => {
                     let iroh_cfg = cfg.iroh();
                     // Extract common fields (relay_only is CLI-only, requires test-utils feature)
-                    let (allowed_tcp, allowed_udp, max_sessions, secret, secret_file, relay_urls, dns_server) = match &mode {
-                        Some(ServerMode::Iroh { allowed_tcp: at, allowed_udp: au, max_sessions: ms, secret: se, secret_file: sf, relay_urls: r, dns_server: d, .. }) => {
+                    let (allowed_tcp, allowed_udp, max_sessions, secret, secret_file, relay_urls, dns_server, socks5_proxy) = match &mode {
+                        Some(ServerMode::Iroh { allowed_tcp: at, allowed_udp: au, max_sessions: ms, secret: se, secret_file: sf, relay_urls: r, dns_server: d, socks5_proxy: sp, .. }) => {
                             let cfg_allowed = iroh_cfg.and_then(|c| c.allowed_sources.clone()).unwrap_or_default();
                             let cfg_secret = iroh_cfg.and_then(|c| c.secret.clone());
                             let cfg_secret_file = iroh_cfg.and_then(|c| c.secret_file.clone());
@@ -640,6 +555,7 @@ async fn main() -> Result<()> {
                                 secret_file,
                                 if r.is_empty() { iroh_cfg.and_then(|c| c.relay_urls.clone()).unwrap_or_default() } else { r.clone() },
                                 d.clone().or_else(|| iroh_cfg.and_then(|c| c.dns_server.clone())),
+                                sp.clone().or_else(|| iroh_cfg.and_then(|c| c.socks5_proxy.clone())),
                             )
                         }
                         _ => {
@@ -652,6 +568,7 @@ async fn main() -> Result<()> {
                                 iroh_cfg.and_then(|c| c.secret_file.clone()),
                                 iroh_cfg.and_then(|c| c.relay_urls.clone()).unwrap_or_default(),
                                 iroh_cfg.and_then(|c| c.dns_server.clone()),
+                                iroh_cfg.and_then(|c| c.socks5_proxy.clone()),
                             )
                         },
                     };
@@ -666,37 +583,16 @@ async fn main() -> Result<()> {
 
                     let secret = resolve_iroh_secret(secret, secret_file)?;
 
+                    // Set up SOCKS5 bridges for .onion relay URLs
+                    let (relay_urls, _bridges) = socks5_bridge::setup_relay_bridges(
+                        relay_urls,
+                        socks5_proxy.as_deref(),
+                    ).await?;
+
                     iroh::run_multi_source_server(allowed_tcp, allowed_udp, max_sessions, secret, relay_urls, relay_only, dns_server).await
                 }
-                "iroh-manual" => {
-                    let manual_cfg = cfg.iroh_manual();
-                    let (allowed_tcp, allowed_udp, stun_servers) = match &mode {
-                        Some(ServerMode::IrohManual { allowed_tcp: at, allowed_udp: au, stun_servers: ss, no_stun }) => {
-                            let cfg_allowed = manual_cfg.and_then(|c| c.allowed_sources.clone()).unwrap_or_default();
-                            (
-                                if at.is_empty() { cfg_allowed.tcp.clone() } else { at.clone() },
-                                if au.is_empty() { cfg_allowed.udp.clone() } else { au.clone() },
-                                resolve_stun_servers(ss, manual_cfg.and_then(|c| c.stun_servers.clone()), *no_stun)?,
-                            )
-                        },
-                        _ => {
-                            let cfg_allowed = manual_cfg.and_then(|c| c.allowed_sources.clone()).unwrap_or_default();
-                            (
-                                cfg_allowed.tcp.clone(),
-                                cfg_allowed.udp.clone(),
-                                resolve_stun_servers(&[], manual_cfg.and_then(|c| c.stun_servers.clone()), false)?,
-                            )
-                        },
-                    };
-
-                    if allowed_tcp.is_empty() && allowed_udp.is_empty() {
-                        anyhow::bail!("At least one of --allowed-tcp or --allowed-udp is required for iroh-manual server");
-                    }
-
-                    iroh::run_iroh_manual_server(allowed_tcp, allowed_udp, stun_servers).await
-                }
-                "custom-manual" => {
-                    let custom_cfg = cfg.custom_manual();
+                "ice-manual" => {
+                    let custom_cfg = cfg.ice_manual.as_ref();
                     let (allowed_tcp, allowed_udp, stun_servers) = match &mode {
                         Some(ServerMode::CustomManual { allowed_tcp: at, allowed_udp: au, stun_servers: ss, no_stun }) => {
                             let cfg_allowed = custom_cfg.and_then(|c| c.allowed_sources.clone()).unwrap_or_default();
@@ -722,7 +618,7 @@ async fn main() -> Result<()> {
 
                     custom::run_manual_server(allowed_tcp, allowed_udp, stun_servers).await
                 }
-                "nostr" => {
+                "ice-nostr" => {
                     let nostr_cfg = cfg.nostr();
                     let (allowed_tcp, allowed_udp, stun_servers, nsec, nsec_file, peer_npub, relays, republish_interval, max_wait, max_sessions) = match &mode {
                         Some(ServerMode::Nostr { allowed_tcp: at, allowed_udp: au, stun_servers: ss, no_stun, nsec: n, nsec_file: nf, peer_npub: p, relays: r, republish_interval: ri, max_wait: mw, max_sessions: ms }) => {
@@ -786,48 +682,7 @@ async fn main() -> Result<()> {
                     // Run both TCP and UDP senders concurrently
                     nostr::run_nostr_server(allowed_tcp, allowed_udp, stun_servers, nsec, peer_npub, relays, republish_interval, max_wait, max_sessions).await
                 }
-                "dcutr" => {
-                    // Extract DCUtR-specific args from CLI
-                    let (source, signaling_server, server_id, stun_servers) = match &mode {
-                        Some(ServerMode::DCUtR { source: src, signaling_server: ss, server_id: si, stun_servers: stun, no_stun }) => {
-                            (
-                                src.clone(),
-                                ss.clone(),
-                                si.clone(),
-                                resolve_stun_servers(stun, None, *no_stun)?,
-                            )
-                        },
-                        _ => {
-                            // Fallback to empty defaults (would require config support)
-                            (
-                                None,
-                                None,
-                                None,
-                                resolve_stun_servers(&[], None, false)?,
-                            )
-                        },
-                    };
-
-                    // Require source
-                    let source = source.context(
-                        "--source is required for dcutr server mode. Specify the source address (e.g., --source tcp://127.0.0.1:22)"
-                    )?;
-
-                    // Require signaling server
-                    let signaling_server = signaling_server.context(
-                        "signaling-server is required for dcutr mode. Provide via --signaling-server."
-                    )?;
-
-                    // Determine protocol from source
-                    let (protocol, _) = parse_endpoint(&source)
-                        .with_context(|| format!("Invalid source '{}'. Expected format: tcp://host:port or udp://host:port", source))?;
-
-                    match protocol {
-                        Protocol::Tcp => custom::run_dcutr_tcp_server(source, signaling_server, server_id, stun_servers).await,
-                        Protocol::Udp => custom::run_dcutr_udp_server(source, signaling_server, server_id, stun_servers).await,
-                    }
-                }
-                _ => anyhow::bail!("Invalid mode '{}'. Use: iroh, iroh-manual, custom-manual, nostr, or dcutr", effective_mode),
+                _ => anyhow::bail!("Invalid mode '{}'. Use: iroh, ice-manual, or ice-nostr", effective_mode),
             }
         }
         Command::Client {
@@ -841,17 +696,15 @@ async fn main() -> Result<()> {
             let effective_mode = match (&mode, &cfg.mode) {
                 (Some(_), _) => mode.as_ref().map(|m| match m {
                     ClientMode::Iroh { .. } => "iroh",
-                    ClientMode::IrohManual { .. } => "iroh-manual",
-                    ClientMode::CustomManual { .. } => "custom-manual",
-                    ClientMode::Nostr { .. } => "nostr",
-                    ClientMode::DCUtR { .. } => "dcutr",
+                    ClientMode::CustomManual { .. } => "ice-manual",
+                    ClientMode::Nostr { .. } => "ice-nostr",
                 }),
                 (None, Some(m)) => Some(m.as_str()),
                 (None, None) => None,
             };
 
             let effective_mode = effective_mode.context(
-                "No mode specified. Either use a subcommand (iroh, iroh-manual, custom-manual, nostr, dcutr) or provide a config file with 'mode' field.",
+                "No mode specified. Either use a subcommand (iroh, ice-manual, ice-nostr) or provide a config file with 'mode' field.",
             )?;
 
             // Validate config if loaded from file
@@ -864,13 +717,14 @@ async fn main() -> Result<()> {
                     let iroh_cfg = cfg.iroh();
                     // Override with CLI values if provided
                     // Note: relay_only is CLI-only (not in config), requires test-utils feature
-                    let (node_id, source, target, relay_urls, dns_server) = match &mode {
-                        Some(ClientMode::Iroh { node_id: n, source: src, target: t, relay_urls: r, dns_server: d, .. }) => (
+                    let (node_id, source, target, relay_urls, dns_server, socks5_proxy) = match &mode {
+                        Some(ClientMode::Iroh { node_id: n, source: src, target: t, relay_urls: r, dns_server: d, socks5_proxy: sp, .. }) => (
                             n.clone().or_else(|| iroh_cfg.and_then(|c| c.node_id.clone())),
                             normalize_optional_endpoint(src.clone()).or_else(|| iroh_cfg.and_then(|c| c.request_source.clone())),
                             t.clone().or_else(|| iroh_cfg.and_then(|c| c.target.clone())),
                             if r.is_empty() { iroh_cfg.and_then(|c| c.relay_urls.clone()).unwrap_or_default() } else { r.clone() },
                             d.clone().or_else(|| iroh_cfg.and_then(|c| c.dns_server.clone())),
+                            sp.clone().or_else(|| iroh_cfg.and_then(|c| c.socks5_proxy.clone())),
                         ),
                         _ => (
                             iroh_cfg.and_then(|c| c.node_id.clone()),
@@ -878,6 +732,7 @@ async fn main() -> Result<()> {
                             iroh_cfg.and_then(|c| c.target.clone()),
                             iroh_cfg.and_then(|c| c.relay_urls.clone()).unwrap_or_default(),
                             iroh_cfg.and_then(|c| c.dns_server.clone()),
+                            iroh_cfg.and_then(|c| c.socks5_proxy.clone()),
                         ),
                     };
                     // relay_only: CLI-only, requires test-utils feature
@@ -899,42 +754,16 @@ async fn main() -> Result<()> {
                         "--target is required. Provide the local address to listen on (e.g., --target 127.0.0.1:2222)",
                     )?;
 
+                    // Set up SOCKS5 bridges for .onion relay URLs
+                    let (relay_urls, _bridges) = socks5_bridge::setup_relay_bridges(
+                        relay_urls,
+                        socks5_proxy.as_deref(),
+                    ).await?;
+
                     iroh::run_multi_source_client(node_id, source, target, relay_urls, relay_only, dns_server).await
                 }
-                "iroh-manual" => {
-                    let manual_cfg = cfg.iroh_manual();
-                    let (source, target, stun_servers) = match &mode {
-                        Some(ClientMode::IrohManual { source: src, target: t, stun_servers: s, no_stun }) => (
-                            normalize_optional_endpoint(src.clone()).or_else(|| manual_cfg.and_then(|c| c.request_source.clone())),
-                            t.clone().or_else(|| manual_cfg.and_then(|c| c.target.clone())),
-                            resolve_stun_servers(s, manual_cfg.and_then(|c| c.stun_servers.clone()), *no_stun)?,
-                        ),
-                        _ => (
-                            manual_cfg.and_then(|c| c.request_source.clone()),
-                            manual_cfg.and_then(|c| c.target.clone()),
-                            resolve_stun_servers(&[], manual_cfg.and_then(|c| c.stun_servers.clone()), false)?,
-                        ),
-                    };
-
-                    let source: String = source.context(
-                        "--source is required for iroh-manual client. Specify the source to request from server (e.g., --source tcp://127.0.0.1:22)",
-                    )?;
-                    let target: String = target.context(
-                        "--target is required. Specify local address to listen on (e.g., --target 127.0.0.1:2222)",
-                    )?;
-
-                    // Validate source format early
-                    let _ = parse_endpoint(&source)
-                        .with_context(|| format!("Invalid source '{}'. Expected format: tcp://host:port or udp://host:port", source))?;
-
-                    // Parse target as just host:port (no protocol prefix needed)
-                    let listen: SocketAddr = target.parse()
-                        .with_context(|| format!("Invalid target '{}'. Expected format: host:port (e.g., 127.0.0.1:2222)", target))?;
-
-                    iroh::run_iroh_manual_client(source, listen, stun_servers).await
-                }
-                "custom-manual" => {
-                    let custom_cfg = cfg.custom_manual();
+                "ice-manual" => {
+                    let custom_cfg = cfg.ice_manual.as_ref();
                     let (source, target, stun_servers) = match &mode {
                         Some(ClientMode::CustomManual { source: src, target: t, stun_servers: s, no_stun }) => (
                             normalize_optional_endpoint(src.clone()).or_else(|| custom_cfg.and_then(|c| c.request_source.clone())),
@@ -949,7 +778,7 @@ async fn main() -> Result<()> {
                     };
 
                     let source: String = source.context(
-                        "--source is required for custom-manual client. Specify the source to request from server (e.g., --source tcp://127.0.0.1:22)",
+                        "--source is required for ice-manual client. Specify the source to request from server (e.g., --source tcp://127.0.0.1:22)",
                     )?;
                     let target: String = target.context(
                         "--target is required. Specify local address to listen on (e.g., --target 127.0.0.1:2222)",
@@ -965,7 +794,7 @@ async fn main() -> Result<()> {
 
                     custom::run_manual_client(source, listen, stun_servers).await
                 }
-                "nostr" => {
+                "ice-nostr" => {
                     let nostr_cfg = cfg.nostr();
                     let (target, source, stun_servers, nsec, nsec_file, peer_npub, relays, republish_interval, max_wait) = match &mode {
                         Some(ClientMode::Nostr { target: t, source: src, stun_servers: ss, no_stun, nsec: n, nsec_file: nf, peer_npub: p, relays: r, republish_interval: ri, max_wait: mw }) => {
@@ -1036,32 +865,7 @@ async fn main() -> Result<()> {
                         nostr::run_nostr_tcp_client(listen, source, stun_servers, nsec, peer_npub, relays, republish_interval, max_wait).await
                     }
                 }
-                "dcutr" => {
-                    let (target, signaling_server, peer_id, client_id, stun_servers) = match &mode {
-                        Some(ClientMode::DCUtR { target: t, signaling_server: ss, peer_id: pi, client_id: ci, stun_servers: stun, no_stun }) => (
-                            t.clone(),
-                            ss.clone(),
-                            pi.clone(),
-                            ci.clone(),
-                            resolve_stun_servers(stun, None, *no_stun)?,
-                        ),
-                        _ => (None, None, None, None, default_stun_servers()),
-                    };
-
-                    let target = target.context(
-                        "--target is required for dcutr client mode. Specify the local address to listen on (e.g., --target 127.0.0.1:2222)",
-                    )?;
-                    let signaling_server = signaling_server.context(
-                        "--signaling-server is required for dcutr mode. Specify the signaling server address (e.g., --signaling-server 1.2.3.4:9999)",
-                    )?;
-                    let peer_id = peer_id.context(
-                        "--peer-id is required for dcutr mode. Specify the target peer ID to connect to.",
-                    )?;
-
-                    // DCUtR client uses TCP by default (server determines the actual source)
-                    custom::run_dcutr_tcp_client(target, signaling_server, peer_id, client_id, stun_servers).await
-                }
-                _ => anyhow::bail!("Invalid mode '{}'. Use: iroh, iroh-manual, custom-manual, nostr, or dcutr", effective_mode),
+                _ => anyhow::bail!("Invalid mode '{}'. Use: iroh, ice-manual, or ice-nostr", effective_mode),
             }
         }
         Command::GenerateIrohKey { output, force } => secret::generate_secret(output, force),

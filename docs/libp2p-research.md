@@ -79,8 +79,7 @@ For rust-libp2p, AutoRelay must be implemented manually:
 
 | Mode | NAT Traversal | Signaling | Relay Required | QUIC Stack |
 |------|---------------|-----------|----------------|------------|
-| iroh default | Auto + relay fallback | Pkarr/DNS/mDNS | Optional | iroh (quinn) |
-| iroh manual | STUN heuristic | Copy-paste | No | iroh (quinn) |
+| iroh | Auto + relay fallback | Pkarr/DNS/mDNS | Optional | iroh (quinn) |
 | custom | Full ICE | Copy-paste | No | quinn |
 | **libp2p** | DCUtR | Relay-based | **Yes** | quinn |
 
@@ -120,12 +119,13 @@ Add libp2p as a fourth mode that uses DHT-discovered relays and DCUtR.
 
 ### Option B: Keep Current Architecture
 
-Custom mode with ICE already provides best serverless NAT traversal.
+Custom mode with ICE already provides reliable serverless NAT traversal.
 
 **Rationale:**
 - ICE with STUN is the industry standard for serverless hole punching
 - We already use quinn (same QUIC as libp2p)
 - No external dependencies for NAT traversal
+- Note: For best overall NAT traversal (including symmetric NAT scenarios), iroh mode with relay fallback is recommended
 
 ---
 

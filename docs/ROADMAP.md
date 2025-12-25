@@ -4,60 +4,12 @@ This document outlines planned features and improvements for tunnel-rs.
 
 ## Current Status
 
-tunnel-rs currently supports four stable operational modes:
+tunnel-rs currently supports three stable operational modes:
 - **iroh**: Persistent identity with automatic discovery, relay fallback, and receiver-requested sources
-- **nostr**: Full ICE with automated Nostr relay signaling and receiver-requested sources
-- **iroh-manual**: Serverless with manual signaling (single-target)
-- **custom-manual**: Full ICE with manual signaling (single-target)
-
-And one experimental mode:
-- **dcutr**: Full ICE with DCUtR-style signaling server for coordinated NAT hole punching
+- **ice-nostr**: Full ICE with automated Nostr relay signaling and receiver-requested sources
+- **ice-manual**: Full ICE with manual signaling (single-target)
 
 All modes support TCP and UDP tunneling with end-to-end encryption via QUIC/TLS 1.3.
-
----
-
-## Experimental: DCUtR Mode
-
-**Status:** Experimental
-
-The `dcutr` mode provides timing-coordinated NAT hole punching using a lightweight signaling server.
-
-**How it works:**
-1. Both peers connect to the signaling server
-2. Server measures RTT to each peer
-3. Server coordinates simultaneous hole punch attempt
-4. Full ICE with fast timing parameters for better success
-
-**Advantages over nostr/custom-manual:**
-- Timing coordination for higher hole punch success
-- No data relay (signaling only, low bandwidth)
-- Self-hosted signaling server
-
-**Limitations:**
-- No relay fallback (fails if ICE fails)
-- Requires running a signaling server
-- Single session per signaling connection
-
-**Usage:**
-```bash
-# Start signaling server (separate binary)
-tunnel-rs-signaling --bind 0.0.0.0:9999
-
-# Server (specifies exact source address)
-tunnel-rs server dcutr \
-  --signaling-server 1.2.3.4:9999 \
-  --source tcp://127.0.0.1:22 \
-  --server-id my-server
-
-# Client (just specifies local listen address)
-tunnel-rs client dcutr \
-  --signaling-server 1.2.3.4:9999 \
-  --peer-id my-server \
-  --target 127.0.0.1:2222
-```
-
-See [dcutr-signaling-research.md](dcutr-signaling-research.md) for protocol details.
 
 ---
 
@@ -69,7 +21,7 @@ See [dcutr-signaling-research.md](dcutr-signaling-research.md) for protocol deta
 
 **Status:** Implemented
 
-Both `iroh` and `nostr` modes support receiver-requested sources, similar to SSH's `-R` flag for reverse tunnels. Senders restrict allowed networks via `--allowed-tcp` / `--allowed-udp` flags or config file.
+Both `iroh` and `ice-nostr` modes support receiver-requested sources, similar to SSH's `-R` flag for reverse tunnels. Senders restrict allowed networks via `--allowed-tcp` / `--allowed-udp` flags or config file.
 
 **Usage (iroh mode):**
 ```bash
@@ -121,12 +73,11 @@ tunnel-rs receiver nostr --nsec-file ./receiver.nsec \
 | Mode | Multi-Session | Dynamic Source |
 |------|---------------|----------------|
 | `iroh` | **Yes** - use `--max-sessions` (default: 100) | **Yes** - receiver specifies `--source` |
-| `nostr` | **Yes** - use `--max-sessions` (default: 10) | **Yes** - receiver specifies `--source` |
-| `iroh-manual` | No | No |
-| `custom-manual` | No | No |
+| `ice-nostr` | **Yes** - use `--max-sessions` (default: 10) | **Yes** - receiver specifies `--source` |
+| `ice-manual` | No | No |
 
 **Multi-Session** = Multiple concurrent connections to the same sender
-**Dynamic Source** = Receiver specifies which service to tunnel (iroh and nostr modes)
+**Dynamic Source** = Receiver specifies which service to tunnel (iroh and ice-nostr modes)
 
 **Implementation Details:**
 - Each session gets independent ICE/QUIC stack
@@ -135,11 +86,11 @@ tunnel-rs receiver nostr --nsec-file ./receiver.nsec \
 
 ---
 
-#### Relay Fallback for Custom-Manual/Nostr Modes
+#### Relay Fallback for ice-manual/ice-nostr Modes
 
 **Status:** Idea
 
-Custom-manual and nostr modes use full ICE but have no relay fallback for symmetric NAT scenarios where direct connectivity fails.
+ice-manual and ice-nostr modes use full ICE but have no relay fallback for symmetric NAT scenarios where direct connectivity fails.
 
 ---
 

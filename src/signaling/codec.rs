@@ -1,8 +1,7 @@
 //! Signaling payload types and encoding/decoding.
 //!
-//! Supports two signaling formats:
+//! Supports signaling format:
 //! - v1 (Custom/Nostr mode): ICE/QUIC with str0m + quinn
-//! - v2 (Iroh manual mode): Iroh endpoint with NodeId and direct addresses
 
 use anyhow::{anyhow, Context, Result};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -12,8 +11,6 @@ use serde::{Deserialize, Serialize};
 
 /// Version 1: Custom mode (str0m ICE + quinn QUIC)
 pub const MANUAL_SIGNAL_VERSION: u16 = 1;
-/// Version 2: Iroh manual mode
-pub const IROH_SIGNAL_VERSION: u16 = 2;
 /// Version 1: Iroh multi-source handshake protocol
 pub const IROH_MULTI_VERSION: u16 = 1;
 
@@ -117,34 +114,6 @@ impl ManualReject {
 }
 
 // ============================================================================
-// Iroh Manual Mode (v2) - Iroh endpoint
-// ============================================================================
-
-/// Iroh manual mode offer (receiver -> sender, receiver-first pattern)
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct IrohManualOffer {
-    pub version: u16,
-    /// Base32-encoded NodeId (public key)
-    pub node_id: String,
-    /// Direct socket addresses (from STUN/local interfaces)
-    pub direct_addresses: Vec<String>,
-    /// Requested source endpoint (e.g., "tcp://127.0.0.1:22")
-    /// Required for receiver-initiated handshake
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source: Option<String>,
-}
-
-/// Iroh manual mode answer (sender -> receiver, sender validates source)
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct IrohManualAnswer {
-    pub version: u16,
-    /// Base32-encoded NodeId (public key)
-    pub node_id: String,
-    /// Direct socket addresses (from STUN/local interfaces)
-    pub direct_addresses: Vec<String>,
-}
-
-// ============================================================================
 // Iroh Multi-Source Handshake Protocol
 // ============================================================================
 
@@ -214,22 +183,6 @@ pub fn encode_answer(answer: &ManualAnswer) -> Result<String> {
 
 pub fn decode_answer(payload: &str) -> Result<ManualAnswer> {
     decode_payload(payload)
-}
-
-pub fn encode_iroh_offer(offer: &IrohManualOffer) -> Result<String> {
-    encode_payload_v(offer, IROH_SIGNAL_VERSION)
-}
-
-pub fn decode_iroh_offer(payload: &str) -> Result<IrohManualOffer> {
-    decode_payload_v(payload, IROH_SIGNAL_VERSION)
-}
-
-pub fn encode_iroh_answer(answer: &IrohManualAnswer) -> Result<String> {
-    encode_payload_v(answer, IROH_SIGNAL_VERSION)
-}
-
-pub fn decode_iroh_answer(payload: &str) -> Result<IrohManualAnswer> {
-    decode_payload_v(payload, IROH_SIGNAL_VERSION)
 }
 
 // ============================================================================

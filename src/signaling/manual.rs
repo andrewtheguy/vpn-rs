@@ -7,8 +7,7 @@ use anyhow::{anyhow, Result};
 use std::io::BufRead;
 
 use super::codec::{
-    decode_iroh_answer, decode_iroh_offer, encode_iroh_answer, encode_iroh_offer, wrap_lines,
-    IrohManualAnswer, IrohManualOffer, ManualAnswer, ManualOffer, LINE_WIDTH,
+    wrap_lines, ManualAnswer, ManualOffer, LINE_WIDTH,
 };
 use super::{decode_answer, decode_offer, encode_answer, encode_offer};
 
@@ -17,12 +16,6 @@ const OFFER_BEGIN_MARKER: &str = "-----BEGIN TUNNEL-RS MANUAL OFFER-----";
 const OFFER_END_MARKER: &str = "-----END TUNNEL-RS MANUAL OFFER-----";
 const ANSWER_BEGIN_MARKER: &str = "-----BEGIN TUNNEL-RS MANUAL ANSWER-----";
 const ANSWER_END_MARKER: &str = "-----END TUNNEL-RS MANUAL ANSWER-----";
-
-// Iroh mode markers (v2)
-const IROH_OFFER_BEGIN_MARKER: &str = "-----BEGIN TUNNEL-RS IROH OFFER-----";
-const IROH_OFFER_END_MARKER: &str = "-----END TUNNEL-RS IROH OFFER-----";
-const IROH_ANSWER_BEGIN_MARKER: &str = "-----BEGIN TUNNEL-RS IROH ANSWER-----";
-const IROH_ANSWER_END_MARKER: &str = "-----END TUNNEL-RS IROH ANSWER-----";
 
 // ============================================================================
 // Custom Mode (v1) Display/Read
@@ -48,36 +41,6 @@ pub fn read_offer_from_stdin() -> Result<ManualOffer> {
 pub fn read_answer_from_stdin() -> Result<ManualAnswer> {
     let payload = read_marked_payload(ANSWER_BEGIN_MARKER, ANSWER_END_MARKER)?;
     decode_answer(&payload)
-}
-
-// ============================================================================
-// Iroh Manual Mode (v2) Display/Read
-// ============================================================================
-
-pub fn display_iroh_offer(offer: &IrohManualOffer) -> Result<()> {
-    display_payload(
-        encode_iroh_offer(offer)?,
-        IROH_OFFER_BEGIN_MARKER,
-        IROH_OFFER_END_MARKER,
-    )
-}
-
-pub fn display_iroh_answer(answer: &IrohManualAnswer) -> Result<()> {
-    display_payload(
-        encode_iroh_answer(answer)?,
-        IROH_ANSWER_BEGIN_MARKER,
-        IROH_ANSWER_END_MARKER,
-    )
-}
-
-pub fn read_iroh_offer_from_stdin() -> Result<IrohManualOffer> {
-    let payload = read_marked_payload(IROH_OFFER_BEGIN_MARKER, IROH_OFFER_END_MARKER)?;
-    decode_iroh_offer(&payload)
-}
-
-pub fn read_iroh_answer_from_stdin() -> Result<IrohManualAnswer> {
-    let payload = read_marked_payload(IROH_ANSWER_BEGIN_MARKER, IROH_ANSWER_END_MARKER)?;
-    decode_iroh_answer(&payload)
 }
 
 // ============================================================================

@@ -1,62 +1,15 @@
 //! Shared helper functions for iroh-based tunnels.
 //!
-//! This module contains stream and connection helpers used by both
-//! multi-source (iroh) and manual (iroh-manual) modes.
+//! This module contains stream and connection helpers used by
+//! iroh mode.
 
 use anyhow::{Context, Result};
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::net::{TcpStream, UdpSocket};
 use tokio::sync::Mutex;
 
 use crate::tunnel_common::{copy_stream, order_udp_addresses, retry_with_backoff, STREAM_OPEN_BASE_DELAY_MS, STREAM_OPEN_MAX_ATTEMPTS};
-
-// ============================================================================
-// TCP Connection Handlers
-// ============================================================================
-
-/// Handle a TCP connection on the server side.
-/// Connects to target and bridges the QUIC stream with the TCP connection.
-pub(super) async fn handle_tcp_server_stream(
-    send_stream: iroh::endpoint::SendStream,
-    recv_stream: iroh::endpoint::RecvStream,
-    target_addrs: Arc<Vec<SocketAddr>>,
-) -> Result<()> {
-    let tcp_stream = crate::tunnel_common::try_connect_tcp(&target_addrs)
-        .await
-        .context("Failed to connect to target TCP service")?;
-
-    let target_addr = tcp_stream.peer_addr().ok();
-    log::info!("-> Connected to target {:?}", target_addr);
-
-    bridge_streams(recv_stream, send_stream, tcp_stream).await?;
-
-    log::info!("<- TCP connection to {:?} closed", target_addr);
-    Ok(())
-}
-
-/// Handle a TCP connection on the client side.
-/// Opens a QUIC stream and bridges it with the local TCP connection.
-pub(super) async fn handle_tcp_client_connection(
-    conn: Arc<iroh::endpoint::Connection>,
-    tcp_stream: TcpStream,
-    peer_addr: SocketAddr,
-    tunnel_established: Arc<AtomicBool>,
-) -> Result<()> {
-    let (send_stream, recv_stream) = open_bi_with_retry(&conn).await?;
-
-    // Print success message only on first successful stream
-    if !tunnel_established.swap(true, Ordering::Relaxed) {
-        log::info!("Tunnel to server established!");
-    }
-    log::info!("-> Opened tunnel for {}", peer_addr);
-
-    bridge_streams(recv_stream, send_stream, tcp_stream).await?;
-
-    log::info!("<- Connection from {} closed", peer_addr);
-    Ok(())
-}
 
 // ============================================================================
 // QUIC Stream Helpers

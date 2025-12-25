@@ -10,9 +10,9 @@
 
 # Required: validates config matches CLI command
 role = "server"
-mode = "iroh"  # or "iroh-manual", "custom-manual", or "nostr"
+mode = "iroh"  # or "ice-manual", or "ice-nostr"
 
-# NOTE: For multi-source modes (iroh, nostr), do NOT set 'source' here.
+# NOTE: For multi-source modes (iroh, ice-nostr), do NOT set 'source' here.
 # Clients request sources dynamically. Use allowed_sources below to restrict.
 
 [iroh]
@@ -35,6 +35,12 @@ relay_urls = [
 # NOTE: URL must include the /pkarr path
 # dns_server = "https://dns.example.com/pkarr"
 
+# SOCKS5 proxy for relay connections
+# REQUIRED: If relay_urls contain .onion addresses, MUST use socks5h:// for DNS through proxy
+# OPTIONAL: For non-.onion relays, can use socks5:// or socks5h://
+# Use with Tor: socks5h://127.0.0.1:9050
+# socks5_proxy = "socks5h://127.0.0.1:9050"
+
 # Maximum concurrent sessions (default: 100)
 max_sessions = 100
 
@@ -52,7 +58,7 @@ udp = [
     "10.0.0.0/8",       # private network
 ]
 
-# [iroh-manual]
+# [ice-manual]
 # # Client-initiated mode: clients request sources, server validates
 # # Set to [] to disable STUN entirely
 # stun_servers = [
@@ -61,25 +67,12 @@ udp = [
 #     "stun.services.mozilla.com:3478",
 # ]
 # # Allowed source networks that clients can request (CIDR notation)
-# [iroh-manual.allowed_sources]
+# [ice-manual.allowed_sources]
 # tcp = ["127.0.0.0/8", "192.168.0.0/16"]
 # udp = ["10.0.0.0/8"]
 
-# [custom-manual]
-# # Client-initiated mode: clients request sources, server validates
-# # Set to [] to disable STUN entirely
-# stun_servers = [
-#     "stun.l.google.com:19302",
-#     "stun1.l.google.com:19302",
-#     "stun.services.mozilla.com:3478",
-# ]
-# # Allowed source networks that clients can request (CIDR notation)
-# [custom-manual.allowed_sources]
-# tcp = ["127.0.0.0/8", "192.168.0.0/16"]
-# udp = ["10.0.0.0/8"]
-
-# [nostr]
-# # NOTE: For nostr mode, do NOT set 'source' above - clients request sources dynamically.
+# [ice-nostr]
+# # Do NOT set 'source' above - clients request sources dynamically.
 # # Use allowed_sources below to restrict what clients can request.
 # # Server-only fields: allowed_sources, max_sessions
 # # (request_source is client-only and will be rejected if present here)
@@ -116,7 +109,7 @@ udp = [
 # # Clients MUST specify --source which must match one of these networks
 # # Separate lists for TCP and UDP protocols
 # # Supports IPv4 and IPv6 CIDR notation
-# [nostr.allowed_sources]
+# [ice-nostr.allowed_sources]
 # tcp = [
 #     "127.0.0.0/8",      # localhost
 #     "192.168.0.0/16",   # private network
