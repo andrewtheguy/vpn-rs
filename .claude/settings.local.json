@@ -30,7 +30,9 @@
       "Bash(perl:*)",
       "Bash(./target/debug/tunnel-rs:*)",
       "Bash(cat:*)",
-      "Bash(cargo metadata:*)"
+      "Bash(cargo metadata:*)",
+      "mcp__fetch__fetch_markdown",
+      "Bash(wc:*)"
     ]
   }
 }

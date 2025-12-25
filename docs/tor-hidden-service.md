@@ -245,3 +245,66 @@ socks5_proxy = "socks5h://127.0.0.1:9050"
 | Relay via Tor | ~500ms-2s | ~1-5 Mbps |
 
 Direct P2P bypasses Tor entirely, so performance is unaffected when direct connections succeed. Tor latency only applies when falling back to relay.
+
+---
+
+## Future Direction: Embedded Arti
+
+> **Note:** This section documents research for a planned future feature.
+
+### Current Limitation: SOCKS5 Bridge
+
+The current `--socks5-proxy` approach requires:
+- External Tor daemon running
+- Manual hidden service configuration
+- SOCKS5 bridge to route iroh relay traffic
+
+### Alternative: Embedded Arti (Rust Tor)
+
+[Arti](https://gitlab.torproject.org/tpo/core/arti) is the official Rust implementation of Tor. It can be embedded directly into Rust applications without requiring an external Tor daemon or SOCKS5 bridging.
+
+**Key capabilities:**
+- **Direct API**: `TorClient::connect()` returns async streams without SOCKS
+- **Onion services**: Can create ephemeral hidden services programmatically
+- **No external daemon**: Fully embedded, no subprocess management
+
+**Reference implementation**: See [wormhole-rs](https://github.com/nickelc/wormhole-rs) which uses Arti for direct Tor integration.
+
+### Potential ice-nostr Integration
+
+A future `--tor-fallback` flag for ice-nostr mode could:
+1. Attempt ICE connection first (direct P2P)
+2. If ICE fails (symmetric NAT, timeout):
+   - Server creates ephemeral Tor hidden service via Arti
+   - Server publishes .onion address via Nostr signaling
+   - Client connects via embedded Arti
+3. No external Tor daemon or SOCKS5 proxy needed
+
+### Comparison: SOCKS5 Bridge vs Embedded Arti
+
+| Feature | SOCKS5 Bridge (current) | Embedded Arti (future) |
+|---------|------------------------|------------------------|
+| External Tor daemon | Required | Not needed |
+| Mode support | iroh only | ice-nostr |
+| Setup complexity | High | Low (just a flag) |
+| Hidden service | Manual config | Automatic ephemeral |
+| Dependencies | External tor process | arti-client crate |
+| Feature flag | None | `onion` |
+
+### Arti Dependencies
+
+```toml
+# Behind optional 'onion' feature flag
+arti-client = { version = "0.37", features = ["onion-service-service", "onion-service-client", "tokio"] }
+tor-hsservice = { version = "0.37" }
+tor-cell = { version = "0.37" }
+```
+
+### Trade-offs
+
+| Aspect | Impact |
+|--------|--------|
+| Startup latency | Tor bootstrap takes 10-30 seconds |
+| Connection latency | Tor adds ~500ms-2s vs direct |
+| Binary size | Arti adds ~5-10MB |
+| No external infra | Uses public Tor network (no self-hosted relay needed) |
