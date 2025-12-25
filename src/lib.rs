@@ -2,8 +2,6 @@
 //!
 //! Provides P2P tunneling functionality with multiple signaling modes.
 
-#[cfg(feature = "embedded-tor")]
-pub mod arti_bridge;
 pub mod config;
 #[cfg(feature = "ice")]
 pub mod custom;

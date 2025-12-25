@@ -181,67 +181,28 @@ socks5_proxy = "socks5://127.0.0.1:9050"
 
 ---
 
-## Embedded Arti (Client Mode)
+## Future: Embedded Arti
 
-For clients, you can use the embedded Arti (Rust Tor implementation) to connect to `.onion` relay URLs without running a separate Tor daemon.
+Single-binary deployment with Tor built-in using [Arti](https://gitlab.torproject.org/tpo/core/arti) (Rust Tor implementation).
 
-**Note:** Due to dependency conflicts between str0m (ICE) and Arti, embedded Tor and ICE modes cannot be built together. The embedded-tor build only includes iroh mode.
-
-### Build with Embedded Tor Support
+### Concept
 
 ```bash
-# Use the build script (recommended)
-./scripts/build-tor.sh
+# Hypothetical - start relay with embedded Tor hidden service
+tunnel-rs server iroh \
+  --tor-hidden-service \
+  --tor-key-file ./onion.key \
+  --allowed-tcp 127.0.0.0/8
 
-# This produces: target/release/tunnel-rs (with embedded Tor)
+# Output: Hidden service available at abc123...xyz.onion
 ```
-
-The build script temporarily swaps `Cargo.toml` with `Cargo.tor.toml` to enable the embedded-tor feature without ICE dependencies.
-
-### Usage (Client Only)
-
-With embedded Tor, clients can connect to `.onion` relay URLs directly:
-
-```bash
-# No need to run separate Tor daemon!
-# No need for --socks5-proxy flag!
-tunnel-rs client iroh \
-  --relay-url http://YOUR_ADDRESS.onion \
-  --node-id <SERVER_ENDPOINT_ID> \
-  --source tcp://127.0.0.1:22 \
-  --target 127.0.0.1:2222
-```
-
-### How It Works
-
-Internally, the bridge intercepts iroh's relay connection:
-
-```
-iroh → internal bridge (127.0.0.1:random) → Arti tor_client.connect() → .onion relay
-```
-
-**Note:** The internal bridge binds to `127.0.0.1` on a random port. This is NOT a general-purpose SOCKS5 proxy - it only forwards to the specific .onion target and cannot be used by other programs.
-
-- Uses Arti's `TorClient::connect()` directly (no SOCKS5 protocol overhead)
-- Persistent state stored at:
-  - Linux: `~/.local/share/tunnel-rs/arti/`
-  - macOS: `~/Library/Application Support/tunnel-rs/arti/`
-  - Windows: `%APPDATA%/tunnel-rs/arti/`
-- First run bootstraps Tor network (~10-30 seconds)
-- Subsequent runs are faster due to cached state
 
 ### Trade-offs
+- **Pros:** Single binary, no external dependencies, programmatic control
+- **Cons:** Large dependency (~10MB+), experimental APIs, longer compile times
 
-| Pros | Cons |
-|------|------|
-| No external Tor daemon needed | Binary size increases ~10-20MB |
-| Self-contained client | Longer compile times |
-| Works on any platform | First bootstrap takes 10-30s |
-| Proven pattern (Arti v0.37) | |
-
-### Server Mode
-
-Server mode still requires an external Tor daemon with `--socks5-proxy`. This is intentional since servers typically run dedicated infrastructure and benefit from the external Tor daemon's maturity and configurability.
+### Status
+Not yet implemented. Requires `arti-client` and `tor-hsservice` crates.
 
 ---
 

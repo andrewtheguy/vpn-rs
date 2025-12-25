@@ -28,8 +28,6 @@ use tunnel_rs::iroh;
 use tunnel_rs::nostr;
 use tunnel_rs::secret;
 use tunnel_rs::socks5_bridge;
-#[cfg(feature = "embedded-tor")]
-use tunnel_rs::arti_bridge;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
@@ -761,17 +759,6 @@ async fn main() -> Result<()> {
                     let target = target.context(
                         "--target is required. Provide the local address to listen on (e.g., --target 127.0.0.1:2222)",
                     )?;
-
-                    // Set up bridges for .onion relay URLs
-                    // With embedded-tor feature: use embedded Arti client (no external Tor needed)
-                    // Without: use external SOCKS5 proxy (requires running Tor daemon)
-                    #[cfg(feature = "embedded-tor")]
-                    let (relay_urls, _bridges) = arti_bridge::setup_relay_bridges_arti(relay_urls).await?;
-                    #[cfg(not(feature = "embedded-tor"))]
-                    let (relay_urls, _bridges) = socks5_bridge::setup_relay_bridges(
-                        relay_urls,
-                        socks5_proxy.as_deref(),
-                    ).await?;
 
                     iroh::run_multi_source_client(node_id, source, target, relay_urls, relay_only, dns_server).await
                 }
