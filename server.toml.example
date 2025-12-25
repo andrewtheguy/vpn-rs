@@ -12,7 +12,7 @@
 role = "server"
 mode = "iroh"  # or "ice-manual", or "ice-nostr"
 
-# NOTE: For multi-source modes (iroh, nostr), do NOT set 'source' here.
+# NOTE: For multi-source modes (iroh, ice-nostr), do NOT set 'source' here.
 # Clients request sources dynamically. Use allowed_sources below to restrict.
 
 [iroh]
@@ -70,7 +70,7 @@ udp = [
 # udp = ["10.0.0.0/8"]
 
 # [nostr]
-# # NOTE: For nostr mode, do NOT set 'source' above - clients request sources dynamically.
+# # NOTE: For ice-nostr mode, do NOT set 'source' above - clients request sources dynamically.
 # # Use allowed_sources below to restrict what clients can request.
 # # Server-only fields: allowed_sources, max_sessions
 # # (request_source is client-only and will be rejected if present here)

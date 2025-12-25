@@ -83,10 +83,10 @@ relay_urls = [
 #     "stun.services.mozilla.com:3478",
 # ]
 #
-# # Source address to request from server (REQUIRED for nostr mode)
+# # Source address to request from server (REQUIRED for ice-nostr mode)
 # # Must be in server's allowed_sources list (--allowed-tcp or --allowed-udp)
 # # Can also use 'source' as an alias
 # request_source = "tcp://127.0.0.1:22"
 #
-# # Local address to listen on (REQUIRED for nostr mode)
+# # Local address to listen on (REQUIRED for ice-nostr mode)
 # target = "127.0.0.1:2222"
