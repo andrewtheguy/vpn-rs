@@ -96,6 +96,8 @@ docker compose -f docker-compose-nostr.yml up -d
 
 ### Self-Hosted Relay via Tor Hidden Service
 
+> **⚠️ Experimental:** Tor hidden service support is experimental and might not work reliably.
+
 Run your own iroh-relay as a Tor hidden service — no public IP required.
 
 **Use Case:**
@@ -226,6 +228,8 @@ dig @127.0.0.1 -p 5353 kubernetes.default.svc.cluster.local
 ```
 
 ### Self-Hosted Relay via Tor Hidden Service
+
+> **⚠️ Experimental:** Tor hidden service support is experimental and might not work reliably.
 
 Deploy your own iroh-relay as a Tor hidden service — no LoadBalancer or Ingress required.
 

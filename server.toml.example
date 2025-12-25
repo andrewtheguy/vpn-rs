@@ -35,7 +35,8 @@ relay_urls = [
 # NOTE: URL must include the /pkarr path
 # dns_server = "https://dns.example.com/pkarr"
 
-# SOCKS5 proxy for relay connections
+# [Experimental] SOCKS5 proxy for relay connections
+# Tor support is experimental and might not work reliably.
 # REQUIRED: If relay_urls contain .onion addresses, MUST use socks5h:// for DNS through proxy
 # OPTIONAL: For non-.onion relays, can use socks5:// or socks5h://
 # Use with Tor: socks5h://127.0.0.1:9050

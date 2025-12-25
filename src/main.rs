@@ -286,7 +286,8 @@ enum ServerMode {
         #[arg(long)]
         dns_server: Option<String>,
 
-        /// SOCKS5 proxy for relay connections (required for .onion URLs)
+        /// [Experimental] SOCKS5 proxy for relay connections (required for .onion URLs).
+        /// Tor support is experimental and might not work reliably.
         /// E.g., socks5://127.0.0.1:9050 for Tor
         #[arg(long)]
         socks5_proxy: Option<String>,
@@ -395,7 +396,8 @@ enum ClientMode {
         #[arg(long)]
         dns_server: Option<String>,
 
-        /// SOCKS5 proxy for relay connections (required for .onion URLs)
+        /// [Experimental] SOCKS5 proxy for relay connections (required for .onion URLs).
+        /// Tor support is experimental and might not work reliably.
         /// E.g., socks5://127.0.0.1:9050 for Tor
         #[arg(long)]
         socks5_proxy: Option<String>,

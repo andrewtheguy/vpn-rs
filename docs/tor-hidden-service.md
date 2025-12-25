@@ -1,5 +1,7 @@
 # Serving iroh-relay via Tor Hidden Service
 
+> **⚠️ Experimental Feature:** Tor hidden service support is experimental and might not work reliably.
+
 Run iroh-relay as a Tor hidden service (.onion) to avoid needing a public IP address. This is useful when:
 - You can't get a public IP or open ports
 - Cloudflare tunnel doesn't work (HTTP/2 breaks WebSocket upgrades)
