@@ -226,6 +226,175 @@ pub fn parse_relay_url(url: &str) -> Result<(String, u16)> {
     Ok((host, port))
 }
 
+/// Validates that the SOCKS5 proxy is a real Tor proxy.
+///
+/// Uses the official Tor Project API: https://check.torproject.org/api/ip
+/// Returns Ok(()) if the proxy is Tor, error otherwise.
+pub async fn validate_tor_proxy(proxy_url: &str) -> Result<()> {
+    use rustls::pki_types::ServerName;
+    use std::sync::Arc;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::time::{timeout, Duration};
+    use tokio_rustls::TlsConnector;
+
+    info!("Validating Tor proxy at {}", proxy_url);
+
+    let proxy_addr = parse_socks5_url(proxy_url)?;
+    let target_host = "check.torproject.org";
+    let target_port = 443u16;
+
+    // Install crypto provider if not already installed
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
+    // Set up TLS config with webpki root certificates
+    let root_store = rustls::RootCertStore::from_iter(
+        webpki_roots::TLS_SERVER_ROOTS.iter().cloned()
+    );
+    let tls_config = rustls::ClientConfig::builder()
+        .with_root_certificates(root_store)
+        .with_no_client_auth();
+    let connector = TlsConnector::from(Arc::new(tls_config));
+
+    // Connect through SOCKS5 with 30 second timeout (Tor can be slow)
+    let connect_future = async {
+        let socks_stream = Socks5Stream::connect(
+            proxy_addr.as_str(),
+            (target_host, target_port),
+        )
+        .await
+        .context("Failed to connect through SOCKS5 proxy to check.torproject.org")?;
+
+        let tcp_stream = socks_stream.into_inner();
+
+        // Establish TLS connection
+        let server_name = ServerName::try_from(target_host.to_string())
+            .map_err(|_| anyhow::anyhow!("Invalid server name"))?;
+        let tls_stream = connector.connect(server_name, tcp_stream)
+            .await
+            .context("TLS handshake failed with check.torproject.org")?;
+
+        Ok::<_, anyhow::Error>(tls_stream)
+    };
+
+    let mut tls_stream = timeout(Duration::from_secs(30), connect_future)
+        .await
+        .context("Timeout connecting to check.torproject.org (30s)")?
+        .context("Failed to establish connection")?;
+
+    // Send HTTP request
+    let request = format!(
+        "GET /api/ip HTTP/1.1\r\n\
+         Host: {}\r\n\
+         Connection: close\r\n\
+         User-Agent: tunnel-rs\r\n\
+         \r\n",
+        target_host
+    );
+    tls_stream.write_all(request.as_bytes()).await
+        .context("Failed to send HTTP request")?;
+
+    // Read response with timeout
+    // Maximum response body size to prevent malicious allocations
+    const MAX_CONTENT_LENGTH: usize = 64 * 1024; // 64 KB
+
+    let read_future = async {
+        let mut reader = BufReader::new(tls_stream);
+
+        // Read and parse HTTP status line
+        let mut status_line = String::new();
+        reader.read_line(&mut status_line).await?;
+
+        // Parse status code from "HTTP/1.1 200 OK\r\n"
+        let status_code: u16 = status_line
+            .split_whitespace()
+            .nth(1)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+
+        // Read remaining headers
+        let mut content_length: Option<usize> = None;
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).await?;
+
+            // Check for Content-Length header with size limit
+            if line.to_lowercase().starts_with("content-length:") {
+                if let Some(len_str) = line.split(':').nth(1) {
+                    if let Ok(len) = len_str.trim().parse::<usize>() {
+                        if len > MAX_CONTENT_LENGTH {
+                            return Err(std::io::Error::new(
+                                std::io::ErrorKind::InvalidData,
+                                format!("Content-Length {} exceeds maximum allowed size of {} bytes", len, MAX_CONTENT_LENGTH)
+                            ));
+                        }
+                        content_length = Some(len);
+                    }
+                    // Non-parsable values are treated as absent
+                }
+            }
+
+            if line == "\r\n" || line.is_empty() {
+                break;
+            }
+        }
+
+        // Read entire body (with size limit)
+        let mut body = String::new();
+        if let Some(len) = content_length {
+            // Read exact content length (already validated against MAX_CONTENT_LENGTH)
+            let mut buf = vec![0u8; len];
+            reader.read_exact(&mut buf).await?;
+            body = String::from_utf8_lossy(&buf).to_string();
+        } else {
+            // Read until EOF with size limit (Connection: close)
+            let mut limited_reader = reader.take(MAX_CONTENT_LENGTH as u64);
+            limited_reader.read_to_string(&mut body).await?;
+        }
+
+        Ok::<_, std::io::Error>((status_code, status_line.trim().to_string(), body.trim().to_string()))
+    };
+
+    let (status_code, status_line, response_body) = timeout(Duration::from_secs(10), read_future)
+        .await
+        .context("Timeout reading response from check.torproject.org")?
+        .context("Failed to read HTTP response")?;
+
+    // Validate HTTP status code
+    if status_code != 200 {
+        anyhow::bail!(
+            "check.torproject.org returned HTTP error.\n\
+             Status: {}\n\
+             Body: {}",
+            status_line,
+            response_body
+        );
+    }
+
+    // Parse JSON response: {"IsTor":true,"IP":"..."}
+    #[derive(serde::Deserialize)]
+    struct TorCheckResponse {
+        #[serde(rename = "IsTor")]
+        is_tor: bool,
+        #[serde(rename = "IP")]
+        ip: Option<String>,
+    }
+
+    let check: TorCheckResponse = serde_json::from_str(&response_body)
+        .with_context(|| format!("Failed to parse check.torproject.org response: {}", response_body))?;
+
+    if check.is_tor {
+        info!("Tor proxy validated successfully (exit IP: {})", check.ip.as_deref().unwrap_or("unknown"));
+        Ok(())
+    } else {
+        anyhow::bail!(
+            "SOCKS5 proxy at {} is not a Tor proxy.\n\
+             Verified via https://check.torproject.org/api/ip - IsTor: false\n\
+             The --socks5-proxy option requires a Tor SOCKS5 proxy (default: 127.0.0.1:9050).",
+            proxy_url
+        )
+    }
+}
+
 /// Set up SOCKS5 bridges for .onion relay URLs.
 ///
 /// Returns:

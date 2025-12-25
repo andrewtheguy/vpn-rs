@@ -137,7 +137,7 @@ All modes (iroh, ice-manual, ice-nostr) work across all platforms, enabling cros
 
 Container images are available at `ghcr.io/andrewtheguy/tunnel-rs:latest`.
 
-Access services running in Docker or Kubernetes remotely — without opening ports, configuring ingress, or requiring `kubectl`. See [examples/](examples/) for Docker Compose and Kubernetes configurations.
+Access services running in Docker or Kubernetes remotely — without opening ports, configuring ingress, or requiring `kubectl`. See [container-deploy/](container-deploy/) for Docker Compose and Kubernetes configurations.
 
 ---
 
@@ -226,7 +226,7 @@ tunnel-rs client iroh --node-id <ENDPOINT_ID> --source udp://127.0.0.1:51820 --t
 | `--relay-url` | public | Custom relay server URL(s), repeatable |
 | `--relay-only` | false | Force all traffic through relay (requires `test-utils` feature) |
 | `--dns-server` | public | Custom DNS server URL for peer discovery |
-| `--socks5-proxy` | - | SOCKS5 proxy for relay connections (e.g., `socks5://127.0.0.1:9050` for Tor) |
+| `--socks5-proxy` | - | Tor SOCKS5 proxy for self-hosted .onion relay. **Tor-only:** requires all relay URLs to be `.onion` addresses, validates proxy is Tor at startup, cannot be used with `--dns-server`. See [Tor Hidden Service](#tor-hidden-service-no-public-ip). |
 
 ### client
 
@@ -245,7 +245,7 @@ tunnel-rs client iroh --node-id <ENDPOINT_ID> --source udp://127.0.0.1:51820 --t
 | `--relay-url` | public | Custom relay server URL(s), repeatable |
 | `--relay-only` | false | Force all traffic through relay (requires `test-utils` feature) |
 | `--dns-server` | public | Custom DNS server URL for peer discovery |
-| `--socks5-proxy` | - | SOCKS5 proxy for relay connections (e.g., `socks5://127.0.0.1:9050` for Tor) |
+| `--socks5-proxy` | - | Tor SOCKS5 proxy for self-hosted .onion relay. **Tor-only:** requires all relay URLs to be `.onion` addresses, validates proxy is Tor at startup, cannot be used with `--dns-server`. See [Tor Hidden Service](#tor-hidden-service-no-public-ip). |
 
 ## Configuration Files
 
@@ -272,8 +272,6 @@ secret_file = "./server.key"
 relay_urls = ["https://relay.example.com"]
 dns_server = "https://dns.example.com/pkarr"
 max_sessions = 100
-# Optional: SOCKS5 proxy for .onion relay URLs (Tor)
-# socks5_proxy = "socks5://127.0.0.1:9050"
 
 [iroh.allowed_sources]
 tcp = ["127.0.0.0/8", "192.168.0.0/16"]
@@ -306,8 +304,6 @@ request_source = "tcp://127.0.0.1:22"
 target = "127.0.0.1:2222"
 relay_urls = ["https://relay.example.com"]
 dns_server = "https://dns.example.com/pkarr"
-# Optional: SOCKS5 proxy for .onion relay URLs (Tor)
-# socks5_proxy = "socks5://127.0.0.1:9050"
 ```
 
 > [!NOTE]
@@ -429,25 +425,29 @@ iroh mode uses the relay for both **signaling/coordination** and as a **data tra
 
 ### Tor Hidden Service (No Public IP)
 
+> **Use Case:** Self-hosting your own iroh-relay without a public IP. The `--socks5-proxy` option is **exclusively for Tor hidden services** — it requires `.onion` relay URLs and validates that the proxy is a real Tor proxy at startup.
+
 If you can't get a public IP or Cloudflare tunnel doesn't work (HTTP/2 breaks WebSocket upgrades), you can run iroh-relay as a Tor hidden service:
 
 ```bash
 # Server side: configure tor hidden service pointing to localhost:3340
 # Then start iroh-relay and tunnel-rs with the .onion URL
 tunnel-rs server iroh \
-  --relay-url http://YOUR_ADDRESS.onion \
-  --socks5-proxy socks5://127.0.0.1:9050 \
+  --relay-url http://YOUR_RELAY.onion \
+  --socks5-proxy socks5h://127.0.0.1:9050 \
   --secret-file ./server.key \
   --allowed-tcp 127.0.0.0/8
 
 # Client side: use --socks5-proxy to reach .onion relay (direct P2P bypasses Tor)
 tunnel-rs client iroh \
-  --relay-url http://YOUR_ADDRESS.onion \
-  --socks5-proxy socks5://127.0.0.1:9050 \
+  --relay-url http://YOUR_RELAY.onion \
+  --socks5-proxy socks5h://127.0.0.1:9050 \
   --node-id <ID> \
   --source tcp://127.0.0.1:22 \
   --target 127.0.0.1:2222
 ```
+
+> **Note:** When using `--socks5-proxy`, all relay URLs must be `.onion` addresses. The proxy is validated as a real Tor proxy at startup. DNS discovery is not used with Tor — the relay handles peer discovery.
 
 See [docs/tor-hidden-service.md](docs/tor-hidden-service.md) for complete setup guide.
 

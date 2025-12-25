@@ -5,16 +5,16 @@
 #
 # Usage:
 #   1. Generate a persistent key (optional, for stable endpoint ID):
-#      docker run --rm ghcr.io/andrewtheguy/tunnel-rs:latest generate-iroh-key --output - > sender.key
+#      docker run --rm ghcr.io/andrewtheguy/tunnel-rs:latest generate-iroh-key --output - > server.key
 #
 #   2. Start the services:
 #      docker compose up -d
 #
 #   3. Get the EndpointId from logs:
-#      docker compose logs tunnel-sender
+#      docker compose logs tunnel-server
 #
 #   4. On the remote machine, connect:
-#      tunnel-rs receiver iroh --node-id <ENDPOINT_ID> --target 127.0.0.1:8080
+#      tunnel-rs client iroh --node-id <ENDPOINT_ID> --source tcp://web:80 --target 127.0.0.1:8080
 #
 #   5. Access the web service at http://127.0.0.1:8080
 
@@ -24,23 +24,23 @@ services:
     image: nginx:alpine
     # No ports exposed - only accessible within Docker network
 
-  # tunnel-rs sender - exposes the web service to remote peers
-  tunnel-sender:
+  # tunnel-rs server - exposes services to remote peers
+  tunnel-server:
     image: ghcr.io/andrewtheguy/tunnel-rs:latest
     command:
-      - sender
+      - server
       - iroh
-      - --source
-      - tcp://web:80
+      - --allowed-tcp
+      - "172.16.0.0/12"  # Docker default network range
     depends_on:
       - web
     # Optional: mount a persistent key for stable EndpointId
     # volumes:
-    #   - ./sender.key:/app/sender.key:ro
+    #   - ./server.key:/app/server.key:ro
     # command:
-    #   - sender
+    #   - server
     #   - iroh
-    #   - --source
-    #   - tcp://web:80
+    #   - --allowed-tcp
+    #   - "172.16.0.0/12"
     #   - --secret-file
-    #   - /app/sender.key
+    #   - /app/server.key

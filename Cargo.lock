@@ -4719,7 +4719,7 @@ dependencies = [
 
 [[package]]
 name = "tunnel-rs"
-version = "0.1.23"
+version = "0.1.24"
 dependencies = [
  "anyhow",
  "base64",
@@ -4743,9 +4743,11 @@ dependencies = [
  "str0m",
  "stunclient",
  "tokio",
+ "tokio-rustls",
  "tokio-socks",
  "toml 0.8.23",
  "url",
+ "webpki-roots 0.26.11",
 ]
 
 [[package]]

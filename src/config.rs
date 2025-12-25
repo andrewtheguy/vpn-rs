@@ -229,44 +229,23 @@ fn validate_allowed_sources(allowed: &AllowedSources) -> Result<()> {
 
 /// Validate that a string is a valid SOCKS5 proxy URL.
 ///
-/// - When relay_urls contain `.onion` addresses, requires `socks5h://` scheme for DNS resolution through proxy
-/// - Otherwise, accepts both `socks5://` and `socks5h://` schemes:
-///   - `socks5://host:port` - Basic SOCKS5 proxy
-///   - `socks5h://host:port` - SOCKS5 with remote DNS resolution (recommended for .onion addresses)
+/// SOCKS5 proxy is only supported for Tor hidden services:
+/// - ALL relay URLs must be `.onion` addresses
+/// - Requires `socks5h://` scheme for DNS resolution through Tor
 fn validate_socks5_proxy(value: &str, relay_urls: Option<&Vec<String>>) -> Result<()> {
     let url = url::Url::parse(value)
-        .with_context(|| format!("Invalid socks5_proxy '{}'. Expected format: socks5://host:port or socks5h://host:port", value))?;
+        .with_context(|| format!("Invalid socks5_proxy '{}'. Expected format: socks5h://host:port", value))?;
 
     let scheme = url.scheme();
 
-    // Check if any relay URLs contain .onion addresses (by checking host component)
-    let has_onion_relay = relay_urls.map_or(false, |urls| {
-        urls.iter().any(|u| {
-            url::Url::parse(u)
-                .ok()
-                .and_then(|parsed| parsed.host_str().map(|h| h.ends_with(".onion")))
-                .unwrap_or(false)
-        })
-    });
-
-    if has_onion_relay {
-        // For .onion relays, socks5h:// is required for DNS resolution through proxy
-        if scheme != "socks5h" {
-            anyhow::bail!(
-                "Invalid socks5_proxy scheme '{}'. When using .onion relay URLs, \
-                 socks5h:// scheme (with remote DNS resolution) is required. \
-                 Change socks5_proxy to use 'socks5h://host:port' format.",
-                scheme
-            );
-        }
-    } else {
-        // For non-.onion relays, both schemes are acceptable
-        if scheme != "socks5" && scheme != "socks5h" {
-            anyhow::bail!(
-                "Invalid socks5_proxy scheme '{}'. Must be 'socks5' or 'socks5h'",
-                scheme
-            );
-        }
+    // SOCKS5 proxy requires socks5h:// scheme for Tor
+    if scheme != "socks5h" {
+        anyhow::bail!(
+            "Invalid socks5_proxy scheme '{}'. \
+             SOCKS5 proxy requires socks5h:// scheme for Tor DNS resolution. \
+             Change socks5_proxy to use 'socks5h://host:port' format.",
+            scheme
+        );
     }
 
     if url.host_str().is_none() {
@@ -275,6 +254,31 @@ fn validate_socks5_proxy(value: &str, relay_urls: Option<&Vec<String>>) -> Resul
 
     if url.port().is_none() {
         anyhow::bail!("socks5_proxy '{}' missing port", value);
+    }
+
+    // Validate that ALL relay URLs are .onion addresses
+    if let Some(urls) = relay_urls {
+        for relay_url in urls {
+            let is_onion = url::Url::parse(relay_url)
+                .ok()
+                .and_then(|parsed| parsed.host_str().map(|h| h.ends_with(".onion")))
+                .unwrap_or(false);
+
+            if !is_onion {
+                anyhow::bail!(
+                    "SOCKS5 proxy is only supported for Tor hidden service (.onion) relay URLs. \
+                     Relay URL '{}' is not a .onion address. \
+                     All relay URLs must end with '.onion' when using --socks5-proxy.",
+                    relay_url
+                );
+            }
+        }
+    } else {
+        // No relay URLs specified - this is an error when using SOCKS5 proxy
+        anyhow::bail!(
+            "SOCKS5 proxy requires .onion relay URLs. \
+             Specify relay URLs with --relay-url or in config file."
+        );
     }
 
     Ok(())
@@ -355,8 +359,15 @@ impl ServerConfig {
                 if let Some(ref allowed) = iroh.allowed_sources {
                     validate_allowed_sources(allowed)?;
                 }
-                // Validate SOCKS5 proxy URL format if present
+                // Validate SOCKS5 proxy: cannot use with dns_server
                 if let Some(ref proxy) = iroh.socks5_proxy {
+                    if iroh.dns_server.is_some() {
+                        anyhow::bail!(
+                            "[iroh] Cannot use 'dns_server' with 'socks5_proxy'. \
+                             When using a Tor hidden service relay, the relay handles peer discovery. \
+                             Remove 'dns_server' to proceed."
+                        );
+                    }
                     validate_socks5_proxy(proxy, iroh.relay_urls.as_ref()).context("[iroh] Invalid SOCKS5 proxy URL")?;
                 }
             }
@@ -495,8 +506,15 @@ impl ClientConfig {
                 if let Some(ref target) = iroh.target {
                     validate_host_port(target, "target")?;
                 }
-                // Validate SOCKS5 proxy URL format if present
+                // Validate SOCKS5 proxy: cannot use with dns_server
                 if let Some(ref proxy) = iroh.socks5_proxy {
+                    if iroh.dns_server.is_some() {
+                        anyhow::bail!(
+                            "[iroh] Cannot use 'dns_server' with 'socks5_proxy'. \
+                             When using a Tor hidden service relay, the relay handles peer discovery. \
+                             Remove 'dns_server' to proceed."
+                        );
+                    }
                     validate_socks5_proxy(proxy, iroh.relay_urls.as_ref()).context("[iroh] Invalid SOCKS5 proxy URL")?;
                 }
             }

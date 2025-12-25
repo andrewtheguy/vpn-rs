@@ -1304,6 +1304,17 @@ The `iroh::Endpoint` provides:
 - **QUIC**: Built-in QUIC transport with hole punching
 - **Identity**: Ed25519-based peer identity and authentication
 
+### SOCKS5 Bridge (Tor Support)
+
+For `.onion` relay URLs, tunnel-rs creates local TCP bridges through a Tor SOCKS5 proxy:
+
+- **Tor-Only**: SOCKS5 proxy requires all relay URLs to be `.onion` addresses
+- **Proxy Validation**: At startup, validates the proxy is a real Tor proxy via `check.torproject.org`
+- **Relay Bridge**: Routes relay connections through SOCKS5 proxy to `.onion` addresses
+- **Transparent**: URLs are rewritten to localhost, iroh connects normally
+- **No DNS Server**: When using SOCKS5 proxy, DNS server is not used (relay handles discovery)
+- **Direct P2P Bypass**: Direct P2P connections bypass Tor entirely (no performance impact)
+
 ---
 
 ## Performance Considerations

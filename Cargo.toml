@@ -1,6 +1,6 @@
 [package]
 name = "tunnel-rs"
-version = "0.1.23"
+version = "0.1.24"
 edition = "2021"
 description = "TCP/UDP port forwarding through iroh P2P connections"
 
@@ -14,7 +14,7 @@ path = "src/main.rs"
 
 [features]
 default = ["ice"]
-ice = ["str0m", "quinn", "rustls", "rcgen", "stunclient", "get_if_addrs", "nostr-sdk"]
+ice = ["str0m", "quinn", "rcgen", "stunclient", "get_if_addrs", "nostr-sdk"]
 # Enable --relay-only CLI flag for testing. Requires iroh's test-utils feature.
 # Build with: cargo build --features test-utils
 test-utils = ["iroh/test-utils"]
@@ -34,7 +34,9 @@ url = "2"
 dirs = "6"
 str0m = { version = "0.14.2", optional = true }
 quinn = { version = "0.11", optional = true }
-rustls = { version = "0.23", features = ["aws-lc-rs"], optional = true }
+rustls = { version = "0.23", features = ["aws-lc-rs"] }
+tokio-rustls = "0.26"
+webpki-roots = "0.26"
 rcgen = { version = "0.13", optional = true }
 stunclient = { version = "0.4", optional = true }
 sha2 = "0.10"
