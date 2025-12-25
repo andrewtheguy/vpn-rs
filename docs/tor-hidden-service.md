@@ -214,10 +214,13 @@ tunnel-rs client iroh \
 
 ### How It Works
 
+Internally, the bridge intercepts iroh's relay connection:
+
 ```
-iroh → localhost:port → Arti bridge → tor_client.connect() → .onion relay
-                        (embedded Tor, no SOCKS5 protocol)
+iroh → internal bridge (127.0.0.1:random) → Arti tor_client.connect() → .onion relay
 ```
+
+**Note:** The internal bridge binds to `127.0.0.1` on a random port. This is NOT a general-purpose SOCKS5 proxy - it only forwards to the specific .onion target and cannot be used by other programs.
 
 - Uses Arti's `TorClient::connect()` directly (no SOCKS5 protocol overhead)
 - Persistent state stored at:
