@@ -84,7 +84,9 @@ pub struct AllowedSources {
     pub udp: Vec<String>,
 }
 
-/// nostr mode configuration.
+/// ice-nostr mode configuration (TOML section: `[ice-nostr]`).
+///
+/// ice-nostr provides full ICE with automated Nostr relay signaling for static peer key exchange.
 ///
 /// Some fields are role-specific (enforced by validate()):
 /// - Server-only: `allowed_sources`, `max_sessions`
