@@ -216,31 +216,6 @@ socks5_proxy = "socks5h://127.0.0.1:9050"
 
 ---
 
-## Future: Embedded Arti
-
-Single-binary deployment with Tor built-in using [Arti](https://gitlab.torproject.org/tpo/core/arti) (Rust Tor implementation).
-
-### Concept
-
-```bash
-# Hypothetical - start relay with embedded Tor hidden service
-tunnel-rs server iroh \
-  --tor-hidden-service \
-  --tor-key-file ./onion.key \
-  --allowed-tcp 127.0.0.0/8
-
-# Output: Hidden service available at abc123...xyz.onion
-```
-
-### Trade-offs
-- **Pros:** Single binary, no external dependencies, programmatic control
-- **Cons:** Large dependency (~10MB+), experimental APIs, longer compile times
-
-### Status
-Not yet implemented. Requires `arti-client` and `tor-hsservice` crates.
-
----
-
 ## Security Considerations
 
 ### What Tor Provides
