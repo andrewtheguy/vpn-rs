@@ -8,7 +8,7 @@ This document provides a comprehensive overview of the tunnel-rs architecture, i
 - [Mode Comparison](#mode-comparison)
 - [iroh Mode](#iroh-mode)
 - [ice-manual Mode](#ice-manual-mode)
-- [Nostr Mode](#nostr-mode)
+- [ice-nostr Mode](#ice-nostr-mode)
 - [DCUtR Mode (Experimental)](#dcutr-mode-experimental)
 - [Configuration System](#configuration-system)
 - [Security Model](#security-model)
@@ -29,7 +29,7 @@ graph TB
     subgraph "tunnel-rs Modes"
         A[iroh]
         C[ice-manual]
-        D2[nostr]
+        D2[ice-nostr]
         D3[dcutr<br/>experimental]
     end
 
@@ -1064,7 +1064,7 @@ graph TB
         N[stun_servers]
     end
 
-    subgraph "nostr Options"
+    subgraph "ice-nostr Options"
         O[nsec/nsec_file]
         P[peer_npub]
         Q[relays]
@@ -1198,7 +1198,7 @@ graph TB
         C --> D[Peer Authentication]
     end
 
-    subgraph "Custom Mode"
+    subgraph "ice-manual Mode"
         H[ICE Credentials] --> I[ufrag + pwd]
         I --> J[STUN Auth]
         J --> K[QUIC TLS]
