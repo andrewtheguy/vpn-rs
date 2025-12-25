@@ -56,6 +56,17 @@ graph TB
     style D2 fill:#9C27B0
 ```
 
+### Feature Flags
+
+The `ice` feature is enabled by default and provides additional modules:
+
+| Feature | Modules Enabled | Description |
+|---------|-----------------|-------------|
+| `ice` (default) | `custom`, `nostr`, `transport` | ICE/STUN-based NAT traversal for `ice-manual` and `ice-nostr` modes |
+| `test-utils` | - | Enables `--relay-only` flag for testing |
+
+Without the `ice` feature, only `iroh` mode is available.
+
 ### Core Components
 
 ```mermaid
