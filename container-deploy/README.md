@@ -1,6 +1,6 @@
-# tunnel-rs Examples
+# Container Deployment
 
-Example configurations for running tunnel-rs in Docker and Kubernetes.
+Docker and Kubernetes configurations for running tunnel-rs in containerized environments.
 
 > [!TIP]
 > **Recommended Mode for Containers:** Use `iroh` mode for Docker and Kubernetes deployments. It includes relay fallback which ensures connectivity even when both peers are behind restrictive NATs (common in cloud environments). The `ice-nostr` and `ice-manual` modes use STUN-only NAT traversal which may fail in containerized environments.

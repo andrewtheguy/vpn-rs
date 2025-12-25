@@ -137,7 +137,7 @@ All modes (iroh, ice-manual, ice-nostr) work across all platforms, enabling cros
 
 Container images are available at `ghcr.io/andrewtheguy/tunnel-rs:latest`.
 
-Access services running in Docker or Kubernetes remotely — without opening ports, configuring ingress, or requiring `kubectl`. See [examples/](examples/) for Docker Compose and Kubernetes configurations.
+Access services running in Docker or Kubernetes remotely — without opening ports, configuring ingress, or requiring `kubectl`. See [container-deploy/](container-deploy/) for Docker Compose and Kubernetes configurations.
 
 ---
 
