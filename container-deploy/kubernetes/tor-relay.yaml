@@ -1,0 +1,209 @@
+# Kubernetes: Self-hosted iroh-relay via Tor Hidden Service
+#
+# Deploy your own iroh-relay as a Tor hidden service (.onion),
+# eliminating the need for a public IP, LoadBalancer, or Ingress.
+#
+# Architecture:
+#   ┌─────────────────────────────────────────────────────────────┐
+#   │  Client ──[Tor]──► .onion relay ◄──[Tor]── Server          │
+#   │     │                                          │            │
+#   │     └────────── Direct P2P (QUIC/UDP) ─────────┘            │
+#   │                  (bypasses Tor entirely)                    │
+#   └─────────────────────────────────────────────────────────────┘
+#
+# Use Case:
+#   - Self-host relay infrastructure without public IPs or LoadBalancers
+#   - Works in private clusters with no external ingress
+#   - Direct P2P connections bypass Tor (no performance impact)
+#
+# Setup:
+#   1. Apply the manifests:
+#      kubectl apply -f tor-relay.yaml
+#
+#   2. Wait for Tor to generate .onion address (1-2 minutes):
+#      kubectl logs -l app=tor-relay -c tor
+#
+#   3. Get your .onion address:
+#      kubectl exec -it deploy/tor-relay -c tor -- cat /var/lib/tor/hidden_service/hostname
+#
+#   4. Get server's EndpointId:
+#      kubectl logs -l app=tor-relay -c tunnel-server
+#
+#   5. On the client machine (requires local Tor daemon):
+#      tor &  # Start Tor SOCKS5 proxy on 127.0.0.1:9050
+#      tunnel-rs client iroh \
+#        --relay-url http://YOUR_ADDRESS.onion \
+#        --socks5-proxy socks5h://127.0.0.1:9050 \
+#        --node-id <ENDPOINT_ID> \
+#        --source tcp://my-service:80 \
+#        --target 127.0.0.1:8080
+
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: tunnel-tor
+  labels:
+    app.kubernetes.io/name: tunnel-tor
+
+---
+# Tor configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tor-config
+  namespace: tunnel-tor
+data:
+  torrc: |
+    # Tor hidden service configuration for iroh-relay
+    HiddenServiceDir /var/lib/tor/hidden_service/
+    HiddenServiceVersion 3
+    HiddenServicePort 80 127.0.0.1:3340
+
+    # Logging
+    Log notice stdout
+
+---
+# Persistent storage for Tor hidden service keys
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: tor-hidden-service-keys
+  namespace: tunnel-tor
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Mi
+
+---
+# Optional: Persistent identity for tunnel-rs server
+apiVersion: v1
+kind: Secret
+metadata:
+  name: tunnel-server-key
+  namespace: tunnel-tor
+type: Opaque
+data: {}
+  # To use persistent identity, generate a key and add it:
+  # kubectl create secret generic tunnel-server-key \
+  #   --from-file=server.key=./server.key \
+  #   -n tunnel-tor
+
+---
+# Combined deployment: Tor + iroh-relay + tunnel-server
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tor-relay
+  namespace: tunnel-tor
+  labels:
+    app: tor-relay
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: tor-relay
+  template:
+    metadata:
+      labels:
+        app: tor-relay
+    spec:
+      # Run Tor as non-root
+      securityContext:
+        fsGroup: 100
+
+      initContainers:
+        # Fix permissions for Tor hidden service directory
+        - name: fix-permissions
+          image: busybox:latest
+          command: ['sh', '-c', 'chmod 700 /var/lib/tor/hidden_service && chown -R 100:100 /var/lib/tor/hidden_service']
+          volumeMounts:
+            - name: tor-hidden-service
+              mountPath: /var/lib/tor/hidden_service
+
+      containers:
+        # Tor daemon with hidden service
+        - name: tor
+          image: goldy/tor-hidden-service:latest
+          command: ['tor', '-f', '/etc/tor/torrc']
+          securityContext:
+            runAsUser: 100
+            runAsGroup: 100
+          volumeMounts:
+            - name: tor-config
+              mountPath: /etc/tor
+              readOnly: true
+            - name: tor-hidden-service
+              mountPath: /var/lib/tor/hidden_service
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu: "50m"
+            limits:
+              memory: "128Mi"
+              cpu: "200m"
+
+        # iroh-relay server (HTTP only - Tor provides encryption)
+        - name: iroh-relay
+          image: n0computer/iroh-relay:latest
+          args: ["--dev"]
+          ports:
+            - containerPort: 3340
+              name: relay
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu: "50m"
+            limits:
+              memory: "256Mi"
+              cpu: "500m"
+
+        # tunnel-rs server
+        - name: tunnel-server
+          image: ghcr.io/andrewtheguy/tunnel-rs:latest
+          args:
+            - server
+            - iroh
+            - --relay-url
+            - http://127.0.0.1:3340  # Connect to iroh-relay sidecar
+            - --allowed-tcp
+            - "10.0.0.0/8"           # Kubernetes pod/service network
+            - --allowed-tcp
+            - "172.16.0.0/12"        # Alternative pod network
+            - --allowed-udp
+            - "10.0.0.0/8"
+          # Uncomment to use persistent identity:
+          # args:
+          #   - server
+          #   - iroh
+          #   - --relay-url
+          #   - http://127.0.0.1:3340
+          #   - --secret-file
+          #   - /secrets/server.key
+          #   - --allowed-tcp
+          #   - "10.0.0.0/8"
+          # volumeMounts:
+          #   - name: server-key
+          #     mountPath: /secrets
+          #     readOnly: true
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu: "50m"
+            limits:
+              memory: "256Mi"
+              cpu: "500m"
+
+      volumes:
+        - name: tor-config
+          configMap:
+            name: tor-config
+        - name: tor-hidden-service
+          persistentVolumeClaim:
+            claimName: tor-hidden-service-keys
+        # Uncomment for persistent identity:
+        # - name: server-key
+        #   secret:
+        #     secretName: tunnel-server-key

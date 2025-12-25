@@ -94,6 +94,52 @@ EOF
 docker compose -f docker-compose-nostr.yml up -d
 ```
 
+### Self-Hosted Relay via Tor Hidden Service
+
+Run your own iroh-relay as a Tor hidden service — no public IP required.
+
+**Use Case:**
+- Self-host relay infrastructure without exposing public IPs
+- Works behind NAT, firewalls, or when Cloudflare tunnel fails (HTTP/2 breaks WebSocket upgrades)
+- Direct P2P connections bypass Tor entirely (no performance impact)
+
+```bash
+cd docker
+
+# Start Tor + iroh-relay + tunnel-rs server
+docker compose -f docker-compose-tor-relay.yml up -d
+
+# Wait for Tor to generate .onion address (30-60 seconds)
+docker compose -f docker-compose-tor-relay.yml logs tor
+
+# Get your .onion address
+docker compose -f docker-compose-tor-relay.yml exec tor cat /var/lib/tor/hidden_service/hostname
+# Example: abc123...xyz.onion
+
+# Get server's EndpointId
+docker compose -f docker-compose-tor-relay.yml logs tunnel-server
+# EndpointId: 2xnbkpbc7izsilvewd7c62w7wnwziacmpfwvhcrya5nt76dqkpga
+```
+
+**On the client machine** (requires local Tor daemon):
+
+```bash
+# Start Tor SOCKS5 proxy
+tor &  # Provides SOCKS5 on 127.0.0.1:9050
+
+# Connect through Tor to the .onion relay
+tunnel-rs client iroh \
+  --relay-url http://YOUR_ADDRESS.onion \
+  --socks5-proxy socks5h://127.0.0.1:9050 \
+  --node-id <ENDPOINT_ID> \
+  --source tcp://nginx:80 \
+  --target 127.0.0.1:8080
+
+# Access at http://127.0.0.1:8080
+```
+
+> **Note:** The `--socks5-proxy` option is **Tor-only** — it requires `.onion` relay URLs and validates the proxy is Tor at startup. See [docs/tor-hidden-service.md](../docs/tor-hidden-service.md) for complete setup guide.
+
 ## Kubernetes
 
 ### Sidecar Pattern
@@ -179,6 +225,50 @@ tunnel-rs receiver nostr \
 dig @127.0.0.1 -p 5353 kubernetes.default.svc.cluster.local
 ```
 
+### Self-Hosted Relay via Tor Hidden Service
+
+Deploy your own iroh-relay as a Tor hidden service — no LoadBalancer or Ingress required.
+
+**Use Case:**
+- Self-host relay infrastructure without public IPs or LoadBalancers
+- Works in private clusters with no external ingress
+- Direct P2P connections bypass Tor (no performance impact)
+
+```bash
+# Deploy Tor + iroh-relay + tunnel-server
+kubectl apply -f kubernetes/tor-relay.yaml
+
+# Wait for Tor to generate .onion address (1-2 minutes)
+kubectl logs -n tunnel-tor -l app=tor-relay -c tor
+
+# Get your .onion address
+kubectl exec -n tunnel-tor deploy/tor-relay -c tor -- cat /var/lib/tor/hidden_service/hostname
+# Example: abc123...xyz.onion
+
+# Get server's EndpointId
+kubectl logs -n tunnel-tor -l app=tor-relay -c tunnel-server
+# EndpointId: 2xnbkpbc7izsilvewd7c62w7wnwziacmpfwvhcrya5nt76dqkpga
+```
+
+**On the client machine** (requires local Tor daemon):
+
+```bash
+# Start Tor SOCKS5 proxy
+tor &  # Provides SOCKS5 on 127.0.0.1:9050
+
+# Connect through Tor to the .onion relay
+tunnel-rs client iroh \
+  --relay-url http://YOUR_ADDRESS.onion \
+  --socks5-proxy socks5h://127.0.0.1:9050 \
+  --node-id <ENDPOINT_ID> \
+  --source tcp://my-service.default.svc:80 \
+  --target 127.0.0.1:8080
+
+# Access at http://127.0.0.1:8080
+```
+
+> **Note:** The manifest creates a `tunnel-tor` namespace with persistent storage for Tor hidden service keys. The `.onion` address persists across pod restarts.
+
 ## Use Cases
 
 | Scenario | Mode | Description |
@@ -189,3 +279,4 @@ dig @127.0.0.1 -p 5353 kubernetes.default.svc.cluster.local
 | Sidecar debugging | iroh | Access pod services directly |
 | Cluster-wide access | iroh/nostr | Single sender, multiple services |
 | UDP tunneling | any | DNS, WireGuard, game servers |
+| No public IP / self-hosted relay | iroh + Tor | Relay via .onion hidden service |
