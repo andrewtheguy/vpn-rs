@@ -4,18 +4,18 @@
 # to remote peers without a LoadBalancer or Ingress.
 #
 # Usage:
-#   1. Create secret with sender key (optional, for stable EndpointId):
+#   1. Create secret with server key (optional, for stable EndpointId):
 #      tunnel-rs generate-iroh-key --output - | \
-#        kubectl create secret generic tunnel-sender-key --from-file=sender.key=/dev/stdin
+#        kubectl create secret generic tunnel-server-key --from-file=server.key=/dev/stdin
 #
 #   2. Apply this manifest:
 #      kubectl apply -f deployment-sidecar.yaml
 #
 #   3. Get the EndpointId:
-#      kubectl logs -l app=myapp -c tunnel-sender | grep EndpointId
+#      kubectl logs -l app=myapp -c tunnel-server | grep EndpointId
 #
 #   4. On remote machine, connect:
-#      tunnel-rs receiver iroh --node-id <ENDPOINT_ID> --target 127.0.0.1:8080
+#      tunnel-rs client iroh --node-id <ENDPOINT_ID> --source tcp://localhost:80 --target 127.0.0.1:8080
 #
 # This is useful for:
 #   - Accessing staging/dev services without exposing them publicly
@@ -46,28 +46,28 @@ spec:
             - containerPort: 80
 
         # tunnel-rs sidecar
-        - name: tunnel-sender
+        - name: tunnel-server
           image: ghcr.io/andrewtheguy/tunnel-rs:latest
           args:
-            - sender
+            - server
             - iroh
-            - --source
-            - tcp://127.0.0.1:80
+            - --allowed-tcp
+            - "127.0.0.1/32"  # Only allow localhost (the sidecar app)
           # Optional: use persistent key for stable EndpointId
           # args:
-          #   - sender
+          #   - server
           #   - iroh
-          #   - --source
-          #   - tcp://127.0.0.1:80
+          #   - --allowed-tcp
+          #   - "127.0.0.1/32"
           #   - --secret-file
-          #   - /secrets/sender.key
+          #   - /secrets/server.key
           # volumeMounts:
-          #   - name: sender-key
+          #   - name: server-key
           #     mountPath: /secrets
           #     readOnly: true
 
       # Optional: mount secret for persistent key
       # volumes:
-      #   - name: sender-key
+      #   - name: server-key
       #     secret:
-      #       secretName: tunnel-sender-key
+      #       secretName: tunnel-server-key

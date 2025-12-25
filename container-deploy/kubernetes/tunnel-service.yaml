@@ -1,56 +1,56 @@
 # Kubernetes example: Expose cluster services via tunnel-rs
 #
 # Deploy tunnel-rs to expose internal ClusterIP services to remote peers.
-# Uses receiver-initiated mode - one sender can serve multiple services.
+# Uses client-initiated mode - one server can serve multiple services.
 #
 # This is an alternative to kubectl port-forward that:
 #   - Supports UDP (kubectl port-forward doesn't)
 #   - Works across NAT without kubectl access
 #   - Can be left running persistently
-#   - Allows receivers to choose which service to access
+#   - Allows clients to choose which service to access
 #
-# Note: Sender uses CIDR notation to whitelist allowed networks (no ports).
-#       Receiver uses hostnames with ports to specify what to connect to.
+# Note: Server uses CIDR notation to whitelist allowed networks (no ports).
+#       Client uses hostnames with ports to specify what to connect to.
 #
 # Usage:
 #   1. Create secrets for nostr keys:
 #      kubectl create secret generic tunnel-nostr-keys \
-#        --from-file=sender.nsec=./sender.nsec \
+#        --from-file=server.nsec=./server.nsec \
 #        --from-literal=peer-npub=npub1...
 #
 #   2. Apply:
 #      kubectl apply -f tunnel-service.yaml
 #
 #   3. On remote machine, connect to any service in allowed networks:
-#      # Access postgres (receiver specifies hostname:port)
-#      tunnel-rs receiver nostr \
+#      # Access postgres (client specifies hostname:port)
+#      tunnel-rs client ice-nostr \
 #        --source tcp://postgres.default.svc.cluster.local:5432 \
 #        --target 127.0.0.1:5432 \
-#        --nsec-file ./receiver.nsec \
-#        --peer-npub <SENDER_NPUB>
+#        --nsec-file ./client.nsec \
+#        --peer-npub <SERVER_NPUB>
 #
 #      # Access cluster DNS (UDP!)
-#      tunnel-rs receiver nostr \
+#      tunnel-rs client ice-nostr \
 #        --source udp://kube-dns.kube-system.svc.cluster.local:53 \
 #        --target udp://127.0.0.1:5353 \
-#        --nsec-file ./receiver.nsec \
-#        --peer-npub <SENDER_NPUB>
+#        --nsec-file ./client.nsec \
+#        --peer-npub <SERVER_NPUB>
 
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: tunnel-sender
+  name: tunnel-server
   labels:
-    app: tunnel-sender
+    app: tunnel-server
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: tunnel-sender
+      app: tunnel-server
   template:
     metadata:
       labels:
-        app: tunnel-sender
+        app: tunnel-server
     spec:
       containers:
         - name: tunnel
@@ -58,10 +58,10 @@ spec:
           command: ["/bin/sh", "-c"]
           args:
             - |
-              exec tunnel-rs sender nostr \
+              exec tunnel-rs server ice-nostr \
                 --allowed-tcp 10.0.0.0/8 \
                 --allowed-udp 10.0.0.0/8 \
-                --nsec-file /secrets/sender.nsec \
+                --nsec-file /secrets/server.nsec \
                 --peer-npub "$(cat /secrets/peer-npub)" \
                 --max-sessions 20
           volumeMounts:

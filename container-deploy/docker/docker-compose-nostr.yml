@@ -1,39 +1,39 @@
-# Docker Compose example: Expose internal services via tunnel-rs (Nostr mode)
+# Docker Compose example: Expose internal services via tunnel-rs (ice-nostr mode)
 #
-# Nostr mode uses receiver-initiated connections with static keys.
-# One sender can serve multiple services - receivers choose what to tunnel.
+# ice-nostr mode uses client-initiated connections with static keys.
+# One server can serve multiple services - clients choose what to tunnel.
 #
-# Note: Sender uses CIDR notation (IP ranges) to whitelist allowed networks.
-#       Receiver uses hostnames with ports to specify what to connect to.
+# Note: Server uses CIDR notation (IP ranges) to whitelist allowed networks.
+#       Client uses hostnames with ports to specify what to connect to.
 #
 # Setup:
 #   1. Generate keypairs:
-#      tunnel-rs generate-nostr-key --output sender.nsec
-#      tunnel-rs generate-nostr-key --output receiver.nsec
+#      tunnel-rs generate-nostr-key --output server.nsec
+#      tunnel-rs generate-nostr-key --output client.nsec
 #
 #   2. Exchange public keys (npub) between peers
 #
 #   3. Create .env file:
-#      RECEIVER_NPUB=npub1...
+#      CLIENT_NPUB=npub1...
 #
-#   4. Copy sender.nsec to this directory
+#   4. Copy server.nsec to this directory
 #
 #   5. Start services:
 #      docker compose -f docker-compose-nostr.yml up -d
 #
-#   6. On remote machine, run receiver to access web (uses hostname:port):
-#      tunnel-rs receiver nostr \
+#   6. On remote machine, run client to access web (uses hostname:port):
+#      tunnel-rs client ice-nostr \
 #        --source tcp://web:80 \
 #        --target 127.0.0.1:8080 \
-#        --nsec-file ./receiver.nsec \
-#        --peer-npub <SENDER_NPUB>
+#        --nsec-file ./client.nsec \
+#        --peer-npub <SERVER_NPUB>
 #
 #   7. Or access postgres:
-#      tunnel-rs receiver nostr \
+#      tunnel-rs client ice-nostr \
 #        --source tcp://postgres:5432 \
 #        --target 127.0.0.1:5432 \
-#        --nsec-file ./receiver.nsec \
-#        --peer-npub <SENDER_NPUB>
+#        --nsec-file ./client.nsec \
+#        --peer-npub <SERVER_NPUB>
 
 services:
   # Example web service
@@ -47,25 +47,25 @@ services:
       POSTGRES_PASSWORD: devpassword
       POSTGRES_DB: myapp
 
-  # Single tunnel-rs sender for all services
+  # Single tunnel-rs server for all services
   # Uses CIDR notation to allow Docker network range (no ports in CIDR)
-  # Receivers request specific services by hostname:port
-  tunnel-sender:
+  # Clients request specific services by hostname:port
+  tunnel-server:
     image: ghcr.io/andrewtheguy/tunnel-rs:latest
     command:
-      - sender
-      - nostr
+      - server
+      - ice-nostr
       # Allow Docker bridge network range
       - --allowed-tcp
       - 172.16.0.0/12
       - --nsec-file
-      - /keys/sender.nsec
+      - /keys/server.nsec
       - --peer-npub
-      - ${RECEIVER_NPUB}
+      - ${CLIENT_NPUB}
       - --max-sessions
       - "10"
     volumes:
-      - ./sender.nsec:/keys/sender.nsec:ro
+      - ./server.nsec:/keys/server.nsec:ro
     depends_on:
       - web
       - postgres
