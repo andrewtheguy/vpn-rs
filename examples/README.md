@@ -14,9 +14,9 @@ Example configurations for running tunnel-rs in Docker and Kubernetes.
 | `ice-manual` | No | No | Manual signaling, one-off tunnels |
 
 **Multi-Session** = Multiple concurrent connections
-**Dynamic Source** = Receiver specifies destination (iroh and nostr modes)
+**Dynamic Source** = Receiver specifies destination (iroh and ice-nostr modes)
 
-## Dynamic Source Modes (iroh and nostr)
+## Dynamic Source Modes (iroh and ice-nostr)
 
 Both `iroh` and `ice-nostr` modes use a **receiver-initiated** model similar to SSH `-L` tunneling:
 

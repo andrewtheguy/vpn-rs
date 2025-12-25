@@ -258,7 +258,7 @@ impl ServerConfig {
         }
 
         let mode = self.mode.as_deref().context(
-            "Config file missing required 'mode' field. Add: mode = \"iroh\" (or \"ice-manual\", \"nostr\")",
+            "Config file missing required 'mode' field. Add: mode = \"iroh\" (or \"ice-manual\", \"ice-nostr\")",
         )?;
         if mode != expected_mode {
             anyhow::bail!(
