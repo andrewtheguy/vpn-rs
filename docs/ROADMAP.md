@@ -7,7 +7,7 @@ This document outlines planned features and improvements for tunnel-rs.
 tunnel-rs currently supports three stable operational modes:
 - **iroh**: Persistent identity with automatic discovery, relay fallback, and receiver-requested sources
 - **nostr**: Full ICE with automated Nostr relay signaling and receiver-requested sources
-- **custom-manual**: Full ICE with manual signaling (single-target)
+- **ice-manual**: Full ICE with manual signaling (single-target)
 
 And one experimental mode:
 - **dcutr**: Full ICE with DCUtR-style signaling server for coordinated NAT hole punching
@@ -28,7 +28,7 @@ The `dcutr` mode provides timing-coordinated NAT hole punching using a lightweig
 3. Server coordinates simultaneous hole punch attempt
 4. Full ICE with fast timing parameters for better success
 
-**Advantages over nostr/custom-manual:**
+**Advantages over nostr/ice-manual:**
 - Timing coordination for higher hole punch success
 - No data relay (signaling only, low bandwidth)
 - Self-hosted signaling server
@@ -68,7 +68,7 @@ See [dcutr-signaling-research.md](dcutr-signaling-research.md) for protocol deta
 
 **Status:** Implemented
 
-Both `iroh` and `nostr` modes support receiver-requested sources, similar to SSH's `-R` flag for reverse tunnels. Senders restrict allowed networks via `--allowed-tcp` / `--allowed-udp` flags or config file.
+Both `iroh` and `ice-nostr` modes support receiver-requested sources, similar to SSH's `-R` flag for reverse tunnels. Senders restrict allowed networks via `--allowed-tcp` / `--allowed-udp` flags or config file.
 
 **Usage (iroh mode):**
 ```bash
@@ -120,8 +120,8 @@ tunnel-rs receiver nostr --nsec-file ./receiver.nsec \
 | Mode | Multi-Session | Dynamic Source |
 |------|---------------|----------------|
 | `iroh` | **Yes** - use `--max-sessions` (default: 100) | **Yes** - receiver specifies `--source` |
-| `nostr` | **Yes** - use `--max-sessions` (default: 10) | **Yes** - receiver specifies `--source` |
-| `custom-manual` | No | No |
+| `ice-nostr` | **Yes** - use `--max-sessions` (default: 10) | **Yes** - receiver specifies `--source` |
+| `ice-manual` | No | No |
 
 **Multi-Session** = Multiple concurrent connections to the same sender
 **Dynamic Source** = Receiver specifies which service to tunnel (iroh and nostr modes)
@@ -133,11 +133,11 @@ tunnel-rs receiver nostr --nsec-file ./receiver.nsec \
 
 ---
 
-#### Relay Fallback for Custom-Manual/Nostr Modes
+#### Relay Fallback for ice-manual/ice-nostr Modes
 
 **Status:** Idea
 
-Custom-manual and nostr modes use full ICE but have no relay fallback for symmetric NAT scenarios where direct connectivity fails.
+ice-manual and ice-nostr modes use full ICE but have no relay fallback for symmetric NAT scenarios where direct connectivity fails.
 
 ---
 

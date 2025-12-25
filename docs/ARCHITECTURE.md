@@ -7,7 +7,7 @@ This document provides a comprehensive overview of the tunnel-rs architecture, i
 - [System Overview](#system-overview)
 - [Mode Comparison](#mode-comparison)
 - [iroh Mode](#iroh-mode)
-- [Custom-Manual Mode](#custom-manual-mode)
+- [ice-manual Mode](#ice-manual-mode)
 - [Nostr Mode](#nostr-mode)
 - [DCUtR Mode (Experimental)](#dcutr-mode-experimental)
 - [Configuration System](#configuration-system)
@@ -28,7 +28,7 @@ tunnel-rs is a P2P TCP/UDP port forwarding tool that supports multiple distinct 
 graph TB
     subgraph "tunnel-rs Modes"
         A[iroh]
-        C[custom-manual]
+        C[ice-manual]
         D2[nostr]
         D3[dcutr<br/>experimental]
     end
@@ -111,7 +111,7 @@ graph LR
 
 ## Mode Comparison
 
-> **Tip for Containerized Environments:** Use `iroh` mode for Docker, Kubernetes, and cloud VM deployments. It includes relay fallback which ensures connectivity even when both peers are behind restrictive NATs (common in cloud environments). The `nostr` and `custom-manual` modes use STUN-only NAT traversal which may fail in these environments.
+> **Tip for Containerized Environments:** Use `iroh` mode for Docker, Kubernetes, and cloud VM deployments. It includes relay fallback which ensures connectivity even when both peers are behind restrictive NATs (common in cloud environments). The `ice-nostr` and `ice-manual` modes use STUN-only NAT traversal which may fail in these environments.
 
 ### Feature Matrix
 
@@ -124,7 +124,7 @@ graph TD
         A4[Infrastructure: Required]
     end
 
-    subgraph "custom-manual"
+    subgraph "ice-manual"
         C1[Discovery: Copy-Paste]
         C2[NAT: Full ICE]
         C3[Setup: Manual Exchange]
@@ -160,7 +160,7 @@ graph LR
         E4[✓ Relay]
     end
 
-    subgraph "custom-manual"
+    subgraph "ice-manual"
         G1[✓ Direct]
         G2[✓ Direct]
         G3[✓ Direct]
@@ -380,9 +380,9 @@ graph TB
 
 ---
 
-## Custom-Manual Mode
+## ice-manual Mode
 
-> **Note:** Custom-manual mode implements full ICE with STUN-only connectivity checks. TURN/relay servers are not implemented. This means symmetric NAT peers may still fail to establish a connection without a relay fallback mechanism.
+> **Note:** ice-manual mode implements full ICE with STUN-only connectivity checks. TURN/relay servers are not implemented. This means symmetric NAT peers may still fail to establish a connection without a relay fallback mechanism.
 
 ### Architecture Overview
 
@@ -677,11 +677,11 @@ graph TB
 
 ---
 
-## Nostr Mode
+## ice-nostr Mode
 
-Nostr mode combines the full ICE implementation from custom-manual mode with automated signaling via Nostr relays. Instead of manual copy-paste, ICE credentials are exchanged through Nostr events using static keypairs.
+Nostr mode combines the full ICE implementation from ice-manual mode with automated signaling via Nostr relays. Instead of manual copy-paste, ICE credentials are exchanged through Nostr events using static keypairs.
 
-> **Note for Containerized Environments:** Like custom-manual mode, nostr mode uses STUN-only NAT traversal without relay fallback. If both peers are behind restrictive NATs (common in Docker, Kubernetes, or cloud VMs), ICE connectivity may fail. For containerized deployments, consider using `iroh` mode which includes automatic relay fallback.
+> **Note for Containerized Environments:** Like ice-manual mode, nostr mode uses STUN-only NAT traversal without relay fallback. If both peers are behind restrictive NATs (common in Docker, Kubernetes, or cloud VMs), ICE connectivity may fail. For containerized deployments, consider using `iroh` mode which includes automatic relay fallback.
 
 ### Receiver-Initiated Dynamic Source
 
@@ -1042,13 +1042,13 @@ sequenceDiagram
 graph TB
     subgraph "Config File"
         A[role: sender/receiver]
-        B[mode: iroh/custom-manual/nostr]
+        B[mode: iroh/ice-manual/nostr]
         C[source/target: tcp://host:port or udp://host:port]
     end
 
     subgraph "Mode Sections"
         E[iroh]
-        G[custom-manual]
+        G[ice-manual]
         H[nostr]
     end
 
@@ -1060,7 +1060,7 @@ graph TB
         M[node_id - receiver only]
     end
 
-    subgraph "custom-manual Options"
+    subgraph "ice-manual Options"
         N[stun_servers]
     end
 
@@ -1437,7 +1437,7 @@ graph LR
         C[Total: 1.5-5s]
     end
 
-    subgraph "custom-manual"
+    subgraph "ice-manual"
         H[ICE Gather: 1-2s]
         I[Manual: User dependent]
         J[ICE Checks: 1-3s]
@@ -1472,7 +1472,7 @@ graph TB
     E -->|Yes| F[Fallback to relay]
     E -->|No| G[Connection failed]
 
-    D -->|custom-manual| I[ICE checks failed]
+    D -->|ice-manual| I[ICE checks failed]
     
     F --> C
     H --> G
@@ -1496,8 +1496,8 @@ graph TB
 | Mode | Multi-Session | Dynamic Source | Description |
 |------|---------------|----------------|-------------|
 | `iroh` | **Yes** | **Yes** | Multiple receivers, receiver specifies `--source` |
-| `nostr` | **Yes** | **Yes** | Multiple receivers, receiver specifies `--source` |
-| `custom-manual` | No | **Yes** | Single session, receiver specifies `--source` |
+| `ice-nostr` | **Yes** | **Yes** | Multiple receivers, receiver specifies `--source` |
+| `ice-manual` | No | **Yes** | Single session, receiver specifies `--source` |
 | `dcutr` | No | **Yes** | Single session, timing-coordinated (experimental) |
 
 **Multi-Session** = Multiple concurrent connections to the same sender
@@ -1509,11 +1509,11 @@ graph TB
 
 ### Single Session (Manual Signaling Mode)
 
-The `custom-manual` mode currently supports only one tunnel session at a time per sender instance. Each signaling exchange establishes exactly one tunnel.
+The `ice-manual` mode currently supports only one tunnel session at a time per sender instance. Each signaling exchange establishes exactly one tunnel.
 
 ```mermaid
 graph TB
-    subgraph "custom-manual Behavior"
+    subgraph "ice-manual Behavior"
         A[Sender starts] --> B[Wait for receiver offer]
         B --> C[Validate source request]
         C --> D[Establish single tunnel]

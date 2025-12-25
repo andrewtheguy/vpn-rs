@@ -10,7 +10,7 @@
 
 # Required: validates config matches CLI command
 role = "client"
-mode = "iroh"  # or "custom-manual", or "nostr"
+mode = "iroh"  # or "ice-manual", or "ice-nostr"
 
 # All modes use client-initiated source requests with consistent config structure.
 # Each mode section has request_source and target fields.
@@ -42,7 +42,7 @@ relay_urls = [
 # Use with Tor: socks5://127.0.0.1:9050
 # socks5_proxy = "socks5://127.0.0.1:9050"
 
-# [custom-manual]
+# [ice-manual]
 # # Client-initiated mode: request source from server, listen locally
 # # Source address to request from server (REQUIRED)
 # request_source = "tcp://127.0.0.1:22"

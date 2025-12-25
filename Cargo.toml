@@ -12,10 +12,6 @@ path = "src/lib.rs"
 name = "tunnel-rs"
 path = "src/main.rs"
 
-[[bin]]
-name = "tunnel-signaling"
-path = "src/bin/signaling.rs"
-
 [features]
 default = []
 # Enable --relay-only CLI flag for testing. Requires iroh's test-utils feature.

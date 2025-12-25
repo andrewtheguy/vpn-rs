@@ -4,10 +4,8 @@
 //! - `codec`: Payload types and encoding/decoding for ICE offers/answers
 //! - `manual`: Stdin/stdout helpers for manual copy-paste signaling
 //! - `nostr`: Nostr relay-based automated signaling
-//! - `dcutr`: DCUtR-style signaling with timing coordination
 
 pub mod codec;
-pub mod dcutr;
 pub mod manual;
 pub mod nostr;
 

@@ -3,22 +3,22 @@
 Example configurations for running tunnel-rs in Docker and Kubernetes.
 
 > [!TIP]
-> **Recommended Mode for Containers:** Use `iroh` mode for Docker and Kubernetes deployments. It includes relay fallback which ensures connectivity even when both peers are behind restrictive NATs (common in cloud environments). The `nostr` and `custom-manual` modes use STUN-only NAT traversal which may fail in containerized environments.
+> **Recommended Mode for Containers:** Use `iroh` mode for Docker and Kubernetes deployments. It includes relay fallback which ensures connectivity even when both peers are behind restrictive NATs (common in cloud environments). The `ice-nostr` and `ice-manual` modes use STUN-only NAT traversal which may fail in containerized environments.
 
 ## Mode Comparison
 
 | Mode | Multi-Session | Dynamic Source | Use Case |
 |------|---------------|----------------|----------|
 | `iroh` | Yes | **Yes** | SSH-like tunneling, receiver chooses destination, best NAT traversal with relay fallback |
-| `nostr` | Yes | **Yes** | SSH-like tunneling, receiver chooses destination |
-| `custom-manual` | No | No | Manual signaling, one-off tunnels |
+| `ice-nostr` | Yes | **Yes** | SSH-like tunneling, receiver chooses destination |
+| `ice-manual` | No | No | Manual signaling, one-off tunnels |
 
 **Multi-Session** = Multiple concurrent connections
 **Dynamic Source** = Receiver specifies destination (iroh and nostr modes)
 
 ## Dynamic Source Modes (iroh and nostr)
 
-Both `iroh` and `nostr` modes use a **receiver-initiated** model similar to SSH `-L` tunneling:
+Both `iroh` and `ice-nostr` modes use a **receiver-initiated** model similar to SSH `-L` tunneling:
 
 | SSH Equivalent | tunnel-rs | Description |
 |----------------|-----------|-------------|
@@ -73,7 +73,7 @@ tunnel-rs receiver iroh \
 # Access at http://127.0.0.1:8080
 ```
 
-### Nostr Mode (automated signaling)
+### ice-nostr Mode (automated signaling)
 
 For persistent connections without manual EndpointId exchange:
 

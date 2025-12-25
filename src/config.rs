@@ -2,7 +2,7 @@
 //!
 //! Configuration structure:
 //! - `role` and `mode` fields for validation
-//! - Mode-specific sections: [iroh], [custom-manual], [nostr]
+//! - Mode-specific sections: [iroh], [ice-manual], [nostr]
 //! - All modes use client-initiated source requests
 //!
 //! Role-based field semantics are enforced by `validate()` at parse time:
@@ -52,7 +52,7 @@ pub struct IrohConfig {
     pub socks5_proxy: Option<String>,
 }
 
-/// custom-manual mode configuration.
+/// ice-manual mode configuration.
 ///
 /// Some fields are role-specific (enforced by validate()):
 /// - Server-only: `allowed_sources`
@@ -127,7 +127,7 @@ pub struct ServerConfig {
 
     // Mode-specific sections
     pub iroh: Option<IrohConfig>,
-    #[serde(rename = "custom-manual")]
+    #[serde(rename = "ice-manual")]
     pub custom_manual: Option<CustomManualConfig>,
     pub nostr: Option<NostrConfig>,
 }
@@ -141,7 +141,7 @@ pub struct ClientConfig {
 
     // Mode-specific sections (each mode has its own target field)
     pub iroh: Option<IrohConfig>,
-    #[serde(rename = "custom-manual")]
+    #[serde(rename = "ice-manual")]
     pub custom_manual: Option<CustomManualConfig>,
     pub nostr: Option<NostrConfig>,
 }
@@ -233,7 +233,7 @@ impl ServerConfig {
         self.iroh.as_ref()
     }
 
-    /// Get custom-manual config section (single-target mode).
+    /// Get ice-manual config section (single-target mode).
     pub fn custom_manual(&self) -> Option<&CustomManualConfig> {
         self.custom_manual.as_ref()
     }
@@ -263,7 +263,7 @@ impl ServerConfig {
         }
 
         let mode = self.mode.as_deref().context(
-            "Config file missing required 'mode' field. Add: mode = \"iroh\" (or \"custom-manual\", \"nostr\")",
+            "Config file missing required 'mode' field. Add: mode = \"iroh\" (or \"ice-manual\", \"nostr\")",
         )?;
         if mode != expected_mode {
             anyhow::bail!(
@@ -275,8 +275,8 @@ impl ServerConfig {
 
         // Validate mode is known
         match expected_mode {
-            "iroh" | "custom-manual" | "nostr" => {}
-            _ => anyhow::bail!("Unknown mode '{}'. Valid modes: iroh, custom-manual, nostr", expected_mode),
+            "iroh" | "ice-manual" | "ice-nostr" => {}
+            _ => anyhow::bail!("Unknown mode '{}'. Valid modes: iroh, ice-manual, ice-nostr", expected_mode),
         }
 
         // Mode-specific validation
@@ -312,7 +312,7 @@ impl ServerConfig {
                 );
             }
         }
-        if expected_mode == "nostr" {
+        if expected_mode == "ice-nostr" {
             if let Some(ref nostr) = self.nostr {
                 if nostr.nsec.is_some() && nostr.nsec_file.is_some() {
                     anyhow::bail!("[nostr] Use only one of 'nsec' or 'nsec_file'.");
@@ -337,12 +337,12 @@ impl ServerConfig {
                 );
             }
         }
-        if expected_mode == "custom-manual" {
+        if expected_mode == "ice-manual" {
             if let Some(ref custom_manual) = self.custom_manual {
                 // Reject client-only fields
                 if custom_manual.request_source.is_some() || custom_manual.target.is_some() {
                     anyhow::bail!(
-                        "[custom-manual] 'source' / 'request_source' / 'target' are client-only fields. \
+                        "[ice-manual] 'source' / 'request_source' / 'target' are client-only fields. \
                         Servers use 'allowed_sources' to restrict what clients can request."
                     );
                 }
@@ -351,11 +351,11 @@ impl ServerConfig {
                     validate_allowed_sources(allowed)?;
                 }
             }
-            // Reject top-level source for custom-manual server
+            // Reject top-level source for ice-manual server
             if self.source.is_some() {
                 anyhow::bail!(
-                    "Top-level 'source' is not allowed for custom-manual server mode. \
-                    Use [custom-manual.allowed_sources] to restrict what clients can request."
+                    "Top-level 'source' is not allowed for ice-manual server mode. \
+                    Use [ice-manual.allowed_sources] to restrict what clients can request."
                 );
             }
         }
@@ -370,7 +370,7 @@ impl ClientConfig {
         self.iroh.as_ref()
     }
 
-    /// Get custom-manual config section (single-target mode).
+    /// Get ice-manual config section (single-target mode).
     pub fn custom_manual(&self) -> Option<&CustomManualConfig> {
         self.custom_manual.as_ref()
     }
@@ -400,7 +400,7 @@ impl ClientConfig {
         }
 
         let mode = self.mode.as_deref().context(
-            "Config file missing required 'mode' field. Add: mode = \"iroh\" (or \"custom-manual\", \"nostr\")",
+            "Config file missing required 'mode' field. Add: mode = \"iroh\" (or \"ice-manual\", \"nostr\")",
         )?;
         if mode != expected_mode {
             anyhow::bail!(
@@ -412,8 +412,8 @@ impl ClientConfig {
 
         // Validate mode is known
         match expected_mode {
-            "iroh" | "custom-manual" | "nostr" => {}
-            _ => anyhow::bail!("Unknown mode '{}'. Valid modes: iroh, custom-manual, nostr", expected_mode),
+            "iroh" | "ice-manual" | "ice-nostr" => {}
+            _ => anyhow::bail!("Unknown mode '{}'. Valid modes: iroh, ice-manual, ice-nostr", expected_mode),
         }
 
         // Mode-specific validation
@@ -446,7 +446,7 @@ impl ClientConfig {
                 }
             }
         }
-        if expected_mode == "nostr" {
+        if expected_mode == "ice-nostr" {
             if let Some(ref nostr) = self.nostr {
                 if nostr.nsec.is_some() && nostr.nsec_file.is_some() {
                     anyhow::bail!("[nostr] Use only one of 'nsec' or 'nsec_file'.");
@@ -474,12 +474,12 @@ impl ClientConfig {
             }
         }
 
-        if expected_mode == "custom-manual" {
+        if expected_mode == "ice-manual" {
             if let Some(ref custom_manual) = self.custom_manual {
                 // Reject server-only fields
                 if custom_manual.allowed_sources.is_some() {
                     anyhow::bail!(
-                        "[custom-manual] 'allowed_sources' is a server-only field. \
+                        "[ice-manual] 'allowed_sources' is a server-only field. \
                         Clients use 'source' to specify what to request from server."
                     );
                 }

@@ -10,7 +10,7 @@
 
 # Required: validates config matches CLI command
 role = "server"
-mode = "iroh"  # or "custom-manual", or "nostr"
+mode = "iroh"  # or "ice-manual", or "ice-nostr"
 
 # NOTE: For multi-source modes (iroh, nostr), do NOT set 'source' here.
 # Clients request sources dynamically. Use allowed_sources below to restrict.
@@ -56,7 +56,7 @@ udp = [
     "10.0.0.0/8",       # private network
 ]
 
-# [custom-manual]
+# [ice-manual]
 # # Client-initiated mode: clients request sources, server validates
 # # Set to [] to disable STUN entirely
 # stun_servers = [
@@ -65,7 +65,7 @@ udp = [
 #     "stun.services.mozilla.com:3478",
 # ]
 # # Allowed source networks that clients can request (CIDR notation)
-# [custom-manual.allowed_sources]
+# [ice-manual.allowed_sources]
 # tcp = ["127.0.0.0/8", "192.168.0.0/16"]
 # udp = ["10.0.0.0/8"]
 
