@@ -294,6 +294,9 @@ pub async fn validate_tor_proxy(proxy_url: &str) -> Result<()> {
         .context("Failed to send HTTP request")?;
 
     // Read response with timeout
+    // Maximum response body size to prevent malicious allocations
+    const MAX_CONTENT_LENGTH: usize = 64 * 1024; // 64 KB
+
     let read_future = async {
         let mut reader = BufReader::new(tls_stream);
 
@@ -314,10 +317,19 @@ pub async fn validate_tor_proxy(proxy_url: &str) -> Result<()> {
             let mut line = String::new();
             reader.read_line(&mut line).await?;
 
-            // Check for Content-Length header
+            // Check for Content-Length header with size limit
             if line.to_lowercase().starts_with("content-length:") {
                 if let Some(len_str) = line.split(':').nth(1) {
-                    content_length = len_str.trim().parse().ok();
+                    if let Ok(len) = len_str.trim().parse::<usize>() {
+                        if len > MAX_CONTENT_LENGTH {
+                            return Err(std::io::Error::new(
+                                std::io::ErrorKind::InvalidData,
+                                format!("Content-Length {} exceeds maximum allowed size of {} bytes", len, MAX_CONTENT_LENGTH)
+                            ));
+                        }
+                        content_length = Some(len);
+                    }
+                    // Non-parsable values are treated as absent
                 }
             }
 
@@ -326,16 +338,17 @@ pub async fn validate_tor_proxy(proxy_url: &str) -> Result<()> {
             }
         }
 
-        // Read entire body
+        // Read entire body (with size limit)
         let mut body = String::new();
         if let Some(len) = content_length {
-            // Read exact content length
+            // Read exact content length (already validated against MAX_CONTENT_LENGTH)
             let mut buf = vec![0u8; len];
             reader.read_exact(&mut buf).await?;
             body = String::from_utf8_lossy(&buf).to_string();
         } else {
-            // Read until EOF (Connection: close)
-            reader.read_to_string(&mut body).await?;
+            // Read until EOF with size limit (Connection: close)
+            let mut limited_reader = reader.take(MAX_CONTENT_LENGTH as u64);
+            limited_reader.read_to_string(&mut body).await?;
         }
 
         Ok::<_, std::io::Error>((status_code, status_line.trim().to_string(), body.trim().to_string()))
