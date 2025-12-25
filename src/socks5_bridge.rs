@@ -296,26 +296,66 @@ pub async fn validate_tor_proxy(proxy_url: &str) -> Result<()> {
     // Read response with timeout
     let read_future = async {
         let mut reader = BufReader::new(tls_stream);
-        let mut response = String::new();
 
-        // Read headers
+        // Read and parse HTTP status line
+        let mut status_line = String::new();
+        reader.read_line(&mut status_line).await?;
+
+        // Parse status code from "HTTP/1.1 200 OK\r\n"
+        let status_code: u16 = status_line
+            .split_whitespace()
+            .nth(1)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+
+        // Read remaining headers
+        let mut content_length: Option<usize> = None;
         loop {
             let mut line = String::new();
             reader.read_line(&mut line).await?;
+
+            // Check for Content-Length header
+            if line.to_lowercase().starts_with("content-length:") {
+                if let Some(len_str) = line.split(':').nth(1) {
+                    content_length = len_str.trim().parse().ok();
+                }
+            }
+
             if line == "\r\n" || line.is_empty() {
                 break;
             }
         }
 
-        // Read body
-        reader.read_line(&mut response).await?;
-        Ok::<_, std::io::Error>(response)
+        // Read entire body
+        let mut body = String::new();
+        if let Some(len) = content_length {
+            // Read exact content length
+            let mut buf = vec![0u8; len];
+            reader.read_exact(&mut buf).await?;
+            body = String::from_utf8_lossy(&buf).to_string();
+        } else {
+            // Read until EOF (Connection: close)
+            reader.read_to_string(&mut body).await?;
+        }
+
+        Ok::<_, std::io::Error>((status_code, status_line.trim().to_string(), body.trim().to_string()))
     };
 
-    let response_body = timeout(Duration::from_secs(10), read_future)
+    let (status_code, status_line, response_body) = timeout(Duration::from_secs(10), read_future)
         .await
         .context("Timeout reading response from check.torproject.org")?
         .context("Failed to read HTTP response")?;
+
+    // Validate HTTP status code
+    if status_code != 200 {
+        anyhow::bail!(
+            "check.torproject.org returned HTTP error.\n\
+             Status: {}\n\
+             Body: {}",
+            status_line,
+            response_body
+        );
+    }
 
     // Parse JSON response: {"IsTor":true,"IP":"..."}
     #[derive(serde::Deserialize)]
