@@ -21,11 +21,15 @@
 //!   tunnel-rs client ice-nostr --source tcp://127.0.0.1:22 --target 127.0.0.1:2222 --nsec <NSEC> --peer-npub <NPUB>
 
 use tunnel_rs::config;
+#[cfg(feature = "ice")]
 use tunnel_rs::custom;
 use tunnel_rs::iroh;
+#[cfg(feature = "ice")]
 use tunnel_rs::nostr;
 use tunnel_rs::secret;
 use tunnel_rs::socks5_bridge;
+#[cfg(feature = "embedded-tor")]
+use tunnel_rs::arti_bridge;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
@@ -224,12 +228,14 @@ enum Command {
         secret_file: PathBuf,
     },
     /// Show the Nostr public key (npub) for an existing nsec file
+    #[cfg(feature = "ice")]
     ShowNpub {
         /// Path to the nsec key file
         #[arg(short, long)]
         nsec_file: PathBuf,
     },
     /// Generate a Nostr keypair for use with nostr mode
+    #[cfg(feature = "ice")]
     GenerateNostrKey {
         /// Path where to save the nsec key file
         #[arg(short, long)]
@@ -591,6 +597,7 @@ async fn main() -> Result<()> {
 
                     iroh::run_multi_source_server(allowed_tcp, allowed_udp, max_sessions, secret, relay_urls, relay_only, dns_server).await
                 }
+                #[cfg(feature = "ice")]
                 "ice-manual" => {
                     let custom_cfg = cfg.ice_manual.as_ref();
                     let (allowed_tcp, allowed_udp, stun_servers) = match &mode {
@@ -618,6 +625,7 @@ async fn main() -> Result<()> {
 
                     custom::run_manual_server(allowed_tcp, allowed_udp, stun_servers).await
                 }
+                #[cfg(feature = "ice")]
                 "ice-nostr" => {
                     let nostr_cfg = cfg.nostr();
                     let (allowed_tcp, allowed_udp, stun_servers, nsec, nsec_file, peer_npub, relays, republish_interval, max_wait, max_sessions) = match &mode {
@@ -754,7 +762,12 @@ async fn main() -> Result<()> {
                         "--target is required. Provide the local address to listen on (e.g., --target 127.0.0.1:2222)",
                     )?;
 
-                    // Set up SOCKS5 bridges for .onion relay URLs
+                    // Set up bridges for .onion relay URLs
+                    // With embedded-tor feature: use embedded Arti client (no external Tor needed)
+                    // Without: use external SOCKS5 proxy (requires running Tor daemon)
+                    #[cfg(feature = "embedded-tor")]
+                    let (relay_urls, _bridges) = arti_bridge::setup_relay_bridges_arti(relay_urls).await?;
+                    #[cfg(not(feature = "embedded-tor"))]
                     let (relay_urls, _bridges) = socks5_bridge::setup_relay_bridges(
                         relay_urls,
                         socks5_proxy.as_deref(),
@@ -762,6 +775,7 @@ async fn main() -> Result<()> {
 
                     iroh::run_multi_source_client(node_id, source, target, relay_urls, relay_only, dns_server).await
                 }
+                #[cfg(feature = "ice")]
                 "ice-manual" => {
                     let custom_cfg = cfg.ice_manual.as_ref();
                     let (source, target, stun_servers) = match &mode {
@@ -794,6 +808,7 @@ async fn main() -> Result<()> {
 
                     custom::run_manual_client(source, listen, stun_servers).await
                 }
+                #[cfg(feature = "ice")]
                 "ice-nostr" => {
                     let nostr_cfg = cfg.nostr();
                     let (target, source, stun_servers, nsec, nsec_file, peer_npub, relays, republish_interval, max_wait) = match &mode {
@@ -870,7 +885,9 @@ async fn main() -> Result<()> {
         }
         Command::GenerateIrohKey { output, force } => secret::generate_secret(output, force),
         Command::ShowIrohNodeId { secret_file } => secret::show_id(secret_file),
+        #[cfg(feature = "ice")]
         Command::ShowNpub { nsec_file } => secret::show_npub(nsec_file),
+        #[cfg(feature = "ice")]
         Command::GenerateNostrKey { output, force } => secret::generate_nostr_key(output, force),
     }
 }
