@@ -41,6 +41,8 @@ tunnel-rs provides multiple modes for establishing tunnels:
 | **ice-manual** | Manual copy-paste | Full ICE | TCP, UDP | Manual signaling without relay |
 | **ice-nostr** | Nostr relays | Full ICE | TCP, UDP | Automated signaling, static keys |
 
+> See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for detailed diagrams and technical deep-dives.
+
 > [!TIP]
 > **For containerized environments (Docker, Kubernetes, cloud VMs):** Use `iroh` mode. It includes relay fallback which ensures connectivity even when both peers are behind restrictive NATs (common in cloud environments). The `ice-nostr` and `ice-manual` modes use full ICE with STUN servers but may have connectivity issues when both peers are behind symmetric NATs without external relay support.
 
@@ -143,7 +145,9 @@ Access services running in Docker or Kubernetes remotely — without opening por
 
 # iroh Mode
 
-Uses iroh's P2P network for automatic peer discovery and NAT traversal with relay fallback. This is a **multi-source mode** where the client requests which service to tunnel (similar to SSH `-L` tunneling).
+Uses iroh's P2P network for automatic peer discovery and NAT traversal with relay fallback. Best for containerized environments and persistent tunnels.
+
+> **Summary:** Automatic discovery via Pkarr/DNS, relay fallback for restrictive NATs, multi-session support. See [Architecture: iroh Mode](docs/ARCHITECTURE.md#iroh-mode) for detailed diagrams.
 
 **Note:** While discovery and relay are fully automatic, peers still need to exchange the server's **EndpointId** to initiate the connection. The server whitelists allowed networks, and the client specifies which service to tunnel.
 
@@ -455,9 +459,9 @@ See [docs/tor-hidden-service.md](docs/tor-hidden-service.md) for complete setup 
 
 # ice-manual Mode
 
-Uses full ICE (Interactive Connectivity Establishment) with str0m + quinn QUIC.
+Uses full ICE (Interactive Connectivity Establishment) with str0m + quinn QUIC. Best for manual signaling without external infrastructure dependencies.
 
-**NAT Traversal:** Full ICE implementation with STUN candidate gathering and connectivity checks. This provides reliable NAT traversal for most scenarios, including support for symmetric NATs that fail with simpler STUN-only approaches.
+> **Summary:** Manual copy-paste signaling, full ICE NAT traversal via STUN, no relay fallback. See [Architecture: ice-manual Mode](docs/ARCHITECTURE.md#ice-manual-mode) for detailed diagrams.
 
 ## Architecture
 
@@ -553,10 +557,12 @@ ICE connection established!
 
 Uses full ICE with Nostr-based signaling. Instead of manual copy-paste, ICE offers/answers are exchanged automatically via Nostr relays using static keypairs (like WireGuard).
 
+> **Summary:** Automated signaling via Nostr relays, static WireGuard-like keys, full ICE NAT traversal, no relay fallback. See [Architecture: ice-nostr Mode](docs/ARCHITECTURE.md#ice-nostr-mode) for detailed diagrams.
+
 **Key Features:**
 - **Static keys** — Persistent identity using nsec/npub keypairs (like WireGuard)
 - **Automated signaling** — No copy-paste required; offers/answers exchanged via Nostr relays
-- **Full ICE** — Same NAT traversal as custom mode (str0m + quinn)
+- **Full ICE** — Same NAT traversal as ice-manual mode (str0m + quinn)
 - **Deterministic pairing** — Transfer ID derived from both pubkeys; no coordination needed
 
 ## Architecture
