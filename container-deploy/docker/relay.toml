@@ -1,0 +1,7 @@
+# iroh-relay configuration for Tor hidden service
+# HTTP only - Tor provides end-to-end encryption
+
+enable_relay = true
+http_bind_addr = "0.0.0.0:3340"
+enable_quic_addr_discovery = false
+enable_metrics = false

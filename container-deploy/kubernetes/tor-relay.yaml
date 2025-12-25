@@ -64,6 +64,22 @@ data:
     Log notice stdout
 
 ---
+# iroh-relay configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: iroh-relay-config
+  namespace: tunnel-tor
+data:
+  relay.toml: |
+    # iroh-relay configuration for Tor hidden service
+    # HTTP only - Tor provides end-to-end encryption
+    enable_relay = true
+    http_bind_addr = "0.0.0.0:3340"
+    enable_quic_addr_discovery = false
+    enable_metrics = false
+
+---
 # Persistent storage for Tor hidden service keys
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -147,11 +163,18 @@ spec:
 
         # iroh-relay server (HTTP only - Tor provides encryption)
         - name: iroh-relay
-          image: n0computer/iroh-relay:latest
-          args: ["--dev"]
+          image: n0computer/iroh-relay:v0.95.1
+          args:
+            - -c
+            - /config/relay.toml
           ports:
             - containerPort: 3340
               name: relay
+          volumeMounts:
+            - name: iroh-relay-config
+              mountPath: /config/relay.toml
+              subPath: relay.toml
+              readOnly: true
           resources:
             requests:
               memory: "64Mi"
@@ -200,6 +223,9 @@ spec:
         - name: tor-config
           configMap:
             name: tor-config
+        - name: iroh-relay-config
+          configMap:
+            name: iroh-relay-config
         - name: tor-hidden-service
           persistentVolumeClaim:
             claimName: tor-hidden-service-keys

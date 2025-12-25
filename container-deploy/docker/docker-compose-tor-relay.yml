@@ -61,9 +61,12 @@ services:
 
   # iroh-relay server (HTTP only - Tor provides encryption)
   iroh-relay:
-    image: n0computer/iroh-relay:latest
+    image: n0computer/iroh-relay:v0.95.1
     command:
-      - --dev
+      - -c
+      - /config/relay.toml
+    volumes:
+      - ./relay.toml:/config/relay.toml:ro
     # Only accessible within Docker network (via Tor hidden service)
     expose:
       - "3340"
