@@ -110,6 +110,20 @@ irm https://andrewtheguy.github.io/tunnel-rs/install.ps1 | iex -Args 20251210172
 cargo install --path .
 ```
 
+### Feature Flags
+
+The `ice` feature is **enabled by default** and provides ICE/STUN-based NAT traversal modes:
+
+| Feature | Default | Description |
+|---------|---------|-------------|
+| `ice` | Yes | Enables `ice-manual` and `ice-nostr` modes (str0m, quinn, nostr-sdk) |
+| `test-utils` | No | Enables `--relay-only` flag for testing |
+
+To build without ICE support (iroh mode only):
+```bash
+cargo build --no-default-features
+```
+
 ### Supported Platforms
 
 tunnel-rs is fully supported on:

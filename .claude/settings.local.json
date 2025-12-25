@@ -29,7 +29,8 @@
       "Bash(mkdir:*)",
       "Bash(perl:*)",
       "Bash(./target/debug/tunnel-rs:*)",
-      "Bash(cat:*)"
+      "Bash(cat:*)",
+      "Bash(cargo metadata:*)"
     ]
   }
 }
