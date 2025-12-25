@@ -237,9 +237,14 @@ fn validate_socks5_proxy(value: &str, relay_urls: Option<&Vec<String>>) -> Resul
 
     let scheme = url.scheme();
 
-    // Check if any relay URLs contain .onion addresses
+    // Check if any relay URLs contain .onion addresses (by checking host component)
     let has_onion_relay = relay_urls.map_or(false, |urls| {
-        urls.iter().any(|u| u.contains(".onion"))
+        urls.iter().any(|u| {
+            url::Url::parse(u)
+                .ok()
+                .and_then(|parsed| parsed.host_str().map(|h| h.ends_with(".onion")))
+                .unwrap_or(false)
+        })
     });
 
     if has_onion_relay {
@@ -367,9 +372,9 @@ impl ServerConfig {
                     anyhow::bail!("[ice-nostr] Use only one of 'nsec' or 'nsec_file'.");
                 }
                 // Reject client-only fields
-                if nostr.request_source.is_some() {
+                if nostr.request_source.is_some() || nostr.target.is_some() {
                     anyhow::bail!(
-                        "[ice-nostr] 'source' / 'request_source' is a client-only field. \
+                        "[ice-nostr] 'source' / 'request_source' / 'target' are client-only fields. \
                         Servers use 'allowed_sources' to restrict what clients can request."
                     );
                 }
