@@ -1306,12 +1306,14 @@ The `iroh::Endpoint` provides:
 
 ### SOCKS5 Bridge (Tor Support)
 
-For `.onion` relay and DNS server URLs, tunnel-rs creates local TCP bridges:
+For `.onion` relay URLs, tunnel-rs creates local TCP bridges through a Tor SOCKS5 proxy:
 
+- **Tor-Only**: SOCKS5 proxy requires all relay URLs to be `.onion` addresses
+- **Proxy Validation**: At startup, validates the proxy is a real Tor proxy via `check.torproject.org`
 - **Relay Bridge**: Routes relay connections through SOCKS5 proxy to `.onion` addresses
-- **DNS Bridge**: Routes DNS/Pkarr HTTP requests through SOCKS5 proxy to `.onion` addresses
 - **Transparent**: URLs are rewritten to localhost, iroh connects normally
-- **Direct P2P Bypass**: Direct P2P connections bypass the proxy entirely
+- **No DNS Server**: When using SOCKS5 proxy, DNS server is not used (relay handles discovery)
+- **Direct P2P Bypass**: Direct P2P connections bypass Tor entirely (no performance impact)
 
 ---
 
