@@ -404,7 +404,7 @@ tunnel-rs client iroh \
 iroh mode uses the relay for both **signaling/coordination** and as a **data transport fallback**:
 
 1. Initial connection goes through relay for signaling
-2. iroh attempts hole punching (similar to libp2p's DCUtR)
+2. iroh attempts coordinated hole punching (similar to libp2p's DCUtR protocol)
 3. If successful (~70%), traffic flows directly between peers
 4. If hole punching fails, **traffic continues through relay**
 

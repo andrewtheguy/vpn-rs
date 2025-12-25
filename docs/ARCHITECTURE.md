@@ -9,7 +9,6 @@ This document provides a comprehensive overview of the tunnel-rs architecture, i
 - [iroh Mode](#iroh-mode)
 - [ice-manual Mode](#ice-manual-mode)
 - [ice-nostr Mode](#ice-nostr-mode)
-- [DCUtR Mode (Experimental)](#dcutr-mode-experimental)
 - [Configuration System](#configuration-system)
 - [Security Model](#security-model)
 - [Protocol Support](#protocol-support)
@@ -30,37 +29,31 @@ graph TB
         A[iroh]
         C[ice-manual]
         D2[ice-nostr]
-        D3[dcutr<br/>experimental]
     end
 
     subgraph "Use Cases"
         D[Persistent<br/>Best NAT Traversal]
         F[Manual Signaling<br/>Full ICE]
         F2[Automated Signaling<br/>Static Keys]
-        F3[Timing Coordination<br/>Self-hosted]
     end
 
     subgraph "Infrastructure"
         G[Pkarr/DNS<br/>Relay Servers]
         I[STUN Only]
         I2[STUN + Nostr Relays]
-        I3[STUN + Signaling Server]
     end
 
     A --> D
     C --> F
     D2 --> F2
-    D3 --> F3
 
     A --> G
     C --> I
     D2 --> I2
-    D3 --> I3
 
     style A fill:#4CAF50
     style C fill:#FF9800
     style D2 fill:#9C27B0
-    style D3 fill:#607D8B
 ```
 
 ### Core Components
@@ -911,129 +904,6 @@ graph TB
 
 ---
 
-## DCUtR Mode (Experimental)
-
-DCUtR mode provides timing-coordinated NAT hole punching using a lightweight signaling server. This mode aims to improve hole punch success rates by coordinating the exact moment both peers begin their connection attempts.
-
-> **Experimental:** This mode is under active development. For production use, prefer `iroh` mode which has relay fallback.
-
-### Architecture Overview
-
-```mermaid
-graph TB
-    subgraph "Server Side"
-        A[tunnel-rs server]
-        B[ICE Agent<br/>str0m]
-        C[QUIC Endpoint<br/>quinn]
-        D[Target Service]
-    end
-
-    subgraph "Signaling Server"
-        E[tunnel-rs-signaling]
-        F[RTT Measurement]
-        G[Timing Coordination]
-    end
-
-    subgraph "Client Side"
-        H[tunnel-rs client]
-        I[ICE Agent<br/>str0m]
-        J[QUIC Endpoint<br/>quinn]
-        K[Local Client]
-    end
-
-    A --> B
-    B --> C
-    C --> D
-
-    H --> I
-    I --> J
-    J --> K
-
-    A <-.TCP Signaling.-> E
-    H <-.TCP Signaling.-> E
-    E --> F
-    F --> G
-
-    B <-.ICE Checks.-> I
-    C <-.QUIC/TLS.-> J
-
-    style E fill:#607D8B
-    style F fill:#607D8B
-    style G fill:#607D8B
-    style A fill:#E8F5E9
-    style H fill:#E8F5E9
-```
-
-### Timing Coordination Flow
-
-```mermaid
-sequenceDiagram
-    participant S as Server
-    participant SS as Signaling Server
-    participant C as Client
-    participant STUN as STUN Server
-
-    Note over S: Register with signaling server
-    S->>SS: register(server_id)
-
-    loop RTT Measurement (5 rounds)
-        S->>SS: ping(seq, timestamp)
-        SS-->>S: pong + store client RTT
-        S->>S: Measure RTT locally
-        S->>SS: Send measured RTT in next ping
-    end
-
-    Note over C: Connect and request tunnel
-    C->>SS: register(client_id)
-
-    loop RTT Measurement (5 rounds)
-        C->>SS: ping(seq, timestamp)
-        SS-->>C: pong + store client RTT
-        C->>C: Measure RTT locally
-        C->>SS: Send measured RTT in next ping
-    end
-
-    C->>SS: connect_request(peer_id, candidates)
-
-    Note over SS: Calculate synchronized start time
-    SS->>SS: start_at = now + max(RTT_S, RTT_C)/2 + buffer
-
-    par Send sync_connect to both
-        SS->>S: sync_connect(peer_candidates, start_at)
-    and
-        SS->>C: sync_connect(peer_candidates, start_at)
-    end
-
-    Note over S,C: Both wait until start_at, then begin ICE
-
-    par Simultaneous ICE
-        S->>STUN: Gather candidates (fast timing)
-        C->>STUN: Gather candidates (fast timing)
-    end
-
-    S<-->C: ICE connectivity checks
-
-    Note over S,C: QUIC connection over ICE socket
-```
-
-### Key Implementation Details
-
-**True RTT Measurement:**
-- Client measures round-trip time locally (response_received - request_sent)
-- Client sends measured RTT to server in subsequent pings
-- Avoids clock synchronization issues between peers
-
-**Fast ICE Timing:**
-- Uses aggressive timing parameters for coordinated attempts
-- 20ms timing advance (vs 50ms standard)
-- 100ms initial STUN RTO (vs 250ms standard)
-- 1000ms max STUN RTO (vs 3000ms standard)
-
-**500ms Timing Buffer:**
-- Added to coordinated start time to account for clock skew, jitter, and processing
-
----
-
 ## Configuration System
 
 ### Configuration File Structure
@@ -1498,7 +1368,6 @@ graph TB
 | `iroh` | **Yes** | **Yes** | Multiple receivers, receiver specifies `--source` |
 | `ice-nostr` | **Yes** | **Yes** | Multiple receivers, receiver specifies `--source` |
 | `ice-manual` | No | **Yes** | Single session, receiver specifies `--source` |
-| `dcutr` | No | **Yes** | Single session, timing-coordinated (experimental) |
 
 **Multi-Session** = Multiple concurrent connections to the same sender
 **Dynamic Source** = Receiver specifies which service to tunnel (via `--source`)
