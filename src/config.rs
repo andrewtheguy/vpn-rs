@@ -128,7 +128,7 @@ pub struct ServerConfig {
     // Mode-specific sections
     pub iroh: Option<IrohConfig>,
     #[serde(rename = "ice-manual")]
-    pub custom_manual: Option<CustomManualConfig>,
+    pub ice_manual: Option<CustomManualConfig>,
     pub nostr: Option<NostrConfig>,
 }
 
@@ -142,7 +142,7 @@ pub struct ClientConfig {
     // Mode-specific sections (each mode has its own target field)
     pub iroh: Option<IrohConfig>,
     #[serde(rename = "ice-manual")]
-    pub custom_manual: Option<CustomManualConfig>,
+    pub ice_manual: Option<CustomManualConfig>,
     pub nostr: Option<NostrConfig>,
 }
 
@@ -231,11 +231,6 @@ impl ServerConfig {
     /// Get iroh config section (multi-source mode).
     pub fn iroh(&self) -> Option<&IrohConfig> {
         self.iroh.as_ref()
-    }
-
-    /// Get ice-manual config section (single-target mode).
-    pub fn custom_manual(&self) -> Option<&CustomManualConfig> {
-        self.custom_manual.as_ref()
     }
 
     /// Get nostr config section.
@@ -338,16 +333,16 @@ impl ServerConfig {
             }
         }
         if expected_mode == "ice-manual" {
-            if let Some(ref custom_manual) = self.custom_manual {
+            if let Some(ref ice_manual) = self.ice_manual {
                 // Reject client-only fields
-                if custom_manual.request_source.is_some() || custom_manual.target.is_some() {
+                if ice_manual.request_source.is_some() || ice_manual.target.is_some() {
                     anyhow::bail!(
                         "[ice-manual] 'source' / 'request_source' / 'target' are client-only fields. \
                         Servers use 'allowed_sources' to restrict what clients can request."
                     );
                 }
                 // Validate CIDR format
-                if let Some(ref allowed) = custom_manual.allowed_sources {
+                if let Some(ref allowed) = ice_manual.allowed_sources {
                     validate_allowed_sources(allowed)?;
                 }
             }
@@ -368,11 +363,6 @@ impl ClientConfig {
     /// Get iroh config section (multi-source mode).
     pub fn iroh(&self) -> Option<&IrohConfig> {
         self.iroh.as_ref()
-    }
-
-    /// Get ice-manual config section (single-target mode).
-    pub fn custom_manual(&self) -> Option<&CustomManualConfig> {
-        self.custom_manual.as_ref()
     }
 
     /// Get nostr config section.
@@ -475,20 +465,20 @@ impl ClientConfig {
         }
 
         if expected_mode == "ice-manual" {
-            if let Some(ref custom_manual) = self.custom_manual {
+            if let Some(ref ice_manual) = self.ice_manual {
                 // Reject server-only fields
-                if custom_manual.allowed_sources.is_some() {
+                if ice_manual.allowed_sources.is_some() {
                     anyhow::bail!(
                         "[ice-manual] 'allowed_sources' is a server-only field. \
                         Clients use 'source' to specify what to request from server."
                     );
                 }
                 // Validate request_source URL format
-                if let Some(ref source) = custom_manual.request_source {
+                if let Some(ref source) = ice_manual.request_source {
                     validate_tcp_udp_url(source, "request_source")?;
                 }
                 // Validate target format (host:port)
-                if let Some(ref target) = custom_manual.target {
+                if let Some(ref target) = ice_manual.target {
                     validate_host_port(target, "target")?;
                 }
             }

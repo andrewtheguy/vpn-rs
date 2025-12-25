@@ -63,7 +63,7 @@ impl IceEndpoint {
         Self::gather_with_timing(stun_servers, false).await
     }
 
-    /// Gather ICE candidates with fast timing for coordinated hole punching (DCUtR).
+    /// Gather ICE candidates with fast timing for coordinated hole punching.
     /// Both peers should call this at the same time for best results.
     pub async fn gather_fast(stun_servers: &[String]) -> Result<Self> {
         Self::gather_with_timing(stun_servers, true).await
@@ -77,7 +77,7 @@ impl IceEndpoint {
         let mut ice = IceAgent::new(IceCreds::new(), sha1);
 
         if fast_timing {
-            // Fast timing for coordinated hole punching (DCUtR)
+            // Fast timing for coordinated hole punching
             // Both peers start at synchronized time, so we can be more aggressive
             ice.set_timing_advance(Duration::from_millis(20));      // Faster polling
             ice.set_initial_stun_rto(Duration::from_millis(100));   // Quicker retries

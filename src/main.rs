@@ -592,7 +592,7 @@ async fn main() -> Result<()> {
                     iroh::run_multi_source_server(allowed_tcp, allowed_udp, max_sessions, secret, relay_urls, relay_only, dns_server).await
                 }
                 "ice-manual" => {
-                    let custom_cfg = cfg.custom_manual();
+                    let custom_cfg = cfg.ice_manual.as_ref();
                     let (allowed_tcp, allowed_udp, stun_servers) = match &mode {
                         Some(ServerMode::CustomManual { allowed_tcp: at, allowed_udp: au, stun_servers: ss, no_stun }) => {
                             let cfg_allowed = custom_cfg.and_then(|c| c.allowed_sources.clone()).unwrap_or_default();
@@ -763,7 +763,7 @@ async fn main() -> Result<()> {
                     iroh::run_multi_source_client(node_id, source, target, relay_urls, relay_only, dns_server).await
                 }
                 "ice-manual" => {
-                    let custom_cfg = cfg.custom_manual();
+                    let custom_cfg = cfg.ice_manual.as_ref();
                     let (source, target, stun_servers) = match &mode {
                         Some(ClientMode::CustomManual { source: src, target: t, stun_servers: s, no_stun }) => (
                             normalize_optional_endpoint(src.clone()).or_else(|| custom_cfg.and_then(|c| c.request_source.clone())),
