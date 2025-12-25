@@ -69,8 +69,8 @@ udp = [
 # tcp = ["127.0.0.0/8", "192.168.0.0/16"]
 # udp = ["10.0.0.0/8"]
 
-# [nostr]
-# # NOTE: For ice-nostr mode, do NOT set 'source' above - clients request sources dynamically.
+# [ice-nostr]
+# # Do NOT set 'source' above - clients request sources dynamically.
 # # Use allowed_sources below to restrict what clients can request.
 # # Server-only fields: allowed_sources, max_sessions
 # # (request_source is client-only and will be rejected if present here)
@@ -107,7 +107,7 @@ udp = [
 # # Clients MUST specify --source which must match one of these networks
 # # Separate lists for TCP and UDP protocols
 # # Supports IPv4 and IPv6 CIDR notation
-# [nostr.allowed_sources]
+# [ice-nostr.allowed_sources]
 # tcp = [
 #     "127.0.0.0/8",      # localhost
 #     "192.168.0.0/16",   # private network

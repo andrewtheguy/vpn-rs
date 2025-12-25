@@ -129,6 +129,7 @@ pub struct ServerConfig {
     pub iroh: Option<IrohConfig>,
     #[serde(rename = "ice-manual")]
     pub ice_manual: Option<CustomManualConfig>,
+    #[serde(rename = "ice-nostr")]
     pub nostr: Option<NostrConfig>,
 }
 
@@ -143,6 +144,7 @@ pub struct ClientConfig {
     pub iroh: Option<IrohConfig>,
     #[serde(rename = "ice-manual")]
     pub ice_manual: Option<CustomManualConfig>,
+    #[serde(rename = "ice-nostr")]
     pub nostr: Option<NostrConfig>,
 }
 
@@ -223,6 +225,27 @@ fn validate_allowed_sources(allowed: &AllowedSources) -> Result<()> {
     Ok(())
 }
 
+/// Validate that a string is a valid SOCKS5 proxy URL.
+fn validate_socks5_proxy(value: &str) -> Result<()> {
+    let url = url::Url::parse(value)
+        .with_context(|| format!("Invalid socks5_proxy '{}'. Expected format: socks5://host:port", value))?;
+
+    let scheme = url.scheme();
+    if scheme != "socks5" {
+        anyhow::bail!("Invalid socks5_proxy scheme '{}'. Must be 'socks5'", scheme);
+    }
+
+    if url.host_str().is_none() {
+        anyhow::bail!("socks5_proxy '{}' missing host", value);
+    }
+
+    if url.port().is_none() {
+        anyhow::bail!("socks5_proxy '{}' missing port", value);
+    }
+
+    Ok(())
+}
+
 // ============================================================================
 // Config Accessor Methods
 // ============================================================================
@@ -297,6 +320,10 @@ impl ServerConfig {
                 // Validate CIDR format
                 if let Some(ref allowed) = iroh.allowed_sources {
                     validate_allowed_sources(allowed)?;
+                }
+                // Validate SOCKS5 proxy URL format if present
+                if let Some(ref proxy) = iroh.socks5_proxy {
+                    validate_socks5_proxy(proxy).context("[iroh] Invalid SOCKS5 proxy URL")?;
                 }
             }
             // Server iroh mode should not have top-level source
@@ -390,7 +417,7 @@ impl ClientConfig {
         }
 
         let mode = self.mode.as_deref().context(
-            "Config file missing required 'mode' field. Add: mode = \"iroh\" (or \"ice-manual\", \"nostr\")",
+            "Config file missing required 'mode' field. Add: mode = \"iroh\" (or \"ice-manual\", \"ice-nostr\")",
         )?;
         if mode != expected_mode {
             anyhow::bail!(
@@ -433,6 +460,10 @@ impl ClientConfig {
                 // Validate target format (host:port)
                 if let Some(ref target) = iroh.target {
                     validate_host_port(target, "target")?;
+                }
+                // Validate SOCKS5 proxy URL format if present
+                if let Some(ref proxy) = iroh.socks5_proxy {
+                    validate_socks5_proxy(proxy).context("[iroh] Invalid SOCKS5 proxy URL")?;
                 }
             }
         }

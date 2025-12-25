@@ -238,7 +238,7 @@ tunnel-rs client iroh --node-id <ENDPOINT_ID> --source udp://127.0.0.1:51820 --t
 Use `--default-config` to load from the default location, or `-c <path>` for a custom path. Each mode has its own configuration section:
 - **iroh** mode: `[iroh]` section
 - **ice-manual** mode: `[ice-manual]` section
-- **ice-nostr** mode: `[nostr]` section (note: CLI command is `ice-nostr` but config section is `[nostr]`)
+- **ice-nostr** mode: `[ice-nostr]` section
 
 **Default locations:**
 - Server: `~/.config/tunnel-rs/server.toml`
@@ -652,7 +652,7 @@ tunnel-rs client ice-nostr \
 role = "server"
 mode = "ice-nostr"
 
-[nostr]
+[ice-nostr]
 nsec_file = "./server.nsec"
 peer_npub = "npub1..."
 allowed_tcp = ["127.0.0.0/8", "10.0.0.0/8"]
@@ -768,7 +768,7 @@ tunnel-rs generate-nostr-key
 role = "server"
 mode = "ice-nostr"
 
-[nostr]
+[ice-nostr]
 nsec = "nsec1..."
 peer_npub = "npub1..."  # Client's public key
 relays = ["wss://relay.damus.io", "wss://nos.lol"]
@@ -779,7 +779,7 @@ relays = ["wss://relay.damus.io", "wss://nos.lol"]
 role = "client"
 mode = "ice-nostr"
 
-[nostr]
+[ice-nostr]
 nsec = "nsec1..."
 peer_npub = "npub1..."  # Server's public key
 relays = ["wss://relay.damus.io", "wss://nos.lol"]

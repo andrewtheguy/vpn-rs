@@ -55,7 +55,7 @@ relay_urls = [
 #     "stun.services.mozilla.com:3478",
 # ]
 
-# [nostr]
+# [ice-nostr]
 # # Your Nostr private key (generate with: tunnel-rs generate-nostr-key)
 # # Use either nsec or nsec_file (mutually exclusive; config validation will error if both are set)
 # # If using nsec_file, keep permissions tight (e.g., chmod 600) and do not commit to VCS.
