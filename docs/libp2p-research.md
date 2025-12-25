@@ -79,8 +79,7 @@ For rust-libp2p, AutoRelay must be implemented manually:
 
 | Mode | NAT Traversal | Signaling | Relay Required | QUIC Stack |
 |------|---------------|-----------|----------------|------------|
-| iroh default | Auto + relay fallback | Pkarr/DNS/mDNS | Optional | iroh (quinn) |
-| iroh manual | STUN heuristic | Copy-paste | No | iroh (quinn) |
+| iroh | Auto + relay fallback | Pkarr/DNS/mDNS | Optional | iroh (quinn) |
 | custom | Full ICE | Copy-paste | No | quinn |
 | **libp2p** | DCUtR | Relay-based | **Yes** | quinn |
 

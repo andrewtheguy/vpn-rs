@@ -4,10 +4,9 @@ This document outlines planned features and improvements for tunnel-rs.
 
 ## Current Status
 
-tunnel-rs currently supports four stable operational modes:
+tunnel-rs currently supports three stable operational modes:
 - **iroh**: Persistent identity with automatic discovery, relay fallback, and receiver-requested sources
 - **nostr**: Full ICE with automated Nostr relay signaling and receiver-requested sources
-- **iroh-manual**: Serverless with manual signaling (single-target)
 - **custom-manual**: Full ICE with manual signaling (single-target)
 
 And one experimental mode:
@@ -122,7 +121,6 @@ tunnel-rs receiver nostr --nsec-file ./receiver.nsec \
 |------|---------------|----------------|
 | `iroh` | **Yes** - use `--max-sessions` (default: 100) | **Yes** - receiver specifies `--source` |
 | `nostr` | **Yes** - use `--max-sessions` (default: 10) | **Yes** - receiver specifies `--source` |
-| `iroh-manual` | No | No |
 | `custom-manual` | No | No |
 
 **Multi-Session** = Multiple concurrent connections to the same sender

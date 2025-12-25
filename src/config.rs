@@ -2,7 +2,7 @@
 //!
 //! Configuration structure:
 //! - `role` and `mode` fields for validation
-//! - Mode-specific sections: [iroh], [iroh-manual], [custom-manual], [nostr]
+//! - Mode-specific sections: [iroh], [custom-manual], [nostr]
 //! - All modes use client-initiated source requests
 //!
 //! Role-based field semantics are enforced by `validate()` at parse time:
@@ -50,26 +50,6 @@ pub struct IrohConfig {
     /// SOCKS5 proxy URL for relay connections (e.g., socks5://127.0.0.1:9050).
     /// Required when using .onion relay URLs with Tor.
     pub socks5_proxy: Option<String>,
-}
-
-/// iroh-manual mode configuration.
-///
-/// Some fields are role-specific (enforced by validate()):
-/// - Server-only: `allowed_sources`
-/// - Client-only: `request_source`, `target`
-#[derive(Deserialize, Default, Clone)]
-pub struct IrohManualConfig {
-    pub stun_servers: Option<Vec<String>>,
-    /// Allowed source networks in CIDR notation (server only).
-    /// Clients must request sources within these networks.
-    pub allowed_sources: Option<AllowedSources>,
-    /// Source URL to request from server (client only, required).
-    /// Format: tcp://host:port or udp://host:port
-    #[serde(alias = "source")]
-    pub request_source: Option<String>,
-    /// Local address to listen on (client only, required).
-    /// Format: host:port (no protocol prefix)
-    pub target: Option<String>,
 }
 
 /// custom-manual mode configuration.
@@ -147,8 +127,6 @@ pub struct ServerConfig {
 
     // Mode-specific sections
     pub iroh: Option<IrohConfig>,
-    #[serde(rename = "iroh-manual")]
-    pub iroh_manual: Option<IrohManualConfig>,
     #[serde(rename = "custom-manual")]
     pub custom_manual: Option<CustomManualConfig>,
     pub nostr: Option<NostrConfig>,
@@ -163,8 +141,6 @@ pub struct ClientConfig {
 
     // Mode-specific sections (each mode has its own target field)
     pub iroh: Option<IrohConfig>,
-    #[serde(rename = "iroh-manual")]
-    pub iroh_manual: Option<IrohManualConfig>,
     #[serde(rename = "custom-manual")]
     pub custom_manual: Option<CustomManualConfig>,
     pub nostr: Option<NostrConfig>,
@@ -257,11 +233,6 @@ impl ServerConfig {
         self.iroh.as_ref()
     }
 
-    /// Get iroh-manual config section (single-target mode).
-    pub fn iroh_manual(&self) -> Option<&IrohManualConfig> {
-        self.iroh_manual.as_ref()
-    }
-
     /// Get custom-manual config section (single-target mode).
     pub fn custom_manual(&self) -> Option<&CustomManualConfig> {
         self.custom_manual.as_ref()
@@ -292,7 +263,7 @@ impl ServerConfig {
         }
 
         let mode = self.mode.as_deref().context(
-            "Config file missing required 'mode' field. Add: mode = \"iroh\" (or iroh-manual, custom-manual, nostr)",
+            "Config file missing required 'mode' field. Add: mode = \"iroh\" (or \"custom-manual\", \"nostr\")",
         )?;
         if mode != expected_mode {
             anyhow::bail!(
@@ -304,8 +275,8 @@ impl ServerConfig {
 
         // Validate mode is known
         match expected_mode {
-            "iroh" | "iroh-manual" | "custom-manual" | "nostr" => {}
-            _ => anyhow::bail!("Unknown mode '{}'. Valid modes: iroh, iroh-manual, custom-manual, nostr", expected_mode),
+            "iroh" | "custom-manual" | "nostr" => {}
+            _ => anyhow::bail!("Unknown mode '{}'. Valid modes: iroh, custom-manual, nostr", expected_mode),
         }
 
         // Mode-specific validation
@@ -366,28 +337,6 @@ impl ServerConfig {
                 );
             }
         }
-        if expected_mode == "iroh-manual" {
-            if let Some(ref iroh_manual) = self.iroh_manual {
-                // Reject client-only fields
-                if iroh_manual.request_source.is_some() || iroh_manual.target.is_some() {
-                    anyhow::bail!(
-                        "[iroh-manual] 'source' / 'request_source' / 'target' are client-only fields. \
-                        Servers use 'allowed_sources' to restrict what clients can request."
-                    );
-                }
-                // Validate CIDR format
-                if let Some(ref allowed) = iroh_manual.allowed_sources {
-                    validate_allowed_sources(allowed)?;
-                }
-            }
-            // Reject top-level source for iroh-manual server
-            if self.source.is_some() {
-                anyhow::bail!(
-                    "Top-level 'source' is not allowed for iroh-manual server mode. \
-                    Use [iroh-manual.allowed_sources] to restrict what clients can request."
-                );
-            }
-        }
         if expected_mode == "custom-manual" {
             if let Some(ref custom_manual) = self.custom_manual {
                 // Reject client-only fields
@@ -421,11 +370,6 @@ impl ClientConfig {
         self.iroh.as_ref()
     }
 
-    /// Get iroh-manual config section (single-target mode).
-    pub fn iroh_manual(&self) -> Option<&IrohManualConfig> {
-        self.iroh_manual.as_ref()
-    }
-
     /// Get custom-manual config section (single-target mode).
     pub fn custom_manual(&self) -> Option<&CustomManualConfig> {
         self.custom_manual.as_ref()
@@ -456,7 +400,7 @@ impl ClientConfig {
         }
 
         let mode = self.mode.as_deref().context(
-            "Config file missing required 'mode' field. Add: mode = \"iroh\" (or iroh-manual, custom-manual, nostr)",
+            "Config file missing required 'mode' field. Add: mode = \"iroh\" (or \"custom-manual\", \"nostr\")",
         )?;
         if mode != expected_mode {
             anyhow::bail!(
@@ -468,8 +412,8 @@ impl ClientConfig {
 
         // Validate mode is known
         match expected_mode {
-            "iroh" | "iroh-manual" | "custom-manual" | "nostr" => {}
-            _ => anyhow::bail!("Unknown mode '{}'. Valid modes: iroh, iroh-manual, custom-manual, nostr", expected_mode),
+            "iroh" | "custom-manual" | "nostr" => {}
+            _ => anyhow::bail!("Unknown mode '{}'. Valid modes: iroh, custom-manual, nostr", expected_mode),
         }
 
         // Mode-specific validation
@@ -530,25 +474,6 @@ impl ClientConfig {
             }
         }
 
-        if expected_mode == "iroh-manual" {
-            if let Some(ref iroh_manual) = self.iroh_manual {
-                // Reject server-only fields
-                if iroh_manual.allowed_sources.is_some() {
-                    anyhow::bail!(
-                        "[iroh-manual] 'allowed_sources' is a server-only field. \
-                        Clients use 'source' to specify what to request from server."
-                    );
-                }
-                // Validate request_source URL format
-                if let Some(ref source) = iroh_manual.request_source {
-                    validate_tcp_udp_url(source, "request_source")?;
-                }
-                // Validate target format (host:port)
-                if let Some(ref target) = iroh_manual.target {
-                    validate_host_port(target, "target")?;
-                }
-            }
-        }
         if expected_mode == "custom-manual" {
             if let Some(ref custom_manual) = self.custom_manual {
                 // Reject server-only fields

@@ -1,7 +1,7 @@
 //! Shared helper functions for iroh-based tunnels.
 //!
-//! This module contains stream and connection helpers used by both
-//! multi-source (iroh) and manual (iroh-manual) modes.
+//! This module contains stream and connection helpers used by
+//! iroh mode.
 
 use anyhow::{Context, Result};
 use std::net::SocketAddr;

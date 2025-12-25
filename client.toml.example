@@ -10,7 +10,7 @@
 
 # Required: validates config matches CLI command
 role = "client"
-mode = "iroh"  # or "iroh-manual", "custom-manual", or "nostr"
+mode = "iroh"  # or "custom-manual", or "nostr"
 
 # All modes use client-initiated source requests with consistent config structure.
 # Each mode section has request_source and target fields.
@@ -41,19 +41,6 @@ relay_urls = [
 # SOCKS5 proxy for relay connections (required for .onion relay URLs)
 # Use with Tor: socks5://127.0.0.1:9050
 # socks5_proxy = "socks5://127.0.0.1:9050"
-
-# [iroh-manual]
-# # Client-initiated mode: request source from server, listen locally
-# # Source address to request from server (REQUIRED)
-# request_source = "tcp://127.0.0.1:22"
-# # Local address to listen on (REQUIRED)
-# target = "127.0.0.1:2222"
-# # Set to [] to disable STUN entirely
-# stun_servers = [
-#     "stun.l.google.com:19302",
-#     "stun1.l.google.com:19302",
-#     "stun.services.mozilla.com:3478",
-# ]
 
 # [custom-manual]
 # # Client-initiated mode: request source from server, listen locally

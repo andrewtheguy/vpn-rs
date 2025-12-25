@@ -4,19 +4,16 @@
 //! All modes use client-initiated source requests for consistent UX.
 //!
 //! Modes:
-//!   - iroh:         Automatic iroh P2P discovery with relay fallback
-//!   - iroh-manual:  Iroh with manual copy-paste signaling (client-first)
+//!   - iroh:          Automatic iroh P2P discovery with relay fallback
 //!   - custom-manual: Full ICE with manual signaling (best NAT traversal)
-//!   - nostr:        Full ICE with Nostr-based signaling
+//!   - nostr:         Full ICE with Nostr-based signaling
+//!   - dcutr:         Experimental DCUtR with timing-coordinated NAT hole punching
 //!
 //! Usage (iroh - automatic discovery):
 //!   tunnel-rs server iroh --allowed-tcp 127.0.0.0/8 --allowed-udp 10.0.0.0/8
 //!   tunnel-rs client iroh --node-id <NODE_ID> --source tcp://127.0.0.1:22 --target 127.0.0.1:2222
 //!
 //! Usage (manual modes - copy-paste signaling):
-//!   tunnel-rs client iroh-manual --source tcp://127.0.0.1:22 --target 127.0.0.1:2222
-//!   tunnel-rs server iroh-manual --allowed-tcp 127.0.0.0/8
-//!
 //!   tunnel-rs client custom-manual --source tcp://127.0.0.1:22 --target 127.0.0.1:2222
 //!   tunnel-rs server custom-manual --allowed-tcp 127.0.0.0/8
 //!
@@ -291,27 +288,6 @@ enum ServerMode {
         #[arg(long)]
         socks5_proxy: Option<String>,
     },
-    /// Client-initiated mode: iroh with STUN-based manual signaling (may fail on symmetric NAT)
-    #[command(name = "iroh-manual")]
-    IrohManual {
-        /// Allowed TCP source networks in CIDR notation (repeatable)
-        /// E.g., --allowed-tcp 127.0.0.0/8 --allowed-tcp 192.168.0.0/16
-        #[arg(long = "allowed-tcp")]
-        allowed_tcp: Vec<String>,
-
-        /// Allowed UDP source networks in CIDR notation (repeatable)
-        /// E.g., --allowed-udp 10.0.0.0/8 --allowed-udp ::1/128
-        #[arg(long = "allowed-udp")]
-        allowed_udp: Vec<String>,
-
-        /// STUN server (repeatable, e.g., stun.l.google.com:19302)
-        #[arg(long = "stun-server")]
-        stun_servers: Vec<String>,
-
-        /// Disable STUN (no external infrastructure)
-        #[arg(long)]
-        no_stun: bool,
-    },
     /// Client-initiated mode: Full ICE with manual signaling - best NAT traversal (str0m+quinn)
     #[command(name = "custom-manual")]
     CustomManual {
@@ -443,26 +419,6 @@ enum ClientMode {
         /// E.g., socks5://127.0.0.1:9050 for Tor
         #[arg(long)]
         socks5_proxy: Option<String>,
-    },
-    /// Client-initiated mode: iroh with STUN-based manual signaling (may fail on symmetric NAT)
-    #[command(name = "iroh-manual")]
-    IrohManual {
-        /// Source address to request from server (tcp://host:port or udp://host:port)
-        /// The server must have this in its --allowed-tcp or --allowed-udp list
-        #[arg(short, long)]
-        source: Option<String>,
-
-        /// Local address to listen on (e.g., 127.0.0.1:2222)
-        #[arg(short, long)]
-        target: Option<String>,
-
-        /// STUN server (repeatable, e.g., stun.l.google.com:19302)
-        #[arg(long = "stun-server")]
-        stun_servers: Vec<String>,
-
-        /// Disable STUN (no external infrastructure)
-        #[arg(long)]
-        no_stun: bool,
     },
     /// Client-initiated mode: Full ICE with manual signaling - best NAT traversal (str0m+quinn)
     #[command(name = "custom-manual")]
@@ -611,7 +567,6 @@ async fn main() -> Result<()> {
             let effective_mode = match (&mode, &cfg.mode) {
                 (Some(_), _) => mode.as_ref().map(|m| match m {
                     ServerMode::Iroh { .. } => "iroh",
-                    ServerMode::IrohManual { .. } => "iroh-manual",
                     ServerMode::CustomManual { .. } => "custom-manual",
                     ServerMode::Nostr { .. } => "nostr",
                     ServerMode::DCUtR { .. } => "dcutr",
@@ -621,7 +576,7 @@ async fn main() -> Result<()> {
             };
 
             let effective_mode = effective_mode.context(
-                "No mode specified. Either use a subcommand (iroh, iroh-manual, custom-manual, nostr, dcutr) or provide a config file with 'mode' field.",
+                "No mode specified. Either use a subcommand (iroh, custom-manual, nostr, dcutr) or provide a config file with 'mode' field.",
             )?;
 
             // Validate config if loaded from file
@@ -686,33 +641,6 @@ async fn main() -> Result<()> {
                     ).await?;
 
                     iroh::run_multi_source_server(allowed_tcp, allowed_udp, max_sessions, secret, relay_urls, relay_only, dns_server).await
-                }
-                "iroh-manual" => {
-                    let manual_cfg = cfg.iroh_manual();
-                    let (allowed_tcp, allowed_udp, stun_servers) = match &mode {
-                        Some(ServerMode::IrohManual { allowed_tcp: at, allowed_udp: au, stun_servers: ss, no_stun }) => {
-                            let cfg_allowed = manual_cfg.and_then(|c| c.allowed_sources.clone()).unwrap_or_default();
-                            (
-                                if at.is_empty() { cfg_allowed.tcp.clone() } else { at.clone() },
-                                if au.is_empty() { cfg_allowed.udp.clone() } else { au.clone() },
-                                resolve_stun_servers(ss, manual_cfg.and_then(|c| c.stun_servers.clone()), *no_stun)?,
-                            )
-                        },
-                        _ => {
-                            let cfg_allowed = manual_cfg.and_then(|c| c.allowed_sources.clone()).unwrap_or_default();
-                            (
-                                cfg_allowed.tcp.clone(),
-                                cfg_allowed.udp.clone(),
-                                resolve_stun_servers(&[], manual_cfg.and_then(|c| c.stun_servers.clone()), false)?,
-                            )
-                        },
-                    };
-
-                    if allowed_tcp.is_empty() && allowed_udp.is_empty() {
-                        anyhow::bail!("At least one of --allowed-tcp or --allowed-udp is required for iroh-manual server");
-                    }
-
-                    iroh::run_iroh_manual_server(allowed_tcp, allowed_udp, stun_servers).await
                 }
                 "custom-manual" => {
                     let custom_cfg = cfg.custom_manual();
@@ -846,7 +774,7 @@ async fn main() -> Result<()> {
                         Protocol::Udp => custom::run_dcutr_udp_server(source, signaling_server, server_id, stun_servers).await,
                     }
                 }
-                _ => anyhow::bail!("Invalid mode '{}'. Use: iroh, iroh-manual, custom-manual, nostr, or dcutr", effective_mode),
+                _ => anyhow::bail!("Invalid mode '{}'. Use: iroh, custom-manual, nostr, or dcutr", effective_mode),
             }
         }
         Command::Client {
@@ -860,7 +788,6 @@ async fn main() -> Result<()> {
             let effective_mode = match (&mode, &cfg.mode) {
                 (Some(_), _) => mode.as_ref().map(|m| match m {
                     ClientMode::Iroh { .. } => "iroh",
-                    ClientMode::IrohManual { .. } => "iroh-manual",
                     ClientMode::CustomManual { .. } => "custom-manual",
                     ClientMode::Nostr { .. } => "nostr",
                     ClientMode::DCUtR { .. } => "dcutr",
@@ -870,7 +797,7 @@ async fn main() -> Result<()> {
             };
 
             let effective_mode = effective_mode.context(
-                "No mode specified. Either use a subcommand (iroh, iroh-manual, custom-manual, nostr, dcutr) or provide a config file with 'mode' field.",
+                "No mode specified. Either use a subcommand (iroh, custom-manual, nostr, dcutr) or provide a config file with 'mode' field.",
             )?;
 
             // Validate config if loaded from file
@@ -927,38 +854,6 @@ async fn main() -> Result<()> {
                     ).await?;
 
                     iroh::run_multi_source_client(node_id, source, target, relay_urls, relay_only, dns_server).await
-                }
-                "iroh-manual" => {
-                    let manual_cfg = cfg.iroh_manual();
-                    let (source, target, stun_servers) = match &mode {
-                        Some(ClientMode::IrohManual { source: src, target: t, stun_servers: s, no_stun }) => (
-                            normalize_optional_endpoint(src.clone()).or_else(|| manual_cfg.and_then(|c| c.request_source.clone())),
-                            t.clone().or_else(|| manual_cfg.and_then(|c| c.target.clone())),
-                            resolve_stun_servers(s, manual_cfg.and_then(|c| c.stun_servers.clone()), *no_stun)?,
-                        ),
-                        _ => (
-                            manual_cfg.and_then(|c| c.request_source.clone()),
-                            manual_cfg.and_then(|c| c.target.clone()),
-                            resolve_stun_servers(&[], manual_cfg.and_then(|c| c.stun_servers.clone()), false)?,
-                        ),
-                    };
-
-                    let source: String = source.context(
-                        "--source is required for iroh-manual client. Specify the source to request from server (e.g., --source tcp://127.0.0.1:22)",
-                    )?;
-                    let target: String = target.context(
-                        "--target is required. Specify local address to listen on (e.g., --target 127.0.0.1:2222)",
-                    )?;
-
-                    // Validate source format early
-                    let _ = parse_endpoint(&source)
-                        .with_context(|| format!("Invalid source '{}'. Expected format: tcp://host:port or udp://host:port", source))?;
-
-                    // Parse target as just host:port (no protocol prefix needed)
-                    let listen: SocketAddr = target.parse()
-                        .with_context(|| format!("Invalid target '{}'. Expected format: host:port (e.g., 127.0.0.1:2222)", target))?;
-
-                    iroh::run_iroh_manual_client(source, listen, stun_servers).await
                 }
                 "custom-manual" => {
                     let custom_cfg = cfg.custom_manual();
@@ -1088,7 +983,7 @@ async fn main() -> Result<()> {
                     // DCUtR client uses TCP by default (server determines the actual source)
                     custom::run_dcutr_tcp_client(target, signaling_server, peer_id, client_id, stun_servers).await
                 }
-                _ => anyhow::bail!("Invalid mode '{}'. Use: iroh, iroh-manual, custom-manual, nostr, or dcutr", effective_mode),
+                _ => anyhow::bail!("Invalid mode '{}'. Use: iroh, custom-manual, nostr, or dcutr", effective_mode),
             }
         }
         Command::GenerateIrohKey { output, force } => secret::generate_secret(output, force),

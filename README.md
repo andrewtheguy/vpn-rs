@@ -38,25 +38,24 @@ tunnel-rs provides multiple modes for establishing tunnels:
 | Mode | Discovery | NAT Traversal | Protocols | Use Case |
 |------|-----------|---------------|-----------|----------|
 | **iroh** | Automatic (Pkarr/DNS/mDNS) | Relay fallback | TCP, UDP | Persistent, multi-source tunnels |
-| **iroh-manual** | Manual copy-paste | STUN heuristic | TCP, UDP | Serverless, simple NATs |
 | **custom-manual** | Manual copy-paste | Full ICE | TCP, UDP | Best NAT compatibility |
 | **nostr** | Nostr relays | Full ICE | TCP, UDP | Automated signaling, static keys |
 | **dcutr** *(experimental)* | Signaling server | Full ICE + timing | TCP, UDP | Coordinated hole punching |
 
 > [!TIP]
-> **For containerized environments (Docker, Kubernetes, cloud VMs):** Use `iroh` mode. It includes relay fallback which ensures connectivity even when both peers are behind restrictive NATs (common in cloud environments). The `nostr`, `custom-manual`, and `iroh-manual` modes use STUN-only NAT traversal which may fail when both peers are behind symmetric NAT.
+> **For containerized environments (Docker, Kubernetes, cloud VMs):** Use `iroh` mode. It includes relay fallback which ensures connectivity even when both peers are behind restrictive NATs (common in cloud environments). The `nostr` and `custom-manual` modes use STUN-only NAT traversal which may fail when both peers are behind symmetric NAT.
 
 ### Choosing a Serverless Mode
 
-The `iroh-manual`, `custom-manual`, and `nostr` modes don't require iroh discovery/relay infrastructure:
+The `custom-manual` and `nostr` modes don't require iroh discovery/relay infrastructure:
 
-| Feature | iroh-manual | custom-manual | nostr |
-|---------|-------------|---------------|-------|
-| Signaling | Manual copy-paste | Manual copy-paste | Nostr relays (automated) |
-| NAT traversal | STUN heuristic | Full ICE | Full ICE |
-| Symmetric NAT | May fail | Best-effort | Best-effort |
-| Keys | Ephemeral | Ephemeral | Static (WireGuard-like) |
-| QUIC stack | iroh | str0m + quinn | str0m + quinn |
+| Feature | custom-manual | nostr |
+|---------|---------------|-------|
+| Signaling | Manual copy-paste | Nostr relays (automated) |
+| NAT traversal | Full ICE | Full ICE |
+| Symmetric NAT | Best-effort | Best-effort |
+| Keys | Ephemeral | Static (WireGuard-like) |
+| QUIC stack | str0m + quinn | str0m + quinn |
 
 **Recommendation:** Use `nostr` mode for automated signaling with persistent identity, or `custom-manual` mode for best NAT traversal without external dependencies.
 
@@ -119,7 +118,7 @@ tunnel-rs is fully supported on:
 - **macOS** (Intel, Apple Silicon)
 - **Windows** (x86_64)
 
-All four modes (iroh, iroh-manual, custom-manual, nostr) work across all platforms, enabling cross-platform P2P tunneling.
+All modes (iroh, custom-manual, nostr) work across all platforms, enabling cross-platform P2P tunneling.
 
 ### Docker & Kubernetes
 
@@ -237,7 +236,7 @@ tunnel-rs client iroh --node-id <ENDPOINT_ID> --source udp://127.0.0.1:51820 --t
 
 ## Configuration Files
 
-Use `--default-config` to load from the default location, or `-c <path>` for a custom path. Each mode has its own section (`[iroh]`, `[iroh-manual]`, `[custom-manual]`, `[nostr]`).
+Use `--default-config` to load from the default location, or `-c <path>` for a custom path. Each mode has its own section (`[iroh]`, `[custom-manual]`, `[nostr]`).
 
 **Default locations:**
 - Server: `~/.config/tunnel-rs/server.toml`
@@ -250,7 +249,7 @@ Use `--default-config` to load from the default location, or `-c <path>` for a c
 
 # Required: validates config matches CLI command
 role = "server"
-mode = "iroh"  # or "iroh-manual", "custom-manual", or "nostr"
+mode = "iroh"  # or "custom-manual", or "nostr"
 
 [iroh]
 secret_file = "./server.key"
@@ -283,7 +282,7 @@ tunnel-rs server -c ./my-server.toml
 
 # Required: validates config matches CLI command
 role = "client"
-mode = "iroh"  # or "iroh-manual", "custom-manual", or "nostr"
+mode = "iroh"  # or "custom-manual", or "nostr"
 
 [iroh]
 node_id = "2xnbkpbc7izsilvewd7c62w7wnwziacmpfwvhcrya5nt76dqkpga"
@@ -435,87 +434,6 @@ tunnel-rs client iroh \
 ```
 
 See [docs/tor-hidden-service.md](docs/tor-hidden-service.md) for complete setup guide.
-
----
-
-# iroh-manual Mode
-
-Uses iroh's QUIC transport with manual copy-paste signaling. No discovery servers or relay infrastructure needed, but STUN is used by default.
-
-**NAT Traversal:** Uses STUN to discover public addresses and bidirectional connection racing. Works with most NATs but may fail on symmetric NATs. For difficult NAT scenarios, use [Custom Mode](#custom-mode) which has full ICE support.
-
-## Quick Start
-
-1. **Client** starts first and outputs an offer:
-   ```bash
-   tunnel-rs client iroh-manual --source tcp://127.0.0.1:22 --target 127.0.0.1:2222
-   ```
-
-   Copy the `-----BEGIN TUNNEL-RS IROH OFFER-----` block.
-
-2. **Server** validates the source request and outputs an answer:
-   ```bash
-   tunnel-rs server iroh-manual --allowed-tcp 127.0.0.0/8
-   ```
-
-   Paste the offer, then copy the `-----BEGIN TUNNEL-RS IROH ANSWER-----` block.
-
-3. **Client** receives the answer:
-
-   Paste the answer into the client terminal.
-
-4. **Connect**:
-   ```bash
-   ssh -p 2222 user@127.0.0.1
-   ```
-
-## CLI Options
-
-### server iroh-manual
-
-| Option | Default | Description |
-|--------|---------|-------------|
-| `--allowed-tcp` | none | Allowed TCP networks in CIDR notation (repeatable) |
-| `--allowed-udp` | none | Allowed UDP networks in CIDR notation (repeatable) |
-| `--stun-server` | public | STUN server(s), repeatable |
-| `--no-stun` | false | Disable STUN (no external infrastructure, CLI only) |
-
-### client iroh-manual
-
-| Option | Default | Description |
-|--------|---------|-------------|
-| `--source`, `-s` | required | Source to request from server (e.g., tcp://127.0.0.1:22) |
-| `--target`, `-t` | required | Local address to listen on (e.g., 127.0.0.1:2222) |
-| `--stun-server` | public | STUN server(s), repeatable |
-| `--no-stun` | false | Disable STUN (no external infrastructure, CLI only) |
-
-Note: Config file options (`-c`, `--default-config`) are at the `server`/`client` command level. See [Configuration Files](#configuration-files) above.
-
-## Serverless Manual Mode (No STUN)
-
-If you want **zero external infrastructure**, you can run manual modes without any STUN servers. This only works reliably when both peers are on public IPs or permissive NATs. Disabling STUN reduces NAT hole‑punching success.
-
-If your goal is simply to avoid self‑hosting or depending on smaller/less‑reliable infra (e.g., iroh relay/discovery), you do **not** need `--no-stun`, public STUN servers (like Google's) are widely available and help NAT traversal without requiring you to run anything yourself.
-
-Use `--no-stun` on the CLI, or set `stun_servers = []` in your config. If you omit STUN entirely (no config and no CLI), tunnel-rs uses its default public STUN list.
-
-Example (CLI only):
-```bash
-tunnel-rs client iroh-manual --no-stun --source tcp://127.0.0.1:22 --target 127.0.0.1:2222
-tunnel-rs server iroh-manual --no-stun --allowed-tcp 127.0.0.0/8
-```
-
-## UDP Example
-
-All modes support TCP and UDP tunneling; example below uses UDP:
-
-```bash
-# Client (starts first)
-tunnel-rs client iroh-manual --source udp://127.0.0.1:51820 --target 0.0.0.0:51820
-
-# Server (validates and responds)
-tunnel-rs server iroh-manual --allowed-udp 127.0.0.0/8
-```
 
 ---
 
@@ -768,7 +686,6 @@ When no relays are specified, these public relays are used:
 |------|---------------|----------------|-------------|
 | `iroh` | **Yes** | **Yes** | Multiple receivers, receiver chooses source |
 | `nostr` | **Yes** | **Yes** | Multiple receivers, receiver chooses source |
-| `iroh-manual` | No | No | Single session, fixed source |
 | `custom-manual` | No | No | Single session, fixed source |
 
 **Multi-Session** = Multiple concurrent connections to the same sender
@@ -804,10 +721,10 @@ tunnel-rs client nostr --source tcp://127.0.0.1:22 --target 127.0.0.1:2222 ...
 tunnel-rs client nostr --source tcp://127.0.0.1:80 --target 127.0.0.1:8080 ...
 ```
 
-### Single-Session Modes (iroh-manual, custom-manual)
+### Single-Session Mode (custom-manual)
 
-For `iroh-manual` and `custom-manual`, use separate instances for each tunnel:
-- Different keypairs/instances per tunnel
+For `custom-manual`, use separate instances for each tunnel:
+- Different instances per tunnel
 - Or use `iroh` or `nostr` mode for multi-session support
 
 ---
@@ -914,7 +831,7 @@ npub1...
 
 ## generate-iroh-key
 
-*For iroh and iroh-manual modes.*
+*For iroh mode.*
 
 ```bash
 tunnel-rs generate-iroh-key --output ./server.key
@@ -963,14 +880,6 @@ All protocol modes and features are available on all platforms.
 6. Sender validates against allowed networks and responds
 7. If accepted, traffic forwarding begins
 
-### iroh-manual Mode
-1. Sender creates iroh endpoint (no relay, no discovery)
-2. STUN queries discover public addresses (heuristic port mapping)
-3. Manual exchange of offer/answer (copy-paste with NodeId + addresses)
-4. Both sides race connect/accept for hole punching
-5. Direct connection established via iroh's QUIC
-
-*Limitation: Uses heuristic port mapping which may fail on symmetric NATs.*
 
 ### Custom-Manual Mode
 1. Both sides gather ICE candidates via STUN (same socket used for data)
