@@ -177,36 +177,68 @@ Uses iroh's P2P network for automatic peer discovery and NAT traversal with rela
 
 ## Quick Start
 
-### TCP Tunnel (e.g., SSH)
+### 1. Generate Keys (One-Time Setup)
+
+Each peer needs their own keypair for authentication:
+
+```bash
+# On server machine
+tunnel-rs generate-iroh-key --output ./server.key
+# Output: EndpointId: 2xnbkpbc7izsilvewd7c62w7wnwziacmpfwvhcrya5nt76dqkpga
+
+# On client machine
+tunnel-rs generate-iroh-key --output ./client.key
+tunnel-rs show-iroh-node-id --secret-file ./client.key
+# Output: 3k4j5l6k7j8k9l0m1n2o3p4q5r6s7t8u9v0w1x2y3z4a5b6c7d8e
+```
+
+Exchange NodeIds between peers (server needs client's NodeId).
+
+### 2. TCP Tunnel (e.g., SSH)
 
 **Server** (on server — waits for client connections):
 ```bash
-tunnel-rs server iroh --allowed-tcp 127.0.0.0/8
+tunnel-rs server iroh \
+  --secret-file ./server.key \
+  --allowed-tcp 127.0.0.0/8 \
+  --allowed-clients <CLIENT_NODE_ID>
 ```
 
 Output:
 ```
 EndpointId: 2xnbkpbc7izsilvewd7c62w7wnwziacmpfwvhcrya5nt76dqkpga
+Allowed clients: 1 NodeId(s) configured
 Waiting for clients to connect...
 ```
 
 **Client** (on client — requests source from server):
 ```bash
-tunnel-rs client iroh --node-id <ENDPOINT_ID> --source tcp://127.0.0.1:22 --target 127.0.0.1:2222
+tunnel-rs client iroh \
+  --secret-file ./client.key \
+  --server-node-id <SERVER_ENDPOINT_ID> \
+  --source tcp://127.0.0.1:22 \
+  --target 127.0.0.1:2222
 ```
 
 Then connect: `ssh -p 2222 user@127.0.0.1`
 
-### UDP Tunnel (e.g., WireGuard)
+### 3. UDP Tunnel (e.g., WireGuard)
 
 **Server**:
 ```bash
-tunnel-rs server iroh --allowed-udp 127.0.0.0/8
+tunnel-rs server iroh \
+  --secret-file ./server.key \
+  --allowed-udp 127.0.0.0/8 \
+  --allowed-clients <CLIENT_NODE_ID>
 ```
 
 **Client**:
 ```bash
-tunnel-rs client iroh --node-id <ENDPOINT_ID> --source udp://127.0.0.1:51820 --target 0.0.0.0:51820
+tunnel-rs client iroh \
+  --secret-file ./client.key \
+  --server-node-id <SERVER_ENDPOINT_ID> \
+  --source udp://127.0.0.1:51820 \
+  --target 0.0.0.0:51820
 ```
 
 ## CLI Options
@@ -224,6 +256,8 @@ tunnel-rs client iroh --node-id <ENDPOINT_ID> --source udp://127.0.0.1:51820 --t
 |--------|---------|-------------|
 | `--allowed-tcp` | - | Allowed TCP networks in CIDR notation (repeatable) |
 | `--allowed-udp` | - | Allowed UDP networks in CIDR notation (repeatable) |
+| `--allowed-clients` | required | Allowed client NodeIds (repeatable). Only clients with these NodeIds can connect. |
+| `--allowed-clients-file` | - | Path to file containing allowed NodeIds (one per line, # comments allowed) |
 | `--max-sessions` | 100 | Maximum concurrent sessions |
 | `--secret` | - | Base64-encoded secret key for persistent identity |
 | `--secret-file` | - | Path to secret key file for persistent identity |
@@ -243,7 +277,7 @@ tunnel-rs client iroh --node-id <ENDPOINT_ID> --source udp://127.0.0.1:51820 --t
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--node-id`, `-n` | required | EndpointId of the server |
+| `--server-node-id`, `-n` | required | EndpointId of the server |
 | `--source`, `-s` | required | Source address to request from server (tcp://host:port or udp://host:port) |
 | `--target`, `-t` | required | Local address to listen on |
 | `--relay-url` | public | Custom relay server URL(s), repeatable |
@@ -277,6 +311,12 @@ relay_urls = ["https://relay.example.com"]
 dns_server = "https://dns.example.com/pkarr"
 max_sessions = 100
 
+# Authentication: only these clients can connect
+allowed_clients = [
+    "3k4j5l6k7j8k9l0m1n2o3p4q5r6s7t8u9v0w1x2y3z4a5b6c7d8e",
+]
+# Or use: allowed_clients_file = "/etc/tunnel-rs/allowed_clients.txt"
+
 [iroh.allowed_sources]
 tcp = ["127.0.0.0/8", "192.168.0.0/16"]
 udp = ["10.0.0.0/8"]
@@ -303,7 +343,7 @@ role = "client"
 mode = "iroh"  # or "ice-manual", or "ice-nostr"
 
 [iroh]
-node_id = "2xnbkpbc7izsilvewd7c62w7wnwziacmpfwvhcrya5nt76dqkpga"
+server_node_id = "2xnbkpbc7izsilvewd7c62w7wnwziacmpfwvhcrya5nt76dqkpga"
 request_source = "tcp://127.0.0.1:22"
 target = "127.0.0.1:2222"
 relay_urls = ["https://relay.example.com"]
@@ -336,19 +376,88 @@ tunnel-rs show-iroh-node-id --secret-file ./server.key
 Then use the key for the server:
 
 ```bash
-tunnel-rs server iroh --allowed-tcp 127.0.0.0/8 --secret-file ./server.key
+tunnel-rs server iroh --allowed-tcp 127.0.0.0/8 --secret-file ./server.key --allowed-clients <CLIENT_NODE_ID>
+```
+
+## Authentication
+
+Iroh mode requires authentication using NodeId whitelisting. Only clients whose NodeIds are in the server's allowed list can connect. This leverages iroh's built-in Ed25519 identity system—each peer has a cryptographic identity, and the server validates the client's NodeId during the TLS handshake.
+
+### Setup Workflow
+
+1. **Generate keys for both peers:**
+   ```bash
+   # Server
+   tunnel-rs generate-iroh-key --output ./server.key
+
+   # Client
+   tunnel-rs generate-iroh-key --output ./client.key
+   ```
+
+2. **Get the client's NodeId:**
+   ```bash
+   tunnel-rs show-iroh-node-id --secret-file ./client.key
+   # Output: 3k4j5l6k7j8k9l0m1n2o3p4q5r6s7t8u9v0w1x2y3z4a5b6c7d8e
+   ```
+
+3. **Start server with allowed clients:**
+   ```bash
+   tunnel-rs server iroh \
+     --secret-file ./server.key \
+     --allowed-tcp 127.0.0.0/8 \
+     --allowed-clients 3k4j5l6k7j8k9l0m1n2o3p4q5r6s7t8u9v0w1x2y3z4a5b6c7d8e
+   ```
+
+### Multiple Clients
+
+```bash
+# Multiple --allowed-clients flags
+tunnel-rs server iroh \
+  --allowed-tcp 127.0.0.0/8 \
+  --allowed-clients <ALICE_NODE_ID> \
+  --allowed-clients <BOB_NODE_ID>
+
+# Or use a file (one NodeId per line, # comments allowed)
+tunnel-rs server iroh \
+  --allowed-tcp 127.0.0.0/8 \
+  --allowed-clients-file /etc/tunnel-rs/allowed_clients.txt
+```
+
+**Example `allowed_clients.txt`:**
+```text
+# Alice's laptop
+3k4j5l6k7j8k9l0m1n2o3p4q5r6s7t8u9v0w1x2y3z4a5b6c7d8e
+
+# Bob's workstation
+2xnbkpbc7izsilvewd7c62w7wnwziacmpfwvhcrya5nt76dqkpga
+```
+
+### Configuration File
+
+In `server.toml`:
+
+```toml
+[iroh]
+# Inline list
+allowed_clients = [
+    "3k4j5l6k7j8k9l0m1n2o3p4q5r6s7t8u9v0w1x2y3z4a5b6c7d8e",  # Alice
+    "2xnbkpbc7izsilvewd7c62w7wnwziacmpfwvhcrya5nt76dqkpga",  # Bob
+]
+
+# Or use a file
+# allowed_clients_file = "/etc/tunnel-rs/allowed_clients.txt"
 ```
 
 ## Custom Relay Server
 
 ```bash
 # Both sides must use the same relay
-tunnel-rs server iroh --relay-url https://relay.example.com --allowed-tcp 127.0.0.0/8
-tunnel-rs client iroh --relay-url https://relay.example.com --node-id <ID> --source tcp://127.0.0.1:22 --target 127.0.0.1:2222
+tunnel-rs server iroh --relay-url https://relay.example.com --allowed-tcp 127.0.0.0/8 --allowed-clients <CLIENT_NODE_ID>
+tunnel-rs client iroh --relay-url https://relay.example.com --server-node-id <ID> --source tcp://127.0.0.1:22 --target 127.0.0.1:2222
 
 # Force relay-only (no direct P2P) - requires test-utils feature
 # Build with: cargo build --features test-utils
-tunnel-rs server iroh --relay-url https://relay.example.com --relay-only --allowed-tcp 127.0.0.0/8
+tunnel-rs server iroh --relay-url https://relay.example.com --relay-only --allowed-tcp 127.0.0.0/8 --allowed-clients <CLIENT_NODE_ID>
 ```
 
 ### Running iroh-relay
@@ -364,8 +473,8 @@ For fully independent operation without public infrastructure:
 
 ```bash
 # Both sides use custom DNS server
-tunnel-rs server iroh --dns-server https://dns.example.com/pkarr --secret-file ./server.key --allowed-tcp 127.0.0.0/8
-tunnel-rs client iroh --dns-server https://dns.example.com/pkarr --node-id <ID> --source tcp://127.0.0.1:22 --target 127.0.0.1:2222
+tunnel-rs server iroh --dns-server https://dns.example.com/pkarr --secret-file ./server.key --allowed-tcp 127.0.0.0/8 --allowed-clients <CLIENT_NODE_ID>
+tunnel-rs client iroh --dns-server https://dns.example.com/pkarr --server-node-id <ID> --source tcp://127.0.0.1:22 --target 127.0.0.1:2222
 ```
 
 ## Self-Hosted Infrastructure
@@ -402,13 +511,15 @@ tunnel-rs server iroh \
   --relay-url https://relay.example.com \
   --dns-server https://dns.example.com/pkarr \
   --secret-file ./server.key \
-  --allowed-tcp 127.0.0.0/8
+  --allowed-tcp 127.0.0.0/8 \
+  --allowed-clients <CLIENT_NODE_ID>
 
 # Client
 tunnel-rs client iroh \
   --relay-url https://relay.example.com \
   --dns-server https://dns.example.com/pkarr \
-  --node-id <ID> \
+  --secret-file ./client.key \
+  --server-node-id <ID> \
   --source tcp://127.0.0.1:22 \
   --target 127.0.0.1:2222
 ```
@@ -443,13 +554,15 @@ tunnel-rs server iroh \
   --relay-url http://YOUR_RELAY.onion \
   --socks5-proxy socks5h://127.0.0.1:9050 \
   --secret-file ./server.key \
-  --allowed-tcp 127.0.0.0/8
+  --allowed-tcp 127.0.0.0/8 \
+  --allowed-clients <CLIENT_NODE_ID>
 
 # Client side: use --socks5-proxy to reach .onion relay (direct P2P bypasses Tor)
 tunnel-rs client iroh \
   --relay-url http://YOUR_RELAY.onion \
   --socks5-proxy socks5h://127.0.0.1:9050 \
-  --node-id <ID> \
+  --secret-file ./client.key \
+  --server-node-id <ID> \
   --source tcp://127.0.0.1:22 \
   --target 127.0.0.1:2222
 ```
@@ -722,13 +835,13 @@ Server whitelists networks; clients choose which service to tunnel:
 
 ```bash
 # Server: whitelist networks, clients choose destination
-tunnel-rs server iroh --allowed-tcp 127.0.0.0/8 --max-sessions 100
+tunnel-rs server iroh --allowed-tcp 127.0.0.0/8 --max-sessions 100 --allowed-clients <CLIENT1_NODE_ID> --allowed-clients <CLIENT2_NODE_ID>
 
 # Client 1: tunnel to SSH
-tunnel-rs client iroh --node-id <ID> --source tcp://127.0.0.1:22 --target 127.0.0.1:2222
+tunnel-rs client iroh --secret-file ./client1.key --server-node-id <ID> --source tcp://127.0.0.1:22 --target 127.0.0.1:2222
 
 # Client 2: tunnel to web server (same server!)
-tunnel-rs client iroh --node-id <ID> --source tcp://127.0.0.1:80 --target 127.0.0.1:8080
+tunnel-rs client iroh --secret-file ./client2.key --server-node-id <ID> --source tcp://127.0.0.1:80 --target 127.0.0.1:8080
 ```
 
 ### ice-nostr (Multi-Session + Dynamic Source)
@@ -837,6 +950,7 @@ All protocol modes and features are available on all platforms.
 
 - All traffic is encrypted using QUIC/TLS 1.3
 - The EndpointId is a public key that identifies the sender
+- **NodeId Whitelisting (iroh mode):** Server rejects clients not in the `--allowed-clients` list. Authentication uses iroh's built-in Ed25519 identity—the NodeId is verified during the TLS handshake.
 - Secret key files are created with `0600` permissions (Unix) and appropriate permissions on Windows
 - Treat secret key files like SSH private keys
 
@@ -846,10 +960,11 @@ All protocol modes and features are available on all platforms.
 1. Sender creates an iroh endpoint with discovery services
 2. Sender publishes its address via Pkarr/DNS
 3. Receiver resolves the sender via discovery
-4. Connection established via iroh's NAT traversal
-5. Receiver sends `SourceRequest` with desired source address
-6. Sender validates against allowed networks and responds
-7. If accepted, traffic forwarding begins
+4. Connection established via iroh's NAT traversal (TLS handshake verifies NodeId)
+5. **Sender validates client NodeId against allowed clients list**
+6. Receiver sends `SourceRequest` with desired source address
+7. Sender validates against allowed networks and responds
+8. If accepted, traffic forwarding begins
 
 
 ### ice-manual Mode

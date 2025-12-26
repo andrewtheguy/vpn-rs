@@ -235,17 +235,24 @@ pub async fn create_server_endpoint(
 }
 
 /// Create a client endpoint.
+/// If a secret key is provided, the client will use a persistent identity for authentication.
 pub async fn create_client_endpoint(
     relay_urls: &[String],
     relay_only: bool,
     dns_server: Option<&str>,
+    secret_key: Option<&SecretKey>,
 ) -> Result<Endpoint> {
     let relay_mode = parse_relay_mode(relay_urls)?;
     let using_custom_relay = !matches!(relay_mode, RelayMode::Default);
     print_relay_status(relay_urls, relay_only, using_custom_relay);
 
-    // Client doesn't have a secret key, so can only resolve (not publish) from custom DNS
-    let builder = create_endpoint_builder(relay_mode, relay_only, dns_server, None)?;
+    let mut builder = create_endpoint_builder(relay_mode, relay_only, dns_server, secret_key)?;
+
+    // Set the secret key for persistent identity (used for authentication)
+    if let Some(secret) = secret_key {
+        builder = builder.secret_key(secret.clone());
+    }
+
     let endpoint = builder.bind().await.context("Failed to create iroh endpoint")?;
 
     // Wait for endpoint to come online with timeout

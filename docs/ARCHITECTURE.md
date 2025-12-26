@@ -77,6 +77,7 @@ graph LR
         C[tunnel.rs<br/>TCP/UDP Forwarding]
         D[endpoint.rs<br/>iroh Endpoint]
         E[secret.rs<br/>Identity Management]
+        E2[auth.rs<br/>NodeId Authentication]
     end
 
     subgraph "Manual/Custom Mode"
@@ -94,6 +95,7 @@ graph LR
     A --> C
     A --> D
     A --> E
+    A --> E2
     A --> F
     A --> G
     A --> H
@@ -106,6 +108,7 @@ graph LR
 
     style A fill:#E3F2FD
     style C fill:#E8F5E9
+    style E2 fill:#FFCCBC
     style F fill:#FFF3E0
     style G fill:#FFF3E0
     style J fill:#E1BEE7
@@ -938,7 +941,7 @@ graph TB
         J[relay_urls]
         K[relay_only]
         L[dns_server]
-        M[node_id - receiver only]
+        M[server_node_id - receiver only]
     end
 
     subgraph "ice-manual Options"
@@ -1076,7 +1079,10 @@ graph TB
     subgraph "iroh Mode"
         A[Secret Key File] --> B[Ed25519 Private Key]
         B --> C[EndpointId - Public Key]
-        C --> D[Peer Authentication]
+        C --> D[NodeId Whitelist Check]
+        D --> E{In allowed_clients?}
+        E -->|Yes| F[Authenticated]
+        E -->|No| G[Rejected]
     end
 
     subgraph "ice-manual Mode"
@@ -1087,7 +1093,39 @@ graph TB
 
     style B fill:#FFE0B2
     style C fill:#C8E6C9
+    style F fill:#C8E6C9
+    style G fill:#FFCCBC
     style K fill:#C8E6C9
+```
+
+### NodeId Whitelist (iroh Mode)
+
+Iroh mode requires server-side authentication using NodeId whitelisting:
+
+1. **Server Configuration**: Server specifies `--allowed-clients` with one or more client NodeIds
+2. **Client Identity**: Each client has an Ed25519 keypair; the NodeId is derived from the public key
+3. **Authentication**: When a client connects, iroh's TLS handshake verifies the client's NodeId
+4. **Validation**: Server checks if `conn.remote_id()` is in the allowed clients list
+5. **Rejection**: Unauthorized clients are immediately disconnected with `conn.close(1, b"unauthorized")`
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant S as Server
+    participant A as Auth Module
+
+    C->>S: Connect (TLS handshake includes NodeId)
+    S->>S: conn.remote_id() → NodeId
+    S->>A: is_client_allowed(NodeId, allowed_clients)
+    alt NodeId in allowed_clients
+        A-->>S: true
+        S->>C: Accept connection
+        Note over S,C: Proceed with tunnel setup
+    else NodeId not in allowed_clients
+        A-->>S: false
+        S->>S: conn.close(1, b"unauthorized")
+        S->>C: Connection rejected
+    end
 ```
 
 ### Threat Model
@@ -1099,22 +1137,26 @@ graph TB
         B[MITM<br/>Peer authentication]
         C[Replay Attacks<br/>QUIC nonces]
         D[Tampering<br/>Authenticated encryption]
+        E2[Unauthorized Access<br/>NodeId Whitelist - iroh mode]
     end
-    
+
     subgraph "User Responsibility"
         E[Signaling Channel Security<br/>Manual modes]
         F[Secret Key Protection<br/>iroh]
         G[EndpointId Verification<br/>Trust on first use]
+        H[Allowed Clients List<br/>Server admin maintains whitelist]
     end
-    
+
     style A fill:#C8E6C9
     style B fill:#C8E6C9
     style C fill:#C8E6C9
     style D fill:#C8E6C9
-    
+    style E2 fill:#C8E6C9
+
     style E fill:#FFF9C4
     style F fill:#FFF9C4
     style G fill:#FFF9C4
+    style H fill:#FFF9C4
 ```
 
 ### Secret Key Management

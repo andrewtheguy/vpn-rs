@@ -14,6 +14,7 @@
 //! - [`nostr`] - Nostr-based signaling for peer discovery
 //! - [`transport`] - ICE transport layer using str0m
 
+pub mod auth;
 pub mod config;
 #[cfg(feature = "ice")]
 pub mod custom;

@@ -10,7 +10,7 @@
 //!
 //! Usage (iroh - automatic discovery):
 //!   tunnel-rs server iroh --allowed-tcp 127.0.0.0/8 --allowed-udp 10.0.0.0/8
-//!   tunnel-rs client iroh --node-id <NODE_ID> --source tcp://127.0.0.1:22 --target 127.0.0.1:2222
+//!   tunnel-rs client iroh --server-node-id <NODE_ID> --source tcp://127.0.0.1:22 --target 127.0.0.1:2222
 //!
 //! Usage (manual modes - copy-paste signaling):
 //!   tunnel-rs client ice-manual --source tcp://127.0.0.1:22 --target 127.0.0.1:2222
@@ -20,6 +20,7 @@
 //!   tunnel-rs server ice-nostr --allowed-tcp 127.0.0.0/8 --nsec <NSEC> --peer-npub <NPUB>
 //!   tunnel-rs client ice-nostr --source tcp://127.0.0.1:22 --target 127.0.0.1:2222 --nsec <NSEC> --peer-npub <NPUB>
 
+use tunnel_rs::auth;
 use tunnel_rs::config;
 #[cfg(feature = "ice")]
 use tunnel_rs::custom;
@@ -170,6 +171,145 @@ fn resolve_nostr_nsec(
     }
 }
 
+// ============================================================================
+// Iroh Parameter Resolution Helpers
+// ============================================================================
+
+/// Resolved parameters for iroh server mode.
+/// CLI values take precedence over config file values.
+struct ServerIrohParams {
+    allowed_tcp: Vec<String>,
+    allowed_udp: Vec<String>,
+    max_sessions: Option<usize>,
+    secret: Option<String>,
+    secret_file: Option<PathBuf>,
+    relay_urls: Vec<String>,
+    dns_server: Option<String>,
+    socks5_proxy: Option<String>,
+    allowed_clients: Vec<String>,
+    allowed_clients_file: Option<PathBuf>,
+}
+
+/// Resolve iroh server parameters from CLI and config.
+/// CLI values take precedence; empty CLI vectors fall back to config.
+fn resolve_server_iroh_params(
+    mode: &Option<ServerMode>,
+    iroh_cfg: Option<&config::IrohConfig>,
+) -> ServerIrohParams {
+    let cfg = iroh_cfg.cloned().unwrap_or_default();
+    let cfg_allowed = cfg.allowed_sources.clone().unwrap_or_default();
+
+    match mode {
+        Some(ServerMode::Iroh {
+            allowed_tcp: at,
+            allowed_udp: au,
+            max_sessions: ms,
+            secret: se,
+            secret_file: sf,
+            relay_urls: r,
+            dns_server: d,
+            socks5_proxy: sp,
+            allowed_clients: ac,
+            allowed_clients_file: acf,
+            ..
+        }) => {
+            let (secret, secret_file) = if se.is_some() || sf.is_some() {
+                (se.clone(), sf.clone())
+            } else {
+                (cfg.secret.clone(), cfg.secret_file.clone())
+            };
+
+            ServerIrohParams {
+                allowed_tcp: if at.is_empty() { cfg_allowed.tcp.clone() } else { at.clone() },
+                allowed_udp: if au.is_empty() { cfg_allowed.udp.clone() } else { au.clone() },
+                max_sessions: ms.or(cfg.max_sessions),
+                secret,
+                secret_file,
+                relay_urls: if r.is_empty() { cfg.relay_urls.clone().unwrap_or_default() } else { r.clone() },
+                dns_server: d.clone().or(cfg.dns_server.clone()),
+                socks5_proxy: sp.clone().or(cfg.socks5_proxy.clone()),
+                allowed_clients: if ac.is_empty() { cfg.allowed_clients.clone().unwrap_or_default() } else { ac.clone() },
+                allowed_clients_file: acf.clone().or(cfg.allowed_clients_file.clone()),
+            }
+        }
+        _ => ServerIrohParams {
+            allowed_tcp: cfg_allowed.tcp,
+            allowed_udp: cfg_allowed.udp,
+            max_sessions: cfg.max_sessions,
+            secret: cfg.secret,
+            secret_file: cfg.secret_file,
+            relay_urls: cfg.relay_urls.unwrap_or_default(),
+            dns_server: cfg.dns_server,
+            socks5_proxy: cfg.socks5_proxy,
+            allowed_clients: cfg.allowed_clients.unwrap_or_default(),
+            allowed_clients_file: cfg.allowed_clients_file,
+        },
+    }
+}
+
+/// Resolved parameters for iroh client mode.
+/// CLI values take precedence over config file values.
+struct ClientIrohParams {
+    server_node_id: Option<String>,
+    source: Option<String>,
+    target: Option<String>,
+    relay_urls: Vec<String>,
+    dns_server: Option<String>,
+    socks5_proxy: Option<String>,
+    secret: Option<String>,
+    secret_file: Option<PathBuf>,
+}
+
+/// Resolve iroh client parameters from CLI and config.
+/// CLI values take precedence; empty CLI vectors fall back to config.
+fn resolve_client_iroh_params(
+    mode: &Option<ClientMode>,
+    iroh_cfg: Option<&config::IrohConfig>,
+) -> ClientIrohParams {
+    let cfg = iroh_cfg.cloned().unwrap_or_default();
+
+    match mode {
+        Some(ClientMode::Iroh {
+            server_node_id: n,
+            source: src,
+            target: t,
+            relay_urls: r,
+            dns_server: d,
+            socks5_proxy: sp,
+            secret: se,
+            secret_file: sf,
+            ..
+        }) => {
+            let (secret, secret_file) = if se.is_some() || sf.is_some() {
+                (se.clone(), sf.clone())
+            } else {
+                (cfg.secret.clone(), cfg.secret_file.clone())
+            };
+
+            ClientIrohParams {
+                server_node_id: n.clone().or(cfg.server_node_id.clone()),
+                source: normalize_optional_endpoint(src.clone()).or(cfg.request_source.clone()),
+                target: t.clone().or(cfg.target.clone()),
+                relay_urls: if r.is_empty() { cfg.relay_urls.clone().unwrap_or_default() } else { r.clone() },
+                dns_server: d.clone().or(cfg.dns_server.clone()),
+                socks5_proxy: sp.clone().or(cfg.socks5_proxy.clone()),
+                secret,
+                secret_file,
+            }
+        }
+        _ => ClientIrohParams {
+            server_node_id: cfg.server_node_id,
+            source: cfg.request_source,
+            target: cfg.target,
+            relay_urls: cfg.relay_urls.unwrap_or_default(),
+            dns_server: cfg.dns_server,
+            socks5_proxy: cfg.socks5_proxy,
+            secret: cfg.secret,
+            secret_file: cfg.secret_file,
+        },
+    }
+}
+
 #[derive(Parser)]
 #[command(name = "tunnel-rs")]
 #[command(version)]
@@ -291,6 +431,16 @@ enum ServerMode {
         /// E.g., socks5://127.0.0.1:9050 for Tor
         #[arg(long)]
         socks5_proxy: Option<String>,
+
+        /// Allowed client NodeIds (repeatable). Only clients with these NodeIds can connect.
+        /// Required for authentication. Use with --allowed-clients-file for file-based config.
+        #[arg(long = "allowed-clients", value_name = "NODE_ID")]
+        allowed_clients: Vec<String>,
+
+        /// Path to file containing allowed client NodeIds (one per line, # comments allowed).
+        /// Can be combined with --allowed-clients for additional inline NodeIds.
+        #[arg(long, value_name = "FILE")]
+        allowed_clients_file: Option<PathBuf>,
     },
     /// Client-initiated mode: Full ICE with manual signaling (str0m+quinn)
     #[command(name = "ice-manual")]
@@ -370,8 +520,8 @@ enum ClientMode {
     #[command(name = "iroh")]
     Iroh {
         /// EndpointId of the server to connect to
-        #[arg(short, long)]
-        node_id: Option<String>,
+        #[arg(short = 'n', long)]
+        server_node_id: Option<String>,
 
         /// Source address to request from server (tcp://host:port or udp://host:port)
         /// The server must have this in its --allowed-tcp or --allowed-udp list
@@ -401,6 +551,14 @@ enum ClientMode {
         /// E.g., socks5://127.0.0.1:9050 for Tor
         #[arg(long)]
         socks5_proxy: Option<String>,
+
+        /// Base64-encoded secret key for persistent identity (for authentication)
+        #[arg(long)]
+        secret: Option<String>,
+
+        /// Path to secret key file for persistent identity (for authentication)
+        #[arg(long)]
+        secret_file: Option<PathBuf>,
     },
     /// Client-initiated mode: Full ICE with manual signaling (str0m+quinn)
     #[command(name = "ice-manual")]
@@ -550,42 +708,20 @@ async fn main() -> Result<()> {
             match effective_mode {
                 "iroh" => {
                     let iroh_cfg = cfg.iroh();
-                    // Extract common fields (relay_only is CLI-only, requires test-utils feature)
-                    let (allowed_tcp, allowed_udp, max_sessions, secret, secret_file, relay_urls, dns_server, socks5_proxy) = match &mode {
-                        Some(ServerMode::Iroh { allowed_tcp: at, allowed_udp: au, max_sessions: ms, secret: se, secret_file: sf, relay_urls: r, dns_server: d, socks5_proxy: sp, .. }) => {
-                            let cfg_allowed = iroh_cfg.and_then(|c| c.allowed_sources.clone()).unwrap_or_default();
-                            let cfg_secret = iroh_cfg.and_then(|c| c.secret.clone());
-                            let cfg_secret_file = iroh_cfg.and_then(|c| c.secret_file.clone());
-                            let (secret, secret_file) = if se.is_some() || sf.is_some() {
-                                (se.clone(), sf.clone())
-                            } else {
-                                (cfg_secret, cfg_secret_file)
-                            };
-                            (
-                                if at.is_empty() { cfg_allowed.tcp.clone() } else { at.clone() },
-                                if au.is_empty() { cfg_allowed.udp.clone() } else { au.clone() },
-                                ms.or_else(|| iroh_cfg.and_then(|c| c.max_sessions)),
-                                secret,
-                                secret_file,
-                                if r.is_empty() { iroh_cfg.and_then(|c| c.relay_urls.clone()).unwrap_or_default() } else { r.clone() },
-                                d.clone().or_else(|| iroh_cfg.and_then(|c| c.dns_server.clone())),
-                                sp.clone().or_else(|| iroh_cfg.and_then(|c| c.socks5_proxy.clone())),
-                            )
-                        }
-                        _ => {
-                            let cfg_allowed = iroh_cfg.and_then(|c| c.allowed_sources.clone()).unwrap_or_default();
-                            (
-                                cfg_allowed.tcp,
-                                cfg_allowed.udp,
-                                iroh_cfg.and_then(|c| c.max_sessions),
-                                iroh_cfg.and_then(|c| c.secret.clone()),
-                                iroh_cfg.and_then(|c| c.secret_file.clone()),
-                                iroh_cfg.and_then(|c| c.relay_urls.clone()).unwrap_or_default(),
-                                iroh_cfg.and_then(|c| c.dns_server.clone()),
-                                iroh_cfg.and_then(|c| c.socks5_proxy.clone()),
-                            )
-                        },
-                    };
+                    // Resolve parameters from CLI and config (CLI takes precedence)
+                    let ServerIrohParams {
+                        allowed_tcp,
+                        allowed_udp,
+                        max_sessions,
+                        secret,
+                        secret_file,
+                        relay_urls,
+                        dns_server,
+                        socks5_proxy,
+                        allowed_clients,
+                        allowed_clients_file,
+                    } = resolve_server_iroh_params(&mode, iroh_cfg);
+
                     // relay_only: CLI-only, requires test-utils feature
                     #[cfg(feature = "test-utils")]
                     let relay_only = match &mode {
@@ -597,6 +733,23 @@ async fn main() -> Result<()> {
 
                     let secret = resolve_iroh_secret(secret, secret_file)?;
 
+                    // Load allowed clients for authentication
+                    let allowed_clients = auth::load_allowed_clients(
+                        &allowed_clients,
+                        allowed_clients_file.as_deref(),
+                    )?;
+
+                    if allowed_clients.is_empty() {
+                        anyhow::bail!(
+                            "Authentication required: specify --allowed-clients or --allowed-clients-file.\n\
+                            Clients need to provide their NodeId, which can be generated with:\n\
+                            tunnel-rs generate-iroh-key --output <key-file>\n\
+                            tunnel-rs show-iroh-node-id --secret-file <key-file>"
+                        );
+                    }
+
+                    log::info!("Allowed clients: {} NodeId(s) configured", allowed_clients.len());
+
                     validate_socks5_proxy_if_present(&socks5_proxy).await?;
 
                     // Set up SOCKS5 bridges for .onion relay URLs
@@ -605,7 +758,7 @@ async fn main() -> Result<()> {
                         socks5_proxy.as_deref(),
                     ).await?;
 
-                    iroh::run_multi_source_server(allowed_tcp, allowed_udp, max_sessions, secret, relay_urls, relay_only, dns_server).await
+                    iroh::run_multi_source_server(allowed_tcp, allowed_udp, max_sessions, secret, relay_urls, relay_only, dns_server, allowed_clients).await
                 }
                 #[cfg(feature = "ice")]
                 "ice-manual" => {
@@ -733,26 +886,18 @@ async fn main() -> Result<()> {
             match effective_mode {
                 "iroh" => {
                     let iroh_cfg = cfg.iroh();
-                    // Override with CLI values if provided
-                    // Note: relay_only is CLI-only (not in config), requires test-utils feature
-                    let (node_id, source, target, relay_urls, dns_server, socks5_proxy) = match &mode {
-                        Some(ClientMode::Iroh { node_id: n, source: src, target: t, relay_urls: r, dns_server: d, socks5_proxy: sp, .. }) => (
-                            n.clone().or_else(|| iroh_cfg.and_then(|c| c.node_id.clone())),
-                            normalize_optional_endpoint(src.clone()).or_else(|| iroh_cfg.and_then(|c| c.request_source.clone())),
-                            t.clone().or_else(|| iroh_cfg.and_then(|c| c.target.clone())),
-                            if r.is_empty() { iroh_cfg.and_then(|c| c.relay_urls.clone()).unwrap_or_default() } else { r.clone() },
-                            d.clone().or_else(|| iroh_cfg.and_then(|c| c.dns_server.clone())),
-                            sp.clone().or_else(|| iroh_cfg.and_then(|c| c.socks5_proxy.clone())),
-                        ),
-                        _ => (
-                            iroh_cfg.and_then(|c| c.node_id.clone()),
-                            iroh_cfg.and_then(|c| c.request_source.clone()),
-                            iroh_cfg.and_then(|c| c.target.clone()),
-                            iroh_cfg.and_then(|c| c.relay_urls.clone()).unwrap_or_default(),
-                            iroh_cfg.and_then(|c| c.dns_server.clone()),
-                            iroh_cfg.and_then(|c| c.socks5_proxy.clone()),
-                        ),
-                    };
+                    // Resolve parameters from CLI and config (CLI takes precedence)
+                    let ClientIrohParams {
+                        server_node_id,
+                        source,
+                        target,
+                        relay_urls,
+                        dns_server,
+                        socks5_proxy,
+                        secret,
+                        secret_file,
+                    } = resolve_client_iroh_params(&mode, iroh_cfg);
+
                     // relay_only: CLI-only, requires test-utils feature
                     #[cfg(feature = "test-utils")]
                     let relay_only = match &mode {
@@ -762,8 +907,8 @@ async fn main() -> Result<()> {
                     #[cfg(not(feature = "test-utils"))]
                     let relay_only = false;
 
-                    let node_id = node_id.context(
-                        "node_id is required. Provide via --node-id or in config file.",
+                    let server_node_id = server_node_id.context(
+                        "server_node_id is required. Provide via --server-node-id or in config file.",
                     )?;
                     let source = source.context(
                         "--source is required for iroh client mode. Specify the source to request from server (e.g., --source tcp://127.0.0.1:22)",
@@ -771,6 +916,9 @@ async fn main() -> Result<()> {
                     let target = target.context(
                         "--target is required. Provide the local address to listen on (e.g., --target 127.0.0.1:2222)",
                     )?;
+
+                    // Resolve client secret for authentication (optional but recommended)
+                    let secret = resolve_iroh_secret(secret, secret_file)?;
 
                     validate_socks5_proxy_if_present(&socks5_proxy).await?;
 
@@ -780,7 +928,7 @@ async fn main() -> Result<()> {
                         socks5_proxy.as_deref(),
                     ).await?;
 
-                    iroh::run_multi_source_client(node_id, source, target, relay_urls, relay_only, dns_server).await
+                    iroh::run_multi_source_client(server_node_id, source, target, relay_urls, relay_only, dns_server, secret).await
                 }
                 #[cfg(feature = "ice")]
                 "ice-manual" => {
