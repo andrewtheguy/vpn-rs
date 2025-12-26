@@ -27,3 +27,4 @@ ipnet = "2"
 url = "2"
 log = "0.4"
 rustls = { version = "0.23", features = ["aws-lc-rs"] }
+get_if_addrs = "0.5"

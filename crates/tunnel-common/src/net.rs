@@ -202,7 +202,7 @@ impl SourceCheckResult {
             format!(
                 "Source '{}' (resolved to {}) not in allowed networks {:?}",
                 source,
-                ips_str.join(\", \"),
+                ips_str.join(", "),
                 allowed_networks
             )
         }

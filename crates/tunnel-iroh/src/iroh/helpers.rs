@@ -23,10 +23,13 @@ pub(super) async fn open_bi_with_retry(
     conn: &iroh::endpoint::Connection,
 ) -> Result<(iroh::endpoint::SendStream, iroh::endpoint::RecvStream)> {
     retry_with_backoff(
-        || conn.open_bi(),
+        |_| async {
+            conn.open_bi()
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to open QUIC stream: {}", e))
+        },
         STREAM_OPEN_MAX_ATTEMPTS,
         STREAM_OPEN_BASE_DELAY_MS,
-        "open QUIC stream",
     )
     .await
 }

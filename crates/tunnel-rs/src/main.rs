@@ -4,7 +4,7 @@
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use iroh::SecretKey;
+use ::iroh::SecretKey;
 use std::path::PathBuf;
 
 use tunnel_common::config::{load_client_config, load_server_config, ClientConfig, ServerConfig};
