@@ -215,7 +215,7 @@ Waiting for clients to connect...
 ```bash
 tunnel-rs client iroh \
   --secret-file ./client.key \
-  --node-id <SERVER_ENDPOINT_ID> \
+  --server-node-id <SERVER_ENDPOINT_ID> \
   --source tcp://127.0.0.1:22 \
   --target 127.0.0.1:2222
 ```
@@ -236,7 +236,7 @@ tunnel-rs server iroh \
 ```bash
 tunnel-rs client iroh \
   --secret-file ./client.key \
-  --node-id <SERVER_ENDPOINT_ID> \
+  --server-node-id <SERVER_ENDPOINT_ID> \
   --source udp://127.0.0.1:51820 \
   --target 0.0.0.0:51820
 ```
@@ -277,7 +277,7 @@ tunnel-rs client iroh \
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--node-id`, `-n` | required | EndpointId of the server |
+| `--server-node-id`, `-n` | required | EndpointId of the server |
 | `--source`, `-s` | required | Source address to request from server (tcp://host:port or udp://host:port) |
 | `--target`, `-t` | required | Local address to listen on |
 | `--relay-url` | public | Custom relay server URL(s), repeatable |
@@ -343,7 +343,7 @@ role = "client"
 mode = "iroh"  # or "ice-manual", or "ice-nostr"
 
 [iroh]
-node_id = "2xnbkpbc7izsilvewd7c62w7wnwziacmpfwvhcrya5nt76dqkpga"
+server_node_id = "2xnbkpbc7izsilvewd7c62w7wnwziacmpfwvhcrya5nt76dqkpga"
 request_source = "tcp://127.0.0.1:22"
 target = "127.0.0.1:2222"
 relay_urls = ["https://relay.example.com"]
@@ -453,7 +453,7 @@ allowed_clients = [
 ```bash
 # Both sides must use the same relay
 tunnel-rs server iroh --relay-url https://relay.example.com --allowed-tcp 127.0.0.0/8 --allowed-clients <CLIENT_NODE_ID>
-tunnel-rs client iroh --relay-url https://relay.example.com --node-id <ID> --source tcp://127.0.0.1:22 --target 127.0.0.1:2222
+tunnel-rs client iroh --relay-url https://relay.example.com --server-node-id <ID> --source tcp://127.0.0.1:22 --target 127.0.0.1:2222
 
 # Force relay-only (no direct P2P) - requires test-utils feature
 # Build with: cargo build --features test-utils
@@ -474,7 +474,7 @@ For fully independent operation without public infrastructure:
 ```bash
 # Both sides use custom DNS server
 tunnel-rs server iroh --dns-server https://dns.example.com/pkarr --secret-file ./server.key --allowed-tcp 127.0.0.0/8 --allowed-clients <CLIENT_NODE_ID>
-tunnel-rs client iroh --dns-server https://dns.example.com/pkarr --node-id <ID> --source tcp://127.0.0.1:22 --target 127.0.0.1:2222
+tunnel-rs client iroh --dns-server https://dns.example.com/pkarr --server-node-id <ID> --source tcp://127.0.0.1:22 --target 127.0.0.1:2222
 ```
 
 ## Self-Hosted Infrastructure
@@ -519,7 +519,7 @@ tunnel-rs client iroh \
   --relay-url https://relay.example.com \
   --dns-server https://dns.example.com/pkarr \
   --secret-file ./client.key \
-  --node-id <ID> \
+  --server-node-id <ID> \
   --source tcp://127.0.0.1:22 \
   --target 127.0.0.1:2222
 ```
@@ -562,7 +562,7 @@ tunnel-rs client iroh \
   --relay-url http://YOUR_RELAY.onion \
   --socks5-proxy socks5h://127.0.0.1:9050 \
   --secret-file ./client.key \
-  --node-id <ID> \
+  --server-node-id <ID> \
   --source tcp://127.0.0.1:22 \
   --target 127.0.0.1:2222
 ```
@@ -838,10 +838,10 @@ Server whitelists networks; clients choose which service to tunnel:
 tunnel-rs server iroh --allowed-tcp 127.0.0.0/8 --max-sessions 100 --allowed-clients <CLIENT1_NODE_ID> --allowed-clients <CLIENT2_NODE_ID>
 
 # Client 1: tunnel to SSH
-tunnel-rs client iroh --secret-file ./client1.key --node-id <ID> --source tcp://127.0.0.1:22 --target 127.0.0.1:2222
+tunnel-rs client iroh --secret-file ./client1.key --server-node-id <ID> --source tcp://127.0.0.1:22 --target 127.0.0.1:2222
 
 # Client 2: tunnel to web server (same server!)
-tunnel-rs client iroh --secret-file ./client2.key --node-id <ID> --source tcp://127.0.0.1:80 --target 127.0.0.1:8080
+tunnel-rs client iroh --secret-file ./client2.key --server-node-id <ID> --source tcp://127.0.0.1:80 --target 127.0.0.1:8080
 ```
 
 ### ice-nostr (Multi-Session + Dynamic Source)

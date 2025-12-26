@@ -341,6 +341,7 @@ async fn handle_multi_source_stream(
 /// Connects to a server and requests a specific source (tcp://host:port or udp://host:port).
 /// The server validates the request and either accepts or rejects it.
 /// Note: relay_only is only meaningful when the 'test-utils' feature is enabled.
+/// If a secret key is provided, the client will use a persistent identity for authentication.
 pub async fn run_multi_source_client(
     node_id: String,
     source: String,
@@ -348,6 +349,7 @@ pub async fn run_multi_source_client(
     relay_urls: Vec<String>,
     relay_only: bool,
     dns_server: Option<String>,
+    secret: Option<SecretKey>,
 ) -> Result<()> {
     // relay_only is only meaningful with test-utils feature
     #[cfg(not(feature = "test-utils"))]
@@ -384,7 +386,7 @@ pub async fn run_multi_source_client(
     log::info!("Requesting source: {}", source);
     log::info!("Creating iroh endpoint...");
 
-    let endpoint = create_client_endpoint(&relay_urls, relay_only, dns_server.as_deref()).await?;
+    let endpoint = create_client_endpoint(&relay_urls, relay_only, dns_server.as_deref(), secret.as_ref()).await?;
 
     let conn = connect_to_server(&endpoint, server_id, &relay_urls, relay_only, MULTI_ALPN).await?;
 

@@ -21,20 +21,21 @@ use std::path::{Path, PathBuf};
 /// iroh mode configuration (multi-source).
 ///
 /// Some fields are role-specific (enforced by validate()):
-/// - Server-only: `allowed_sources`, `max_sessions`, `secret`, `secret_file`, `allowed_clients`, `allowed_clients_file`
-/// - Client-only: `request_source`, `target`, `node_id`
+/// - Server-only: `allowed_sources`, `max_sessions`, `allowed_clients`, `allowed_clients_file`
+/// - Client-only: `request_source`, `target`, `server_node_id`
+/// - Both: `secret`, `secret_file` (server identity / client authentication)
 #[derive(Deserialize, Default, Clone)]
 pub struct IrohConfig {
-    /// Path to secret key file for persistent identity
+    /// Path to secret key file for persistent identity (server or client)
     pub secret_file: Option<PathBuf>,
-    /// Base64-encoded secret key for persistent identity.
+    /// Base64-encoded secret key for persistent identity (server or client).
     /// Prefer `secret_file` in production; inline secrets are best kept to testing or
     /// special cases due to VCS/log exposure risk. Secret files should be 0600 on Unix.
     pub secret: Option<String>,
     pub relay_urls: Option<Vec<String>>,
     pub dns_server: Option<String>,
     /// NodeId of the server to connect to (client only)
-    pub node_id: Option<String>,
+    pub server_node_id: Option<String>,
     /// Allowed source networks in CIDR notation (server only).
     /// Clients must request sources within these networks.
     pub allowed_sources: Option<AllowedSources>,
@@ -356,9 +357,9 @@ impl ServerConfig {
                         Servers use 'allowed_sources' to restrict what clients can request."
                     );
                 }
-                if iroh.node_id.is_some() {
+                if iroh.server_node_id.is_some() {
                     anyhow::bail!(
-                        "[iroh] 'node_id' is a client-only field."
+                        "[iroh] 'server_node_id' is a client-only field."
                     );
                 }
                 // Validate CIDR format
@@ -487,11 +488,7 @@ impl ClientConfig {
         // Mode-specific validation
         if expected_mode == "iroh" {
             if let Some(ref iroh) = self.iroh {
-                if iroh.secret.is_some() || iroh.secret_file.is_some() {
-                    anyhow::bail!(
-                        "[iroh] 'secret' and 'secret_file' are server-only fields."
-                    );
-                }
+                // Note: secret/secret_file are allowed for clients (needed for authentication)
                 // Reject server-only fields
                 if iroh.allowed_sources.is_some() {
                     anyhow::bail!(
@@ -502,6 +499,11 @@ impl ClientConfig {
                 if iroh.max_sessions.is_some() {
                     anyhow::bail!(
                         "[iroh] 'max_sessions' is a server-only field."
+                    );
+                }
+                if iroh.allowed_clients.is_some() || iroh.allowed_clients_file.is_some() {
+                    anyhow::bail!(
+                        "[iroh] 'allowed_clients' and 'allowed_clients_file' are server-only fields."
                     );
                 }
                 // Validate request_source URL format

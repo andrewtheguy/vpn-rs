@@ -17,7 +17,7 @@ mode = "iroh"  # or "ice-manual", or "ice-nostr"
 
 [iroh]
 # NodeId of the server to connect to (required for iroh)
-node_id = "2xnbkpbc7izsilvewd7c62w7wnwziacmpfwvhcrya5nt76dqkpga"
+server_node_id = "2xnbkpbc7izsilvewd7c62w7wnwziacmpfwvhcrya5nt76dqkpga"
 
 # ============================================================================
 # Client Identity (RECOMMENDED for authentication)

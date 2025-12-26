@@ -941,7 +941,7 @@ graph TB
         J[relay_urls]
         K[relay_only]
         L[dns_server]
-        M[node_id - receiver only]
+        M[server_node_id - receiver only]
     end
 
     subgraph "ice-manual Options"

@@ -48,7 +48,7 @@ tunnel-rs server iroh \
 # Client: request SSH and listen locally
 tunnel-rs client iroh \
   --secret-file ./client.key \
-  --node-id <server-node-id> \
+  --server-node-id <server-node-id> \
   --source tcp://127.0.0.1:22 \
   --target 127.0.0.1:2222
 ```
@@ -79,7 +79,7 @@ docker compose logs tunnel-server
 # On remote machine
 tunnel-rs client iroh \
   --secret-file ./client.key \
-  --node-id 2xnbkpbc7izsilvewd7c62w7wnwziacmpfwvhcrya5nt76dqkpga \
+  --server-node-id 2xnbkpbc7izsilvewd7c62w7wnwziacmpfwvhcrya5nt76dqkpga \
   --source tcp://nginx:80 \
   --target 127.0.0.1:8080
 
@@ -147,7 +147,7 @@ tunnel-rs client iroh \
   --relay-url http://YOUR_ADDRESS.onion \
   --socks5-proxy socks5h://127.0.0.1:9050 \
   --secret-file ./client.key \
-  --node-id <ENDPOINT_ID> \
+  --server-node-id <ENDPOINT_ID> \
   --source tcp://nginx:80 \
   --target 127.0.0.1:8080
 
@@ -171,7 +171,7 @@ kubectl logs -l app=myapp -c tunnel-server | grep EndpointId
 # Connect from remote (replace "myapp" with your service name)
 tunnel-rs client iroh \
   --secret-file ./client.key \
-  --node-id <ID> \
+  --server-node-id <ID> \
   --source tcp://myapp:8080 \
   --target 127.0.0.1:8080
 ```
@@ -281,7 +281,7 @@ tunnel-rs client iroh \
   --relay-url http://YOUR_ADDRESS.onion \
   --socks5-proxy socks5h://127.0.0.1:9050 \
   --secret-file ./client.key \
-  --node-id <ENDPOINT_ID> \
+  --server-node-id <ENDPOINT_ID> \
   --source tcp://my-service.default.svc:80 \
   --target 127.0.0.1:8080
 
