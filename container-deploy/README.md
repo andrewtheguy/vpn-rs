@@ -162,6 +162,20 @@ tunnel-rs client iroh \
 
 Run tunnel-rs alongside your application:
 
+**Prerequisites:** Generate client keys before deploying. See the [Docker section](#basic-example-iroh-mode) for the exact commands:
+
+```bash
+# Generate client key and get NodeId (same as Docker section)
+tunnel-rs generate-iroh-key --output ./client.key
+tunnel-rs show-iroh-node-id --secret-file ./client.key
+# Output: <CLIENT_NODE_ID> - add this to the server's --allowed-clients
+
+# Store client key as Kubernetes secret (for client-side use)
+kubectl create secret generic tunnel-client-key --from-file=client.key=./client.key
+```
+
+**Deploy:**
+
 ```bash
 kubectl apply -f kubernetes/deployment-sidecar.yaml
 
@@ -171,7 +185,7 @@ kubectl logs -l app=myapp -c tunnel-server | grep EndpointId
 # Connect from remote (replace "myapp" with your service name)
 tunnel-rs client iroh \
   --secret-file ./client.key \
-  --server-node-id <ID> \
+  --server-node-id <SERVER_NODE_ID> \
   --source tcp://myapp:8080 \
   --target 127.0.0.1:8080
 ```
