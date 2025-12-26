@@ -467,6 +467,10 @@ allowed_clients = [
 
 ## Custom Relay Server
 
+Use a custom relay server instead of the public iroh relay infrastructure.
+
+> **Note:** When using `--relay-url`, you only need a custom relay server. The `--dns-server` option is **not required** — DNS discovery is only needed if you also want to avoid the public iroh DNS infrastructure (see [Self-Hosted DNS Discovery](#self-hosted-dns-discovery)).
+
 ```bash
 # Both sides must use the same relay
 tunnel-rs server iroh --relay-url https://relay.example.com --allowed-tcp 127.0.0.0/8 --allowed-clients <CLIENT_NODE_ID>
