@@ -81,14 +81,14 @@ graph LR
     end
 
     subgraph "Manual/Custom Mode"
-        F[manual/ice.rs<br/>ICE with str0m]
-        G[manual/quic.rs<br/>QUIC with quinn]
-        H[manual/signaling.rs<br/>Offer/Answer]
-        I[manual/mux.rs<br/>Stream Multiplexing]
+        F[transport/ice.rs<br/>ICE with str0m]
+        G[transport/quic.rs<br/>QUIC with quinn]
+        H[signaling/manual.rs<br/>Offer/Answer]
+        I[transport/mux.rs<br/>Stream Multiplexing]
     end
 
     subgraph "Nostr Mode"
-        J[manual/nostr_signaling.rs<br/>Nostr Relay Signaling]
+        J[signaling/nostr.rs<br/>Nostr Relay Signaling]
     end
 
     A --> B
