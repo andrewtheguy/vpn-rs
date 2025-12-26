@@ -296,6 +296,23 @@ Use `--default-config` to load from the default location, or `-c <path>` for a c
 - Server: `~/.config/tunnel-rs/server.toml`
 - Client: `~/.config/tunnel-rs/client.toml`
 
+### Overriding Config Values
+
+CLI arguments take precedence over config file values. Use `--default-config` with CLI arguments to override specific fields:
+
+```bash
+# Use config but override source and target
+tunnel-rs client iroh --default-config \
+  --source tcp://localhost:3000 \
+  --target 127.0.0.1:8080
+
+# Use config but override allowed networks
+tunnel-rs server iroh --default-config \
+  --allowed-tcp 10.0.0.0/8
+```
+
+This lets you keep common settings (keys, relay URLs) in the config file while varying per-session options on the command line. You can also omit fields like `source` and `target` from the config entirely and provide them only via CLI.
+
 ### Server Config Example
 
 ```toml
