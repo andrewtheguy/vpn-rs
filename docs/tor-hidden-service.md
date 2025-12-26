@@ -248,85 +248,58 @@ Direct P2P bypasses Tor entirely, so performance is unaffected when direct conne
 
 ---
 
-## Future Direction: Embedded Arti
+## Planned Implementation: Embedded Arti & UDP Tunneling
 
-> **Note:** This section documents research for a planned future feature.
+Based on research and reference implementations (specifically `wormhole-rs`), we plan to integrate `arti` directly into tunnel-rs.
 
-### Current Limitation: SOCKS5 Bridge
+### Core Architecture
 
-The current `--socks5-proxy` approach requires:
-- External Tor daemon running
-- Manual hidden service configuration
-- SOCKS5 bridge to route iroh relay traffic
+Instead of relying on an external Tor daemon and SOCKS5, we will use the `arti-client` crate to directly bootstrap a Tor client within the application.
 
-### Alternative: Embedded Arti (Rust Tor)
+1.  **Direct Connection**: The client will use `arti_client::TorClient` to connect directly to `.onion` addresses.
+2.  **Ephemeral Hidden Services**: The server will use `tor_hsservice` to programmatically publish a hidden service without manual config files.
+3.  **No Relay Needed**: This removes the need for a separate `iroh-relay` in this mode; the tunnel-rs server *is* the Tor endpoint.
 
-[Arti](https://gitlab.torproject.org/tpo/core/arti) is the official Rust implementation of Tor. It can be embedded directly into Rust applications without requiring an external Tor daemon or SOCKS5 bridging.
+### Reference Implementation
+We will follow the pattern established in **[wormhole-rs](https://github.com/andrewtheguy/wormhole-rs)**:
+- **Server**: Uses `tor_client.launch_onion_service()` to create a hidden service.
+- **Client**: Uses `tor_client.connect()` to establish a data stream.
 
-**Key capabilities:**
-- **Direct API**: `TorClient::connect()` returns async streams without SOCKS
-- **Onion services**: Can create ephemeral hidden services programmatically
-- **No external daemon**: Fully embedded, no subprocess management
-
-**Reference implementation**: See [wormhole-rs](https://github.com/nickelc/wormhole-rs) which uses Arti for direct Tor integration.
-
-### Potential ice-nostr Integration
-
-A future `--tor-fallback` flag for ice-nostr mode could:
-1. Attempt ICE connection first (direct P2P)
-2. If ICE fails (symmetric NAT, timeout) **and tunnel is TCP**:
-   - Server creates ephemeral Tor hidden service via Arti
-   - Server publishes .onion address via Nostr signaling
-   - Client connects via embedded Arti
-3. If ICE fails **and tunnel is UDP**: connection fails (Tor is TCP-only)
-4. No external Tor daemon or SOCKS5 proxy needed
-
-### Comparison: SOCKS5 Bridge vs Embedded Arti
-
-| Feature | SOCKS5 Bridge (current) | Embedded Arti (future) |
-|---------|------------------------|------------------------|
-| External Tor daemon | Required | Not needed |
-| Mode support | iroh only | ice-nostr |
-| Setup complexity | High | Low (just a flag) |
-| Hidden service | Manual config | Automatic ephemeral |
-| Dependencies | External tor process | arti-client crate |
-| Feature flag | None | `onion` |
-
-### Arti Dependencies
+### Dependencies
+The integration will require the following crates, gated behind an `onion` feature flag to manage binary size (~5-10MB increase):
 
 ```toml
-# Behind optional 'onion' feature flag
-arti-client = { version = "0.37", features = ["onion-service-service", "onion-service-client", "tokio"] }
-tor-hsservice = { version = "0.37" }
-tor-cell = { version = "0.37" }
+[dependencies]
+# Feature: onion
+arti-client = { version = "0.37", optional = true, features = ["onion-service-service", "onion-service-client", "tokio"] }
+tor-hsservice = { version = "0.37", optional = true }
+tor-rtcompat = { version = "0.37", optional = true }
 ```
 
-### Important Limitation: TCP Only
+### UDP-over-TCP Workaround
 
-**Tor only supports TCP streams.** This has significant implications for the Arti fallback:
+Tor itself is TCP-only. To support UDP applications (like DNS, WireGuard, or games), we will implement a "UDP-over-TCP" encapsulation layer.
 
-| Tunnel Type | ICE Succeeds | ICE Fails + Tor Fallback |
-|-------------|--------------|--------------------------|
-| TCP (SSH, HTTP, databases) | ✅ Works | ✅ Falls back to Tor |
-| UDP (DNS, WireGuard, gaming) | ✅ Works | ❌ Connection fails |
+**The Protocol:**
+We will use a simple length-prefixed framing protocol over the Tor TCP stream:
 
-**Behavior with `--tor-fallback`:**
-- TCP tunnels: ICE first, Tor fallback if ICE fails
-- UDP tunnels: ICE only, no fallback available
+```text
+[Length (2 bytes)] [UDP Payload (N bytes)]
+```
 
-This is an acceptable trade-off because:
-1. Most tunnel use cases are TCP (SSH, databases, web services)
-2. UDP applications (gaming, real-time) have latency requirements incompatible with Tor (~500ms-2s)
-3. UDP-over-TCP encapsulation would add overhead and break UDP semantics
+**Workflow:**
+1.  **Client (UDP listener)**: 
+    - Captures UDP packets from the user.
+    - Encapsulates them with the 2-byte length header.
+    - Writes the frame to the Tor TCP stream.
+2.  **Server (Tor hidden service)**:
+    - Reads the length header from the Tor stream.
+    - Reads N bytes of payload.
+    - Forwards the payload as a raw UDP packet to the target.
 
-**Workaround for UDP:** Ensure direct connectivity (port forwarding, UPnP, or avoid symmetric NAT on both sides).
+**Performance Implications:**
+- **Latency**: Will remain high (500ms - 2s) due to Tor network hops.
+- **Reliability**: TCP guarantees delivery, which is actually *unlike* standard UDP, but acceptable for tunneling.
+- **Overhead**: Minimal (2 bytes per packet).
 
-### Trade-offs
-
-| Aspect | Impact |
-|--------|--------|
-| Startup latency | Tor bootstrap takes 10-30 seconds |
-| Connection latency | Tor adds ~500ms-2s vs direct |
-| Binary size | Arti adds ~5-10MB |
-| No external infra | Uses public Tor network (no self-hosted relay needed) |
-| **TCP only** | UDP tunnels cannot fall back to Tor |
+**Status**: Viability confirmed. This approach allows full UDP support (DNS, etc.) over the anonymity network, albeit with high latency.
