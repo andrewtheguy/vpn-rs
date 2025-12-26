@@ -19,6 +19,14 @@ mode = "iroh"  # or "ice-manual", or "ice-nostr"
 # NodeId of the server to connect to (required for iroh)
 node_id = "2xnbkpbc7izsilvewd7c62w7wnwziacmpfwvhcrya5nt76dqkpga"
 
+# ============================================================================
+# Client Identity (RECOMMENDED for authentication)
+# ============================================================================
+# Generate with: tunnel-rs generate-iroh-key --output client.key
+# Get NodeId with: tunnel-rs show-iroh-node-id --secret-file client.key
+# Share your NodeId with the server admin to be added to allowed_clients
+secret_file = "./client.key"
+
 # Source address to request from server (REQUIRED for iroh mode)
 # Must be in server's allowed_sources list (--allowed-tcp or --allowed-udp)
 request_source = "tcp://127.0.0.1:22"

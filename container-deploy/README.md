@@ -40,15 +40,20 @@ Both `iroh` and `ice-nostr` modes use a **client-initiated** model similar to SS
 ```bash
 # Server: allow localhost and private networks
 tunnel-rs server iroh \
+  --secret-file ./server.key \
   --allowed-tcp 127.0.0.0/8 \
-  --allowed-tcp 192.168.0.0/16
+  --allowed-tcp 192.168.0.0/16 \
+  --allowed-clients <CLIENT_NODE_ID>
 
 # Client: request SSH and listen locally
 tunnel-rs client iroh \
+  --secret-file ./client.key \
   --node-id <server-node-id> \
   --source tcp://127.0.0.1:22 \
   --target 127.0.0.1:2222
 ```
+
+> **Note:** Server requires `--allowed-clients` with client NodeIds. Generate keys with `tunnel-rs generate-iroh-key` and get NodeIds with `tunnel-rs show-iroh-node-id --secret-file <key>`.
 
 ## Docker
 
@@ -58,14 +63,22 @@ Expose an nginx service via tunnel-rs:
 
 ```bash
 cd docker
+
+# Generate client key first (you'll need the NodeId for the server)
+tunnel-rs generate-iroh-key --output ./client.key
+tunnel-rs show-iroh-node-id --secret-file ./client.key
+# Output: 3k4j5l6k7j8k9l0m1n2o3p4q5r6s7t8u9v0w1x2y3z4a5b6c7d8e
+
+# Add client NodeId to docker-compose.yml or .env, then start
 docker compose up -d
 
-# Get EndpointId
+# Get server EndpointId
 docker compose logs tunnel-server
 # EndpointId: 2xnbkpbc7izsilvewd7c62w7wnwziacmpfwvhcrya5nt76dqkpga
 
 # On remote machine
 tunnel-rs client iroh \
+  --secret-file ./client.key \
   --node-id 2xnbkpbc7izsilvewd7c62w7wnwziacmpfwvhcrya5nt76dqkpga \
   --source tcp://nginx:80 \
   --target 127.0.0.1:8080
@@ -133,6 +146,7 @@ tor &  # Provides SOCKS5 on 127.0.0.1:9050
 tunnel-rs client iroh \
   --relay-url http://YOUR_ADDRESS.onion \
   --socks5-proxy socks5h://127.0.0.1:9050 \
+  --secret-file ./client.key \
   --node-id <ENDPOINT_ID> \
   --source tcp://nginx:80 \
   --target 127.0.0.1:8080
@@ -140,7 +154,7 @@ tunnel-rs client iroh \
 # Access at http://127.0.0.1:8080
 ```
 
-> **Note:** The `--socks5-proxy` option is **Tor-only** — it requires `.onion` relay URLs and validates the proxy is Tor at startup. See [docs/tor-hidden-service.md](../docs/tor-hidden-service.md) for complete setup guide.
+> **Note:** The `--socks5-proxy` option is **Tor-only** — it requires `.onion` relay URLs and validates the proxy is Tor at startup. The server must have your client's NodeId in its `--allowed-clients` list. See [docs/tor-hidden-service.md](../docs/tor-hidden-service.md) for complete setup guide.
 
 ## Kubernetes
 
@@ -156,6 +170,7 @@ kubectl logs -l app=myapp -c tunnel-server | grep EndpointId
 
 # Connect from remote (replace "myapp" with your service name)
 tunnel-rs client iroh \
+  --secret-file ./client.key \
   --node-id <ID> \
   --source tcp://myapp:8080 \
   --target 127.0.0.1:8080
@@ -163,6 +178,7 @@ tunnel-rs client iroh \
 
 > **Note:** The `--source` specifies the service the server should connect to on your behalf.
 > Replace `myapp:8080` with your actual service name and port (e.g., `myapp.namespace.svc:8080`).
+> The server must have your client's NodeId in its `--allowed-clients` list.
 
 ### Expose Cluster Services (Multi-Session)
 
@@ -264,6 +280,7 @@ tor &  # Provides SOCKS5 on 127.0.0.1:9050
 tunnel-rs client iroh \
   --relay-url http://YOUR_ADDRESS.onion \
   --socks5-proxy socks5h://127.0.0.1:9050 \
+  --secret-file ./client.key \
   --node-id <ENDPOINT_ID> \
   --source tcp://my-service.default.svc:80 \
   --target 127.0.0.1:8080
@@ -271,7 +288,7 @@ tunnel-rs client iroh \
 # Access at http://127.0.0.1:8080
 ```
 
-> **Note:** The manifest creates a `tunnel-tor` namespace with persistent storage for Tor hidden service keys. The `.onion` address persists across pod restarts.
+> **Note:** The manifest creates a `tunnel-tor` namespace with persistent storage for Tor hidden service keys. The `.onion` address persists across pod restarts. The server must have your client's NodeId in its `--allowed-clients` list.
 
 ## Use Cases
 

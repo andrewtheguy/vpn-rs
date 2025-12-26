@@ -6,6 +6,7 @@
 
 use anyhow::{Context, Result};
 use iroh::{EndpointId, SecretKey};
+use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -41,6 +42,7 @@ const DEFAULT_MAX_SESSIONS: usize = 100;
 ///
 /// This mode allows clients to request specific sources (tcp://host:port or udp://host:port).
 /// The server validates requests against allowed_tcp and allowed_udp CIDR lists.
+/// Authentication is enforced via allowed_clients - only clients with NodeIds in this set can connect.
 /// Note: relay_only is only meaningful when the 'test-utils' feature is enabled.
 pub async fn run_multi_source_server(
     allowed_tcp: Vec<String>,
@@ -50,6 +52,7 @@ pub async fn run_multi_source_server(
     relay_urls: Vec<String>,
     relay_only: bool,
     dns_server: Option<String>,
+    allowed_clients: HashSet<EndpointId>,
 ) -> Result<()> {
     // relay_only is only meaningful with test-utils feature
     #[cfg(not(feature = "test-utils"))]
@@ -96,9 +99,10 @@ pub async fn run_multi_source_server(
     log::info!("Max concurrent sessions: {}", max_sessions);
     log::info!("\nOn the client side, run:");
     log::info!(
-        "  tunnel-rs client iroh --node-id {} --source tcp://target:port --target 127.0.0.1:port\n",
+        "  tunnel-rs client iroh --secret-file <key-file> --node-id {} --source tcp://target:port --target 127.0.0.1:port\n",
         endpoint_id
     );
+    log::info!("Note: Clients must use --secret-file for authentication (their NodeId must be in --allowed-clients)");
     log::info!("Waiting for clients to connect...");
 
     // Session management with semaphore for concurrency limit
@@ -126,7 +130,15 @@ pub async fn run_multi_source_server(
         };
 
         let remote_id = conn.remote_id();
-        log::info!("Client connected from: {}", remote_id);
+
+        // Authentication check: verify client NodeId is in allowed list
+        if !allowed_clients.contains(&remote_id) {
+            log::warn!("Rejected unauthorized client: {}", remote_id);
+            conn.close(1u32.into(), b"unauthorized");
+            continue;
+        }
+
+        log::info!("Client connected (authenticated): {}", remote_id);
 
         // Clone for the spawned task
         let allowed_tcp = allowed_tcp.clone();
