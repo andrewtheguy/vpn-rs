@@ -15,6 +15,7 @@ Tunnel-rs enables you to forward TCP and UDP traffic between machines without re
 - **NAT traversal** with multiple strategies (relay fallback, STUN, full ICE)
 - **Minimal configuration** — Automatic peer discovery using simple, shareable identities
 - **Flexible signaling** — Supports multiple connection methods, from automated discovery to manual exchange
+- **Offline/LAN support** — ice-manual mode works without internet for local network tunneling
 - **High performance** — Optimized for low latency using QUIC stream multiplexing
 
 **Common Use Cases:**
@@ -33,32 +34,31 @@ Tunnel-rs enables you to forward TCP and UDP traffic between machines without re
 
 ## Overview
 
-tunnel-rs provides multiple modes for establishing tunnels:
+tunnel-rs provides multiple modes for establishing tunnels. **Use `iroh` mode** for most use cases — it provides the best NAT traversal with relay fallback, automatic discovery, and client authentication.
 
-| Mode | Discovery | NAT Traversal | Protocols | Use Case |
-|------|-----------|---------------|-----------|----------|
-| **iroh** | Automatic (Pkarr/DNS/mDNS) | Relay fallback (best) | TCP, UDP | Persistent, multi-source tunnels |
-| **ice-manual** | Manual copy-paste | Full ICE | TCP, UDP | Manual signaling without relay |
-| **ice-nostr** | Nostr relays | Full ICE | TCP, UDP | Automated signaling, static keys |
+| Mode | NAT Traversal | Discovery | External Dependency |
+|------|---------------|-----------|---------------------|
+| **iroh** (recommended) | Best (relay fallback) | Automatic | iroh relay infrastructure |
+| ice-nostr | STUN only | Automatic (Nostr) | Nostr relays (decentralized) |
+| ice-manual | STUN only | Manual copy-paste | None |
 
 > See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for detailed diagrams and technical deep-dives.
 
+### When to Use Alternative Modes
+
+Choose an alternative mode only if you have specific requirements:
+
+- **ice-nostr**: You want decentralized signaling without depending on iroh infrastructure. Uses Nostr relays instead.
+- **ice-manual**: You want complete independence from third-party services (disable STUN for fully self-contained operation), or no internet is available (offline/LAN-only). Signaling is done via manual copy-paste.
+
+> [!NOTE]
+> The `ice-nostr` and `ice-manual` modes use STUN-only NAT traversal, which may fail when both peers are behind symmetric NATs. For containerized environments (Docker, Kubernetes, cloud VMs), use `iroh` mode which includes relay fallback.
+
 > [!TIP]
-> **For containerized environments (Docker, Kubernetes, cloud VMs):** Use `iroh` mode. It includes relay fallback which ensures connectivity even when both peers are behind restrictive NATs (common in cloud environments). The `ice-nostr` and `ice-manual` modes use full ICE with STUN servers but may have connectivity issues when both peers are behind symmetric NATs without external relay support.
-
-### Choosing a Serverless Mode
-
-The `ice-manual` and `ice-nostr` modes don't require iroh discovery/relay infrastructure:
-
-| Feature | ice-manual | ice-nostr |
-|---------|---------------|-------|
-| Signaling | Manual copy-paste | Nostr relays (automated) |
-| NAT traversal | Full ICE | Full ICE |
-| Symmetric NAT | Best-effort | Best-effort |
-| Keys | Ephemeral | Static (WireGuard-like) |
-| QUIC stack | str0m + quinn | str0m + quinn |
-
-**Recommendation:** Use `ice-nostr` mode for automated signaling with persistent identity, or `ice-manual` mode for manual signaling without external dependencies.
+> If you only need iroh mode, you can compile without ICE support for a smaller binary:
+> ```bash
+> cargo build --release --no-default-features
+> ```
 
 ## Installation
 
@@ -143,7 +143,7 @@ Access services running in Docker or Kubernetes remotely — without opening por
 
 ---
 
-# iroh Mode
+# iroh Mode (Recommended)
 
 Uses iroh's P2P network for automatic peer discovery and NAT traversal with relay fallback. Best for containerized environments and persistent tunnels.
 
@@ -594,9 +594,11 @@ See [docs/tor-hidden-service.md](docs/tor-hidden-service.md) for complete setup 
 
 ---
 
-# ice-manual Mode
+# Alternative: ice-manual Mode
 
-Uses full ICE (Interactive Connectivity Establishment) with str0m + quinn QUIC. Best for manual signaling without external infrastructure dependencies.
+> Use this mode for: (1) complete independence from third-party services (disable STUN), or (2) offline/LAN-only operation when no internet is available. For most use cases, [iroh mode](#iroh-mode-recommended) is recommended.
+
+Uses full ICE (Interactive Connectivity Establishment) with str0m + quinn QUIC. Signaling is done via manual copy-paste.
 
 > **Summary:** Manual copy-paste signaling, full ICE NAT traversal via STUN, no relay fallback. See [Architecture: ice-manual Mode](docs/ARCHITECTURE.md#ice-manual-mode) for detailed diagrams.
 
@@ -690,7 +692,9 @@ ICE connection established!
 
 ---
 
-# ice-nostr Mode
+# Alternative: ice-nostr Mode
+
+> Use this mode if you want decentralized signaling without depending on iroh infrastructure. For most use cases, [iroh mode](#iroh-mode-recommended) is recommended.
 
 Uses full ICE with Nostr-based signaling. Instead of manual copy-paste, ICE offers/answers are exchanged automatically via Nostr relays using static keypairs (like WireGuard).
 
