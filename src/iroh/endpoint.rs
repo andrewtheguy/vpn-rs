@@ -246,7 +246,13 @@ pub async fn create_client_endpoint(
     let using_custom_relay = !matches!(relay_mode, RelayMode::Default);
     print_relay_status(relay_urls, relay_only, using_custom_relay);
 
-    let builder = create_endpoint_builder(relay_mode, relay_only, dns_server, secret_key)?;
+    let mut builder = create_endpoint_builder(relay_mode, relay_only, dns_server, secret_key)?;
+
+    // Set the secret key for persistent identity (used for authentication)
+    if let Some(secret) = secret_key {
+        builder = builder.secret_key(secret.clone());
+    }
+
     let endpoint = builder.bind().await.context("Failed to create iroh endpoint")?;
 
     // Wait for endpoint to come online with timeout
