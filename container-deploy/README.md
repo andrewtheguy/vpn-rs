@@ -3,49 +3,47 @@
 Docker and Kubernetes configurations for running tunnel-rs in containerized environments.
 
 > [!TIP]
-> **Recommended Mode for Containers:** Use `iroh` mode for Docker and Kubernetes deployments. It includes relay fallback which ensures connectivity even when both peers are behind restrictive NATs (common in cloud environments). The `ice-nostr` and `ice-manual` modes use STUN-only NAT traversal which may fail in containerized environments.
+> **Recommended Mode:** Use `iroh` mode for all deployments. It provides the best NAT traversal with relay fallback, client authentication via NodeId, and multi-source capability where clients choose what to tunnel.
 
-## Mode Comparison
+## How It Works
 
-| Mode | Multi-Session | Dynamic Source | Use Case |
-|------|---------------|----------------|----------|
-| `iroh` | Yes | **Yes** | SSH-like tunneling, client chooses destination, best NAT traversal with relay fallback |
-| `ice-nostr` | Yes | **Yes** | SSH-like tunneling, client chooses destination |
-| `ice-manual` | No | No | Manual signaling, one-off tunnels |
-
-**Multi-Session** = Multiple concurrent connections
-**Dynamic Source** = Client specifies destination (iroh and ice-nostr modes)
-
-## Dynamic Source Modes (iroh and ice-nostr)
-
-Both `iroh` and `ice-nostr` modes use a **client-initiated** model similar to SSH `-L` tunneling:
+tunnel-rs uses a **client-initiated** model similar to SSH `-L` tunneling:
 
 | SSH Equivalent | tunnel-rs | Description |
 |----------------|-----------|-------------|
 | `ssh -L 8080:service:80` | Client with `--source` | Client requests what to tunnel |
 | `sshd` with allowed hosts | Server with `--allowed-tcp` | Server whitelists allowed networks |
 
-**Server** (runs on server, waits for connections):
+**Server** (runs in container, waits for connections):
 - Uses `--allowed-tcp` / `--allowed-udp` with **CIDR notation** (e.g., `10.0.0.0/8`) to whitelist networks
+- Uses `--allowed-clients` or `--allowed-clients-file` to authenticate clients by NodeId
 - Does NOT specify ports — clients choose the destination
-- Supports multiple concurrent sessions via `--max-sessions`
 
-**Client** (initiates connection):
+**Client** (initiates connection from remote machine):
 - Uses `--source` with **hostname:port** (e.g., `tcp://postgres:5432`) to request a specific service
 - Uses `--target` to specify local listen address
-- The source must resolve to an IP within server's allowed CIDR range
+- Uses `--secret-file` for authentication (server must have client's NodeId)
 
-## iroh Mode Example
+## Quick Start
 
 ```bash
-# Server: allow localhost and private networks
+# 1. Generate server key
+tunnel-rs generate-iroh-key --output server.key
+
+# 2. Generate client key and get NodeId
+tunnel-rs generate-iroh-key --output client.key
+tunnel-rs generate-iroh-key --input client.key --output-node-id
+# Output: <CLIENT_NODE_ID>
+
+# 3. Server: allow connections from authenticated clients
 tunnel-rs server iroh \
   --secret-file ./server.key \
   --allowed-tcp 127.0.0.0/8 \
   --allowed-tcp 192.168.0.0/16 \
   --allowed-clients <CLIENT_NODE_ID>
+# Output: NodeId: <SERVER_NODE_ID>
 
-# Client: request SSH and listen locally
+# 4. Client: connect and request a service
 tunnel-rs client iroh \
   --secret-file ./client.key \
   --server-node-id <SERVER_NODE_ID> \
@@ -53,189 +51,98 @@ tunnel-rs client iroh \
   --target 127.0.0.1:2222
 ```
 
-> **Note:** Server requires `--allowed-clients` with client NodeIds. See the Docker example below for key generation commands (`generate-iroh-key`, `show-iroh-node-id`).
-
 ## Docker
 
-### Basic Example (iroh mode)
-
-Expose an nginx service via tunnel-rs:
+Expose services via tunnel-rs with client authentication:
 
 ```bash
 cd docker
 
-# Generate client key first (you'll need the NodeId for the server)
-tunnel-rs generate-iroh-key --output ./client.key
-tunnel-rs show-iroh-node-id --secret-file ./client.key
-# Output: 3k4j5l6k7j8k9l0m1n2o3p4q5r6s7t8u9v0w1x2y3z4a5b6c7d8e
+# 1. Generate keys
+docker run --rm ghcr.io/andrewtheguy/tunnel-rs:latest \
+  generate-iroh-key --output - > server.key
 
-# Add client NodeId to docker-compose.yml or .env, then start
-docker compose up -d
+docker run --rm ghcr.io/andrewtheguy/tunnel-rs:latest \
+  generate-iroh-key --output - > client.key
 
-# Get server EndpointId
-docker compose logs tunnel-server
-# EndpointId: 2xnbkpbc7izsilvewd7c62w7wnwziacmpfwvhcrya5nt76dqkpga
-
-# On remote machine
-tunnel-rs client iroh \
-  --secret-file ./client.key \
-  --server-node-id 2xnbkpbc7izsilvewd7c62w7wnwziacmpfwvhcrya5nt76dqkpga \
-  --source tcp://nginx:80 \
-  --target 127.0.0.1:8080
-
-# Access at http://127.0.0.1:8080
-```
-
-### ice-nostr Mode (automated signaling)
-
-For persistent connections without manual EndpointId exchange:
-
-```bash
-# Generate keys
-tunnel-rs generate-nostr-key --output server.nsec
-# npub: npub1server...
-
-tunnel-rs generate-nostr-key --output client.nsec
-# npub: npub1client...
-
-# Create .env with server's nsec and client's npub
-cat > .env << EOF
-SERVER_NSEC_FILE=./server.nsec
-CLIENT_NPUB=npub1client...
-EOF
-
-docker compose -f docker-compose-nostr.yml up -d
-```
-
-### Self-Hosted Relay via Tor Hidden Service
-
-> **⚠️ Experimental:** Tor hidden service support is experimental and might not work reliably.
-
-Run your own iroh-relay as a Tor hidden service — no public IP required.
-
-**Use Case:**
-- Self-host relay infrastructure without exposing public IPs
-- Works behind NAT, firewalls, or when Cloudflare tunnel fails (HTTP/2 breaks WebSocket upgrades)
-- Direct P2P connections bypass Tor entirely (no performance impact)
-
-```bash
-cd docker
-
-# Start Tor + iroh-relay + tunnel-rs server
-docker compose -f docker-compose-tor-relay.yml up -d
-
-# Wait for Tor to generate .onion address (30-60 seconds)
-docker compose -f docker-compose-tor-relay.yml logs tor
-
-# Get your .onion address
-docker compose -f docker-compose-tor-relay.yml exec tor cat /var/lib/tor/hidden_service/hostname
-# Example: abc123...xyz.onion
-
-# Get server's EndpointId
-docker compose -f docker-compose-tor-relay.yml logs tunnel-server
-# EndpointId: 2xnbkpbc7izsilvewd7c62w7wnwziacmpfwvhcrya5nt76dqkpga
-```
-
-**On the client machine** (requires local Tor daemon):
-
-```bash
-# Start Tor SOCKS5 proxy
-tor &  # Provides SOCKS5 on 127.0.0.1:9050
-
-# Connect through Tor to the .onion relay
-tunnel-rs client iroh \
-  --relay-url http://YOUR_ADDRESS.onion \
-  --socks5-proxy socks5h://127.0.0.1:9050 \
-  --secret-file ./client.key \
-  --server-node-id <ENDPOINT_ID> \
-  --source tcp://nginx:80 \
-  --target 127.0.0.1:8080
-
-# Access at http://127.0.0.1:8080
-```
-
-> **Note:** The `--socks5-proxy` option is **Tor-only** — it requires `.onion` relay URLs and validates the proxy is Tor at startup. The server must have your client's NodeId in its `--allowed-clients` list. See [docs/tor-hidden-service.md](../docs/tor-hidden-service.md) for complete setup guide.
-
-## Kubernetes
-
-### Sidecar Pattern
-
-Run tunnel-rs alongside your application:
-
-**Prerequisites:** Generate client keys and configure server authentication before deploying:
-
-```bash
-# 1. Generate client key and get NodeId
-tunnel-rs generate-iroh-key --output ./client.key
-tunnel-rs show-iroh-node-id --secret-file ./client.key
+# 2. Get client NodeId
+docker run --rm -v ./client.key:/key:ro ghcr.io/andrewtheguy/tunnel-rs:latest \
+  generate-iroh-key --input /key --output-node-id
 # Output: <CLIENT_NODE_ID>
 
-# 2. Add the NodeId to the server's --allowed-clients in deployment-sidecar.yaml:
-#    args: ["server", "iroh", "--allowed-clients", "<CLIENT_NODE_ID>", ...]
-#    See the iroh mode example above (lines ~41-46) for the full server command pattern.
+# 3. Create clients.txt
+echo "<CLIENT_NODE_ID>" > clients.txt
 
-# 3. Store client key as Kubernetes secret (for client-side use)
-kubectl create secret generic tunnel-client-key --from-file=client.key=./client.key
-```
+# 4. Start services
+docker compose up -d
 
-**Deploy:**
+# 5. Get server NodeId
+docker compose logs tunnel-server | grep NodeId
+# NodeId: <SERVER_NODE_ID>
 
-```bash
-kubectl apply -f kubernetes/deployment-sidecar.yaml
-
-# Get EndpointId
-kubectl logs -l app=myapp -c tunnel-server | grep EndpointId
-
-# Connect from remote (replace "myapp" with your service name)
+# 6. On remote machine - connect to web service
 tunnel-rs client iroh \
   --secret-file ./client.key \
   --server-node-id <SERVER_NODE_ID> \
-  --source tcp://myapp:8080 \
+  --source tcp://web:80 \
   --target 127.0.0.1:8080
+
+# 7. Or connect to database
+tunnel-rs client iroh \
+  --secret-file ./client.key \
+  --server-node-id <SERVER_NODE_ID> \
+  --source tcp://db:5432 \
+  --target 127.0.0.1:5432
+
+# Access at http://127.0.0.1:8080 or localhost:5432
 ```
 
-> **Note:** The `--source` specifies the service the server should connect to on your behalf.
-> Replace `myapp:8080` with your actual service name and port (e.g., `myapp.namespace.svc:8080`).
-> The server must have your client's NodeId in its `--allowed-clients` list.
+## Kubernetes
 
-### Expose Cluster Services (Multi-Session)
-
-Access ClusterIP services from outside the cluster — like SSH tunneling but over P2P.
-
-The server whitelists allowed sources, and clients request specific services:
+Access ClusterIP services from outside the cluster — like SSH tunneling but over P2P:
 
 ```bash
-# Create secrets
-kubectl create secret generic tunnel-nostr-keys \
-  --from-file=server.nsec=./server.nsec \
-  --from-literal=peer-npub=npub1client...
+# 1. Generate keys
+tunnel-rs generate-iroh-key --output server.key
+tunnel-rs generate-iroh-key --output client.key
+tunnel-rs generate-iroh-key --input client.key --output-node-id
+# Output: <CLIENT_NODE_ID>
 
-kubectl apply -f kubernetes/tunnel-service.yaml
+# 2. Create secrets
+kubectl create secret generic tunnel-iroh-keys \
+  --from-file=server.key=./server.key \
+  --from-literal=clients.txt="<CLIENT_NODE_ID>"
+
+# 3. Deploy
+kubectl apply -f kubernetes/tunnel-deployment.yaml
+
+# 4. Get server NodeId
+kubectl logs -l app=tunnel-server | grep NodeId
 ```
 
 **Client examples** (run on your local machine):
 
 ```bash
-# Tunnel to a web dashboard
-tunnel-rs client ice-nostr \
-  --source tcp://kubernetes-dashboard.kubernetes-dashboard.svc:443 \
-  --target 127.0.0.1:8443 \
-  --nsec-file ./client.nsec \
-  --peer-npub <SERVER_NPUB>
-
 # Tunnel to PostgreSQL
-tunnel-rs client ice-nostr \
+tunnel-rs client iroh \
+  --secret-file ./client.key \
+  --server-node-id <SERVER_NODE_ID> \
   --source tcp://postgres.database.svc:5432 \
-  --target 127.0.0.1:5432 \
-  --nsec-file ./client.nsec \
-  --peer-npub <SERVER_NPUB>
+  --target 127.0.0.1:5432
 
 # Tunnel to Redis
-tunnel-rs client ice-nostr \
+tunnel-rs client iroh \
+  --secret-file ./client.key \
+  --server-node-id <SERVER_NODE_ID> \
   --source tcp://redis.cache.svc:6379 \
-  --target 127.0.0.1:6379 \
-  --nsec-file ./client.nsec \
-  --peer-npub <SERVER_NPUB>
+  --target 127.0.0.1:6379
+
+# Tunnel to a web dashboard
+tunnel-rs client iroh \
+  --secret-file ./client.key \
+  --server-node-id <SERVER_NODE_ID> \
+  --source tcp://kubernetes-dashboard.kubernetes-dashboard.svc:443 \
+  --target 127.0.0.1:8443
 ```
 
 **Advantages over `kubectl port-forward`:**
@@ -245,77 +152,27 @@ tunnel-rs client ice-nostr \
 - No need for cluster credentials on client
 - Multiple clients can connect simultaneously
 
-### UDP Example (what kubectl can't do)
+### UDP Example
 
-Tunnel UDP services like DNS or WireGuard:
+Tunnel UDP services like DNS (something `kubectl port-forward` can't do):
 
 ```bash
-# Expose cluster DNS (client requests source, server must allow it)
-tunnel-rs client ice-nostr \
+# Expose cluster DNS
+tunnel-rs client iroh \
+  --secret-file ./client.key \
+  --server-node-id <SERVER_NODE_ID> \
   --source udp://kube-dns.kube-system.svc.cluster.local:53 \
-  --target 127.0.0.1:5353 \
-  --nsec-file ./client.nsec \
-  --peer-npub <SERVER_NPUB>
+  --target udp://127.0.0.1:5353
 
 # Query cluster DNS locally
 dig @127.0.0.1 -p 5353 kubernetes.default.svc.cluster.local
 ```
 
-### Self-Hosted Relay via Tor Hidden Service
-
-> **⚠️ Experimental:** Tor hidden service support is experimental and might not work reliably.
-
-Deploy your own iroh-relay as a Tor hidden service — no LoadBalancer or Ingress required.
-
-**Use Case:**
-- Self-host relay infrastructure without public IPs or LoadBalancers
-- Works in private clusters with no external ingress
-- Direct P2P connections bypass Tor (no performance impact)
-
-```bash
-# Deploy Tor + iroh-relay + tunnel-server
-kubectl apply -f kubernetes/tor-relay.yaml
-
-# Wait for Tor to generate .onion address (1-2 minutes)
-kubectl logs -n tunnel-tor -l app=tor-relay -c tor
-
-# Get your .onion address
-kubectl exec -n tunnel-tor deploy/tor-relay -c tor -- cat /var/lib/tor/hidden_service/hostname
-# Example: abc123...xyz.onion
-
-# Get server's EndpointId
-kubectl logs -n tunnel-tor -l app=tor-relay -c tunnel-server
-# EndpointId: 2xnbkpbc7izsilvewd7c62w7wnwziacmpfwvhcrya5nt76dqkpga
-```
-
-**On the client machine** (requires local Tor daemon):
-
-```bash
-# Start Tor SOCKS5 proxy
-tor &  # Provides SOCKS5 on 127.0.0.1:9050
-
-# Connect through Tor to the .onion relay
-tunnel-rs client iroh \
-  --relay-url http://YOUR_ADDRESS.onion \
-  --socks5-proxy socks5h://127.0.0.1:9050 \
-  --secret-file ./client.key \
-  --server-node-id <ENDPOINT_ID> \
-  --source tcp://my-service.default.svc:80 \
-  --target 127.0.0.1:8080
-
-# Access at http://127.0.0.1:8080
-```
-
-> **Note:** The manifest creates a `tunnel-tor` namespace with persistent storage for Tor hidden service keys. The `.onion` address persists across pod restarts. The server must have your client's NodeId in its `--allowed-clients` list.
-
 ## Use Cases
 
-| Scenario | Mode | Description |
-|----------|------|-------------|
-| Quick dev access | iroh | Simple setup, relay fallback |
-| Persistent tunnel | ice-nostr | Static keys, automated signaling |
-| Dynamic service access | iroh/ice-nostr | Client chooses what to tunnel |
-| Sidecar debugging | iroh | Access pod services directly |
-| Cluster-wide access | iroh/ice-nostr | Single server, multiple services |
-| UDP tunneling | any | DNS, WireGuard, game servers |
-| No public IP / self-hosted relay | iroh + Tor | Relay via .onion hidden service |
+| Scenario | Description |
+|----------|-------------|
+| Dev/staging access | Access services without exposing them publicly |
+| Cluster-wide access | Single server, multiple services |
+| UDP tunneling | DNS, WireGuard, game servers |
+| NAT traversal | Works behind restrictive firewalls |

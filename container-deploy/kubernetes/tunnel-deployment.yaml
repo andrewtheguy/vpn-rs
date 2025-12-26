@@ -1,0 +1,98 @@
+# Kubernetes example: Expose cluster services via tunnel-rs (multi-source iroh mode)
+#
+# Deploy tunnel-rs to expose internal ClusterIP services to remote peers.
+# Multi-source mode - one server can serve multiple services.
+#
+# This is an alternative to kubectl port-forward that:
+#   - Supports UDP (kubectl port-forward doesn't)
+#   - Works across NAT without kubectl access
+#   - Can be left running persistently
+#   - Allows clients to choose which service to access
+#   - Provides client authentication via NodeId
+#
+# Note: Server uses CIDR notation to whitelist allowed networks.
+#       Client specifies which service to connect to.
+#
+# Setup:
+#   1. Generate server key:
+#      tunnel-rs generate-iroh-key --output server.key
+#
+#   2. Generate client key and get NodeId:
+#      tunnel-rs generate-iroh-key --output client.key
+#      tunnel-rs generate-iroh-key --input client.key --output-node-id
+#
+#   3. Create secrets:
+#      kubectl create secret generic tunnel-iroh-keys \
+#        --from-file=server.key=./server.key \
+#        --from-literal=clients.txt="<CLIENT_NODE_ID>"
+#
+#   4. Apply:
+#      kubectl apply -f tunnel-deployment.yaml
+#
+#   5. Get server NodeId:
+#      kubectl logs -l app=tunnel-server | grep NodeId
+#
+#   6. On remote machine, connect to any service in allowed networks:
+#      # Access postgres
+#      tunnel-rs client iroh \
+#        --server-node-id <SERVER_NODE_ID> \
+#        --source tcp://postgres.default.svc.cluster.local:5432 \
+#        --target 127.0.0.1:5432 \
+#        --secret-file client.key
+#
+#      # Access cluster DNS (UDP!)
+#      tunnel-rs client iroh \
+#        --server-node-id <SERVER_NODE_ID> \
+#        --source udp://kube-dns.kube-system.svc.cluster.local:53 \
+#        --target udp://127.0.0.1:5353 \
+#        --secret-file client.key
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tunnel-server
+  labels:
+    app: tunnel-server
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: tunnel-server
+  template:
+    metadata:
+      labels:
+        app: tunnel-server
+    spec:
+      containers:
+        - name: tunnel
+          image: ghcr.io/andrewtheguy/tunnel-rs:latest
+          args:
+            - server
+            - iroh
+            - --allowed-tcp
+            - "10.0.0.0/8"      # Kubernetes pod/service network
+            - --allowed-tcp
+            - "172.16.0.0/12"   # Alternative pod network
+            - --allowed-udp
+            - "10.0.0.0/8"      # For UDP services like DNS
+            - --secret-file
+            - /secrets/server.key
+            - --allowed-clients-file
+            - /secrets/clients.txt
+            - --max-sessions
+            - "20"
+          volumeMounts:
+            - name: iroh-keys
+              mountPath: /secrets
+              readOnly: true
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu: "50m"
+            limits:
+              memory: "256Mi"
+              cpu: "500m"
+      volumes:
+        - name: iroh-keys
+          secret:
+            secretName: tunnel-iroh-keys

@@ -1,7 +1,0 @@
-# Tor hidden service configuration for iroh-relay
-HiddenServiceDir /var/lib/tor/hidden_service/
-HiddenServiceVersion 3
-HiddenServicePort 80 iroh-relay:3340
-
-# Logging
-Log notice stdout
