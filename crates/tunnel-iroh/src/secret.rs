@@ -6,7 +6,7 @@ use iroh::SecretKey;
 use log::info;
 use std::path::PathBuf;
 
-use crate::iroh::endpoint::{load_secret, secret_to_endpoint_id};
+use crate::iroh_mode::endpoint::{load_secret, secret_to_endpoint_id};
 
 fn write_secret_to_output(
     output: &PathBuf,

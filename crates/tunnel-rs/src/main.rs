@@ -8,8 +8,8 @@ use ::iroh::SecretKey;
 use std::path::PathBuf;
 
 use tunnel_common::config::{load_client_config, load_server_config, ClientConfig, ServerConfig};
-use tunnel_iroh::{auth, iroh, secret, socks5_bridge};
-use tunnel_iroh::iroh::endpoint::{load_secret, load_secret_from_string, secret_to_endpoint_id};
+use tunnel_iroh::{auth, iroh_mode, secret, socks5_bridge};
+use tunnel_iroh::iroh_mode::endpoint::{load_secret, load_secret_from_string, secret_to_endpoint_id};
 
 #[derive(Parser)]
 #[command(name = "tunnel-rs")]
@@ -410,7 +410,7 @@ async fn main() -> Result<()> {
                 socks5_proxy.as_deref(),
             ).await?;
 
-            iroh::run_multi_source_server(
+            iroh_mode::run_multi_source_server(
                 allowed_tcp,
                 allowed_udp,
                 max_sessions,
@@ -467,7 +467,7 @@ async fn main() -> Result<()> {
                 socks5_proxy.as_deref(),
             ).await?;
 
-            iroh::run_multi_source_client(
+            iroh_mode::run_multi_source_client(
                 server_node_id,
                 source,
                 target,

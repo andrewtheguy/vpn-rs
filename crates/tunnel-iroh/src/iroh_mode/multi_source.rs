@@ -14,11 +14,11 @@ use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::sync::Mutex;
 use tokio::task::JoinSet;
 
-use crate::iroh::endpoint::{
+use crate::iroh_mode::endpoint::{
     connect_to_server, create_client_endpoint, create_server_endpoint, print_connection_type,
     validate_relay_only, MULTI_ALPN,
 };
-use crate::iroh::helpers::{
+use crate::iroh_mode::helpers::{
     bridge_streams, forward_stream_to_udp_client, forward_stream_to_udp_server,
     forward_udp_to_stream, open_bi_with_retry,
 };
