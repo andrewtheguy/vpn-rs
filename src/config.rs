@@ -11,6 +11,7 @@
 //! - CIDR networks and source URLs are validated for correct format
 
 use anyhow::{Context, Result};
+use iroh::EndpointId;
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
@@ -349,6 +350,27 @@ impl ServerConfig {
                     anyhow::bail!(
                         "[iroh] Use only one of 'secret' or 'secret_file'."
                     );
+                }
+                // Validate allowed_clients mutual exclusion and format
+                if iroh.allowed_clients.is_some() && iroh.allowed_clients_file.is_some() {
+                    anyhow::bail!(
+                        "[iroh] Use only one of 'allowed_clients' or 'allowed_clients_file'."
+                    );
+                }
+                if let Some(ref clients) = iroh.allowed_clients {
+                    for client_id in clients {
+                        let trimmed = client_id.trim();
+                        if trimmed.is_empty() || trimmed.starts_with('#') {
+                            continue; // Skip empty lines and comments
+                        }
+                        trimmed.parse::<EndpointId>().with_context(|| {
+                            format!(
+                                "[iroh] Invalid NodeId in 'allowed_clients': '{}'. \
+                                 Expected a 64-character hex string or 52-character base32 string.",
+                                client_id
+                            )
+                        })?;
+                    }
                 }
                 // Reject client-only fields
                 if iroh.request_source.is_some() || iroh.target.is_some() {

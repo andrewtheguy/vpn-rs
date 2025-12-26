@@ -48,12 +48,12 @@ tunnel-rs server iroh \
 # Client: request SSH and listen locally
 tunnel-rs client iroh \
   --secret-file ./client.key \
-  --server-node-id <server-node-id> \
+  --server-node-id <SERVER_NODE_ID> \
   --source tcp://127.0.0.1:22 \
   --target 127.0.0.1:2222
 ```
 
-> **Note:** Server requires `--allowed-clients` with client NodeIds. Generate keys with `tunnel-rs generate-iroh-key` and get NodeIds with `tunnel-rs show-iroh-node-id --secret-file <key>`.
+> **Note:** Server requires `--allowed-clients` with client NodeIds. See the Docker example below for key generation commands (`generate-iroh-key`, `show-iroh-node-id`).
 
 ## Docker
 
