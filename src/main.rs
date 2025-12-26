@@ -171,6 +171,165 @@ fn resolve_nostr_nsec(
     }
 }
 
+// ============================================================================
+// Iroh Parameter Resolution Helpers
+// ============================================================================
+
+/// Resolved parameters for iroh server mode.
+/// CLI values take precedence over config file values.
+struct ServerIrohParams {
+    allowed_tcp: Vec<String>,
+    allowed_udp: Vec<String>,
+    max_sessions: Option<usize>,
+    secret: Option<String>,
+    secret_file: Option<PathBuf>,
+    relay_urls: Vec<String>,
+    dns_server: Option<String>,
+    socks5_proxy: Option<String>,
+    allowed_clients: Vec<String>,
+    allowed_clients_file: Option<PathBuf>,
+}
+
+/// Resolve iroh server parameters from CLI and config.
+/// CLI values take precedence; empty CLI vectors fall back to config.
+fn resolve_server_iroh_params(
+    mode: &Option<ServerMode>,
+    iroh_cfg: Option<&config::IrohConfig>,
+) -> ServerIrohParams {
+    match mode {
+        Some(ServerMode::Iroh {
+            allowed_tcp: at,
+            allowed_udp: au,
+            max_sessions: ms,
+            secret: se,
+            secret_file: sf,
+            relay_urls: r,
+            dns_server: d,
+            socks5_proxy: sp,
+            allowed_clients: ac,
+            allowed_clients_file: acf,
+            ..
+        }) => {
+            let cfg_allowed = iroh_cfg
+                .and_then(|c| c.allowed_sources.clone())
+                .unwrap_or_default();
+            let cfg_secret = iroh_cfg.and_then(|c| c.secret.clone());
+            let cfg_secret_file = iroh_cfg.and_then(|c| c.secret_file.clone());
+            let (secret, secret_file) = if se.is_some() || sf.is_some() {
+                (se.clone(), sf.clone())
+            } else {
+                (cfg_secret, cfg_secret_file)
+            };
+            let cfg_allowed_clients = iroh_cfg
+                .and_then(|c| c.allowed_clients.clone())
+                .unwrap_or_default();
+            let cfg_allowed_clients_file = iroh_cfg.and_then(|c| c.allowed_clients_file.clone());
+
+            ServerIrohParams {
+                allowed_tcp: if at.is_empty() { cfg_allowed.tcp.clone() } else { at.clone() },
+                allowed_udp: if au.is_empty() { cfg_allowed.udp.clone() } else { au.clone() },
+                max_sessions: ms.or_else(|| iroh_cfg.and_then(|c| c.max_sessions)),
+                secret,
+                secret_file,
+                relay_urls: if r.is_empty() {
+                    iroh_cfg.and_then(|c| c.relay_urls.clone()).unwrap_or_default()
+                } else {
+                    r.clone()
+                },
+                dns_server: d.clone().or_else(|| iroh_cfg.and_then(|c| c.dns_server.clone())),
+                socks5_proxy: sp.clone().or_else(|| iroh_cfg.and_then(|c| c.socks5_proxy.clone())),
+                allowed_clients: if ac.is_empty() { cfg_allowed_clients } else { ac.clone() },
+                allowed_clients_file: acf.clone().or(cfg_allowed_clients_file),
+            }
+        }
+        _ => {
+            let cfg_allowed = iroh_cfg
+                .and_then(|c| c.allowed_sources.clone())
+                .unwrap_or_default();
+            ServerIrohParams {
+                allowed_tcp: cfg_allowed.tcp,
+                allowed_udp: cfg_allowed.udp,
+                max_sessions: iroh_cfg.and_then(|c| c.max_sessions),
+                secret: iroh_cfg.and_then(|c| c.secret.clone()),
+                secret_file: iroh_cfg.and_then(|c| c.secret_file.clone()),
+                relay_urls: iroh_cfg.and_then(|c| c.relay_urls.clone()).unwrap_or_default(),
+                dns_server: iroh_cfg.and_then(|c| c.dns_server.clone()),
+                socks5_proxy: iroh_cfg.and_then(|c| c.socks5_proxy.clone()),
+                allowed_clients: iroh_cfg.and_then(|c| c.allowed_clients.clone()).unwrap_or_default(),
+                allowed_clients_file: iroh_cfg.and_then(|c| c.allowed_clients_file.clone()),
+            }
+        }
+    }
+}
+
+/// Resolved parameters for iroh client mode.
+/// CLI values take precedence over config file values.
+struct ClientIrohParams {
+    server_node_id: Option<String>,
+    source: Option<String>,
+    target: Option<String>,
+    relay_urls: Vec<String>,
+    dns_server: Option<String>,
+    socks5_proxy: Option<String>,
+    secret: Option<String>,
+    secret_file: Option<PathBuf>,
+}
+
+/// Resolve iroh client parameters from CLI and config.
+/// CLI values take precedence; empty CLI vectors fall back to config.
+fn resolve_client_iroh_params(
+    mode: &Option<ClientMode>,
+    iroh_cfg: Option<&config::IrohConfig>,
+) -> ClientIrohParams {
+    match mode {
+        Some(ClientMode::Iroh {
+            server_node_id: n,
+            source: src,
+            target: t,
+            relay_urls: r,
+            dns_server: d,
+            socks5_proxy: sp,
+            secret: se,
+            secret_file: sf,
+            ..
+        }) => {
+            let cfg_secret = iroh_cfg.and_then(|c| c.secret.clone());
+            let cfg_secret_file = iroh_cfg.and_then(|c| c.secret_file.clone());
+            let (secret, secret_file) = if se.is_some() || sf.is_some() {
+                (se.clone(), sf.clone())
+            } else {
+                (cfg_secret, cfg_secret_file)
+            };
+
+            ClientIrohParams {
+                server_node_id: n.clone().or_else(|| iroh_cfg.and_then(|c| c.server_node_id.clone())),
+                source: normalize_optional_endpoint(src.clone())
+                    .or_else(|| iroh_cfg.and_then(|c| c.request_source.clone())),
+                target: t.clone().or_else(|| iroh_cfg.and_then(|c| c.target.clone())),
+                relay_urls: if r.is_empty() {
+                    iroh_cfg.and_then(|c| c.relay_urls.clone()).unwrap_or_default()
+                } else {
+                    r.clone()
+                },
+                dns_server: d.clone().or_else(|| iroh_cfg.and_then(|c| c.dns_server.clone())),
+                socks5_proxy: sp.clone().or_else(|| iroh_cfg.and_then(|c| c.socks5_proxy.clone())),
+                secret,
+                secret_file,
+            }
+        }
+        _ => ClientIrohParams {
+            server_node_id: iroh_cfg.and_then(|c| c.server_node_id.clone()),
+            source: iroh_cfg.and_then(|c| c.request_source.clone()),
+            target: iroh_cfg.and_then(|c| c.target.clone()),
+            relay_urls: iroh_cfg.and_then(|c| c.relay_urls.clone()).unwrap_or_default(),
+            dns_server: iroh_cfg.and_then(|c| c.dns_server.clone()),
+            socks5_proxy: iroh_cfg.and_then(|c| c.socks5_proxy.clone()),
+            secret: iroh_cfg.and_then(|c| c.secret.clone()),
+            secret_file: iroh_cfg.and_then(|c| c.secret_file.clone()),
+        },
+    }
+}
+
 #[derive(Parser)]
 #[command(name = "tunnel-rs")]
 #[command(version)]
@@ -569,49 +728,20 @@ async fn main() -> Result<()> {
             match effective_mode {
                 "iroh" => {
                     let iroh_cfg = cfg.iroh();
-                    // Extract common fields (relay_only is CLI-only, requires test-utils feature)
-                    let (allowed_tcp, allowed_udp, max_sessions, secret, secret_file, relay_urls, dns_server, socks5_proxy, allowed_clients, allowed_clients_file) = match &mode {
-                        Some(ServerMode::Iroh { allowed_tcp: at, allowed_udp: au, max_sessions: ms, secret: se, secret_file: sf, relay_urls: r, dns_server: d, socks5_proxy: sp, allowed_clients: ac, allowed_clients_file: acf, .. }) => {
-                            let cfg_allowed = iroh_cfg.and_then(|c| c.allowed_sources.clone()).unwrap_or_default();
-                            let cfg_secret = iroh_cfg.and_then(|c| c.secret.clone());
-                            let cfg_secret_file = iroh_cfg.and_then(|c| c.secret_file.clone());
-                            let (secret, secret_file) = if se.is_some() || sf.is_some() {
-                                (se.clone(), sf.clone())
-                            } else {
-                                (cfg_secret, cfg_secret_file)
-                            };
-                            // Merge allowed_clients: CLI takes precedence, fall back to config
-                            let cfg_allowed_clients = iroh_cfg.and_then(|c| c.allowed_clients.clone()).unwrap_or_default();
-                            let cfg_allowed_clients_file = iroh_cfg.and_then(|c| c.allowed_clients_file.clone());
-                            (
-                                if at.is_empty() { cfg_allowed.tcp.clone() } else { at.clone() },
-                                if au.is_empty() { cfg_allowed.udp.clone() } else { au.clone() },
-                                ms.or_else(|| iroh_cfg.and_then(|c| c.max_sessions)),
-                                secret,
-                                secret_file,
-                                if r.is_empty() { iroh_cfg.and_then(|c| c.relay_urls.clone()).unwrap_or_default() } else { r.clone() },
-                                d.clone().or_else(|| iroh_cfg.and_then(|c| c.dns_server.clone())),
-                                sp.clone().or_else(|| iroh_cfg.and_then(|c| c.socks5_proxy.clone())),
-                                if ac.is_empty() { cfg_allowed_clients } else { ac.clone() },
-                                acf.clone().or(cfg_allowed_clients_file),
-                            )
-                        }
-                        _ => {
-                            let cfg_allowed = iroh_cfg.and_then(|c| c.allowed_sources.clone()).unwrap_or_default();
-                            (
-                                cfg_allowed.tcp,
-                                cfg_allowed.udp,
-                                iroh_cfg.and_then(|c| c.max_sessions),
-                                iroh_cfg.and_then(|c| c.secret.clone()),
-                                iroh_cfg.and_then(|c| c.secret_file.clone()),
-                                iroh_cfg.and_then(|c| c.relay_urls.clone()).unwrap_or_default(),
-                                iroh_cfg.and_then(|c| c.dns_server.clone()),
-                                iroh_cfg.and_then(|c| c.socks5_proxy.clone()),
-                                iroh_cfg.and_then(|c| c.allowed_clients.clone()).unwrap_or_default(),
-                                iroh_cfg.and_then(|c| c.allowed_clients_file.clone()),
-                            )
-                        },
-                    };
+                    // Resolve parameters from CLI and config (CLI takes precedence)
+                    let ServerIrohParams {
+                        allowed_tcp,
+                        allowed_udp,
+                        max_sessions,
+                        secret,
+                        secret_file,
+                        relay_urls,
+                        dns_server,
+                        socks5_proxy,
+                        allowed_clients,
+                        allowed_clients_file,
+                    } = resolve_server_iroh_params(&mode, iroh_cfg);
+
                     // relay_only: CLI-only, requires test-utils feature
                     #[cfg(feature = "test-utils")]
                     let relay_only = match &mode {
@@ -776,39 +906,18 @@ async fn main() -> Result<()> {
             match effective_mode {
                 "iroh" => {
                     let iroh_cfg = cfg.iroh();
-                    // Override with CLI values if provided
-                    // Note: relay_only is CLI-only (not in config), requires test-utils feature
-                    let (server_node_id, source, target, relay_urls, dns_server, socks5_proxy, secret, secret_file) = match &mode {
-                        Some(ClientMode::Iroh { server_node_id: n, source: src, target: t, relay_urls: r, dns_server: d, socks5_proxy: sp, secret: se, secret_file: sf, .. }) => {
-                            let cfg_secret = iroh_cfg.and_then(|c| c.secret.clone());
-                            let cfg_secret_file = iroh_cfg.and_then(|c| c.secret_file.clone());
-                            let (secret, secret_file) = if se.is_some() || sf.is_some() {
-                                (se.clone(), sf.clone())
-                            } else {
-                                (cfg_secret, cfg_secret_file)
-                            };
-                            (
-                                n.clone().or_else(|| iroh_cfg.and_then(|c| c.server_node_id.clone())),
-                                normalize_optional_endpoint(src.clone()).or_else(|| iroh_cfg.and_then(|c| c.request_source.clone())),
-                                t.clone().or_else(|| iroh_cfg.and_then(|c| c.target.clone())),
-                                if r.is_empty() { iroh_cfg.and_then(|c| c.relay_urls.clone()).unwrap_or_default() } else { r.clone() },
-                                d.clone().or_else(|| iroh_cfg.and_then(|c| c.dns_server.clone())),
-                                sp.clone().or_else(|| iroh_cfg.and_then(|c| c.socks5_proxy.clone())),
-                                secret,
-                                secret_file,
-                            )
-                        },
-                        _ => (
-                            iroh_cfg.and_then(|c| c.server_node_id.clone()),
-                            iroh_cfg.and_then(|c| c.request_source.clone()),
-                            iroh_cfg.and_then(|c| c.target.clone()),
-                            iroh_cfg.and_then(|c| c.relay_urls.clone()).unwrap_or_default(),
-                            iroh_cfg.and_then(|c| c.dns_server.clone()),
-                            iroh_cfg.and_then(|c| c.socks5_proxy.clone()),
-                            iroh_cfg.and_then(|c| c.secret.clone()),
-                            iroh_cfg.and_then(|c| c.secret_file.clone()),
-                        ),
-                    };
+                    // Resolve parameters from CLI and config (CLI takes precedence)
+                    let ClientIrohParams {
+                        server_node_id,
+                        source,
+                        target,
+                        relay_urls,
+                        dns_server,
+                        socks5_proxy,
+                        secret,
+                        secret_file,
+                    } = resolve_client_iroh_params(&mode, iroh_cfg);
+
                     // relay_only: CLI-only, requires test-utils feature
                     #[cfg(feature = "test-utils")]
                     let relay_only = match &mode {
