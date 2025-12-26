@@ -2,7 +2,7 @@
 
 pub mod custom;
 pub mod nostr;
+pub mod secret;
 pub mod signaling;
 pub mod transport;
 pub mod tunnel_common;
-pub mod secret;

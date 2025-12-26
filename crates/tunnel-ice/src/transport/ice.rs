@@ -1,8 +1,8 @@
 //! Manual ICE gathering and connectivity using str0m.
 
 use anyhow::{anyhow, Context, Result};
-use log::{debug, info, warn};
 use get_if_addrs::get_if_addrs;
+use log::{debug, info, warn};
 use std::collections::HashMap;
 use std::fmt;
 use std::net::{IpAddr, SocketAddr};
@@ -10,8 +10,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use str0m::ice::{IceAgent, IceAgentEvent, IceCreds, StunMessage, StunPacket};
-use str0m::IceConnectionState;
 use str0m::net::{Protocol, Transmit};
+use str0m::IceConnectionState;
 
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
@@ -79,10 +79,10 @@ impl IceEndpoint {
         if fast_timing {
             // Fast timing for coordinated hole punching
             // Both peers start at synchronized time, so we can be more aggressive
-            ice.set_timing_advance(Duration::from_millis(20));      // Faster polling
-            ice.set_initial_stun_rto(Duration::from_millis(100));   // Quicker retries
-            ice.set_max_stun_rto(Duration::from_millis(1000));      // Shorter max timeout
-            ice.set_max_stun_retransmits(5);                        // Fewer retries per attempt
+            ice.set_timing_advance(Duration::from_millis(20)); // Faster polling
+            ice.set_initial_stun_rto(Duration::from_millis(100)); // Quicker retries
+            ice.set_max_stun_rto(Duration::from_millis(1000)); // Shorter max timeout
+            ice.set_max_stun_retransmits(5); // Fewer retries per attempt
         } else {
             // Conservative timing (similar to webrtc crate defaults)
             // Aggressive timing causes issues when one side connects faster than the other
@@ -265,10 +265,14 @@ impl IceEndpoint {
         remote_creds: IceCreds,
         remote_candidates: Vec<String>,
     ) -> Result<IceConnection> {
-        self.ice.set_controlling(matches!(role, IceRole::Controlling));
+        self.ice
+            .set_controlling(matches!(role, IceRole::Controlling));
         self.ice.set_remote_credentials(remote_creds);
 
-        info!("Starting ICE connectivity check with {} remote candidates", remote_candidates.len());
+        info!(
+            "Starting ICE connectivity check with {} remote candidates",
+            remote_candidates.len()
+        );
         debug!("Adding {} remote candidates:", remote_candidates.len());
         for candidate in &remote_candidates {
             debug!("  Remote: {}", candidate);
@@ -351,7 +355,12 @@ impl IceEndpoint {
 
             let socket_map = socket_map(&self.sockets);
             drain_transmit(&mut self.ice, &socket_map).await?;
-            drain_events(&mut self.ice, &mut nominated_source, &mut nominated_dest, &mut ice_failed);
+            drain_events(
+                &mut self.ice,
+                &mut nominated_source,
+                &mut nominated_dest,
+                &mut ice_failed,
+            );
 
             // Check if ICE has failed (Disconnected or Failed state)
             if ice_failed {
@@ -367,10 +376,7 @@ impl IceEndpoint {
             if self.ice.state().is_connected() {
                 if let (Some(source), Some(destination)) = (nominated_source, nominated_dest) {
                     // Find and take ownership of the nominated socket
-                    let nominated_idx = self
-                        .sockets
-                        .iter()
-                        .position(|s| s.local_addr == source);
+                    let nominated_idx = self.sockets.iter().position(|s| s.local_addr == source);
 
                     if let Some(idx) = nominated_idx {
                         // Signal all receive tasks to stop
@@ -378,10 +384,9 @@ impl IceEndpoint {
 
                         // Wait for all tasks to confirm they stopped and dropped their sockets
                         for _ in 0..num_tasks {
-                            let _ = tokio::time::timeout(
-                                Duration::from_millis(500),
-                                done_rx.recv()
-                            ).await;
+                            let _ =
+                                tokio::time::timeout(Duration::from_millis(500), done_rx.recv())
+                                    .await;
                         }
 
                         // Take ownership of the nominated socket by removing it
@@ -406,8 +411,7 @@ impl IceEndpoint {
                         let (demux_socket, stun_rx) = DemuxSocket::new(nominated_tokio)
                             .context("Failed to create demux socket")?;
 
-                        let (disconnect_tx, disconnect_rx) =
-                            tokio::sync::watch::channel(false);
+                        let (disconnect_tx, disconnect_rx) = tokio::sync::watch::channel(false);
 
                         // Create the ICE keeper to handle STUN in the background
                         let ice_keeper = IceKeeper::new(
@@ -490,7 +494,9 @@ async fn local_ip_for_target(target: SocketAddr) -> Result<IpAddr> {
     };
     let socket = std::net::UdpSocket::bind(bind_addr)
         .context("Failed to bind UDP socket for local IP lookup")?;
-    socket.connect(target).context("Failed to connect UDP socket")?;
+    socket
+        .connect(target)
+        .context("Failed to connect UDP socket")?;
     Ok(socket.local_addr()?.ip())
 }
 
@@ -579,8 +585,8 @@ fn bind_socket_from_std(socket: std::net::UdpSocket) -> Result<IceSocket> {
     let local_addr = socket.local_addr().context("ICE socket local addr")?;
     // Clone for tokio socket - the original will be used for DemuxSocket later
     let tokio_clone = socket.try_clone().context("Failed to clone ICE socket")?;
-    let udp = UdpSocket::from_std(tokio_clone)
-        .context("Failed to create tokio UDP socket for ICE")?;
+    let udp =
+        UdpSocket::from_std(tokio_clone).context("Failed to create tokio UDP socket for ICE")?;
     Ok(IceSocket {
         std_socket: socket,
         udp: Arc::new(udp),
@@ -597,9 +603,9 @@ fn socket_map(sockets: &[IceSocket]) -> HashMap<SocketAddr, Arc<UdpSocket>> {
 
 fn is_no_route_error(err: &std::io::Error) -> bool {
     match err.raw_os_error() {
-        Some(64) => true, // macOS: Host is down
-        Some(65) => true, // macOS: No route to host
-        Some(51) => true, // ENETUNREACH
+        Some(64) => true,  // macOS: Host is down
+        Some(65) => true,  // macOS: No route to host
+        Some(51) => true,  // ENETUNREACH
         Some(113) => true, // Linux: No route to host
         _ => matches!(err.kind(), std::io::ErrorKind::NetworkUnreachable),
     }

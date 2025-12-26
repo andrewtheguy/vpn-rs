@@ -14,8 +14,7 @@ use tokio::sync::Mutex;
 use tokio::task::JoinSet;
 
 use crate::signaling::{
-    ManualAnswer, ManualOffer, ManualRequest, NostrSignaling, OfferWaitError,
-    MANUAL_SIGNAL_VERSION,
+    ManualAnswer, ManualOffer, ManualRequest, NostrSignaling, OfferWaitError, MANUAL_SIGNAL_VERSION,
 };
 use crate::transport::ice::{IceEndpoint, IceRole};
 use crate::transport::quic;

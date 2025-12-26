@@ -1,12 +1,14 @@
 //! QUIC setup helpers for manual mode.
 
 use anyhow::{Context, Result};
-use quinn::{AsyncUdpSocket, ClientConfig, Endpoint, EndpointConfig, IdleTimeout, Runtime, ServerConfig};
 use quinn::crypto::rustls::QuicClientConfig;
-use std::time::Duration;
+use quinn::{
+    AsyncUdpSocket, ClientConfig, Endpoint, EndpointConfig, IdleTimeout, Runtime, ServerConfig,
+};
 use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer, ServerName, UnixTime};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
+use std::time::Duration;
 
 /// Ensure rustls crypto provider is installed.
 /// This must be called before using any rustls functionality.
@@ -42,7 +44,7 @@ pub fn generate_server_identity() -> Result<QuicServerIdentity> {
 
     let rcgen::CertifiedKey { cert, key_pair } =
         rcgen::generate_simple_self_signed(vec!["manual.tunnel".into()])
-        .context("Failed to generate self-signed certificate")?;
+            .context("Failed to generate self-signed certificate")?;
     let cert_der = cert.der().to_vec();
     let key = PrivatePkcs8KeyDer::from(key_pair.serialize_der());
 
@@ -87,13 +89,9 @@ pub fn make_client_endpoint(
     ensure_crypto_provider();
 
     let runtime: Arc<dyn Runtime> = Arc::new(quinn::TokioRuntime);
-    let mut endpoint = Endpoint::new_with_abstract_socket(
-        EndpointConfig::default(),
-        None,
-        socket,
-        runtime,
-    )
-    .context("Failed to create QUIC client endpoint")?;
+    let mut endpoint =
+        Endpoint::new_with_abstract_socket(EndpointConfig::default(), None, socket, runtime)
+            .context("Failed to create QUIC client endpoint")?;
 
     let client_cfg = build_client_config(expected_fingerprint)?;
     endpoint.set_default_client_config(client_cfg);
@@ -107,8 +105,8 @@ fn build_client_config(expected_fingerprint: &str) -> Result<ClientConfig> {
         .with_custom_certificate_verifier(verifier)
         .with_no_client_auth();
 
-    let quic_cfg = QuicClientConfig::try_from(rustls_config)
-        .context("Failed to build QUIC client config")?;
+    let quic_cfg =
+        QuicClientConfig::try_from(rustls_config).context("Failed to build QUIC client config")?;
 
     let mut client_config = ClientConfig::new(Arc::new(quic_cfg));
 
@@ -162,9 +160,7 @@ impl rustls::client::danger::ServerCertVerifier for FingerprintVerifier {
         _now: UnixTime,
     ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
         if !self.matches(end_entity) {
-            return Err(rustls::Error::General(
-                "manual fingerprint mismatch".into(),
-            ));
+            return Err(rustls::Error::General("manual fingerprint mismatch".into()));
         }
         Ok(rustls::client::danger::ServerCertVerified::assertion())
     }

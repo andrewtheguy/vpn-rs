@@ -163,19 +163,31 @@ pub struct ClientConfig {
 
 /// Validate that a string is a valid CIDR network (IPv4 or IPv6).
 fn validate_cidr(cidr: &str) -> Result<()> {
-    cidr.parse::<ipnet::IpNet>()
-        .with_context(|| format!("Invalid CIDR network '{}'. Expected format: 192.168.0.0/16 or ::1/128", cidr))?;
+    cidr.parse::<ipnet::IpNet>().with_context(|| {
+        format!(
+            "Invalid CIDR network '{}'. Expected format: 192.168.0.0/16 or ::1/128",
+            cidr
+        )
+    })?;
     Ok(())
 }
 
 /// Validate that a string is a valid tcp:// or udp:// URL with host and port.
 fn validate_tcp_udp_url(value: &str, field_name: &str) -> Result<()> {
-    let url = url::Url::parse(value)
-        .with_context(|| format!("Invalid {} '{}'. Expected format: tcp://host:port or udp://host:port", field_name, value))?;
+    let url = url::Url::parse(value).with_context(|| {
+        format!(
+            "Invalid {} '{}'. Expected format: tcp://host:port or udp://host:port",
+            field_name, value
+        )
+    })?;
 
     let scheme = url.scheme();
     if scheme != "tcp" && scheme != "udp" {
-        anyhow::bail!("Invalid {} scheme '{}'. Must be 'tcp' or 'udp'", field_name, scheme);
+        anyhow::bail!(
+            "Invalid {} scheme '{}'. Must be 'tcp' or 'udp'",
+            field_name,
+            scheme
+        );
     }
 
     if url.host_str().is_none() {
@@ -240,8 +252,12 @@ fn validate_allowed_sources(allowed: &AllowedSources) -> Result<()> {
 /// - ALL relay URLs must be `.onion` addresses
 /// - Requires `socks5h://` scheme for DNS resolution through Tor
 fn validate_socks5_proxy(value: &str, relay_urls: Option<&Vec<String>>) -> Result<()> {
-    let url = url::Url::parse(value)
-        .with_context(|| format!("Invalid socks5_proxy '{}'. Expected format: socks5h://host:port", value))?;
+    let url = url::Url::parse(value).with_context(|| {
+        format!(
+            "Invalid socks5_proxy '{}'. Expected format: socks5h://host:port",
+            value
+        )
+    })?;
 
     let scheme = url.scheme();
 
@@ -315,14 +331,12 @@ impl ServerConfig {
     /// - Multi-source modes: validates CIDR format in allowed_sources
     /// - Single-target modes: validates source URL format if present
     pub fn validate(&self, expected_mode: &str) -> Result<()> {
-        let role = self.role.as_deref().context(
-            "Config file missing required 'role' field. Add: role = \"server\"",
-        )?;
+        let role = self
+            .role
+            .as_deref()
+            .context("Config file missing required 'role' field. Add: role = \"server\"")?;
         if role != "server" {
-            anyhow::bail!(
-                "Config file has role = \"{}\", but running as server",
-                role
-            );
+            anyhow::bail!("Config file has role = \"{}\", but running as server", role);
         }
 
         let mode = self.mode.as_deref().context(
@@ -339,16 +353,17 @@ impl ServerConfig {
         // Validate mode is known
         match expected_mode {
             "iroh" | "ice-manual" | "ice-nostr" => {}
-            _ => anyhow::bail!("Unknown mode '{}'. Valid modes: iroh, ice-manual, ice-nostr", expected_mode),
+            _ => anyhow::bail!(
+                "Unknown mode '{}'. Valid modes: iroh, ice-manual, ice-nostr",
+                expected_mode
+            ),
         }
 
         // Mode-specific validation
         if expected_mode == "iroh" {
             if let Some(ref iroh) = self.iroh {
                 if iroh.secret.is_some() && iroh.secret_file.is_some() {
-                    anyhow::bail!(
-                        "[iroh] Use only one of 'secret' or 'secret_file'."
-                    );
+                    anyhow::bail!("[iroh] Use only one of 'secret' or 'secret_file'.");
                 }
                 // Validate allowed_clients mutual exclusion and format
                 if iroh.allowed_clients.is_some() && iroh.allowed_clients_file.is_some() {
@@ -381,9 +396,7 @@ impl ServerConfig {
                     );
                 }
                 if iroh.server_node_id.is_some() {
-                    anyhow::bail!(
-                        "[iroh] 'server_node_id' is a client-only field."
-                    );
+                    anyhow::bail!("[iroh] 'server_node_id' is a client-only field.");
                 }
                 // Validate CIDR format
                 if let Some(ref allowed) = iroh.allowed_sources {
@@ -398,7 +411,8 @@ impl ServerConfig {
                              Remove 'dns_server' to proceed."
                         );
                     }
-                    validate_socks5_proxy(proxy, iroh.relay_urls.as_ref()).context("[iroh] Invalid SOCKS5 proxy URL")?;
+                    validate_socks5_proxy(proxy, iroh.relay_urls.as_ref())
+                        .context("[iroh] Invalid SOCKS5 proxy URL")?;
                 }
             }
             // Server iroh mode should not have top-level source
@@ -481,14 +495,12 @@ impl ClientConfig {
     /// - Multi-source modes: validates request_source URL format if present
     /// - Single-target modes: validates target URL format if present
     pub fn validate(&self, expected_mode: &str) -> Result<()> {
-        let role = self.role.as_deref().context(
-            "Config file missing required 'role' field. Add: role = \"client\"",
-        )?;
+        let role = self
+            .role
+            .as_deref()
+            .context("Config file missing required 'role' field. Add: role = \"client\"")?;
         if role != "client" {
-            anyhow::bail!(
-                "Config file has role = \"{}\", but running as client",
-                role
-            );
+            anyhow::bail!("Config file has role = \"{}\", but running as client", role);
         }
 
         let mode = self.mode.as_deref().context(
@@ -505,7 +517,10 @@ impl ClientConfig {
         // Validate mode is known
         match expected_mode {
             "iroh" | "ice-manual" | "ice-nostr" => {}
-            _ => anyhow::bail!("Unknown mode '{}'. Valid modes: iroh, ice-manual, ice-nostr", expected_mode),
+            _ => anyhow::bail!(
+                "Unknown mode '{}'. Valid modes: iroh, ice-manual, ice-nostr",
+                expected_mode
+            ),
         }
 
         // Mode-specific validation
@@ -520,9 +535,7 @@ impl ClientConfig {
                     );
                 }
                 if iroh.max_sessions.is_some() {
-                    anyhow::bail!(
-                        "[iroh] 'max_sessions' is a server-only field."
-                    );
+                    anyhow::bail!("[iroh] 'max_sessions' is a server-only field.");
                 }
                 if iroh.allowed_clients.is_some() || iroh.allowed_clients_file.is_some() {
                     anyhow::bail!(
@@ -546,7 +559,8 @@ impl ClientConfig {
                              Remove 'dns_server' to proceed."
                         );
                     }
-                    validate_socks5_proxy(proxy, iroh.relay_urls.as_ref()).context("[iroh] Invalid SOCKS5 proxy URL")?;
+                    validate_socks5_proxy(proxy, iroh.relay_urls.as_ref())
+                        .context("[iroh] Invalid SOCKS5 proxy URL")?;
                 }
             }
         }
@@ -563,9 +577,7 @@ impl ClientConfig {
                     );
                 }
                 if nostr.max_sessions.is_some() {
-                    anyhow::bail!(
-                        "[ice-nostr] 'max_sessions' is a server-only field."
-                    );
+                    anyhow::bail!("[ice-nostr] 'max_sessions' is a server-only field.");
                 }
                 // Validate request_source URL format
                 if let Some(ref source) = nostr.request_source {
@@ -631,8 +643,9 @@ fn default_client_config_path() -> Option<PathBuf> {
 pub fn load_server_config(path: Option<&Path>) -> Result<ServerConfig> {
     let config_path = match path {
         Some(p) => p.to_path_buf(),
-        None => default_server_config_path()
-            .ok_or_else(|| anyhow::anyhow!("Could not find default config path. Use -c to specify a config file."))?,
+        None => default_server_config_path().ok_or_else(|| {
+            anyhow::anyhow!("Could not find default config path. Use -c to specify a config file.")
+        })?,
     };
     load_config(&config_path)
 }
@@ -644,8 +657,9 @@ pub fn load_server_config(path: Option<&Path>) -> Result<ServerConfig> {
 pub fn load_client_config(path: Option<&Path>) -> Result<ClientConfig> {
     let config_path = match path {
         Some(p) => p.to_path_buf(),
-        None => default_client_config_path()
-            .ok_or_else(|| anyhow::anyhow!("Could not find default config path. Use -c to specify a config file."))?,
+        None => default_client_config_path().ok_or_else(|| {
+            anyhow::anyhow!("Could not find default config path. Use -c to specify a config file.")
+        })?,
     };
     load_config(&config_path)
 }

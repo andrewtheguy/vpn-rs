@@ -12,8 +12,7 @@ use std::time::{Duration, Instant};
 use tokio::task::JoinSet;
 
 use crate::signaling::{
-    ManualOffer, ManualReject, ManualRequest, NostrSignaling, SignalingError,
-    MANUAL_SIGNAL_VERSION,
+    ManualOffer, ManualReject, ManualRequest, NostrSignaling, SignalingError, MANUAL_SIGNAL_VERSION,
 };
 use crate::transport::ice::{IceEndpoint, IceRole};
 use crate::transport::quic;
@@ -36,7 +35,8 @@ type SessionHandler = fn(
     stun_servers: Vec<String>,
     republish_interval_secs: u64,
     max_wait_secs: u64,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>>;
+)
+    -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>>;
 
 /// Generic nostr server loop that handles session management.
 async fn run_nostr_server_loop(
@@ -196,10 +196,7 @@ async fn run_nostr_server_loop(
                             e
                         );
                     }
-                    log::info!(
-                        "[{}] Rejected: at capacity",
-                        short_session_id(&session_id)
-                    );
+                    log::info!("[{}] Rejected: at capacity", short_session_id(&session_id));
                     continue;
                 }
             }
@@ -271,9 +268,10 @@ async fn handle_nostr_session_impl(
     let short_id = short_session_id(&session_id).to_string();
 
     // source is required - client must specify which source to connect to
-    let requested_source = request.source.as_ref().ok_or_else(|| {
-        anyhow::anyhow!("[{}] Request missing required 'source' field", short_id)
-    })?;
+    let requested_source = request
+        .source
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("[{}] Request missing required 'source' field", short_id))?;
 
     // Parse protocol from source (tcp:// or udp://)
     let protocol = requested_source.split("://").next().unwrap_or("");
@@ -354,8 +352,13 @@ async fn handle_nostr_tcp_session_impl(
         .ok_or_else(|| anyhow::anyhow!("[{}] Missing source", short_id))?;
 
     // Extract host:port from source URL (strip protocol prefix)
-    let target_hostport = extract_addr_from_source(requested_source)
-        .ok_or_else(|| anyhow::anyhow!("[{}] Invalid source format '{}'", short_id, requested_source))?;
+    let target_hostport = extract_addr_from_source(requested_source).ok_or_else(|| {
+        anyhow::anyhow!(
+            "[{}] Invalid source format '{}'",
+            short_id,
+            requested_source
+        )
+    })?;
 
     log::info!("[{}] Forwarding to: {}", short_id, requested_source);
     let target_addrs = Arc::new(
@@ -364,7 +367,11 @@ async fn handle_nostr_tcp_session_impl(
             .with_context(|| format!("Invalid source '{}'", requested_source))?,
     );
     if target_addrs.is_empty() {
-        anyhow::bail!("[{}] No target addresses resolved for '{}'", short_id, requested_source);
+        anyhow::bail!(
+            "[{}] No target addresses resolved for '{}'",
+            short_id,
+            requested_source
+        );
     }
 
     // Gather ICE candidates
@@ -492,8 +499,13 @@ async fn handle_nostr_udp_session_impl(
         .ok_or_else(|| anyhow::anyhow!("[{}] Missing source", short_id))?;
 
     // Extract host:port from source URL (strip protocol prefix)
-    let target_hostport = extract_addr_from_source(requested_source)
-        .ok_or_else(|| anyhow::anyhow!("[{}] Invalid source format '{}'", short_id, requested_source))?;
+    let target_hostport = extract_addr_from_source(requested_source).ok_or_else(|| {
+        anyhow::anyhow!(
+            "[{}] Invalid source format '{}'",
+            short_id,
+            requested_source
+        )
+    })?;
 
     log::info!("[{}] Forwarding to: {}", short_id, requested_source);
     let target_addrs = Arc::new(
@@ -502,7 +514,11 @@ async fn handle_nostr_udp_session_impl(
             .with_context(|| format!("Invalid source '{}'", requested_source))?,
     );
     if target_addrs.is_empty() {
-        anyhow::bail!("[{}] No target addresses resolved for '{}'", short_id, requested_source);
+        anyhow::bail!(
+            "[{}] No target addresses resolved for '{}'",
+            short_id,
+            requested_source
+        );
     }
 
     // Gather ICE candidates

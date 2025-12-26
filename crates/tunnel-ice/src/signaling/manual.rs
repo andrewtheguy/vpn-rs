@@ -6,8 +6,8 @@
 use anyhow::{anyhow, Result};
 use std::io::BufRead;
 
-use tunnel_common::signaling::codec::{wrap_lines, ManualAnswer, ManualOffer, LINE_WIDTH};
 use super::{decode_answer, decode_offer, encode_answer, encode_offer};
+use tunnel_common::signaling::codec::{wrap_lines, ManualAnswer, ManualOffer, LINE_WIDTH};
 
 // Custom mode markers (v1)
 const OFFER_BEGIN_MARKER: &str = "-----BEGIN TUNNEL-RS MANUAL OFFER-----";

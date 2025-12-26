@@ -42,9 +42,8 @@ fn parse_endpoint(value: &str) -> Result<(Protocol, String)> {
     if addr.contains('/') {
         anyhow::bail!("Endpoint must not include a path (got '{}')", value);
     }
-    let protocol = Protocol::from_str_opt(scheme).context(
-        "Invalid scheme. Use tcp://host:port or udp://host:port",
-    )?;
+    let protocol = Protocol::from_str_opt(scheme)
+        .context("Invalid scheme. Use tcp://host:port or udp://host:port")?;
     Ok((protocol, addr.to_string()))
 }
 
@@ -75,13 +74,12 @@ fn resolve_stun_servers(
     Ok(default_stun_servers())
 }
 
-fn resolve_nostr_nsec(
-    nsec: Option<String>,
-    nsec_file: Option<PathBuf>,
-) -> Result<Option<String>> {
+fn resolve_nostr_nsec(nsec: Option<String>, nsec_file: Option<PathBuf>) -> Result<Option<String>> {
     match (nsec, nsec_file) {
         (Some(_), Some(_)) => {
-            anyhow::bail!("Cannot combine --nsec with --nsec-file (or nsec and nsec_file in config).");
+            anyhow::bail!(
+                "Cannot combine --nsec with --nsec-file (or nsec and nsec_file in config)."
+            );
         }
         (Some(nsec), None) => {
             let trimmed = nsec.trim();
@@ -348,7 +346,11 @@ async fn main() -> Result<()> {
     let args = Args::parse();
 
     match args.command {
-        Command::Server { config, default_config, mode } => {
+        Command::Server {
+            config,
+            default_config,
+            mode,
+        } => {
             let (cfg, from_file) = resolve_server_config(config.clone(), default_config)?;
 
             // Determine effective mode: CLI mode takes precedence, else read from config
@@ -373,22 +375,47 @@ async fn main() -> Result<()> {
                 "ice-manual" => {
                     let custom_cfg = cfg.ice_manual.as_ref();
                     let (allowed_tcp, allowed_udp, stun_servers) = match &mode {
-                        Some(ServerMode::CustomManual { allowed_tcp: at, allowed_udp: au, stun_servers: ss, no_stun }) => {
-                            let cfg_allowed = custom_cfg.and_then(|c| c.allowed_sources.clone()).unwrap_or_default();
+                        Some(ServerMode::CustomManual {
+                            allowed_tcp: at,
+                            allowed_udp: au,
+                            stun_servers: ss,
+                            no_stun,
+                        }) => {
+                            let cfg_allowed = custom_cfg
+                                .and_then(|c| c.allowed_sources.clone())
+                                .unwrap_or_default();
                             (
-                                if at.is_empty() { cfg_allowed.tcp.clone() } else { at.clone() },
-                                if au.is_empty() { cfg_allowed.udp.clone() } else { au.clone() },
-                                resolve_stun_servers(ss, custom_cfg.and_then(|c| c.stun_servers.clone()), *no_stun)?,
+                                if at.is_empty() {
+                                    cfg_allowed.tcp.clone()
+                                } else {
+                                    at.clone()
+                                },
+                                if au.is_empty() {
+                                    cfg_allowed.udp.clone()
+                                } else {
+                                    au.clone()
+                                },
+                                resolve_stun_servers(
+                                    ss,
+                                    custom_cfg.and_then(|c| c.stun_servers.clone()),
+                                    *no_stun,
+                                )?,
                             )
-                        },
+                        }
                         _ => {
-                            let cfg_allowed = custom_cfg.and_then(|c| c.allowed_sources.clone()).unwrap_or_default();
+                            let cfg_allowed = custom_cfg
+                                .and_then(|c| c.allowed_sources.clone())
+                                .unwrap_or_default();
                             (
                                 cfg_allowed.tcp.clone(),
                                 cfg_allowed.udp.clone(),
-                                resolve_stun_servers(&[], custom_cfg.and_then(|c| c.stun_servers.clone()), false)?,
+                                resolve_stun_servers(
+                                    &[],
+                                    custom_cfg.and_then(|c| c.stun_servers.clone()),
+                                    false,
+                                )?,
                             )
-                        },
+                        }
                     };
 
                     if allowed_tcp.is_empty() && allowed_udp.is_empty() {
@@ -399,9 +426,34 @@ async fn main() -> Result<()> {
                 }
                 "ice-nostr" => {
                     let nostr_cfg = cfg.nostr();
-                    let (allowed_tcp, allowed_udp, stun_servers, nsec, nsec_file, peer_npub, relays, republish_interval, max_wait, max_sessions) = match &mode {
-                        Some(ServerMode::Nostr { allowed_tcp: at, allowed_udp: au, stun_servers: ss, no_stun, nsec: n, nsec_file: nf, peer_npub: p, relays: r, republish_interval: ri, max_wait: mw, max_sessions: ms }) => {
-                            let cfg_allowed = nostr_cfg.and_then(|c| c.allowed_sources.clone()).unwrap_or_default();
+                    let (
+                        allowed_tcp,
+                        allowed_udp,
+                        stun_servers,
+                        nsec,
+                        nsec_file,
+                        peer_npub,
+                        relays,
+                        republish_interval,
+                        max_wait,
+                        max_sessions,
+                    ) = match &mode {
+                        Some(ServerMode::Nostr {
+                            allowed_tcp: at,
+                            allowed_udp: au,
+                            stun_servers: ss,
+                            no_stun,
+                            nsec: n,
+                            nsec_file: nf,
+                            peer_npub: p,
+                            relays: r,
+                            republish_interval: ri,
+                            max_wait: mw,
+                            max_sessions: ms,
+                        }) => {
+                            let cfg_allowed = nostr_cfg
+                                .and_then(|c| c.allowed_sources.clone())
+                                .unwrap_or_default();
                             let cfg_nsec = nostr_cfg.and_then(|c| c.nsec.clone());
                             let cfg_nsec_file = nostr_cfg.and_then(|c| c.nsec_file.clone());
                             let (nsec, nsec_file) = if n.is_some() || nf.is_some() {
@@ -410,24 +462,47 @@ async fn main() -> Result<()> {
                                 (cfg_nsec, cfg_nsec_file)
                             };
                             (
-                                if at.is_empty() { cfg_allowed.tcp.clone() } else { at.clone() },
-                                if au.is_empty() { cfg_allowed.udp.clone() } else { au.clone() },
-                                resolve_stun_servers(ss, nostr_cfg.and_then(|c| c.stun_servers.clone()), *no_stun)?,
+                                if at.is_empty() {
+                                    cfg_allowed.tcp.clone()
+                                } else {
+                                    at.clone()
+                                },
+                                if au.is_empty() {
+                                    cfg_allowed.udp.clone()
+                                } else {
+                                    au.clone()
+                                },
+                                resolve_stun_servers(
+                                    ss,
+                                    nostr_cfg.and_then(|c| c.stun_servers.clone()),
+                                    *no_stun,
+                                )?,
                                 nsec,
                                 nsec_file,
-                                p.clone().or_else(|| nostr_cfg.and_then(|c| c.peer_npub.clone())),
-                                if r.is_empty() { nostr_cfg.and_then(|c| c.relays.clone()).unwrap_or_default() } else { r.clone() },
+                                p.clone()
+                                    .or_else(|| nostr_cfg.and_then(|c| c.peer_npub.clone())),
+                                if r.is_empty() {
+                                    nostr_cfg.and_then(|c| c.relays.clone()).unwrap_or_default()
+                                } else {
+                                    r.clone()
+                                },
                                 *ri,
                                 *mw,
                                 *ms,
                             )
-                        },
+                        }
                         _ => {
-                            let cfg_allowed = nostr_cfg.and_then(|c| c.allowed_sources.clone()).unwrap_or_default();
+                            let cfg_allowed = nostr_cfg
+                                .and_then(|c| c.allowed_sources.clone())
+                                .unwrap_or_default();
                             (
                                 cfg_allowed.tcp,
                                 cfg_allowed.udp,
-                                resolve_stun_servers(&[], nostr_cfg.and_then(|c| c.stun_servers.clone()), false)?,
+                                resolve_stun_servers(
+                                    &[],
+                                    nostr_cfg.and_then(|c| c.stun_servers.clone()),
+                                    false,
+                                )?,
                                 nostr_cfg.and_then(|c| c.nsec.clone()),
                                 nostr_cfg.and_then(|c| c.nsec_file.clone()),
                                 nostr_cfg.and_then(|c| c.peer_npub.clone()),
@@ -436,7 +511,7 @@ async fn main() -> Result<()> {
                                 120,
                                 nostr_cfg.and_then(|c| c.max_sessions).unwrap_or(10),
                             )
-                        },
+                        }
                     };
 
                     if allowed_tcp.is_empty() && allowed_udp.is_empty() {
@@ -467,12 +542,20 @@ async fn main() -> Result<()> {
                         republish_interval,
                         max_wait,
                         max_sessions,
-                    ).await
+                    )
+                    .await
                 }
-                _ => anyhow::bail!("Invalid mode '{}'. Use: ice-manual or ice-nostr", effective_mode),
+                _ => anyhow::bail!(
+                    "Invalid mode '{}'. Use: ice-manual or ice-nostr",
+                    effective_mode
+                ),
             }
         }
-        Command::Client { config, default_config, mode } => {
+        Command::Client {
+            config,
+            default_config,
+            mode,
+        } => {
             let (cfg, from_file) = resolve_client_config(config, default_config)?;
 
             let effective_mode = match (&mode, &cfg.mode) {
@@ -496,15 +579,30 @@ async fn main() -> Result<()> {
                 "ice-manual" => {
                     let custom_cfg = cfg.ice_manual.as_ref();
                     let (source, target, stun_servers) = match &mode {
-                        Some(ClientMode::CustomManual { source: src, target: t, stun_servers: s, no_stun }) => (
-                            normalize_optional_endpoint(src.clone()).or_else(|| custom_cfg.and_then(|c| c.request_source.clone())),
-                            t.clone().or_else(|| custom_cfg.and_then(|c| c.target.clone())),
-                            resolve_stun_servers(s, custom_cfg.and_then(|c| c.stun_servers.clone()), *no_stun)?,
+                        Some(ClientMode::CustomManual {
+                            source: src,
+                            target: t,
+                            stun_servers: s,
+                            no_stun,
+                        }) => (
+                            normalize_optional_endpoint(src.clone())
+                                .or_else(|| custom_cfg.and_then(|c| c.request_source.clone())),
+                            t.clone()
+                                .or_else(|| custom_cfg.and_then(|c| c.target.clone())),
+                            resolve_stun_servers(
+                                s,
+                                custom_cfg.and_then(|c| c.stun_servers.clone()),
+                                *no_stun,
+                            )?,
                         ),
                         _ => (
                             custom_cfg.and_then(|c| c.request_source.clone()),
                             custom_cfg.and_then(|c| c.target.clone()),
-                            resolve_stun_servers(&[], custom_cfg.and_then(|c| c.stun_servers.clone()), false)?,
+                            resolve_stun_servers(
+                                &[],
+                                custom_cfg.and_then(|c| c.stun_servers.clone()),
+                                false,
+                            )?,
                         ),
                     };
 
@@ -525,8 +623,29 @@ async fn main() -> Result<()> {
                 }
                 "ice-nostr" => {
                     let nostr_cfg = cfg.nostr();
-                    let (target, source, stun_servers, nsec, nsec_file, peer_npub, relays, republish_interval, max_wait) = match &mode {
-                        Some(ClientMode::Nostr { target: t, source: src, stun_servers: ss, no_stun, nsec: n, nsec_file: nf, peer_npub: p, relays: r, republish_interval: ri, max_wait: mw }) => {
+                    let (
+                        target,
+                        source,
+                        stun_servers,
+                        nsec,
+                        nsec_file,
+                        peer_npub,
+                        relays,
+                        republish_interval,
+                        max_wait,
+                    ) = match &mode {
+                        Some(ClientMode::Nostr {
+                            target: t,
+                            source: src,
+                            stun_servers: ss,
+                            no_stun,
+                            nsec: n,
+                            nsec_file: nf,
+                            peer_npub: p,
+                            relays: r,
+                            republish_interval: ri,
+                            max_wait: mw,
+                        }) => {
                             let cfg_nsec = nostr_cfg.and_then(|c| c.nsec.clone());
                             let cfg_nsec_file = nostr_cfg.and_then(|c| c.nsec_file.clone());
                             let (nsec, nsec_file) = if n.is_some() || nf.is_some() {
@@ -535,13 +654,24 @@ async fn main() -> Result<()> {
                                 (cfg_nsec, cfg_nsec_file)
                             };
                             (
-                                normalize_optional_endpoint(t.clone()).or_else(|| nostr_cfg.and_then(|c| c.target.clone())),
-                                normalize_optional_endpoint(src.clone()).or_else(|| nostr_cfg.and_then(|c| c.request_source.clone())),
-                                resolve_stun_servers(ss, nostr_cfg.and_then(|c| c.stun_servers.clone()), *no_stun)?,
+                                normalize_optional_endpoint(t.clone())
+                                    .or_else(|| nostr_cfg.and_then(|c| c.target.clone())),
+                                normalize_optional_endpoint(src.clone())
+                                    .or_else(|| nostr_cfg.and_then(|c| c.request_source.clone())),
+                                resolve_stun_servers(
+                                    ss,
+                                    nostr_cfg.and_then(|c| c.stun_servers.clone()),
+                                    *no_stun,
+                                )?,
                                 nsec,
                                 nsec_file,
-                                p.clone().or_else(|| nostr_cfg.and_then(|c| c.peer_npub.clone())),
-                                if r.is_empty() { nostr_cfg.and_then(|c| c.relays.clone()).unwrap_or_default() } else { r.clone() },
+                                p.clone()
+                                    .or_else(|| nostr_cfg.and_then(|c| c.peer_npub.clone())),
+                                if r.is_empty() {
+                                    nostr_cfg.and_then(|c| c.relays.clone()).unwrap_or_default()
+                                } else {
+                                    r.clone()
+                                },
                                 *ri,
                                 *mw,
                             )
@@ -549,7 +679,11 @@ async fn main() -> Result<()> {
                         _ => (
                             nostr_cfg.and_then(|c| c.target.clone()),
                             nostr_cfg.and_then(|c| c.request_source.clone()),
-                            resolve_stun_servers(&[], nostr_cfg.and_then(|c| c.stun_servers.clone()), false)?,
+                            resolve_stun_servers(
+                                &[],
+                                nostr_cfg.and_then(|c| c.stun_servers.clone()),
+                                false,
+                            )?,
                             nostr_cfg.and_then(|c| c.nsec.clone()),
                             nostr_cfg.and_then(|c| c.nsec_file.clone()),
                             nostr_cfg.and_then(|c| c.peer_npub.clone()),
@@ -559,9 +693,8 @@ async fn main() -> Result<()> {
                         ),
                     };
 
-                    let target = target.context(
-                        "target is required. Provide via --target or in config file.",
-                    )?;
+                    let target = target
+                        .context("target is required. Provide via --target or in config file.")?;
                     let source = source.context(
                         "--source is required for nostr client mode. Specify the source to request from server (e.g., --source tcp://127.0.0.1:22)",
                     )?;
@@ -583,14 +716,51 @@ async fn main() -> Result<()> {
                         let (protocol, addr) = parse_endpoint(&listen)
                             .with_context(|| format!("Invalid receiver target '{}'", listen))?;
                         match protocol {
-                            Protocol::Udp => nostr::run_nostr_udp_client(addr, source, stun_servers, nsec, peer_npub, relays, republish_interval, max_wait).await,
-                            Protocol::Tcp => nostr::run_nostr_tcp_client(addr, source, stun_servers, nsec, peer_npub, relays, republish_interval, max_wait).await,
+                            Protocol::Udp => {
+                                nostr::run_nostr_udp_client(
+                                    addr,
+                                    source,
+                                    stun_servers,
+                                    nsec,
+                                    peer_npub,
+                                    relays,
+                                    republish_interval,
+                                    max_wait,
+                                )
+                                .await
+                            }
+                            Protocol::Tcp => {
+                                nostr::run_nostr_tcp_client(
+                                    addr,
+                                    source,
+                                    stun_servers,
+                                    nsec,
+                                    peer_npub,
+                                    relays,
+                                    republish_interval,
+                                    max_wait,
+                                )
+                                .await
+                            }
                         }
                     } else {
-                        nostr::run_nostr_tcp_client(listen, source, stun_servers, nsec, peer_npub, relays, republish_interval, max_wait).await
+                        nostr::run_nostr_tcp_client(
+                            listen,
+                            source,
+                            stun_servers,
+                            nsec,
+                            peer_npub,
+                            relays,
+                            republish_interval,
+                            max_wait,
+                        )
+                        .await
                     }
                 }
-                _ => anyhow::bail!("Invalid mode '{}'. Use: ice-manual or ice-nostr", effective_mode),
+                _ => anyhow::bail!(
+                    "Invalid mode '{}'. Use: ice-manual or ice-nostr",
+                    effective_mode
+                ),
             }
         }
         Command::ShowNpub { nsec_file } => secret::show_npub(nsec_file),

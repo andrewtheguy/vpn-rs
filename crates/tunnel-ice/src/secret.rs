@@ -54,9 +54,12 @@ pub fn show_npub(nsec_file: PathBuf) -> Result<()> {
     if nsec.is_empty() {
         anyhow::bail!("nsec file is empty: {}", nsec_file.display());
     }
-    let keys = Keys::parse(nsec)
-        .context("Failed to parse private key (expected nsec or hex format)")?;
-    let npub = keys.public_key().to_bech32().context("Failed to encode npub")?;
+    let keys =
+        Keys::parse(nsec).context("Failed to parse private key (expected nsec or hex format)")?;
+    let npub = keys
+        .public_key()
+        .to_bech32()
+        .context("Failed to encode npub")?;
     println!("{}", npub);
     Ok(())
 }
@@ -64,13 +67,13 @@ pub fn show_npub(nsec_file: PathBuf) -> Result<()> {
 /// Generate a new nostr key file (nsec) and output the npub to stdout
 pub fn generate_nostr_key(output: PathBuf, force: bool) -> Result<()> {
     let keys = generate_keypair();
-    let nsec = keys.secret_key().to_bech32().context("Failed to encode nsec")?;
-    let npub = keys.public_key().to_bech32().context("Failed to encode npub")?;
-    write_secret_to_output(
-        &output,
-        &nsec,
-        &format!("npub: {}", npub),
-        force,
-        "nsec",
-    )
+    let nsec = keys
+        .secret_key()
+        .to_bech32()
+        .context("Failed to encode nsec")?;
+    let npub = keys
+        .public_key()
+        .to_bech32()
+        .context("Failed to encode npub")?;
+    write_secret_to_output(&output, &nsec, &format!("npub: {}", npub), force, "nsec")
 }

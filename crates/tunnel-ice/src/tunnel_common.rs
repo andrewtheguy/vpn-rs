@@ -701,7 +701,8 @@ pub async fn forward_stream_to_udp_server(
                             );
                         }
                         // Update shared index for any monitoring
-                        current_addr_idx.store(active_addr_idx, std::sync::atomic::Ordering::Relaxed);
+                        current_addr_idx
+                            .store(active_addr_idx, std::sync::atomic::Ordering::Relaxed);
                         logged_active = true;
                     }
                     log::debug!("<- Forwarded {} bytes to {}", len, target_addr);

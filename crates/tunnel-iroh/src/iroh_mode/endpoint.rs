@@ -1,15 +1,19 @@
 //! Common endpoint helpers for iroh tunnel connections.
 
 use anyhow::{Context, Result};
-use log::{info, warn};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+#[cfg(feature = "test-utils")]
+use iroh::endpoint::PathSelection;
 use iroh::{
-    discovery::{dns::DnsDiscovery, mdns::MdnsDiscovery, pkarr::{PkarrPublisher, PkarrResolver}},
+    discovery::{
+        dns::DnsDiscovery,
+        mdns::MdnsDiscovery,
+        pkarr::{PkarrPublisher, PkarrResolver},
+    },
     endpoint::Builder as EndpointBuilder,
     Endpoint, EndpointAddr, EndpointId, RelayMap, RelayMode, RelayUrl, SecretKey, Watcher,
 };
-#[cfg(feature = "test-utils")]
-use iroh::endpoint::PathSelection;
+use log::{info, warn};
 use std::path::Path;
 use std::time::Duration;
 use url::Url;
@@ -114,7 +118,10 @@ pub fn print_relay_status(relay_urls: &[String], relay_only: bool, using_custom_
         if relay_urls.len() == 1 {
             info!("Using custom relay server");
         } else {
-            info!("Using {} custom relay servers (with failover)", relay_urls.len());
+            info!(
+                "Using {} custom relay servers (with failover)",
+                relay_urls.len()
+            );
         }
     }
     #[cfg(feature = "test-utils")]
@@ -157,8 +164,7 @@ pub fn create_endpoint_builder(
     transport_config.max_idle_timeout(Some(idle_timeout));
     transport_config.keep_alive_interval(Some(QUIC_KEEP_ALIVE_INTERVAL));
 
-    let mut builder = Endpoint::empty_builder(relay_mode)
-        .transport_config(transport_config);
+    let mut builder = Endpoint::empty_builder(relay_mode).transport_config(transport_config);
 
     #[cfg(feature = "test-utils")]
     if relay_only {
@@ -207,19 +213,17 @@ pub async fn create_server_endpoint(
     let using_custom_relay = !matches!(relay_mode, RelayMode::Default);
     print_relay_status(relay_urls, relay_only, using_custom_relay);
 
-    let mut builder = create_endpoint_builder(
-        relay_mode,
-        relay_only,
-        dns_server,
-        secret.as_ref(),
-    )?
-    .alpns(vec![alpn.to_vec()]);
+    let mut builder = create_endpoint_builder(relay_mode, relay_only, dns_server, secret.as_ref())?
+        .alpns(vec![alpn.to_vec()]);
 
     if let Some(secret) = secret {
         builder = builder.secret_key(secret);
     }
 
-    let endpoint = builder.bind().await.context("Failed to create iroh endpoint")?;
+    let endpoint = builder
+        .bind()
+        .await
+        .context("Failed to create iroh endpoint")?;
 
     // Wait for endpoint to come online with timeout
     info!(
@@ -228,7 +232,10 @@ pub async fn create_server_endpoint(
     );
     match tokio::time::timeout(RELAY_CONNECT_TIMEOUT, endpoint.online()).await {
         Ok(()) => {}
-        Err(_) => anyhow::bail!("Endpoint failed to come online after {}s - check relay server connectivity", RELAY_CONNECT_TIMEOUT.as_secs()),
+        Err(_) => anyhow::bail!(
+            "Endpoint failed to come online after {}s - check relay server connectivity",
+            RELAY_CONNECT_TIMEOUT.as_secs()
+        ),
     }
 
     Ok(endpoint)
@@ -253,7 +260,10 @@ pub async fn create_client_endpoint(
         builder = builder.secret_key(secret.clone());
     }
 
-    let endpoint = builder.bind().await.context("Failed to create iroh endpoint")?;
+    let endpoint = builder
+        .bind()
+        .await
+        .context("Failed to create iroh endpoint")?;
 
     // Wait for endpoint to come online with timeout
     info!(
@@ -262,7 +272,10 @@ pub async fn create_client_endpoint(
     );
     match tokio::time::timeout(RELAY_CONNECT_TIMEOUT, endpoint.online()).await {
         Ok(()) => {}
-        Err(_) => anyhow::bail!("Endpoint failed to come online after {}s - check relay server connectivity", RELAY_CONNECT_TIMEOUT.as_secs()),
+        Err(_) => anyhow::bail!(
+            "Endpoint failed to come online after {}s - check relay server connectivity",
+            RELAY_CONNECT_TIMEOUT.as_secs()
+        ),
     }
 
     Ok(endpoint)
@@ -299,10 +312,9 @@ pub async fn connect_to_server(
                 RELAY_CONNECT_TIMEOUT.as_secs()
             );
 
-            match tokio::time::timeout(
-                RELAY_CONNECT_TIMEOUT,
-                endpoint.connect(endpoint_addr, alpn),
-            ).await {
+            match tokio::time::timeout(RELAY_CONNECT_TIMEOUT, endpoint.connect(endpoint_addr, alpn))
+                .await
+            {
                 Ok(Ok(conn)) => {
                     info!("Connected via relay: {}", relay_url);
                     return Ok(conn);
@@ -327,13 +339,15 @@ pub async fn connect_to_server(
             "Connecting (timeout: {}s)...",
             RELAY_CONNECT_TIMEOUT.as_secs()
         );
-        match tokio::time::timeout(
-            RELAY_CONNECT_TIMEOUT,
-            endpoint.connect(endpoint_addr, alpn),
-        ).await {
+        match tokio::time::timeout(RELAY_CONNECT_TIMEOUT, endpoint.connect(endpoint_addr, alpn))
+            .await
+        {
             Ok(Ok(conn)) => Ok(conn),
             Ok(Err(e)) => Err(e).context("Failed to connect to server"),
-            Err(_) => anyhow::bail!("Connection timed out after {}s", RELAY_CONNECT_TIMEOUT.as_secs()),
+            Err(_) => anyhow::bail!(
+                "Connection timed out after {}s",
+                RELAY_CONNECT_TIMEOUT.as_secs()
+            ),
         }
     }
 }

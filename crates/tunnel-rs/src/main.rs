@@ -2,14 +2,16 @@
 //!
 //! Forwards TCP or UDP traffic through iroh P2P connections.
 
+use ::iroh::SecretKey;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use ::iroh::SecretKey;
 use std::path::PathBuf;
 
 use tunnel_common::config::{load_client_config, load_server_config, ClientConfig, ServerConfig};
+use tunnel_iroh::iroh_mode::endpoint::{
+    load_secret, load_secret_from_string, secret_to_endpoint_id,
+};
 use tunnel_iroh::{auth, iroh_mode, secret, socks5_bridge};
-use tunnel_iroh::iroh_mode::endpoint::{load_secret, load_secret_from_string, secret_to_endpoint_id};
 
 #[derive(Parser)]
 #[command(name = "tunnel-rs")]
@@ -193,7 +195,8 @@ fn resolve_server_iroh_params(
         allowed_clients,
         allowed_clients_file,
         ..
-    } = cli else {
+    } = cli
+    else {
         unreachable!("resolve_server_iroh_params called with non-server command");
     };
 
@@ -204,16 +207,34 @@ fn resolve_server_iroh_params(
     };
 
     ServerIrohParams {
-        allowed_tcp: if allowed_tcp.is_empty() { cfg_allowed.tcp.clone() } else { allowed_tcp.clone() },
-        allowed_udp: if allowed_udp.is_empty() { cfg_allowed.udp.clone() } else { allowed_udp.clone() },
+        allowed_tcp: if allowed_tcp.is_empty() {
+            cfg_allowed.tcp.clone()
+        } else {
+            allowed_tcp.clone()
+        },
+        allowed_udp: if allowed_udp.is_empty() {
+            cfg_allowed.udp.clone()
+        } else {
+            allowed_udp.clone()
+        },
         max_sessions: max_sessions.or(cfg.max_sessions),
         secret,
         secret_file,
-        relay_urls: if relay_urls.is_empty() { cfg.relay_urls.clone().unwrap_or_default() } else { relay_urls.clone() },
+        relay_urls: if relay_urls.is_empty() {
+            cfg.relay_urls.clone().unwrap_or_default()
+        } else {
+            relay_urls.clone()
+        },
         dns_server: dns_server.clone().or(cfg.dns_server.clone()),
         socks5_proxy: socks5_proxy.clone().or(cfg.socks5_proxy.clone()),
-        allowed_clients: if allowed_clients.is_empty() { cfg.allowed_clients.clone().unwrap_or_default() } else { allowed_clients.clone() },
-        allowed_clients_file: allowed_clients_file.clone().or(cfg.allowed_clients_file.clone()),
+        allowed_clients: if allowed_clients.is_empty() {
+            cfg.allowed_clients.clone().unwrap_or_default()
+        } else {
+            allowed_clients.clone()
+        },
+        allowed_clients_file: allowed_clients_file
+            .clone()
+            .or(cfg.allowed_clients_file.clone()),
     }
 }
 
@@ -248,7 +269,8 @@ fn resolve_client_iroh_params(
         secret,
         secret_file,
         ..
-    } = cli else {
+    } = cli
+    else {
         unreachable!("resolve_client_iroh_params called with non-client command");
     };
 
@@ -262,7 +284,11 @@ fn resolve_client_iroh_params(
         server_node_id: server_node_id.clone().or(cfg.server_node_id.clone()),
         source: normalize_optional_endpoint(source.clone()).or(cfg.request_source.clone()),
         target: target.clone().or(cfg.target.clone()),
-        relay_urls: if relay_urls.is_empty() { cfg.relay_urls.clone().unwrap_or_default() } else { relay_urls.clone() },
+        relay_urls: if relay_urls.is_empty() {
+            cfg.relay_urls.clone().unwrap_or_default()
+        } else {
+            relay_urls.clone()
+        },
         dns_server: dns_server.clone().or(cfg.dns_server.clone()),
         socks5_proxy: socks5_proxy.clone().or(cfg.socks5_proxy.clone()),
         secret,
@@ -276,7 +302,9 @@ fn resolve_iroh_secret(
 ) -> Result<Option<SecretKey>> {
     match (secret, secret_file) {
         (Some(_), Some(_)) => {
-            anyhow::bail!("Cannot combine --secret with --secret-file (or secret and secret_file in config)." );
+            anyhow::bail!(
+                "Cannot combine --secret with --secret-file (or secret and secret_file in config)."
+            );
         }
         (Some(secret), None) => {
             let trimmed = secret.trim();
@@ -354,7 +382,11 @@ async fn main() -> Result<()> {
     let command = args.command;
 
     match &command {
-        Command::Server { config, default_config, .. } => {
+        Command::Server {
+            config,
+            default_config,
+            ..
+        } => {
             let (cfg, from_file) = resolve_server_config(config.clone(), *default_config)?;
 
             if from_file {
@@ -386,10 +418,8 @@ async fn main() -> Result<()> {
             let secret = resolve_iroh_secret(secret, secret_file)?;
 
             // Load allowed clients for authentication
-            let allowed_clients = auth::load_allowed_clients(
-                &allowed_clients,
-                allowed_clients_file.as_deref(),
-            )?;
+            let allowed_clients =
+                auth::load_allowed_clients(&allowed_clients, allowed_clients_file.as_deref())?;
 
             if allowed_clients.is_empty() {
                 anyhow::bail!(
@@ -400,15 +430,16 @@ async fn main() -> Result<()> {
                 );
             }
 
-            log::info!("Allowed clients: {} NodeId(s) configured", allowed_clients.len());
+            log::info!(
+                "Allowed clients: {} NodeId(s) configured",
+                allowed_clients.len()
+            );
 
             validate_socks5_proxy_if_present(&socks5_proxy).await?;
 
             // Set up SOCKS5 bridges for .onion relay URLs
-            let (relay_urls, _relay_bridges) = socks5_bridge::setup_relay_bridges(
-                relay_urls,
-                socks5_proxy.as_deref(),
-            ).await?;
+            let (relay_urls, _relay_bridges) =
+                socks5_bridge::setup_relay_bridges(relay_urls, socks5_proxy.as_deref()).await?;
 
             iroh_mode::run_multi_source_server(
                 allowed_tcp,
@@ -419,9 +450,14 @@ async fn main() -> Result<()> {
                 relay_only,
                 dns_server,
                 allowed_clients,
-            ).await
+            )
+            .await
         }
-        Command::Client { config, default_config, .. } => {
+        Command::Client {
+            config,
+            default_config,
+            ..
+        } => {
             let (cfg, from_file) = resolve_client_config(config.clone(), *default_config)?;
 
             if from_file {
@@ -462,10 +498,8 @@ async fn main() -> Result<()> {
 
             validate_socks5_proxy_if_present(&socks5_proxy).await?;
 
-            let (relay_urls, _relay_bridges) = socks5_bridge::setup_relay_bridges(
-                relay_urls,
-                socks5_proxy.as_deref(),
-            ).await?;
+            let (relay_urls, _relay_bridges) =
+                socks5_bridge::setup_relay_bridges(relay_urls, socks5_proxy.as_deref()).await?;
 
             iroh_mode::run_multi_source_client(
                 server_node_id,
@@ -475,7 +509,8 @@ async fn main() -> Result<()> {
                 relay_only,
                 dns_server,
                 secret,
-            ).await
+            )
+            .await
         }
         Command::GenerateIrohKey { output, force } => {
             secret::generate_secret(output.clone(), *force)

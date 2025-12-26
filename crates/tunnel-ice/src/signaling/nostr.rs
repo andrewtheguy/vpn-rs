@@ -4,9 +4,9 @@
 //! eliminating the need for manual copy-paste signaling.
 
 use anyhow::{Context, Result};
-use log::{info, warn};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
+use log::{info, warn};
 use nostr_sdk::prelude::*;
 use sha2::{Digest, Sha256};
 use std::time::Duration;
@@ -79,7 +79,6 @@ impl std::fmt::Display for OfferWaitError {
 }
 
 impl std::error::Error for OfferWaitError {}
-
 
 /// Nostr signaling client for ICE exchange.
 ///
@@ -341,7 +340,10 @@ impl NostrSignaling {
                             .as_secs();
                         let age = now.saturating_sub(request.timestamp);
                         if age <= max_age_secs {
-                            info!("Received fresh {} from peer (age: {}s)", SIGNALING_TYPE_REQUEST, age);
+                            info!(
+                                "Received fresh {} from peer (age: {}s)",
+                                SIGNALING_TYPE_REQUEST, age
+                            );
                             return Ok(request);
                         } else {
                             info!(
@@ -363,7 +365,9 @@ impl NostrSignaling {
                                 skipped
                             );
                             // Drain buffered messages and check for fresh request
-                            match self.drain_and_find_fresh_request(&mut notifications, max_age_secs) {
+                            match self
+                                .drain_and_find_fresh_request(&mut notifications, max_age_secs)
+                            {
                                 Ok(Some(request)) => return Ok(request),
                                 Ok(None) => {} // No matching request found, continue waiting
                                 Err(SignalingError::ChannelClosed) => {
@@ -482,7 +486,9 @@ impl NostrSignaling {
 
             match tokio::time::timeout(wait_duration, notifications.recv()).await {
                 Ok(Ok(RelayPoolNotification::Event { event, .. })) => {
-                    if let Some(result) = self.check_event_for_offer_or_rejection(&event, session_id) {
+                    if let Some(result) =
+                        self.check_event_for_offer_or_rejection(&event, session_id)
+                    {
                         return result;
                     }
                 }
@@ -544,7 +550,9 @@ impl NostrSignaling {
         loop {
             match notifications.try_recv() {
                 Ok(RelayPoolNotification::Event { event, .. }) => {
-                    if let Some(result) = self.check_event_for_offer_or_rejection(&event, session_id) {
+                    if let Some(result) =
+                        self.check_event_for_offer_or_rejection(&event, session_id)
+                    {
                         return Some(result);
                     }
                 }

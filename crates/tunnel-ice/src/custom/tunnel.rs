@@ -70,12 +70,14 @@ pub async fn run_manual_server(
     let allowed_networks = if is_tcp { &allowed_tcp } else { &allowed_udp };
     let check_result = check_source_allowed(source, allowed_networks).await;
     if !check_result.allowed {
-        anyhow::bail!("{}", check_result.rejection_reason(source, allowed_networks));
+        anyhow::bail!(
+            "{}",
+            check_result.rejection_reason(source, allowed_networks)
+        );
     }
 
     // Extract address from source URL (strip tcp:// or udp:// prefix)
-    let addr_str = extract_addr_from_source(source)
-        .context("Failed to parse source URL")?;
+    let addr_str = extract_addr_from_source(source).context("Failed to parse source URL")?;
 
     // Resolve target addresses
     let target_addrs = Arc::new(
@@ -234,7 +236,10 @@ pub async fn run_manual_client(
     let is_tcp = source.starts_with("tcp://");
     let is_udp = source.starts_with("udp://");
     if !is_tcp && !is_udp {
-        anyhow::bail!("Invalid source protocol '{}'. Must start with tcp:// or udp://", source);
+        anyhow::bail!(
+            "Invalid source protocol '{}'. Must start with tcp:// or udp://",
+            source
+        );
     }
 
     log::info!("Manual Tunnel - Client Mode (Client-First)");
@@ -448,4 +453,3 @@ pub async fn run_manual_client(
 
     Ok(())
 }
-

@@ -197,7 +197,10 @@ fn encode_payload_v<T: Serialize>(payload: &T, version: u16) -> Result<String> {
     let json = serde_json::to_vec(payload).context("Failed to serialize manual payload")?;
     let checksum = crc32(&json);
     let encoded = URL_SAFE_NO_PAD.encode(&json);
-    Ok(format!("{}{}:{:08x}:{}", PREFIX, version, checksum, encoded))
+    Ok(format!(
+        "{}{}:{:08x}:{}",
+        PREFIX, version, checksum, encoded
+    ))
 }
 
 fn decode_payload<T: for<'de> Deserialize<'de>>(payload: &str) -> Result<T> {

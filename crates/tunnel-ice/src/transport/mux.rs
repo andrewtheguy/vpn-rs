@@ -68,9 +68,7 @@ impl DemuxSocket {
     /// Create a new demultiplexing socket.
     ///
     /// Returns the socket and a receiver for STUN packets.
-    pub fn new(
-        io: UdpSocket,
-    ) -> io::Result<(Arc<Self>, mpsc::Receiver<ReceivedPacket>)> {
+    pub fn new(io: UdpSocket) -> io::Result<(Arc<Self>, mpsc::Receiver<ReceivedPacket>)> {
         let local_addr = io.local_addr()?;
         let inner = quinn::udp::UdpSocketState::new((&io).into())?;
         let (stun_tx, stun_rx) = mpsc::channel(STUN_CHANNEL_CAPACITY);
@@ -151,7 +149,10 @@ impl AsyncUdpSocket for DemuxSocket {
                         } else {
                             // Keep QUIC packet in results
                             // Invariant: quic_count <= i (we only increment quic_count after processing)
-                            debug_assert!(quic_count <= i, "quic_count must not exceed current index");
+                            debug_assert!(
+                                quic_count <= i,
+                                "quic_count must not exceed current index"
+                            );
                             if quic_count < i {
                                 // Shift meta entry down
                                 meta[quic_count] = meta[i];
