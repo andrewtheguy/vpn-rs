@@ -572,6 +572,9 @@ async fn main() -> Result<()> {
                             } else {
                                 (cfg_secret, cfg_secret_file)
                             };
+                            // Merge allowed_clients: CLI takes precedence, fall back to config
+                            let cfg_allowed_clients = iroh_cfg.and_then(|c| c.allowed_clients.clone()).unwrap_or_default();
+                            let cfg_allowed_clients_file = iroh_cfg.and_then(|c| c.allowed_clients_file.clone());
                             (
                                 if at.is_empty() { cfg_allowed.tcp.clone() } else { at.clone() },
                                 if au.is_empty() { cfg_allowed.udp.clone() } else { au.clone() },
@@ -581,8 +584,8 @@ async fn main() -> Result<()> {
                                 if r.is_empty() { iroh_cfg.and_then(|c| c.relay_urls.clone()).unwrap_or_default() } else { r.clone() },
                                 d.clone().or_else(|| iroh_cfg.and_then(|c| c.dns_server.clone())),
                                 sp.clone().or_else(|| iroh_cfg.and_then(|c| c.socks5_proxy.clone())),
-                                ac.clone(),
-                                acf.clone(),
+                                if ac.is_empty() { cfg_allowed_clients } else { ac.clone() },
+                                acf.clone().or(cfg_allowed_clients_file),
                             )
                         }
                         _ => {
@@ -596,8 +599,8 @@ async fn main() -> Result<()> {
                                 iroh_cfg.and_then(|c| c.relay_urls.clone()).unwrap_or_default(),
                                 iroh_cfg.and_then(|c| c.dns_server.clone()),
                                 iroh_cfg.and_then(|c| c.socks5_proxy.clone()),
-                                Vec::new(),
-                                None,
+                                iroh_cfg.and_then(|c| c.allowed_clients.clone()).unwrap_or_default(),
+                                iroh_cfg.and_then(|c| c.allowed_clients_file.clone()),
                             )
                         },
                     };

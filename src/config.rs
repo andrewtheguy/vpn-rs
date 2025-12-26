@@ -21,13 +21,13 @@ use std::path::{Path, PathBuf};
 /// iroh mode configuration (multi-source).
 ///
 /// Some fields are role-specific (enforced by validate()):
-/// - Server-only: `allowed_sources`, `max_sessions`, `secret`, `secret_file`
+/// - Server-only: `allowed_sources`, `max_sessions`, `secret`, `secret_file`, `allowed_clients`, `allowed_clients_file`
 /// - Client-only: `request_source`, `target`, `node_id`
 #[derive(Deserialize, Default, Clone)]
 pub struct IrohConfig {
-    /// Path to secret key file for persistent identity (server only)
+    /// Path to secret key file for persistent identity
     pub secret_file: Option<PathBuf>,
-    /// Base64-encoded secret key for persistent identity (server only).
+    /// Base64-encoded secret key for persistent identity.
     /// Prefer `secret_file` in production; inline secrets are best kept to testing or
     /// special cases due to VCS/log exposure risk. Secret files should be 0600 on Unix.
     pub secret: Option<String>,
@@ -40,6 +40,12 @@ pub struct IrohConfig {
     pub allowed_sources: Option<AllowedSources>,
     /// Maximum concurrent sessions (server only, default: 100)
     pub max_sessions: Option<usize>,
+    /// Allowed client NodeIds (server only).
+    /// Only clients with these NodeIds can connect.
+    pub allowed_clients: Option<Vec<String>>,
+    /// Path to file containing allowed client NodeIds (server only).
+    /// One NodeId per line, # comments allowed.
+    pub allowed_clients_file: Option<PathBuf>,
     /// Source URL to request from server (client only).
     /// Format: tcp://host:port or udp://host:port
     #[serde(alias = "source")]
