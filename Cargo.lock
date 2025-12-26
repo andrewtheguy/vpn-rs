@@ -4778,7 +4778,7 @@ dependencies = [
 
 [[package]]
 name = "tunnel-ice"
-version = "0.1.26"
+version = "0.1.27"
 dependencies = [
  "anyhow",
  "base64",
@@ -4824,7 +4824,7 @@ dependencies = [
 
 [[package]]
 name = "tunnel-rs"
-version = "0.1.26"
+version = "0.1.27"
 dependencies = [
  "anyhow",
  "clap",
