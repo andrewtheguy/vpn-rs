@@ -22,11 +22,11 @@ use crate::iroh::helpers::{
     bridge_streams, forward_stream_to_udp_client, forward_stream_to_udp_server,
     forward_udp_to_stream, open_bi_with_retry,
 };
-use crate::signaling::{
+use tunnel_common::signaling::{
     decode_source_request, decode_source_response, encode_source_request, encode_source_response,
     read_length_prefixed, SourceRequest, SourceResponse,
 };
-use crate::tunnel_common::{
+use tunnel_common::net::{
     bind_udp_for_targets, check_source_allowed, extract_addr_from_source, resolve_all_target_addrs,
     validate_allowed_networks,
 };
@@ -298,7 +298,7 @@ async fn handle_multi_source_stream(
     if is_tcp {
         // Resolve and connect to TCP target
         let target_addrs = resolve_all_target_addrs(&target_addr).await?;
-        let tcp_stream = crate::tunnel_common::try_connect_tcp(&target_addrs)
+        let tcp_stream = tunnel_common::net::try_connect_tcp(&target_addrs)
             .await
             .context("Failed to connect to target TCP service")?;
 

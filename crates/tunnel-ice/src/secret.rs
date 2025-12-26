@@ -1,15 +1,10 @@
-//! Secret key generation and management commands.
+//! Secret key generation and management commands (nostr).
 
 use anyhow::{Context, Result};
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
-use iroh::SecretKey;
 use log::info;
-#[cfg(feature = "ice")]
 use nostr_sdk::{Keys, ToBech32};
 use std::path::PathBuf;
 
-use crate::iroh::endpoint::{load_secret, secret_to_endpoint_id};
-#[cfg(feature = "ice")]
 use crate::signaling::nostr::generate_keypair;
 
 fn write_secret_to_output(
@@ -51,30 +46,7 @@ fn write_secret_to_output(
     Ok(())
 }
 
-/// Generate a new secret key file (base64 encoded) and output the EndpointId to stdout
-pub fn generate_secret(output: PathBuf, force: bool) -> Result<()> {
-    let secret = SecretKey::generate(&mut rand::rng());
-    let secret_base64 = BASE64.encode(secret.to_bytes());
-    let endpoint_id = secret_to_endpoint_id(&secret);
-    write_secret_to_output(
-        &output,
-        &secret_base64,
-        &format!("EndpointId: {}", endpoint_id),
-        force,
-        "Secret key",
-    )
-}
-
-/// Show the EndpointId for an existing secret key file
-pub fn show_id(secret_file: PathBuf) -> Result<()> {
-    let secret = load_secret(&secret_file)?;
-    let endpoint_id = secret_to_endpoint_id(&secret);
-    println!("{}", endpoint_id);
-    Ok(())
-}
-
 /// Show the npub for an existing nsec key file
-#[cfg(feature = "ice")]
 pub fn show_npub(nsec_file: PathBuf) -> Result<()> {
     let content = std::fs::read_to_string(&nsec_file)
         .with_context(|| format!("Failed to read nsec file: {}", nsec_file.display()))?;
@@ -90,7 +62,6 @@ pub fn show_npub(nsec_file: PathBuf) -> Result<()> {
 }
 
 /// Generate a new nostr key file (nsec) and output the npub to stdout
-#[cfg(feature = "ice")]
 pub fn generate_nostr_key(output: PathBuf, force: bool) -> Result<()> {
     let keys = generate_keypair();
     let nsec = keys.secret_key().to_bech32().context("Failed to encode nsec")?;

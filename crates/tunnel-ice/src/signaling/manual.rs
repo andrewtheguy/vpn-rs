@@ -6,9 +6,7 @@
 use anyhow::{anyhow, Result};
 use std::io::BufRead;
 
-use super::codec::{
-    wrap_lines, ManualAnswer, ManualOffer, LINE_WIDTH,
-};
+use tunnel_common::signaling::codec::{wrap_lines, ManualAnswer, ManualOffer, LINE_WIDTH};
 use super::{decode_answer, decode_offer, encode_answer, encode_offer};
 
 // Custom mode markers (v1)

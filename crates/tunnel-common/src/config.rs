@@ -11,7 +11,6 @@
 //! - CIDR networks and source URLs are validated for correct format
 
 use anyhow::{Context, Result};
-use iroh::EndpointId;
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
@@ -363,13 +362,15 @@ impl ServerConfig {
                         if trimmed.is_empty() || trimmed.starts_with('#') {
                             continue; // Skip empty lines and comments
                         }
-                        trimmed.parse::<EndpointId>().with_context(|| {
-                            format!(
+                        // NodeId validation is deferred to the iroh runtime to avoid
+                        // coupling config parsing to the iroh crate.
+                        if trimmed.contains(' ') {
+                            anyhow::bail!(
                                 "[iroh] Invalid NodeId in 'allowed_clients': '{}'. \
-                                 Expected a 64-character hex string or 52-character base32 string.",
+                                 Expected a base32 or hex string without spaces.",
                                 client_id
-                            )
-                        })?;
+                            );
+                        }
                     }
                 }
                 // Reject client-only fields

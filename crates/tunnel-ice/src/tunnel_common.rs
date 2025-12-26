@@ -505,13 +505,10 @@ where
 // Quinn Stream Helpers (shared by custom and nostr modes)
 // ============================================================================
 
-#[cfg(feature = "ice")]
 use std::sync::atomic::{AtomicBool, Ordering};
-#[cfg(feature = "ice")]
 use tokio::sync::Mutex;
 
 /// Open a QUIC bidirectional stream with retry and exponential backoff.
-#[cfg(feature = "ice")]
 pub async fn open_bi_with_retry(
     conn: &quinn::Connection,
 ) -> Result<(quinn::SendStream, quinn::RecvStream)> {
@@ -525,7 +522,6 @@ pub async fn open_bi_with_retry(
 }
 
 /// Handle TCP sender stream: read marker, connect to target, bridge streams
-#[cfg(feature = "ice")]
 pub async fn handle_tcp_server_stream(
     send_stream: quinn::SendStream,
     mut recv_stream: quinn::RecvStream,
@@ -550,7 +546,6 @@ pub async fn handle_tcp_server_stream(
 }
 
 /// Handle TCP receiver connection: open stream, write marker, bridge streams
-#[cfg(feature = "ice")]
 pub async fn handle_tcp_client_connection(
     conn: Arc<quinn::Connection>,
     tcp_stream: TcpStream,
@@ -576,7 +571,6 @@ pub async fn handle_tcp_client_connection(
 }
 
 /// Bridge QUIC streams with a TCP stream (bidirectional copy)
-#[cfg(feature = "ice")]
 pub async fn bridge_quinn_streams(
     mut quic_recv: quinn::RecvStream,
     mut quic_send: quinn::SendStream,
@@ -608,7 +602,6 @@ pub async fn bridge_quinn_streams(
 }
 
 /// Read UDP packets from local socket and forward to quinn stream
-#[cfg(feature = "ice")]
 pub async fn forward_udp_to_stream(
     udp_socket: Arc<UdpSocket>,
     mut send_stream: quinn::SendStream,
@@ -644,7 +637,6 @@ pub async fn forward_udp_to_stream(
 /// - Addresses are tried in Happy Eyeballs order (IPv6 first)
 /// - On send error, falls back to the next address
 /// - Aggregates errors if all addresses fail
-#[cfg(feature = "ice")]
 pub async fn forward_stream_to_udp_server(
     mut recv_stream: quinn::RecvStream,
     mut send_stream: quinn::SendStream,
@@ -749,7 +741,6 @@ pub async fn forward_stream_to_udp_server(
 }
 
 /// Read from quinn stream and forward to local UDP client (receiver mode)
-#[cfg(feature = "ice")]
 pub async fn forward_stream_to_udp_client(
     mut recv_stream: quinn::RecvStream,
     udp_socket: Arc<UdpSocket>,

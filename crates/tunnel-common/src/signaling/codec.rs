@@ -15,7 +15,7 @@ pub const MANUAL_SIGNAL_VERSION: u16 = 1;
 pub const IROH_MULTI_VERSION: u16 = 1;
 
 pub(crate) const PREFIX: &str = "TRS";
-pub(crate) const LINE_WIDTH: usize = 76;
+pub const LINE_WIDTH: usize = 76;
 
 // ============================================================================
 // Custom Mode (v1) - str0m ICE + quinn QUIC
@@ -267,7 +267,7 @@ fn crc32(bytes: &[u8]) -> u32 {
 /// base64-encoded payloads with ASCII prefix/checksum). This function chunks by
 /// bytes for efficiency, which is safe for ASCII but would split multi-byte UTF-8
 /// codepoints. The function will panic if given non-ASCII input.
-pub(crate) fn wrap_lines(s: &str, width: usize) -> String {
+pub fn wrap_lines(s: &str, width: usize) -> String {
     debug_assert!(
         s.is_ascii(),
         "wrap_lines requires ASCII input; got non-ASCII characters"
