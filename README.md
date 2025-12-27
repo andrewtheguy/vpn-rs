@@ -15,7 +15,7 @@ Tunnel-rs enables you to forward TCP and UDP traffic between machines without re
 - **NAT traversal** with multiple strategies (relay fallback, STUN, full ICE)
 - **Minimal configuration** — Automatic peer discovery using simple, shareable identities
 - **Flexible signaling** — Supports multiple connection methods, from automated discovery to manual exchange
-- **Offline/LAN support** — ice-manual mode works without internet for local network tunneling
+- **Offline/LAN support** — manual mode works without internet for local network tunneling
 - **High performance** — Optimized for low latency using QUIC stream multiplexing
 
 **Common Use Cases:**
@@ -43,8 +43,8 @@ Binary layout:
 | Mode | NAT Traversal | Discovery | External Dependency |
 |------|---------------|-----------|---------------------|
 | **iroh** (recommended) | Best (relay fallback) | Automatic | iroh relay infrastructure |
-| ice-nostr | STUN only | Automatic (Nostr) | Nostr relays (decentralized) |
-| ice-manual | STUN only | Manual copy-paste | None |
+| nostr | STUN only | Automatic (Nostr) | Nostr relays (decentralized) |
+| manual | STUN only | Manual copy-paste | None |
 
 > See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for detailed diagrams and technical deep-dives.
 
@@ -52,11 +52,11 @@ Binary layout:
 
 Choose an alternative mode only if you have specific requirements:
 
-- **ice-nostr**: You want decentralized signaling without depending on iroh infrastructure. Uses Nostr relays instead.
-- **ice-manual**: You want complete independence from third-party services (disable STUN for fully self-contained operation), or no internet is available (offline/LAN-only). Signaling is done via manual copy-paste.
+- **nostr**: You want decentralized signaling without depending on iroh infrastructure. Uses Nostr relays instead.
+- **manual**: You want complete independence from third-party services (disable STUN for fully self-contained operation), or no internet is available (offline/LAN-only). Signaling is done via manual copy-paste.
 
 > [!NOTE]
-> The `ice-nostr` and `ice-manual` modes use STUN-only NAT traversal, which may fail when both peers are behind symmetric NATs. For containerized environments (Docker, Kubernetes, cloud VMs), use `iroh` mode which includes relay fallback.
+> The `nostr` and `manual` modes use STUN-only NAT traversal, which may fail when both peers are behind symmetric NATs. For containerized environments (Docker, Kubernetes, cloud VMs), use `iroh` mode which includes relay fallback.
 
 > [!TIP]
 > If you only need iroh mode, use the `tunnel-rs` binary. ICE modes are in `tunnel-rs-ice`.
@@ -133,7 +133,7 @@ tunnel-rs is fully supported on:
 - **macOS** (Intel, Apple Silicon)
 - **Windows** (x86_64)
 
-All modes (iroh, ice-manual, ice-nostr) work across all platforms, enabling cross-platform P2P tunneling.
+All modes (iroh, manual, nostr) work across all platforms, enabling cross-platform P2P tunneling.
 
 ### Docker & Kubernetes
 
@@ -248,7 +248,7 @@ tunnel-rs client \
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--config`, `-c` | - | Path to TOML config file |
-| `--default-config` | false | Load config from `~/.config/tunnel-rs/server.toml` |
+| `--default-config` | false | Load config from `~/.config/tunnel-rs/server.toml` (`tunnel-rs`) or `~/.config/tunnel-rs/server_ice.toml` (`tunnel-rs-ice`) |
 
 ### server iroh
 
@@ -271,7 +271,7 @@ tunnel-rs client \
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--config`, `-c` | - | Path to TOML config file |
-| `--default-config` | false | Load config from `~/.config/tunnel-rs/client.toml` |
+| `--default-config` | false | Load config from `~/.config/tunnel-rs/client.toml` (`tunnel-rs`) or `~/.config/tunnel-rs/client_ice.toml` (`tunnel-rs-ice`) |
 
 ### client iroh
 
@@ -289,12 +289,12 @@ tunnel-rs client \
 
 Use `--default-config` to load from the default location, or `-c <path>` for a custom path. Each mode has its own configuration section:
 - **iroh** mode: `[iroh]` section
-- **ice-manual** mode: `[ice-manual]` section
-- **ice-nostr** mode: `[ice-nostr]` section
+- **manual** mode: `[manual]` section
+- **nostr** mode: `[nostr]` section
 
 **Default locations:**
-- Server: `~/.config/tunnel-rs/server.toml`
-- Client: `~/.config/tunnel-rs/client.toml`
+- Server: `~/.config/tunnel-rs/server.toml` (`tunnel-rs`) or `~/.config/tunnel-rs/server_ice.toml` (`tunnel-rs-ice`)
+- Client: `~/.config/tunnel-rs/client.toml` (`tunnel-rs`) or `~/.config/tunnel-rs/client_ice.toml` (`tunnel-rs-ice`)
 
 ### Overriding Config Values
 
@@ -320,7 +320,7 @@ This lets you keep common settings (keys, relay URLs) in the config file while v
 
 # Required: validates config matches CLI command
 role = "server"
-mode = "iroh"  # or "ice-manual", or "ice-nostr"
+mode = "iroh"  # or "manual", or "nostr"
 
 [iroh]
 secret_file = "./server.key"
@@ -340,7 +340,7 @@ udp = ["10.0.0.0/8"]
 ```
 
 > [!NOTE]
-> See [`server.toml.example`](server.toml.example) for configuration options for other modes and all available options for each mode.
+> See [`server.toml.example`](server.toml.example) for the full iroh example, and [`server_ice.toml.example`](server_ice.toml.example) for ICE modes.
 
 ```bash
 # Load from default location (mode inferred from config)
@@ -357,7 +357,7 @@ tunnel-rs server -c ./my-server.toml
 
 # Required: validates config matches CLI command
 role = "client"
-mode = "iroh"  # or "ice-manual", or "ice-nostr"
+mode = "iroh"
 
 [iroh]
 server_node_id = "2xnbkpbc7izsilvewd7c62w7wnwziacmpfwvhcrya5nt76dqkpga"
@@ -368,7 +368,7 @@ dns_server = "https://dns.example.com/pkarr"
 ```
 
 > [!NOTE]
-> See [`client.toml.example`](client.toml.example) for configuration options for other modes and all available options for each mode.
+> See [`client.toml.example`](client.toml.example) for the full iroh example, and [`client_ice.toml.example`](client_ice.toml.example) for ICE modes.
 
 ```bash
 # Load from default location (mode inferred from config)
@@ -557,7 +557,7 @@ iroh mode uses the relay for both **signaling/coordination** and as a **data tra
 > [!NOTE]
 > **Bandwidth Concern:** If you want signaling-only coordination **without** relay fallback (to avoid forwarding any tunnel traffic), iroh mode currently doesn't support this. The relay always acts as fallback when direct connection fails.
 >
-> **Alternative for signaling-only:** Use `ice-nostr` mode with self-hosted Nostr relays. Nostr relays only handle signaling (small encrypted messages), never tunnel traffic. If hole punching fails, the connection fails — no traffic is ever forwarded through the relay.
+> **Alternative for signaling-only:** Use `nostr` mode with self-hosted Nostr relays. Nostr relays only handle signaling (small encrypted messages), never tunnel traffic. If hole punching fails, the connection fails — no traffic is ever forwarded through the relay.
 
 ### Tor Hidden Service (No Public IP)
 
@@ -594,13 +594,13 @@ See [docs/tor-hidden-service.md](docs/tor-hidden-service.md) for complete setup 
 
 ---
 
-# Alternative: ice-manual Mode
+# Alternative: manual Mode
 
 > Use this mode for: (1) complete independence from third-party services (disable STUN), or (2) offline/LAN-only operation when no internet is available. For most use cases, [iroh mode](#iroh-mode-recommended) is recommended.
 
 Uses full ICE (Interactive Connectivity Establishment) with str0m + quinn QUIC. Signaling is done via manual copy-paste.
 
-> **Summary:** Manual copy-paste signaling, full ICE NAT traversal via STUN, no relay fallback. See [Architecture: ice-manual Mode](docs/ARCHITECTURE.md#ice-manual-mode) for detailed diagrams.
+> **Summary:** Manual copy-paste signaling, full ICE NAT traversal via STUN, no relay fallback. See [Architecture: manual Mode](docs/ARCHITECTURE.md#manual-mode) for detailed diagrams.
 
 ## Architecture
 
@@ -692,18 +692,18 @@ ICE connection established!
 
 ---
 
-# Alternative: ice-nostr Mode
+# Alternative: nostr Mode
 
 > Use this mode if you want decentralized signaling without depending on iroh infrastructure. For most use cases, [iroh mode](#iroh-mode-recommended) is recommended.
 
 Uses full ICE with Nostr-based signaling. Instead of manual copy-paste, ICE offers/answers are exchanged automatically via Nostr relays using static keypairs (like WireGuard).
 
-> **Summary:** Automated signaling via Nostr relays, static WireGuard-like keys, full ICE NAT traversal, no relay fallback. See [Architecture: ice-nostr Mode](docs/ARCHITECTURE.md#ice-nostr-mode) for detailed diagrams.
+> **Summary:** Automated signaling via Nostr relays, static WireGuard-like keys, full ICE NAT traversal, no relay fallback. See [Architecture: nostr Mode](docs/ARCHITECTURE.md#nostr-mode) for detailed diagrams.
 
 **Key Features:**
 - **Static keys** — Persistent identity using nsec/npub keypairs (like WireGuard)
 - **Automated signaling** — No copy-paste required; offers/answers exchanged via Nostr relays
-- **Full ICE** — Same NAT traversal as ice-manual mode (str0m + quinn)
+- **Full ICE** — Same NAT traversal as manual mode (str0m + quinn)
 - **Deterministic pairing** — Transfer ID derived from both pubkeys; no coordination needed
 
 ## Architecture
@@ -811,15 +811,17 @@ tunnel-rs-ice client nostr \
 ```toml
 # Server config
 role = "server"
-mode = "ice-nostr"
+mode = "nostr"
 
-[ice-nostr]
+[nostr]
 nsec_file = "./server.nsec"
 peer_npub = "npub1..."
-allowed_tcp = ["127.0.0.0/8", "10.0.0.0/8"]
 relays = ["wss://relay.damus.io", "wss://nos.lol"]
 stun_servers = ["stun.l.google.com:19302"]
 max_sessions = 10
+
+[nostr.allowed_sources]
+tcp = ["127.0.0.0/8", "10.0.0.0/8"]
 ```
 
 ## Default Nostr Relays
@@ -827,7 +829,6 @@ max_sessions = 10
 When no relays are specified, these public relays are used:
 - `wss://relay.damus.io`
 - `wss://nos.lol`
-- `wss://relay.nostr.band`
 - `wss://relay.primal.net`
 - `wss://nostr.mom`
 - `wss://relay.snort.social`
@@ -841,15 +842,15 @@ When no relays are specified, these public relays are used:
 - **Client-first protocol:** The client initiates the connection by publishing a request first; server waits for a request before publishing its offer
 
 > [!WARNING]
-> **Containerized Environments:** ice-nostr mode uses full ICE but without relay fallback. If both peers are behind restrictive NATs (common in Docker, Kubernetes, or cloud VMs), ICE connectivity may fail. For containerized deployments, consider using `iroh` mode which includes automatic relay fallback.
+> **Containerized Environments:** nostr mode uses full ICE but without relay fallback. If both peers are behind restrictive NATs (common in Docker, Kubernetes, or cloud VMs), ICE connectivity may fail. For containerized deployments, consider using `iroh` mode which includes automatic relay fallback.
 
 ## Mode Capabilities
 
 | Mode | Multi-Session | Dynamic Source | Description |
 |------|---------------|----------------|-------------|
 | `iroh` | **Yes** | **Yes** | Multiple receivers, receiver chooses source |
-| `ice-nostr` | **Yes** | **Yes** | Multiple receivers, receiver chooses source |
-| `ice-manual` | No | **Yes** | Single session, receiver chooses source |
+| `nostr` | **Yes** | **Yes** | Multiple receivers, receiver chooses source |
+| `manual` | No | **Yes** | Single session, receiver chooses source |
 
 **Multi-Session** = Multiple concurrent connections to the same sender
 **Dynamic Source** = Receiver specifies which service to tunnel (like SSH `-L`)
@@ -869,7 +870,7 @@ tunnel-rs client --secret-file ./client1.key --server-node-id <ID> --source tcp:
 tunnel-rs client --secret-file ./client2.key --server-node-id <ID> --source tcp://127.0.0.1:80 --target 127.0.0.1:8080
 ```
 
-### ice-nostr (Multi-Session + Dynamic Source)
+### nostr (Multi-Session + Dynamic Source)
 
 Server whitelists networks; clients choose which service to tunnel:
 
@@ -884,11 +885,11 @@ tunnel-rs-ice client nostr --source tcp://127.0.0.1:22 --target 127.0.0.1:2222 .
 tunnel-rs-ice client nostr --source tcp://127.0.0.1:80 --target 127.0.0.1:8080 ...
 ```
 
-### Single-Session Mode (ice-manual)
+### Single-Session Mode (manual)
 
-For `ice-manual`, use separate instances for each tunnel:
+For `manual`, use separate instances for each tunnel:
 - Different instances per tunnel
-- Or use `iroh` or `ice-nostr` mode for multi-session support
+- Or use `iroh` or `nostr` mode for multi-session support
 
 ---
 
@@ -913,7 +914,7 @@ For `ice-manual`, use separate instances for each tunnel:
 
 ## generate-nostr-key
 
-Generate a Nostr keypair for use with ice-nostr mode:
+Generate a Nostr keypair for use with nostr mode:
 
 ```bash
 # Save nsec to file and output npub
@@ -992,7 +993,7 @@ All protocol modes and features are available on all platforms.
 8. If accepted, traffic forwarding begins
 
 
-### ice-manual Mode
+### manual Mode
 1. Both sides gather ICE candidates via STUN (same socket used for data)
 2. Manual exchange of offer/answer (copy-paste)
 3. ICE connectivity checks probe all candidate pairs simultaneously
@@ -1001,7 +1002,7 @@ All protocol modes and features are available on all platforms.
 
 *Advantage: Full ICE provides reliable NAT traversal even for symmetric NATs.*
 
-### ice-nostr Mode (Receiver-Initiated)
+### nostr Mode (Receiver-Initiated)
 1. Both peers derive deterministic transfer ID from their sorted public keys
 2. Sender waits for connection requests from receivers
 3. Receiver publishes connection request with desired source to Nostr relays

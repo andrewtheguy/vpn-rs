@@ -121,7 +121,7 @@ enum Command {
         #[arg(short, long)]
         config: Option<PathBuf>,
 
-        /// Load config from default location (~/.config/tunnel-rs/server.toml)
+        /// Load config from default location (~/.config/tunnel-rs/server_ice.toml)
         #[arg(long)]
         default_config: bool,
 
@@ -135,7 +135,7 @@ enum Command {
         #[arg(short, long)]
         config: Option<PathBuf>,
 
-        /// Load config from default location (~/.config/tunnel-rs/client.toml)
+        /// Load config from default location (~/.config/tunnel-rs/client_ice.toml)
         #[arg(long)]
         default_config: bool,
 
@@ -314,7 +314,14 @@ fn resolve_server_config(
     if let Some(path) = config {
         Ok((load_server_config(Some(&path))?, true))
     } else if default_config {
-        Ok((load_server_config(None)?, true))
+        let path = dirs::home_dir()
+            .map(|home| home.join(".config").join("tunnel-rs").join("server_ice.toml"))
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Could not find default config path. Use -c to specify a config file."
+                )
+            })?;
+        Ok((load_server_config(Some(&path))?, true))
     } else {
         Ok((ServerConfig::default(), false))
     }
@@ -332,7 +339,14 @@ fn resolve_client_config(
     if let Some(path) = config {
         Ok((load_client_config(Some(&path))?, true))
     } else if default_config {
-        Ok((load_client_config(None)?, true))
+        let path = dirs::home_dir()
+            .map(|home| home.join(".config").join("tunnel-rs").join("client_ice.toml"))
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Could not find default config path. Use -c to specify a config file."
+                )
+            })?;
+        Ok((load_client_config(Some(&path))?, true))
     } else {
         Ok((ClientConfig::default(), false))
     }
@@ -356,8 +370,8 @@ async fn main() -> Result<()> {
             // Determine effective mode: CLI mode takes precedence, else read from config
             let effective_mode = match (&mode, &cfg.mode) {
                 (Some(_), _) => mode.as_ref().map(|m| match m {
-                    ServerMode::CustomManual { .. } => "ice-manual",
-                    ServerMode::Nostr { .. } => "ice-nostr",
+                    ServerMode::CustomManual { .. } => "manual",
+                    ServerMode::Nostr { .. } => "nostr",
                 }),
                 (None, Some(m)) => Some(m.as_str()),
                 (None, None) => None,
@@ -372,8 +386,8 @@ async fn main() -> Result<()> {
             }
 
             match effective_mode {
-                "ice-manual" => {
-                    let custom_cfg = cfg.ice_manual.as_ref();
+                "manual" => {
+                    let custom_cfg = cfg.manual.as_ref();
                     let (allowed_tcp, allowed_udp, stun_servers) = match &mode {
                         Some(ServerMode::CustomManual {
                             allowed_tcp: at,
@@ -424,7 +438,7 @@ async fn main() -> Result<()> {
 
                     custom::run_manual_server(allowed_tcp, allowed_udp, stun_servers).await
                 }
-                "ice-nostr" => {
+                "nostr" => {
                     let nostr_cfg = cfg.nostr();
                     let (
                         allowed_tcp,
@@ -546,7 +560,7 @@ async fn main() -> Result<()> {
                     .await
                 }
                 _ => anyhow::bail!(
-                    "Invalid mode '{}'. Use: ice-manual or ice-nostr",
+                    "Invalid mode '{}'. Use: manual or nostr",
                     effective_mode
                 ),
             }
@@ -560,8 +574,8 @@ async fn main() -> Result<()> {
 
             let effective_mode = match (&mode, &cfg.mode) {
                 (Some(_), _) => mode.as_ref().map(|m| match m {
-                    ClientMode::CustomManual { .. } => "ice-manual",
-                    ClientMode::Nostr { .. } => "ice-nostr",
+                    ClientMode::CustomManual { .. } => "manual",
+                    ClientMode::Nostr { .. } => "nostr",
                 }),
                 (None, Some(m)) => Some(m.as_str()),
                 (None, None) => None,
@@ -576,8 +590,8 @@ async fn main() -> Result<()> {
             }
 
             match effective_mode {
-                "ice-manual" => {
-                    let custom_cfg = cfg.ice_manual.as_ref();
+                "manual" => {
+                    let custom_cfg = cfg.manual.as_ref();
                     let (source, target, stun_servers) = match &mode {
                         Some(ClientMode::CustomManual {
                             source: src,
@@ -621,7 +635,7 @@ async fn main() -> Result<()> {
 
                     custom::run_manual_client(source, listen, stun_servers).await
                 }
-                "ice-nostr" => {
+                "nostr" => {
                     let nostr_cfg = cfg.nostr();
                     let (
                         target,
@@ -758,7 +772,7 @@ async fn main() -> Result<()> {
                     }
                 }
                 _ => anyhow::bail!(
-                    "Invalid mode '{}'. Use: ice-manual or ice-nostr",
+                    "Invalid mode '{}'. Use: manual or nostr",
                     effective_mode
                 ),
             }
