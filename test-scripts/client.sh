@@ -12,7 +12,7 @@ source "$SCRIPT_DIR/keys.sh"
 NUM_SESSIONS="${1:-1}"
 BASE_PORT="${2:-17001}"
 SOURCE_PORT="${3:-19999}"
-TUNNEL_BIN="$SCRIPT_DIR/../target/release/tunnel-rs"
+TUNNEL_BIN="$SCRIPT_DIR/../target/release/tunnel-rs-ice"
 
 [ ! -f "$TUNNEL_BIN" ] && cargo build --release --manifest-path="$SCRIPT_DIR/../Cargo.toml"
 
@@ -31,7 +31,7 @@ echo ""
 for i in $(seq 1 $NUM_SESSIONS); do
     PORT=$((BASE_PORT + i - 1))
     echo "[$i] Starting client on port $PORT..."
-    "$TUNNEL_BIN" client nostr \
+    "$TUNNEL_BIN" client ice-nostr \
         --source "tcp://localhost:$SOURCE_PORT" \
         --target "127.0.0.1:$PORT" \
         --nsec-file "$CLIENT_NSEC_FILE" \

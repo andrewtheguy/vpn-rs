@@ -208,7 +208,7 @@ graph LR
 ```mermaid
 graph TB
     subgraph "Sender Side"
-        A[tunnel-rs sender]
+        A[tunnel-rs server]
         B[iroh Endpoint]
         C[Target Service<br/>e.g., SSH:22]
         D[Discovery<br/>Pkarr/DNS]
@@ -216,7 +216,7 @@ graph TB
     end
     
     subgraph "Receiver Side"
-        F[tunnel-rs receiver]
+        F[tunnel-rs client]
         G[iroh Endpoint]
         H[Local Client<br/>e.g., SSH client]
         I[Discovery<br/>Pkarr/DNS]
@@ -400,7 +400,7 @@ graph TB
 ```mermaid
 graph TB
     subgraph "Sender Side"
-        A[tunnel-rs sender]
+        A[tunnel-rs server]
         B[ICE Agent<br/>str0m]
         C[QUIC Endpoint<br/>quinn]
         D[Stream Mux]
@@ -408,7 +408,7 @@ graph TB
     end
     
     subgraph "Receiver Side"
-        F[tunnel-rs receiver]
+        F[tunnel-rs client]
         G[ICE Agent<br/>str0m]
         H[QUIC Endpoint<br/>quinn]
         I[Stream Mux]
@@ -714,7 +714,7 @@ Receiver: --source tcp://postgres:5432    # Request specific service
 ```mermaid
 graph TB
     subgraph "Sender Side"
-        A[tunnel-rs sender]
+        A[tunnel-rs server]
         B[ICE Agent<br/>str0m]
         C[QUIC Endpoint<br/>quinn]
         D[Nostr Client]
@@ -728,7 +728,7 @@ graph TB
     end
 
     subgraph "Receiver Side"
-        I[tunnel-rs receiver]
+        I[tunnel-rs client]
         J[ICE Agent<br/>str0m]
         K[QUIC Endpoint<br/>quinn]
         L[Nostr Client]

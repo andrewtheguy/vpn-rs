@@ -144,7 +144,7 @@ tor
 tunnel-rs client \
   --relay-url http://YOUR_ADDRESS.onion \
   --socks5-proxy socks5h://127.0.0.1:9050 \
-  --node-id <SERVER_ENDPOINT_ID> \
+  --server-node-id <SERVER_ENDPOINT_ID> \
   --source tcp://127.0.0.1:22 \
   --target 127.0.0.1:2222
 ```

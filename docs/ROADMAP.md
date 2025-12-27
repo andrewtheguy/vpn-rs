@@ -25,29 +25,29 @@ Both `iroh` and `ice-nostr` modes support receiver-requested sources, similar to
 
 **Usage (iroh mode):**
 ```bash
-# Sender: allow networks via CIDR
-tunnel-rs sender iroh \
+# Server: allow networks via CIDR
+tunnel-rs server \
   --allowed-tcp 127.0.0.0/8 \
   --allowed-tcp 192.168.0.0/16 \
   --allowed-udp 10.0.0.0/8
 
-# Receiver: request a specific source
-tunnel-rs receiver iroh \
-  --node-id <sender-node-id> \
+# Client: request a specific source
+tunnel-rs client \
+  --server-node-id <sender-node-id> \
   --source tcp://127.0.0.1:22 \
   --target 127.0.0.1:2222
 ```
 
 **Usage (nostr mode):**
 ```bash
-# Sender: allow networks via CIDR
-tunnel-rs sender nostr --nsec-file ./sender.nsec \
+# Server: allow networks via CIDR
+tunnel-rs-ice server ice-nostr --nsec-file ./server.nsec \
   --peer-npub npub1receiver... \
   --allowed-tcp 127.0.0.0/8 \
   --allowed-udp 10.0.0.0/8
 
-# Receiver: request a specific source
-tunnel-rs receiver nostr --nsec-file ./receiver.nsec \
+# Client: request a specific source
+tunnel-rs-ice client ice-nostr --nsec-file ./receiver.nsec \
   --peer-npub npub1sender... \
   --source tcp://127.0.0.1:22 \
   --target 127.0.0.1:2222

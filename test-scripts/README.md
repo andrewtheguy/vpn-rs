@@ -26,11 +26,11 @@ cargo build --release
 # Terminal 1: Start echo server (the source service)
 python3 test-scripts/echo_server.py 19999
 
-# Terminal 2: Start sender (waits for receiver connections)
-./test-scripts/sender.sh
+# Terminal 2: Start server (waits for client connections)
+./test-scripts/server.sh
 
-# Terminal 3: Start receiver(s) - these initiate connections to sender
-./test-scripts/receiver.sh 3      # 3 sessions on ports 17001-17003
+# Terminal 3: Start client(s) - these initiate connections to server
+./test-scripts/client.sh 3      # 3 sessions on ports 17001-17003
 
 # Terminal 4: Run tests
 python3 test-scripts/test_tunnel.py -n 3                # Ping 3 ports (17001-17003)
@@ -43,8 +43,8 @@ python3 test-scripts/test_tunnel.py -n 3 --stream 10 --loop  # Stream 10s repeat
 
 | Script | Description |
 |--------|-------------|
-| `sender.sh [MAX]` | Start sender with `--allowed-tcp 127.0.0.0/8` (default: max 5 sessions) |
-| `receiver.sh [NUM] [PORT] [SRC]` | Start N receivers requesting source SRC on local ports (default: 1 receiver, port 17001, source 19999) |
+| `server.sh [MAX]` | Start server with `--allowed-tcp 127.0.0.0/8` (default: max 5 sessions) |
+| `client.sh [NUM] [PORT] [SRC]` | Start N clients requesting source SRC on local ports (default: 1 client, port 17001, source 19999) |
 | `test_tunnel.py` | Test tunnel connectivity and data integrity |
 | `echo_server.py [PORT]` | Multi-connection TCP echo server |
 | `keys.sh` | Key management (auto-sourced by other scripts) |

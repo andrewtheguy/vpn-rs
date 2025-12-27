@@ -2,6 +2,8 @@
 #
 # Usage: tunnel-rs server -c server.toml
 #        tunnel-rs server --default-config
+#        tunnel-rs-ice server ice-manual -c server.toml
+#        tunnel-rs-ice server ice-nostr -c server.toml
 #
 # Mode is inferred from the 'mode' field below.
 # CLI arguments take precedence over config file values.
@@ -95,7 +97,7 @@ udp = [
 # # Server-only fields: allowed_sources, max_sessions
 # # (request_source is client-only and will be rejected if present here)
 #
-# # Your Nostr private key (generate with: tunnel-rs generate-nostr-key)
+# # Your Nostr private key (generate with: tunnel-rs-ice generate-nostr-key)
 # # Use either nsec or nsec_file
 # nsec = "nsec1..."
 # nsec_file = "./nostr.nsec"

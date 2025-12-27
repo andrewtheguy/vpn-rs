@@ -849,7 +849,7 @@ When no relays are specified, these public relays are used:
 |------|---------------|----------------|-------------|
 | `iroh` | **Yes** | **Yes** | Multiple receivers, receiver chooses source |
 | `ice-nostr` | **Yes** | **Yes** | Multiple receivers, receiver chooses source |
-| `ice-manual` | No | No | Single session, fixed source |
+| `ice-manual` | No | **Yes** | Single session, receiver chooses source |
 
 **Multi-Session** = Multiple concurrent connections to the same sender
 **Dynamic Source** = Receiver specifies which service to tunnel (like SSH `-L`)
