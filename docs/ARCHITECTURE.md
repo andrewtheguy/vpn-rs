@@ -7,8 +7,8 @@ This document provides a comprehensive overview of the tunnel-rs architecture, i
 - [System Overview](#system-overview)
 - [Mode Comparison](#mode-comparison)
 - [iroh Mode](#iroh-mode)
-- [ice-manual Mode](#ice-manual-mode)
-- [ice-nostr Mode](#ice-nostr-mode)
+- [manual Mode](#manual-mode)
+- [nostr Mode](#nostr-mode)
 - [Configuration System](#configuration-system)
 - [Security Model](#security-model)
 - [Protocol Support](#protocol-support)
@@ -23,7 +23,7 @@ tunnel-rs is a P2P TCP/UDP port forwarding tool that supports multiple distinct 
 
 Binary layout:
 - `tunnel-rs`: iroh-only
-- `tunnel-rs-ice`: ice-manual and ice-nostr
+- `tunnel-rs-ice`: manual and nostr
 
 > **Design Goal:** The project's primary goal is to provide a convenient way to connect to different networks for development or homelab purposes without the hassle and security risk of opening a port. It is **not** meant for production setups or designed to be performant at scale.
 
@@ -31,8 +31,8 @@ Binary layout:
 graph TB
     subgraph "tunnel-rs Modes"
         A[iroh]
-        C[ice-manual]
-        D2[ice-nostr]
+        C[manual]
+        D2[nostr]
     end
 
     subgraph "Use Cases"
@@ -67,7 +67,7 @@ The project is split into separate binaries to isolate dependencies:
 | Binary | Modes | Key Modules |
 |--------|-------|-------------|
 | `tunnel-rs` | `iroh` | `iroh_mode`, `auth`, `socks5_bridge` |
-| `tunnel-rs-ice` | `ice-manual`, `ice-nostr` | `custom`, `nostr`, `transport` |
+| `tunnel-rs-ice` | `manual`, `nostr` | `custom`, `nostr`, `transport` |
 
 The `test-utils` feature is still available on the iroh crates/binary to enable `--relay-only` for testing.
 
@@ -122,7 +122,7 @@ graph LR
 
 ## Mode Comparison
 
-> **Tip for Containerized Environments:** Use `iroh` mode for Docker, Kubernetes, and cloud VM deployments. It includes relay fallback which ensures connectivity even when both peers are behind restrictive NATs (common in cloud environments). The `ice-nostr` and `ice-manual` modes use STUN-only NAT traversal which may fail in these environments.
+> **Tip for Containerized Environments:** Use `iroh` mode for Docker, Kubernetes, and cloud VM deployments. It includes relay fallback which ensures connectivity even when both peers are behind restrictive NATs (common in cloud environments). The `nostr` and `manual` modes use STUN-only NAT traversal which may fail in these environments.
 
 ### Feature Matrix
 
@@ -135,7 +135,7 @@ graph TD
         A4[Infrastructure: Required]
     end
 
-    subgraph "ice-manual"
+    subgraph "manual"
         C1[Discovery: Copy-Paste]
         C2[NAT: Full ICE]
         C3[Setup: Manual Exchange]
@@ -171,7 +171,7 @@ graph LR
         E4[✓ Relay]
     end
 
-    subgraph "ice-manual"
+    subgraph "manual"
         G1[✓ Direct]
         G2[✓ Direct]
         G3[✓ Direct]
@@ -391,9 +391,9 @@ graph TB
 
 ---
 
-## ice-manual Mode
+## manual Mode
 
-> **Note:** ice-manual mode implements full ICE with STUN-only connectivity checks. TURN/relay servers are not implemented. This means symmetric NAT peers may still fail to establish a connection without a relay fallback mechanism.
+> **Note:** manual mode implements full ICE with STUN-only connectivity checks. TURN/relay servers are not implemented. This means symmetric NAT peers may still fail to establish a connection without a relay fallback mechanism.
 
 ### Architecture Overview
 
@@ -688,11 +688,11 @@ graph TB
 
 ---
 
-## ice-nostr Mode
+## nostr Mode
 
-Nostr mode combines the full ICE implementation from ice-manual mode with automated signaling via Nostr relays. Instead of manual copy-paste, ICE credentials are exchanged through Nostr events using static keypairs.
+Nostr mode combines the full ICE implementation from manual mode with automated signaling via Nostr relays. Instead of manual copy-paste, ICE credentials are exchanged through Nostr events using static keypairs.
 
-> **Note for Containerized Environments:** Like ice-manual mode, nostr mode uses STUN-only NAT traversal without relay fallback. If both peers are behind restrictive NATs (common in Docker, Kubernetes, or cloud VMs), ICE connectivity may fail. For containerized deployments, consider using `iroh` mode which includes automatic relay fallback.
+> **Note for Containerized Environments:** Like manual mode, nostr mode uses STUN-only NAT traversal without relay fallback. If both peers are behind restrictive NATs (common in Docker, Kubernetes, or cloud VMs), ICE connectivity may fail. For containerized deployments, consider using `iroh` mode which includes automatic relay fallback.
 
 ### Receiver-Initiated Dynamic Source
 
@@ -930,14 +930,14 @@ graph TB
 graph TB
     subgraph "Config File"
         A[role: sender/receiver]
-        B[mode: iroh/ice-manual/ice-nostr]
+        B[mode: iroh/manual/nostr]
         C[source/target: tcp://host:port or udp://host:port]
     end
 
     subgraph "Mode Sections"
         E[iroh]
-        G[ice-manual]
-        H[ice-nostr]
+        G[manual]
+        H[nostr]
     end
 
     subgraph "iroh Options"
@@ -948,11 +948,11 @@ graph TB
         M[server_node_id - receiver only]
     end
 
-    subgraph "ice-manual Options"
+    subgraph "manual Options"
         N[stun_servers]
     end
 
-    subgraph "ice-nostr Options"
+    subgraph "nostr Options"
         O[nsec/nsec_file]
         P[peer_npub]
         Q[relays]
@@ -994,7 +994,7 @@ sequenceDiagram
     
     alt --default-config
         Main->>Config: Load from default path
-        Config->>File: Read ~/.config/tunnel-rs/{role}.toml
+        Config->>File: Read ~/.config/tunnel-rs/{role}.toml (tunnel-rs) or ~/.config/tunnel-rs/{role}_ice.toml (tunnel-rs-ice)
     else -c <path>
         Main->>Config: Load from path
         Config->>File: Read specified file
@@ -1012,6 +1012,8 @@ sequenceDiagram
     
     Main->>Main: Proceed with merged config
 ```
+
+Note: For `tunnel-rs-ice`, the mode is inferred from the config file, so `server -c <file>` / `client -c <file>` can be used without a subcommand.
 
 ### Config Validation
 
@@ -1089,7 +1091,7 @@ graph TB
         E -->|No| G[Rejected]
     end
 
-    subgraph "ice-manual Mode"
+    subgraph "manual Mode"
         H[ICE Credentials] --> I[ufrag + pwd]
         I --> J[STUN Auth]
         J --> K[QUIC TLS]
@@ -1375,7 +1377,7 @@ graph LR
         C[Total: 1.5-5s]
     end
 
-    subgraph "ice-manual"
+    subgraph "manual"
         H[ICE Gather: 1-2s]
         I[Manual: User dependent]
         J[ICE Checks: 1-3s]
@@ -1410,7 +1412,7 @@ graph TB
     E -->|Yes| F[Fallback to relay]
     E -->|No| G[Connection failed]
 
-    D -->|ice-manual| I[ICE checks failed]
+    D -->|manual| I[ICE checks failed]
     
     F --> C
     H --> G
@@ -1434,8 +1436,8 @@ graph TB
 | Mode | Multi-Session | Dynamic Source | Description |
 |------|---------------|----------------|-------------|
 | `iroh` | **Yes** | **Yes** | Multiple receivers, receiver specifies `--source` |
-| `ice-nostr` | **Yes** | **Yes** | Multiple receivers, receiver specifies `--source` |
-| `ice-manual` | No | **Yes** | Single session, receiver specifies `--source` |
+| `nostr` | **Yes** | **Yes** | Multiple receivers, receiver specifies `--source` |
+| `manual` | No | **Yes** | Single session, receiver specifies `--source` |
 
 **Multi-Session** = Multiple concurrent connections to the same sender
 **Dynamic Source** = Receiver specifies which service to tunnel (via `--source`)
@@ -1446,11 +1448,11 @@ graph TB
 
 ### Single Session (Manual Signaling Mode)
 
-The `ice-manual` mode currently supports only one tunnel session at a time per sender instance. Each signaling exchange establishes exactly one tunnel.
+The `manual` mode currently supports only one tunnel session at a time per sender instance. Each signaling exchange establishes exactly one tunnel.
 
 ```mermaid
 graph TB
-    subgraph "ice-manual Behavior"
+    subgraph "manual Behavior"
         A[Sender starts] --> B[Wait for receiver offer]
         B --> C[Validate source request]
         C --> D[Establish single tunnel]

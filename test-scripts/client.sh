@@ -31,7 +31,7 @@ echo ""
 for i in $(seq 1 $NUM_SESSIONS); do
     PORT=$((BASE_PORT + i - 1))
     echo "[$i] Starting client on port $PORT..."
-    "$TUNNEL_BIN" client ice-nostr \
+    "$TUNNEL_BIN" client nostr \
         --source "tcp://localhost:$SOURCE_PORT" \
         --target "127.0.0.1:$PORT" \
         --nsec-file "$CLIENT_NSEC_FILE" \

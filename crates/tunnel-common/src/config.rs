@@ -2,7 +2,7 @@
 //!
 //! Configuration structure:
 //! - `role` and `mode` fields for validation
-//! - Mode-specific sections: [iroh], [ice-manual], [ice-nostr]
+//! - Mode-specific sections: [iroh], [manual], [nostr]
 //! - All modes use client-initiated source requests
 //!
 //! Role-based field semantics are enforced by `validate()` at parse time:
@@ -59,7 +59,7 @@ pub struct IrohConfig {
     pub socks5_proxy: Option<String>,
 }
 
-/// ice-manual mode configuration.
+/// manual mode configuration.
 ///
 /// Some fields are role-specific (enforced by validate()):
 /// - Server-only: `allowed_sources`
@@ -91,9 +91,9 @@ pub struct AllowedSources {
     pub udp: Vec<String>,
 }
 
-/// ice-nostr mode configuration (TOML section: `[ice-nostr]`).
+/// nostr mode configuration (TOML section: `[nostr]`).
 ///
-/// ice-nostr provides full ICE with automated Nostr relay signaling for static peer key exchange.
+/// nostr provides full ICE with automated Nostr relay signaling for static peer key exchange.
 ///
 /// Some fields are role-specific (enforced by validate()):
 /// - Server-only: `allowed_sources`, `max_sessions`
@@ -124,21 +124,56 @@ pub struct NostrConfig {
     pub target: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Role {
+    Server,
+    Client,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Mode {
+    Iroh,
+    Manual,
+    Nostr,
+}
+
+impl Mode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Mode::Iroh => "iroh",
+            Mode::Manual => "manual",
+            Mode::Nostr => "nostr",
+        }
+    }
+}
+
+fn parse_expected_mode(expected_mode: &str) -> Result<Mode> {
+    match expected_mode {
+        "iroh" => Ok(Mode::Iroh),
+        "manual" => Ok(Mode::Manual),
+        "nostr" => Ok(Mode::Nostr),
+        _ => anyhow::bail!(
+            "Unknown mode '{}'. Valid modes: iroh, manual, nostr",
+            expected_mode
+        ),
+    }
+}
+
 /// Unified server configuration.
 #[derive(Deserialize, Default)]
 pub struct ServerConfig {
     // Validation fields
-    pub role: Option<String>,
-    pub mode: Option<String>,
+    pub role: Option<Role>,
+    pub mode: Option<Mode>,
 
     // Shared options
     pub source: Option<String>,
 
     // Mode-specific sections
     pub iroh: Option<IrohConfig>,
-    #[serde(rename = "ice-manual")]
-    pub ice_manual: Option<CustomManualConfig>,
-    #[serde(rename = "ice-nostr")]
+    pub manual: Option<CustomManualConfig>,
     pub nostr: Option<NostrConfig>,
 }
 
@@ -146,14 +181,12 @@ pub struct ServerConfig {
 #[derive(Deserialize, Default)]
 pub struct ClientConfig {
     // Validation fields
-    pub role: Option<String>,
-    pub mode: Option<String>,
+    pub role: Option<Role>,
+    pub mode: Option<Mode>,
 
     // Mode-specific sections (each mode has its own target field)
     pub iroh: Option<IrohConfig>,
-    #[serde(rename = "ice-manual")]
-    pub ice_manual: Option<CustomManualConfig>,
-    #[serde(rename = "ice-nostr")]
+    pub manual: Option<CustomManualConfig>,
     pub nostr: Option<NostrConfig>,
 }
 
@@ -337,34 +370,25 @@ impl ServerConfig {
     pub fn validate(&self, expected_mode: &str) -> Result<()> {
         let role = self
             .role
-            .as_deref()
             .context("Config file missing required 'role' field. Add: role = \"server\"")?;
-        if role != "server" {
-            anyhow::bail!("Config file has role = \"{}\", but running as server", role);
+        if role != Role::Server {
+            anyhow::bail!("Config file has role = \"client\", but running as server");
         }
 
-        let mode = self.mode.as_deref().context(
-            "Config file missing required 'mode' field. Add: mode = \"iroh\" (or \"ice-manual\", \"ice-nostr\")",
+        let mode = self.mode.context(
+            "Config file missing required 'mode' field. Add: mode = \"iroh\" (or \"manual\", \"nostr\")",
         )?;
+        let expected_mode = parse_expected_mode(expected_mode)?;
         if mode != expected_mode {
             anyhow::bail!(
                 "Config file has mode = \"{}\", but running with {}",
-                mode,
-                expected_mode
+                mode.as_str(),
+                expected_mode.as_str()
             );
         }
 
-        // Validate mode is known
-        match expected_mode {
-            "iroh" | "ice-manual" | "ice-nostr" => {}
-            _ => anyhow::bail!(
-                "Unknown mode '{}'. Valid modes: iroh, ice-manual, ice-nostr",
-                expected_mode
-            ),
-        }
-
         // Mode-specific validation
-        if expected_mode == "iroh" {
+        if expected_mode == Mode::Iroh {
             if let Some(ref iroh) = self.iroh {
                 if iroh.secret.is_some() && iroh.secret_file.is_some() {
                     anyhow::bail!("[iroh] Use only one of 'secret' or 'secret_file'.");
@@ -427,15 +451,15 @@ impl ServerConfig {
                 );
             }
         }
-        if expected_mode == "ice-nostr" {
+        if expected_mode == Mode::Nostr {
             if let Some(ref nostr) = self.nostr {
                 if nostr.nsec.is_some() && nostr.nsec_file.is_some() {
-                    anyhow::bail!("[ice-nostr] Use only one of 'nsec' or 'nsec_file'.");
+                    anyhow::bail!("[nostr] Use only one of 'nsec' or 'nsec_file'.");
                 }
                 // Reject client-only fields
                 if nostr.request_source.is_some() || nostr.target.is_some() {
                     anyhow::bail!(
-                        "[ice-nostr] 'source' / 'request_source' / 'target' are client-only fields. \
+                        "[nostr] 'source' / 'request_source' / 'target' are client-only fields. \
                         Servers use 'allowed_sources' to restrict what clients can request."
                     );
                 }
@@ -444,33 +468,33 @@ impl ServerConfig {
                     validate_allowed_sources(allowed)?;
                 }
             }
-            // Server ice-nostr mode should not have top-level source
+            // Server nostr mode should not have top-level source
             if self.source.is_some() {
                 anyhow::bail!(
-                    "Top-level 'source' is not allowed for ice-nostr server mode. \
-                    Use [ice-nostr.allowed_sources] to restrict what clients can request."
+                    "Top-level 'source' is not allowed for nostr server mode. \
+                    Use [nostr.allowed_sources] to restrict what clients can request."
                 );
             }
         }
-        if expected_mode == "ice-manual" {
-            if let Some(ref ice_manual) = self.ice_manual {
+        if expected_mode == Mode::Manual {
+            if let Some(ref manual) = self.manual {
                 // Reject client-only fields
-                if ice_manual.request_source.is_some() || ice_manual.target.is_some() {
+                if manual.request_source.is_some() || manual.target.is_some() {
                     anyhow::bail!(
-                        "[ice-manual] 'source' / 'request_source' / 'target' are client-only fields. \
+                        "[manual] 'source' / 'request_source' / 'target' are client-only fields. \
                         Servers use 'allowed_sources' to restrict what clients can request."
                     );
                 }
                 // Validate CIDR format
-                if let Some(ref allowed) = ice_manual.allowed_sources {
+                if let Some(ref allowed) = manual.allowed_sources {
                     validate_allowed_sources(allowed)?;
                 }
             }
-            // Reject top-level source for ice-manual server
+            // Reject top-level source for manual server
             if self.source.is_some() {
                 anyhow::bail!(
-                    "Top-level 'source' is not allowed for ice-manual server mode. \
-                    Use [ice-manual.allowed_sources] to restrict what clients can request."
+                    "Top-level 'source' is not allowed for manual server mode. \
+                    Use [manual.allowed_sources] to restrict what clients can request."
                 );
             }
         }
@@ -501,34 +525,25 @@ impl ClientConfig {
     pub fn validate(&self, expected_mode: &str) -> Result<()> {
         let role = self
             .role
-            .as_deref()
             .context("Config file missing required 'role' field. Add: role = \"client\"")?;
-        if role != "client" {
-            anyhow::bail!("Config file has role = \"{}\", but running as client", role);
+        if role != Role::Client {
+            anyhow::bail!("Config file has role = \"server\", but running as client");
         }
 
-        let mode = self.mode.as_deref().context(
-            "Config file missing required 'mode' field. Add: mode = \"iroh\" (or \"ice-manual\", \"ice-nostr\")",
+        let mode = self.mode.context(
+            "Config file missing required 'mode' field. Add: mode = \"iroh\" (or \"manual\", \"nostr\")",
         )?;
+        let expected_mode = parse_expected_mode(expected_mode)?;
         if mode != expected_mode {
             anyhow::bail!(
                 "Config file has mode = \"{}\", but running with {}",
-                mode,
-                expected_mode
+                mode.as_str(),
+                expected_mode.as_str()
             );
         }
 
-        // Validate mode is known
-        match expected_mode {
-            "iroh" | "ice-manual" | "ice-nostr" => {}
-            _ => anyhow::bail!(
-                "Unknown mode '{}'. Valid modes: iroh, ice-manual, ice-nostr",
-                expected_mode
-            ),
-        }
-
         // Mode-specific validation
-        if expected_mode == "iroh" {
+        if expected_mode == Mode::Iroh {
             if let Some(ref iroh) = self.iroh {
                 if iroh.secret.is_some() && iroh.secret_file.is_some() {
                     anyhow::bail!("[iroh] Use only one of 'secret' or 'secret_file'.");
@@ -571,20 +586,20 @@ impl ClientConfig {
                 }
             }
         }
-        if expected_mode == "ice-nostr" {
+        if expected_mode == Mode::Nostr {
             if let Some(ref nostr) = self.nostr {
                 if nostr.nsec.is_some() && nostr.nsec_file.is_some() {
-                    anyhow::bail!("[ice-nostr] Use only one of 'nsec' or 'nsec_file'.");
+                    anyhow::bail!("[nostr] Use only one of 'nsec' or 'nsec_file'.");
                 }
                 // Reject server-only fields
                 if nostr.allowed_sources.is_some() {
                     anyhow::bail!(
-                        "[ice-nostr] 'allowed_sources' is a server-only field. \
+                        "[nostr] 'allowed_sources' is a server-only field. \
                         Clients use 'source' to specify what to request from server."
                     );
                 }
                 if nostr.max_sessions.is_some() {
-                    anyhow::bail!("[ice-nostr] 'max_sessions' is a server-only field.");
+                    anyhow::bail!("[nostr] 'max_sessions' is a server-only field.");
                 }
                 // Validate request_source URL format
                 if let Some(ref source) = nostr.request_source {
@@ -597,21 +612,21 @@ impl ClientConfig {
             }
         }
 
-        if expected_mode == "ice-manual" {
-            if let Some(ref ice_manual) = self.ice_manual {
+        if expected_mode == Mode::Manual {
+            if let Some(ref manual) = self.manual {
                 // Reject server-only fields
-                if ice_manual.allowed_sources.is_some() {
+                if manual.allowed_sources.is_some() {
                     anyhow::bail!(
-                        "[ice-manual] 'allowed_sources' is a server-only field. \
+                        "[manual] 'allowed_sources' is a server-only field. \
                         Clients use 'source' to specify what to request from server."
                     );
                 }
                 // Validate request_source URL format
-                if let Some(ref source) = ice_manual.request_source {
+                if let Some(ref source) = manual.request_source {
                     validate_tcp_udp_url(source, "request_source")?;
                 }
                 // Validate target format (host:port)
-                if let Some(ref target) = ice_manual.target {
+                if let Some(ref target) = manual.target {
                     validate_host_port(target, "target")?;
                 }
             }
@@ -688,7 +703,6 @@ pub fn default_nostr_relays() -> Vec<String> {
     vec![
         "wss://relay.damus.io".to_string(),
         "wss://nos.lol".to_string(),
-        "wss://relay.nostr.band".to_string(),
         "wss://relay.primal.net".to_string(),
         "wss://nostr.mom".to_string(),
         "wss://relay.snort.social".to_string(),

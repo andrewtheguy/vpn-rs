@@ -22,7 +22,7 @@ echo "Allowed networks: 127.0.0.0/8 (TCP)"
 echo "Max sessions: $MAX_SESSIONS"
 echo ""
 
-exec "$TUNNEL_BIN" server ice-nostr \
+exec "$TUNNEL_BIN" server nostr \
     --allowed-tcp 127.0.0.0/8 \
     --nsec-file "$SERVER_NSEC_FILE" \
     --peer-npub "$CLIENT_NPUB" \

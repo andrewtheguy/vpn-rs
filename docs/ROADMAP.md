@@ -6,8 +6,8 @@ This document outlines planned features and improvements for tunnel-rs.
 
 tunnel-rs currently supports three stable operational modes:
 - **iroh**: Persistent identity with automatic discovery, relay fallback, and receiver-requested sources
-- **ice-nostr**: Full ICE with automated Nostr relay signaling and receiver-requested sources
-- **ice-manual**: Full ICE with manual signaling (single-target)
+- **nostr**: Full ICE with automated Nostr relay signaling and receiver-requested sources
+- **manual**: Full ICE with manual signaling (single-target)
 
 All modes support TCP and UDP tunneling with end-to-end encryption via QUIC/TLS 1.3.
 
@@ -21,7 +21,7 @@ All modes support TCP and UDP tunneling with end-to-end encryption via QUIC/TLS 
 
 **Status:** Implemented
 
-Both `iroh` and `ice-nostr` modes support receiver-requested sources, similar to SSH's `-R` flag for reverse tunnels. Senders restrict allowed networks via `--allowed-tcp` / `--allowed-udp` flags or config file.
+Both `iroh` and `nostr` modes support receiver-requested sources, similar to SSH's `-R` flag for reverse tunnels. Senders restrict allowed networks via `--allowed-tcp` / `--allowed-udp` flags or config file.
 
 **Usage (iroh mode):**
 ```bash
@@ -41,13 +41,13 @@ tunnel-rs client \
 **Usage (nostr mode):**
 ```bash
 # Server: allow networks via CIDR
-tunnel-rs-ice server ice-nostr --nsec-file ./server.nsec \
+tunnel-rs-ice server nostr --nsec-file ./server.nsec \
   --peer-npub npub1receiver... \
   --allowed-tcp 127.0.0.0/8 \
   --allowed-udp 10.0.0.0/8
 
 # Client: request a specific source
-tunnel-rs-ice client ice-nostr --nsec-file ./receiver.nsec \
+tunnel-rs-ice client nostr --nsec-file ./receiver.nsec \
   --peer-npub npub1sender... \
   --source tcp://127.0.0.1:22 \
   --target 127.0.0.1:2222
@@ -73,11 +73,11 @@ tunnel-rs-ice client ice-nostr --nsec-file ./receiver.nsec \
 | Mode | Multi-Session | Dynamic Source |
 |------|---------------|----------------|
 | `iroh` | **Yes** - use `--max-sessions` (default: 100) | **Yes** - receiver specifies `--source` |
-| `ice-nostr` | **Yes** - use `--max-sessions` (default: 10) | **Yes** - receiver specifies `--source` |
-| `ice-manual` | No | No |
+| `nostr` | **Yes** - use `--max-sessions` (default: 10) | **Yes** - receiver specifies `--source` |
+| `manual` | No | No |
 
 **Multi-Session** = Multiple concurrent connections to the same sender
-**Dynamic Source** = Receiver specifies which service to tunnel (iroh and ice-nostr modes)
+**Dynamic Source** = Receiver specifies which service to tunnel (iroh and nostr modes)
 
 **Implementation Details:**
 - Each session gets independent ICE/QUIC stack
@@ -86,11 +86,11 @@ tunnel-rs-ice client ice-nostr --nsec-file ./receiver.nsec \
 
 ---
 
-#### Relay Fallback for ice-manual/ice-nostr Modes
+#### Relay Fallback for manual/nostr Modes
 
 **Status:** Idea
 
-ice-manual and ice-nostr modes use full ICE but have no relay fallback for symmetric NAT scenarios where direct connectivity fails.
+manual and nostr modes use full ICE but have no relay fallback for symmetric NAT scenarios where direct connectivity fails.
 
 ---
 
