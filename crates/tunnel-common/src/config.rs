@@ -124,12 +124,49 @@ pub struct NostrConfig {
     pub target: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Role {
+    Server,
+    Client,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Mode {
+    Iroh,
+    Manual,
+    Nostr,
+}
+
+impl Mode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Mode::Iroh => "iroh",
+            Mode::Manual => "manual",
+            Mode::Nostr => "nostr",
+        }
+    }
+}
+
+fn parse_expected_mode(expected_mode: &str) -> Result<Mode> {
+    match expected_mode {
+        "iroh" => Ok(Mode::Iroh),
+        "manual" => Ok(Mode::Manual),
+        "nostr" => Ok(Mode::Nostr),
+        _ => anyhow::bail!(
+            "Unknown mode '{}'. Valid modes: iroh, manual, nostr",
+            expected_mode
+        ),
+    }
+}
+
 /// Unified server configuration.
 #[derive(Deserialize, Default)]
 pub struct ServerConfig {
     // Validation fields
-    pub role: Option<String>,
-    pub mode: Option<String>,
+    pub role: Option<Role>,
+    pub mode: Option<Mode>,
 
     // Shared options
     pub source: Option<String>,
@@ -144,8 +181,8 @@ pub struct ServerConfig {
 #[derive(Deserialize, Default)]
 pub struct ClientConfig {
     // Validation fields
-    pub role: Option<String>,
-    pub mode: Option<String>,
+    pub role: Option<Role>,
+    pub mode: Option<Mode>,
 
     // Mode-specific sections (each mode has its own target field)
     pub iroh: Option<IrohConfig>,
@@ -333,34 +370,25 @@ impl ServerConfig {
     pub fn validate(&self, expected_mode: &str) -> Result<()> {
         let role = self
             .role
-            .as_deref()
             .context("Config file missing required 'role' field. Add: role = \"server\"")?;
-        if role != "server" {
-            anyhow::bail!("Config file has role = \"{}\", but running as server", role);
+        if role != Role::Server {
+            anyhow::bail!("Config file has role = \"client\", but running as server");
         }
 
-        let mode = self.mode.as_deref().context(
+        let mode = self.mode.context(
             "Config file missing required 'mode' field. Add: mode = \"iroh\" (or \"manual\", \"nostr\")",
         )?;
+        let expected_mode = parse_expected_mode(expected_mode)?;
         if mode != expected_mode {
             anyhow::bail!(
                 "Config file has mode = \"{}\", but running with {}",
-                mode,
-                expected_mode
+                mode.as_str(),
+                expected_mode.as_str()
             );
         }
 
-        // Validate mode is known
-        match expected_mode {
-            "iroh" | "manual" | "nostr" => {}
-            _ => anyhow::bail!(
-                "Unknown mode '{}'. Valid modes: iroh, manual, nostr",
-                expected_mode
-            ),
-        }
-
         // Mode-specific validation
-        if expected_mode == "iroh" {
+        if expected_mode == Mode::Iroh {
             if let Some(ref iroh) = self.iroh {
                 if iroh.secret.is_some() && iroh.secret_file.is_some() {
                     anyhow::bail!("[iroh] Use only one of 'secret' or 'secret_file'.");
@@ -423,7 +451,7 @@ impl ServerConfig {
                 );
             }
         }
-        if expected_mode == "nostr" {
+        if expected_mode == Mode::Nostr {
             if let Some(ref nostr) = self.nostr {
                 if nostr.nsec.is_some() && nostr.nsec_file.is_some() {
                     anyhow::bail!("[nostr] Use only one of 'nsec' or 'nsec_file'.");
@@ -448,7 +476,7 @@ impl ServerConfig {
                 );
             }
         }
-        if expected_mode == "manual" {
+        if expected_mode == Mode::Manual {
             if let Some(ref manual) = self.manual {
                 // Reject client-only fields
                 if manual.request_source.is_some() || manual.target.is_some() {
@@ -497,34 +525,25 @@ impl ClientConfig {
     pub fn validate(&self, expected_mode: &str) -> Result<()> {
         let role = self
             .role
-            .as_deref()
             .context("Config file missing required 'role' field. Add: role = \"client\"")?;
-        if role != "client" {
-            anyhow::bail!("Config file has role = \"{}\", but running as client", role);
+        if role != Role::Client {
+            anyhow::bail!("Config file has role = \"server\", but running as client");
         }
 
-        let mode = self.mode.as_deref().context(
+        let mode = self.mode.context(
             "Config file missing required 'mode' field. Add: mode = \"iroh\" (or \"manual\", \"nostr\")",
         )?;
+        let expected_mode = parse_expected_mode(expected_mode)?;
         if mode != expected_mode {
             anyhow::bail!(
                 "Config file has mode = \"{}\", but running with {}",
-                mode,
-                expected_mode
+                mode.as_str(),
+                expected_mode.as_str()
             );
         }
 
-        // Validate mode is known
-        match expected_mode {
-            "iroh" | "manual" | "nostr" => {}
-            _ => anyhow::bail!(
-                "Unknown mode '{}'. Valid modes: iroh, manual, nostr",
-                expected_mode
-            ),
-        }
-
         // Mode-specific validation
-        if expected_mode == "iroh" {
+        if expected_mode == Mode::Iroh {
             if let Some(ref iroh) = self.iroh {
                 if iroh.secret.is_some() && iroh.secret_file.is_some() {
                     anyhow::bail!("[iroh] Use only one of 'secret' or 'secret_file'.");
@@ -567,7 +586,7 @@ impl ClientConfig {
                 }
             }
         }
-        if expected_mode == "nostr" {
+        if expected_mode == Mode::Nostr {
             if let Some(ref nostr) = self.nostr {
                 if nostr.nsec.is_some() && nostr.nsec_file.is_some() {
                     anyhow::bail!("[nostr] Use only one of 'nsec' or 'nsec_file'.");
@@ -593,7 +612,7 @@ impl ClientConfig {
             }
         }
 
-        if expected_mode == "manual" {
+        if expected_mode == Mode::Manual {
             if let Some(ref manual) = self.manual {
                 // Reject server-only fields
                 if manual.allowed_sources.is_some() {
