@@ -15,7 +15,7 @@
 #      docker run --rm ghcr.io/andrewtheguy/tunnel-rs:latest \
 #        generate-iroh-key --output - > client.key
 #      docker run --rm -v ./client.key:/key:ro ghcr.io/andrewtheguy/tunnel-rs:latest \
-#        generate-iroh-key --input /key --output-node-id
+#        show-iroh-node-id --secret-file /key
 #      # Note the NodeId and add to clients.txt
 #
 #   3. Create clients.txt with allowed client NodeIds:
@@ -29,14 +29,14 @@
 #
 #   6. On the remote machine, connect to any service:
 #      # Connect to web service
-#      tunnel-rs client iroh \
+#      tunnel-rs client \
 #        --server-node-id <SERVER_NODE_ID> \
 #        --source tcp://web:80 \
 #        --target 127.0.0.1:8080 \
 #        --secret-file client.key
 #
 #      # Connect to database
-#      tunnel-rs client iroh \
+#      tunnel-rs client \
 #        --server-node-id <SERVER_NODE_ID> \
 #        --source tcp://db:5432 \
 #        --target 127.0.0.1:5432 \
@@ -62,7 +62,6 @@ services:
     image: ghcr.io/andrewtheguy/tunnel-rs:latest
     command:
       - server
-      - iroh
       - --allowed-tcp
       - "172.16.0.0/12"  # Docker default network range
       - --allowed-tcp

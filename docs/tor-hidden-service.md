@@ -117,7 +117,7 @@ iroh-relay --http-bind-addr 127.0.0.1:3340
 
 ```bash
 # Replace with your .onion address
-tunnel-rs server iroh \
+tunnel-rs server \
   --relay-url http://YOUR_ADDRESS.onion \
   --socks5-proxy socks5h://127.0.0.1:9050 \
   --secret-file ./server.key \
@@ -141,7 +141,7 @@ tor
 ```bash
 # Use --socks5-proxy to route relay connections through Tor
 # Note: Only relay connections go through Tor, direct P2P bypasses it
-tunnel-rs client iroh \
+tunnel-rs client \
   --relay-url http://YOUR_ADDRESS.onion \
   --socks5-proxy socks5h://127.0.0.1:9050 \
   --node-id <SERVER_ENDPOINT_ID> \

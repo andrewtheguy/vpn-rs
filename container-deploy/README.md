@@ -2,6 +2,9 @@
 
 Docker and Kubernetes configurations for running tunnel-rs in containerized environments.
 
+Note: The container image `ghcr.io/andrewtheguy/tunnel-rs:latest` is iroh-only.
+The `tunnel-rs-ice` binary is published in GitHub releases but is not containerized.
+
 > [!TIP]
 > **Recommended Mode:** Use `iroh` mode for all deployments. It provides the best NAT traversal with relay fallback, client authentication via NodeId, and multi-source capability where clients choose what to tunnel.
 
@@ -32,11 +35,11 @@ tunnel-rs generate-iroh-key --output server.key
 
 # 2. Generate client key and get NodeId
 tunnel-rs generate-iroh-key --output client.key
-tunnel-rs generate-iroh-key --input client.key --output-node-id
+tunnel-rs show-iroh-node-id --secret-file client.key
 # Output: <CLIENT_NODE_ID>
 
 # 3. Server: allow connections from authenticated clients
-tunnel-rs server iroh \
+tunnel-rs server \
   --secret-file ./server.key \
   --allowed-tcp 127.0.0.0/8 \
   --allowed-tcp 192.168.0.0/16 \
@@ -44,7 +47,7 @@ tunnel-rs server iroh \
 # Output: NodeId: <SERVER_NODE_ID>
 
 # 4. Client: connect and request a service
-tunnel-rs client iroh \
+tunnel-rs client \
   --secret-file ./client.key \
   --server-node-id <SERVER_NODE_ID> \
   --source tcp://127.0.0.1:22 \
@@ -67,7 +70,7 @@ docker run --rm ghcr.io/andrewtheguy/tunnel-rs:latest \
 
 # 2. Get client NodeId
 docker run --rm -v ./client.key:/key:ro ghcr.io/andrewtheguy/tunnel-rs:latest \
-  generate-iroh-key --input /key --output-node-id
+  show-iroh-node-id --secret-file /key
 # Output: <CLIENT_NODE_ID>
 
 # 3. Create clients.txt
@@ -81,14 +84,14 @@ docker compose logs tunnel-server | grep NodeId
 # NodeId: <SERVER_NODE_ID>
 
 # 6. On remote machine - connect to web service
-tunnel-rs client iroh \
+tunnel-rs client \
   --secret-file ./client.key \
   --server-node-id <SERVER_NODE_ID> \
   --source tcp://web:80 \
   --target 127.0.0.1:8080
 
 # 7. Or connect to database
-tunnel-rs client iroh \
+tunnel-rs client \
   --secret-file ./client.key \
   --server-node-id <SERVER_NODE_ID> \
   --source tcp://db:5432 \
@@ -105,7 +108,7 @@ Access ClusterIP services from outside the cluster — like SSH tunneling but ov
 # 1. Generate keys
 tunnel-rs generate-iroh-key --output server.key
 tunnel-rs generate-iroh-key --output client.key
-tunnel-rs generate-iroh-key --input client.key --output-node-id
+tunnel-rs show-iroh-node-id --secret-file client.key
 # Output: <CLIENT_NODE_ID>
 
 # 2. Create secrets
@@ -124,21 +127,21 @@ kubectl logs -l app=tunnel-server | grep NodeId
 
 ```bash
 # Tunnel to PostgreSQL
-tunnel-rs client iroh \
+tunnel-rs client \
   --secret-file ./client.key \
   --server-node-id <SERVER_NODE_ID> \
   --source tcp://postgres.database.svc:5432 \
   --target 127.0.0.1:5432
 
 # Tunnel to Redis
-tunnel-rs client iroh \
+tunnel-rs client \
   --secret-file ./client.key \
   --server-node-id <SERVER_NODE_ID> \
   --source tcp://redis.cache.svc:6379 \
   --target 127.0.0.1:6379
 
 # Tunnel to a web dashboard
-tunnel-rs client iroh \
+tunnel-rs client \
   --secret-file ./client.key \
   --server-node-id <SERVER_NODE_ID> \
   --source tcp://kubernetes-dashboard.kubernetes-dashboard.svc:443 \
@@ -158,7 +161,7 @@ Tunnel UDP services like DNS (something `kubectl port-forward` can't do):
 
 ```bash
 # Expose cluster DNS
-tunnel-rs client iroh \
+tunnel-rs client \
   --secret-file ./client.key \
   --server-node-id <SERVER_NODE_ID> \
   --source udp://kube-dns.kube-system.svc.cluster.local:53 \

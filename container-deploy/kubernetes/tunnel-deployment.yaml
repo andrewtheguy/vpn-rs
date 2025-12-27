@@ -19,7 +19,7 @@
 #
 #   2. Generate client key and get NodeId:
 #      tunnel-rs generate-iroh-key --output client.key
-#      tunnel-rs generate-iroh-key --input client.key --output-node-id
+#      tunnel-rs show-iroh-node-id --secret-file client.key
 #
 #   3. Create secrets:
 #      kubectl create secret generic tunnel-iroh-keys \
@@ -34,14 +34,14 @@
 #
 #   6. On remote machine, connect to any service in allowed networks:
 #      # Access postgres
-#      tunnel-rs client iroh \
+#      tunnel-rs client \
 #        --server-node-id <SERVER_NODE_ID> \
 #        --source tcp://postgres.default.svc.cluster.local:5432 \
 #        --target 127.0.0.1:5432 \
 #        --secret-file client.key
 #
 #      # Access cluster DNS (UDP!)
-#      tunnel-rs client iroh \
+#      tunnel-rs client \
 #        --server-node-id <SERVER_NODE_ID> \
 #        --source udp://kube-dns.kube-system.svc.cluster.local:53 \
 #        --target udp://127.0.0.1:5353 \
@@ -68,7 +68,6 @@ spec:
           image: ghcr.io/andrewtheguy/tunnel-rs:latest
           args:
             - server
-            - iroh
             - --allowed-tcp
             - "10.0.0.0/8"      # Kubernetes pod/service network
             - --allowed-tcp
