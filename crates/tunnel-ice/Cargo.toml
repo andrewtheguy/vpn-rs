@@ -1,6 +1,6 @@
 [package]
 name = "tunnel-ice"
-version = "0.1.27"
+version.workspace = true
 edition = "2021"
 description = "ICE modes for tunnel-rs"
 

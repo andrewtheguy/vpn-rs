@@ -377,6 +377,7 @@ async fn validate_socks5_proxy_if_present(socks5_proxy: &Option<String>) -> Resu
 async fn main() -> Result<()> {
     let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn"))
         .filter_module("tunnel_rs", log::LevelFilter::Info)
+        .filter_module("tunnel_iroh", log::LevelFilter::Info)
         .try_init();
     let args = Args::parse();
     let command = args.command;

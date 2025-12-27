@@ -1,6 +1,6 @@
 [package]
 name = "tunnel-rs-ice"
-version = "0.1.26"
+version.workspace = true
 edition = "2021"
 description = "TCP/UDP port forwarding through ICE/QUIC"
 

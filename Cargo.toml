@@ -7,3 +7,6 @@ members = [
     "crates/tunnel-rs",
     "crates/tunnel-rs-ice",
 ]
+
+[workspace.package]
+version = "0.1.28"

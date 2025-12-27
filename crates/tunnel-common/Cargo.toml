@@ -1,6 +1,6 @@
 [package]
 name = "tunnel-common"
-version = "0.1.26"
+version.workspace = true
 edition = "2021"
 description = "Shared config and signaling for tunnel-rs"
 

@@ -1,6 +1,6 @@
 [package]
 name = "tunnel-iroh"
-version = "0.1.26"
+version.workspace = true
 edition = "2021"
 description = "Iroh mode for tunnel-rs"
 
