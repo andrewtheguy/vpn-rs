@@ -4760,19 +4760,31 @@ dependencies = [
 ]
 
 [[package]]
-name = "tunnel-rs"
+name = "tunnel-common"
 version = "0.1.26"
 dependencies = [
  "anyhow",
  "base64",
- "clap",
  "crc32fast",
  "dirs",
- "env_logger",
+ "ipnet",
+ "log",
+ "serde",
+ "serde_json",
+ "tokio",
+ "toml 0.8.23",
+ "url",
+]
+
+[[package]]
+name = "tunnel-ice"
+version = "0.1.27"
+dependencies = [
+ "anyhow",
+ "base64",
  "get_if_addrs",
  "hex",
  "ipnet",
- "iroh",
  "log",
  "nostr-sdk",
  "quinn",
@@ -4784,13 +4796,57 @@ dependencies = [
  "sha2 0.10.9",
  "str0m",
  "stunclient",
+ "tokio",
+ "tunnel-common",
+ "url",
+]
+
+[[package]]
+name = "tunnel-iroh"
+version = "0.1.26"
+dependencies = [
+ "anyhow",
+ "base64",
+ "iroh",
+ "log",
+ "rand 0.9.2",
+ "rustls",
+ "serde",
+ "serde_json",
  "tempfile",
  "tokio",
  "tokio-rustls",
  "tokio-socks",
- "toml 0.8.23",
+ "tunnel-common",
  "url",
  "webpki-roots 0.26.11",
+]
+
+[[package]]
+name = "tunnel-rs"
+version = "0.1.27"
+dependencies = [
+ "anyhow",
+ "clap",
+ "env_logger",
+ "iroh",
+ "log",
+ "tokio",
+ "tunnel-common",
+ "tunnel-iroh",
+]
+
+[[package]]
+name = "tunnel-rs-ice"
+version = "0.1.26"
+dependencies = [
+ "anyhow",
+ "clap",
+ "env_logger",
+ "log",
+ "tokio",
+ "tunnel-common",
+ "tunnel-ice",
 ]
 
 [[package]]

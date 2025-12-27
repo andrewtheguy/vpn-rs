@@ -36,6 +36,10 @@ Tunnel-rs enables you to forward TCP and UDP traffic between machines without re
 
 tunnel-rs provides multiple modes for establishing tunnels. **Use `iroh` mode** for most use cases — it provides the best NAT traversal with relay fallback, automatic discovery, and client authentication.
 
+Binary layout:
+- `tunnel-rs`: iroh-only
+- `tunnel-rs-ice`: ice-manual and ice-nostr
+
 | Mode | NAT Traversal | Discovery | External Dependency |
 |------|---------------|-----------|---------------------|
 | **iroh** (recommended) | Best (relay fallback) | Automatic | iroh relay infrastructure |
@@ -55,16 +59,13 @@ Choose an alternative mode only if you have specific requirements:
 > The `ice-nostr` and `ice-manual` modes use STUN-only NAT traversal, which may fail when both peers are behind symmetric NATs. For containerized environments (Docker, Kubernetes, cloud VMs), use `iroh` mode which includes relay fallback.
 
 > [!TIP]
-> If you only need iroh mode, you can compile without ICE support for a smaller binary:
-> ```bash
-> cargo build --release --no-default-features
-> ```
+> If you only need iroh mode, use the `tunnel-rs` binary. ICE modes are in `tunnel-rs-ice`.
 
 ## Installation
 
-The release installers fetch a native, standalone executable. You only need the binary in your PATH; no runtime dependencies or package managers are required.
+GitHub releases include both `tunnel-rs` (iroh-only) and `tunnel-rs-ice` binaries. You only need the binary in your PATH; no runtime dependencies or package managers are required.
 
-### Quick Install (Linux & macOS)
+### Quick Install (Linux & macOS, iroh only)
 
 ```bash
 curl -sSL https://andrewtheguy.github.io/tunnel-rs/install.sh | bash
@@ -85,7 +86,7 @@ curl -sSL https://andrewtheguy.github.io/tunnel-rs/install.sh | bash -s -- --pre
 curl -sSL https://andrewtheguy.github.io/tunnel-rs/install.sh | bash -s 20251210172710
 ```
 
-### Quick Install (Windows)
+### Quick Install (Windows, iroh only)
 
 ```powershell
 irm https://andrewtheguy.github.io/tunnel-rs/install.ps1 | iex
@@ -106,25 +107,24 @@ irm https://andrewtheguy.github.io/tunnel-rs/install.ps1 | iex -Args -PreRelease
 irm https://andrewtheguy.github.io/tunnel-rs/install.ps1 | iex -Args 20251210172710
 ```
 
+Note: The quick install scripts install the `tunnel-rs` iroh-only binary.
+For ICE modes (`tunnel-rs-ice`), download the `tunnel-rs-ice` binary manually
+from GitHub releases or build from source.
+
 ### From Source
 
 ```bash
-cargo install --path .
+cargo install --path . -p tunnel-rs
+```
+
+To install the ICE binary:
+```bash
+cargo install --path . -p tunnel-rs-ice
 ```
 
 ### Feature Flags
 
-The `ice` feature is **enabled by default** and provides ICE/STUN-based NAT traversal modes:
-
-| Feature | Default | Description |
-|---------|---------|-------------|
-| `ice` | Yes | Enables `ice-manual` and `ice-nostr` modes (str0m, quinn, nostr-sdk) |
-| `test-utils` | No | Enables `--relay-only` flag for testing |
-
-To build without ICE support (iroh mode only):
-```bash
-cargo build --no-default-features
-```
+`test-utils` is available on the iroh crates/binary for enabling `--relay-only` during testing.
 
 ### Supported Platforms
 
@@ -137,7 +137,7 @@ All modes (iroh, ice-manual, ice-nostr) work across all platforms, enabling cros
 
 ### Docker & Kubernetes
 
-Container images are available at `ghcr.io/andrewtheguy/tunnel-rs:latest`.
+Container images are available at `ghcr.io/andrewtheguy/tunnel-rs:latest` (iroh-only).
 
 Access services running in Docker or Kubernetes remotely — without opening ports, configuring ingress, or requiring `kubectl`. See [container-deploy/](container-deploy/) for Docker Compose and Kubernetes configurations.
 
@@ -198,7 +198,7 @@ Exchange NodeIds between peers (server needs client's NodeId).
 
 **Server** (on server — waits for client connections):
 ```bash
-tunnel-rs server iroh \
+tunnel-rs server \
   --secret-file ./server.key \
   --allowed-tcp 127.0.0.0/8 \
   --allowed-clients <CLIENT_NODE_ID>
@@ -213,7 +213,7 @@ Waiting for clients to connect...
 
 **Client** (on client — requests source from server):
 ```bash
-tunnel-rs client iroh \
+tunnel-rs client \
   --secret-file ./client.key \
   --server-node-id <SERVER_ENDPOINT_ID> \
   --source tcp://127.0.0.1:22 \
@@ -226,7 +226,7 @@ Then connect: `ssh -p 2222 user@127.0.0.1`
 
 **Server**:
 ```bash
-tunnel-rs server iroh \
+tunnel-rs server \
   --secret-file ./server.key \
   --allowed-udp 127.0.0.0/8 \
   --allowed-clients <CLIENT_NODE_ID>
@@ -234,7 +234,7 @@ tunnel-rs server iroh \
 
 **Client**:
 ```bash
-tunnel-rs client iroh \
+tunnel-rs client \
   --secret-file ./client.key \
   --server-node-id <SERVER_ENDPOINT_ID> \
   --source udp://127.0.0.1:51820 \
@@ -302,12 +302,12 @@ CLI arguments take precedence over config file values. Use `--default-config` wi
 
 ```bash
 # Use config but override source and target
-tunnel-rs client iroh --default-config \
+tunnel-rs client --default-config \
   --source tcp://localhost:3000 \
   --target 127.0.0.1:8080
 
 # Use config but override allowed networks
-tunnel-rs server iroh --default-config \
+tunnel-rs server --default-config \
   --allowed-tcp 10.0.0.0/8
 ```
 
@@ -393,7 +393,7 @@ tunnel-rs show-iroh-node-id --secret-file ./server.key
 Then use the key for the server:
 
 ```bash
-tunnel-rs server iroh --allowed-tcp 127.0.0.0/8 --secret-file ./server.key --allowed-clients <CLIENT_NODE_ID>
+tunnel-rs server --allowed-tcp 127.0.0.0/8 --secret-file ./server.key --allowed-clients <CLIENT_NODE_ID>
 ```
 
 ## Authentication
@@ -419,7 +419,7 @@ Iroh mode requires authentication using NodeId whitelisting. Only clients whose 
 
 3. **Start server with allowed clients:**
    ```bash
-   tunnel-rs server iroh \
+   tunnel-rs server \
      --secret-file ./server.key \
      --allowed-tcp 127.0.0.0/8 \
      --allowed-clients 3k4j5l6k7j8k9l0m1n2o3p4q5r6s7t8u9v0w1x2y3z4a5b6c7d8e
@@ -429,13 +429,13 @@ Iroh mode requires authentication using NodeId whitelisting. Only clients whose 
 
 ```bash
 # Multiple --allowed-clients flags
-tunnel-rs server iroh \
+tunnel-rs server \
   --allowed-tcp 127.0.0.0/8 \
   --allowed-clients <ALICE_NODE_ID> \
   --allowed-clients <BOB_NODE_ID>
 
 # Or use a file (one NodeId per line, # comments allowed)
-tunnel-rs server iroh \
+tunnel-rs server \
   --allowed-tcp 127.0.0.0/8 \
   --allowed-clients-file /etc/tunnel-rs/allowed_clients.txt
 ```
@@ -473,12 +473,12 @@ Use a custom relay server instead of the public iroh relay infrastructure.
 
 ```bash
 # Both sides must use the same relay
-tunnel-rs server iroh --relay-url https://relay.example.com --allowed-tcp 127.0.0.0/8 --allowed-clients <CLIENT_NODE_ID>
-tunnel-rs client iroh --relay-url https://relay.example.com --server-node-id <ID> --source tcp://127.0.0.1:22 --target 127.0.0.1:2222
+tunnel-rs server --relay-url https://relay.example.com --allowed-tcp 127.0.0.0/8 --allowed-clients <CLIENT_NODE_ID>
+tunnel-rs client --relay-url https://relay.example.com --server-node-id <ID> --source tcp://127.0.0.1:22 --target 127.0.0.1:2222
 
 # Force relay-only (no direct P2P) - requires test-utils feature
 # Build with: cargo build --features test-utils
-tunnel-rs server iroh --relay-url https://relay.example.com --relay-only --allowed-tcp 127.0.0.0/8 --allowed-clients <CLIENT_NODE_ID>
+tunnel-rs server --relay-url https://relay.example.com --relay-only --allowed-tcp 127.0.0.0/8 --allowed-clients <CLIENT_NODE_ID>
 ```
 
 ### Running iroh-relay
@@ -494,8 +494,8 @@ For fully independent operation without public infrastructure:
 
 ```bash
 # Both sides use custom DNS server
-tunnel-rs server iroh --dns-server https://dns.example.com/pkarr --secret-file ./server.key --allowed-tcp 127.0.0.0/8 --allowed-clients <CLIENT_NODE_ID>
-tunnel-rs client iroh --dns-server https://dns.example.com/pkarr --server-node-id <ID> --source tcp://127.0.0.1:22 --target 127.0.0.1:2222
+tunnel-rs server --dns-server https://dns.example.com/pkarr --secret-file ./server.key --allowed-tcp 127.0.0.0/8 --allowed-clients <CLIENT_NODE_ID>
+tunnel-rs client --dns-server https://dns.example.com/pkarr --server-node-id <ID> --source tcp://127.0.0.1:22 --target 127.0.0.1:2222
 ```
 
 ## Self-Hosted Infrastructure
@@ -528,7 +528,7 @@ iroh-dns-server --config dns.toml
 
 ```bash
 # Server
-tunnel-rs server iroh \
+tunnel-rs server \
   --relay-url https://relay.example.com \
   --dns-server https://dns.example.com/pkarr \
   --secret-file ./server.key \
@@ -536,7 +536,7 @@ tunnel-rs server iroh \
   --allowed-clients <CLIENT_NODE_ID>
 
 # Client
-tunnel-rs client iroh \
+tunnel-rs client \
   --relay-url https://relay.example.com \
   --dns-server https://dns.example.com/pkarr \
   --secret-file ./client.key \
@@ -571,7 +571,7 @@ If you can't get a public IP or Cloudflare tunnel doesn't work (HTTP/2 breaks We
 ```bash
 # Server side: configure tor hidden service pointing to localhost:3340
 # Then start iroh-relay and tunnel-rs with the .onion URL
-tunnel-rs server iroh \
+tunnel-rs server \
   --relay-url http://YOUR_RELAY.onion \
   --socks5-proxy socks5h://127.0.0.1:9050 \
   --secret-file ./server.key \
@@ -579,7 +579,7 @@ tunnel-rs server iroh \
   --allowed-clients <CLIENT_NODE_ID>
 
 # Client side: use --socks5-proxy to reach .onion relay (direct P2P bypasses Tor)
-tunnel-rs client iroh \
+tunnel-rs client \
   --relay-url http://YOUR_RELAY.onion \
   --socks5-proxy socks5h://127.0.0.1:9050 \
   --secret-file ./client.key \
@@ -617,14 +617,14 @@ Uses full ICE (Interactive Connectivity Establishment) with str0m + quinn QUIC. 
 
 1. **Client** starts first and outputs an offer:
    ```bash
-   tunnel-rs client ice-manual --source tcp://127.0.0.1:22 --target 127.0.0.1:2222
+   tunnel-rs-ice client ice-manual --source tcp://127.0.0.1:22 --target 127.0.0.1:2222
    ```
 
    Copy the `-----BEGIN TUNNEL-RS MANUAL OFFER-----` block.
 
 2. **Server** validates the source request and outputs an answer:
    ```bash
-   tunnel-rs server ice-manual --allowed-tcp 127.0.0.0/8
+   tunnel-rs-ice server ice-manual --allowed-tcp 127.0.0.0/8
    ```
 
    Paste the offer, then copy the `-----BEGIN TUNNEL-RS MANUAL ANSWER-----` block.
@@ -642,10 +642,10 @@ Uses full ICE (Interactive Connectivity Establishment) with str0m + quinn QUIC. 
 
 ```bash
 # Client (starts first)
-tunnel-rs client ice-manual --source udp://127.0.0.1:51820 --target 0.0.0.0:51820
+tunnel-rs-ice client ice-manual --source udp://127.0.0.1:51820 --target 0.0.0.0:51820
 
 # Server (validates and responds)
-tunnel-rs server ice-manual --allowed-udp 127.0.0.0/8
+tunnel-rs-ice server ice-manual --allowed-udp 127.0.0.0/8
 ```
 
 ## CLI Options
@@ -725,11 +725,11 @@ Each peer needs their own keypair:
 
 ```bash
 # On server machine
-tunnel-rs generate-nostr-key --output ./server.nsec
+tunnel-rs-ice generate-nostr-key --output ./server.nsec
 # Output (stdout): npub1server...
 
 # On client machine
-tunnel-rs generate-nostr-key --output ./client.nsec
+tunnel-rs-ice generate-nostr-key --output ./client.nsec
 # Output (stdout): npub1client...
 ```
 
@@ -739,7 +739,7 @@ Exchange public keys (npub) between peers.
 
 **Server** (on server with SSH — waits for client connections):
 ```bash
-tunnel-rs server ice-nostr \
+tunnel-rs-ice server ice-nostr \
   --allowed-tcp 127.0.0.0/8 \
   --nsec-file ./server.nsec \
   --peer-npub npub1client...
@@ -747,7 +747,7 @@ tunnel-rs server ice-nostr \
 
 **Client** (on client — initiates connection):
 ```bash
-tunnel-rs client ice-nostr \
+tunnel-rs-ice client ice-nostr \
   --source tcp://127.0.0.1:22 \
   --target 127.0.0.1:2222 \
   --nsec-file ./client.nsec \
@@ -764,13 +764,13 @@ ssh -p 2222 user@127.0.0.1
 
 ```bash
 # Server (allows UDP traffic to localhost)
-tunnel-rs server ice-nostr \
+tunnel-rs-ice server ice-nostr \
   --allowed-udp 127.0.0.0/8 \
   --nsec-file ./server.nsec \
   --peer-npub npub1client...
 
 # Client (requests WireGuard tunnel)
-tunnel-rs client ice-nostr \
+tunnel-rs-ice client ice-nostr \
   --source udp://127.0.0.1:51820 \
   --target udp://0.0.0.0:51820 \
   --nsec-file ./client.nsec \
@@ -860,13 +860,13 @@ Server whitelists networks; clients choose which service to tunnel:
 
 ```bash
 # Server: whitelist networks, clients choose destination
-tunnel-rs server iroh --allowed-tcp 127.0.0.0/8 --max-sessions 100 --allowed-clients <CLIENT1_NODE_ID> --allowed-clients <CLIENT2_NODE_ID>
+tunnel-rs server --allowed-tcp 127.0.0.0/8 --max-sessions 100 --allowed-clients <CLIENT1_NODE_ID> --allowed-clients <CLIENT2_NODE_ID>
 
 # Client 1: tunnel to SSH
-tunnel-rs client iroh --secret-file ./client1.key --server-node-id <ID> --source tcp://127.0.0.1:22 --target 127.0.0.1:2222
+tunnel-rs client --secret-file ./client1.key --server-node-id <ID> --source tcp://127.0.0.1:22 --target 127.0.0.1:2222
 
 # Client 2: tunnel to web server (same server!)
-tunnel-rs client iroh --secret-file ./client2.key --server-node-id <ID> --source tcp://127.0.0.1:80 --target 127.0.0.1:8080
+tunnel-rs client --secret-file ./client2.key --server-node-id <ID> --source tcp://127.0.0.1:80 --target 127.0.0.1:8080
 ```
 
 ### ice-nostr (Multi-Session + Dynamic Source)
@@ -875,13 +875,13 @@ Server whitelists networks; clients choose which service to tunnel:
 
 ```bash
 # Server: whitelist networks, clients choose destination
-tunnel-rs server ice-nostr --allowed-tcp 127.0.0.0/8 --nsec-file ./server.nsec --peer-npub <NPUB> --max-sessions 5
+tunnel-rs-ice server ice-nostr --allowed-tcp 127.0.0.0/8 --nsec-file ./server.nsec --peer-npub <NPUB> --max-sessions 5
 
 # Client 1: tunnel to SSH
-tunnel-rs client ice-nostr --source tcp://127.0.0.1:22 --target 127.0.0.1:2222 ...
+tunnel-rs-ice client ice-nostr --source tcp://127.0.0.1:22 --target 127.0.0.1:2222 ...
 
 # Client 2: tunnel to web server (same server!)
-tunnel-rs client ice-nostr --source tcp://127.0.0.1:80 --target 127.0.0.1:8080 ...
+tunnel-rs-ice client ice-nostr --source tcp://127.0.0.1:80 --target 127.0.0.1:8080 ...
 ```
 
 ### Single-Session Mode (ice-manual)
@@ -917,13 +917,13 @@ Generate a Nostr keypair for use with ice-nostr mode:
 
 ```bash
 # Save nsec to file and output npub
-tunnel-rs generate-nostr-key --output ./nostr.nsec
+tunnel-rs-ice generate-nostr-key --output ./nostr.nsec
 
 # Overwrite existing file
-tunnel-rs generate-nostr-key --output ./nostr.nsec --force
+tunnel-rs-ice generate-nostr-key --output ./nostr.nsec --force
 
 # Output nsec to stdout and npub to stderr (wireguard-style)
-tunnel-rs generate-nostr-key --output -
+tunnel-rs-ice generate-nostr-key --output -
 ```
 
 Output (when using `--output -`):
@@ -957,7 +957,7 @@ tunnel-rs show-iroh-node-id --secret-file ./server.key
 Display the npub for an existing nsec key file:
 
 ```bash
-tunnel-rs show-npub --nsec-file ./nostr.nsec
+tunnel-rs-ice show-npub --nsec-file ./nostr.nsec
 ```
 
 ---

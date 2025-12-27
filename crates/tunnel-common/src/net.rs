@@ -1,0 +1,359 @@
+//! Shared networking utilities for tunnel-rs.
+
+use anyhow::{Context, Result};
+use std::net::SocketAddr;
+use std::time::Duration;
+use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::net::{lookup_host, TcpStream, UdpSocket};
+
+/// Delay between starting connection attempts (Happy Eyeballs style).
+pub const CONNECTION_ATTEMPT_DELAY: Duration = Duration::from_millis(250);
+
+/// Maximum attempts for opening QUIC streams
+pub const STREAM_OPEN_MAX_ATTEMPTS: u32 = 3;
+
+/// Base delay for exponential backoff (doubles each attempt)
+pub const STREAM_OPEN_BASE_DELAY_MS: u64 = 100;
+
+/// Maximum multiplier for exponential backoff to keep delays bounded.
+/// With base delay of 100ms, this caps max delay at ~102 seconds.
+pub const BACKOFF_MAX_MULTIPLIER: u64 = 1024;
+
+// ============================================================================
+// Address Resolution
+// ============================================================================
+
+/// Resolve a target address to all available socket addresses.
+/// Returns all IPv4 and IPv6 addresses for the hostname.
+pub async fn resolve_all_target_addrs(target: &str) -> Result<Vec<SocketAddr>> {
+    let addrs: Vec<SocketAddr> = lookup_host(target)
+        .await
+        .with_context(|| format!("Failed to resolve '{}'", target))?
+        .collect();
+    if addrs.is_empty() {
+        anyhow::bail!("No addresses found for host '{}'", target);
+    }
+    Ok(addrs)
+}
+
+// ============================================================================
+// Happy Eyeballs TCP Connection
+// ============================================================================
+
+/// Try to connect to any of the given addresses using Happy Eyeballs algorithm (RFC 8305).
+/// - Prefers IPv6 addresses (tried first)
+/// - Interleaves IPv6 and IPv4 attempts
+/// - Staggers connection attempts with a small delay
+/// - Returns first successful connection, cancels remaining attempts
+pub async fn try_connect_tcp(addrs: &[SocketAddr]) -> Result<TcpStream> {
+    use tokio::sync::mpsc;
+
+    if addrs.is_empty() {
+        anyhow::bail!("No addresses to connect to");
+    }
+
+    // Separate addresses by family, preferring IPv6
+    let (ipv6, ipv4): (Vec<SocketAddr>, Vec<SocketAddr>) =
+        addrs.iter().copied().partition(|a| a.is_ipv6());
+
+    // Interleave addresses: IPv6 first, then alternate
+    let mut ordered = Vec::with_capacity(addrs.len());
+    let mut v6_iter = ipv6.into_iter();
+    let mut v4_iter = ipv4.into_iter();
+
+    // Start with IPv6 if available
+    while ordered.len() < addrs.len() {
+        if let Some(addr) = v6_iter.next() {
+            ordered.push(addr);
+        }
+        if let Some(addr) = v4_iter.next() {
+            ordered.push(addr);
+        }
+    }
+
+    // Channel for connection results
+    let (tx, mut rx) =
+        mpsc::channel::<(SocketAddr, Result<TcpStream, std::io::Error>)>(ordered.len());
+
+    // Spawn staggered connection attempts
+    let mut handles = Vec::with_capacity(ordered.len());
+    for (i, addr) in ordered.into_iter().enumerate() {
+        let tx = tx.clone();
+        let delay = CONNECTION_ATTEMPT_DELAY * i as u32;
+        handles.push(tokio::spawn(async move {
+            tokio::time::sleep(delay).await;
+            let res = TcpStream::connect(addr).await;
+            let _ = tx.send((addr, res)).await;
+        }));
+    }
+    drop(tx);
+
+    // Return the first successful connection
+    while let Some((addr, result)) = rx.recv().await {
+        match result {
+            Ok(stream) => {
+                // Cancel outstanding tasks
+                for handle in handles {
+                    handle.abort();
+                }
+                return Ok(stream);
+            }
+            Err(e) => {
+                log::debug!("Connection attempt to {} failed: {}", addr, e);
+            }
+        }
+    }
+
+    anyhow::bail!("Failed to connect to any address");
+}
+
+// ============================================================================
+// UDP address ordering
+// ============================================================================
+
+/// Order UDP target addresses to prefer IPv6 first, then IPv4, to maximize reachability.
+pub fn order_udp_addresses(addrs: &[SocketAddr]) -> Vec<SocketAddr> {
+    let mut ipv6 = Vec::new();
+    let mut ipv4 = Vec::new();
+
+    for addr in addrs {
+        if addr.is_ipv6() {
+            ipv6.push(*addr);
+        } else {
+            ipv4.push(*addr);
+        }
+    }
+
+    let mut ordered = Vec::with_capacity(addrs.len());
+    ordered.extend(ipv6);
+    ordered.extend(ipv4);
+    ordered
+}
+
+// ============================================================================
+// URL Parsing Helpers
+// ============================================================================
+
+/// Extract address (host:port) from a source URL (protocol://host:port).
+pub fn extract_addr_from_source(source: &str) -> Option<String> {
+    let url = url::Url::parse(source).ok()?;
+    let host = url.host_str()?;
+    let port = url.port()?;
+    // Re-add brackets for IPv6 addresses
+    if host.contains(':') {
+        Some(format!("[{}]:{}", host, port))
+    } else {
+        Some(format!("{}:{}", host, port))
+    }
+}
+
+/// Extract host from a source URL (protocol://host:port).
+pub fn extract_host_from_source(source: &str) -> Option<String> {
+    let url = url::Url::parse(source).ok()?;
+    url.host_str().map(|s| s.to_string())
+}
+
+/// Extract port from a source URL (protocol://host:port).
+pub fn extract_port_from_source(source: &str) -> Option<u16> {
+    url::Url::parse(source).ok()?.port()
+}
+
+// ============================================================================
+// CIDR Network Validation + checks
+// ============================================================================
+
+/// Validate that all entries in allowed_networks are valid CIDR notation.
+/// Returns an error with context if any entry fails to parse.
+pub fn validate_allowed_networks(allowed_networks: &[String], label: &str) -> Result<()> {
+    for network_str in allowed_networks {
+        network_str.parse::<ipnet::IpNet>().with_context(|| {
+            format!(
+                "Invalid CIDR '{}' in {}. Expected format: 192.168.0.0/16 or ::1/128",
+                network_str, label
+            )
+        })?;
+    }
+    Ok(())
+}
+
+/// Result of checking if a source is allowed.
+#[derive(Debug)]
+pub struct SourceCheckResult {
+    /// Whether the source is allowed
+    pub allowed: bool,
+    /// The resolved IP addresses (if any)
+    pub resolved_ips: Vec<std::net::IpAddr>,
+    /// Error message if not allowed (includes resolved IPs for debugging)
+    pub reason: Option<String>,
+}
+
+impl SourceCheckResult {
+    /// Format the rejection reason with resolved IPs for detailed error messages.
+    pub fn rejection_reason(&self, source: &str, allowed_networks: &[String]) -> String {
+        // Use the explicit reason if available (for parse/resolution errors)
+        if let Some(ref reason) = self.reason {
+            return format!("Source '{}': {}", source, reason);
+        }
+
+        if self.resolved_ips.is_empty() {
+            format!("Source '{}' could not be resolved or parsed", source)
+        } else {
+            let ips_str: Vec<String> = self.resolved_ips.iter().map(|ip| ip.to_string()).collect();
+            format!(
+                "Source '{}' (resolved to {}) not in allowed networks {:?}",
+                source,
+                ips_str.join(", "),
+                allowed_networks
+            )
+        }
+    }
+}
+
+/// Check if a source address is allowed by any network in the CIDR list.
+/// Returns detailed information about the check including resolved IPs.
+///
+/// The source format is `protocol://host:port` (e.g., `tcp://192.168.1.100:22` or `tcp://myserver.local:22`).
+/// The allowed_networks list contains CIDR notation (e.g., `192.168.0.0/16`, `::1/128`).
+pub async fn check_source_allowed(source: &str, allowed_networks: &[String]) -> SourceCheckResult {
+    if allowed_networks.is_empty() {
+        return SourceCheckResult {
+            allowed: true,
+            resolved_ips: vec![],
+            reason: None,
+        };
+    }
+
+    // Extract host from source (protocol://host:port)
+    let Some(host) = extract_host_from_source(source) else {
+        return SourceCheckResult {
+            allowed: false,
+            resolved_ips: vec![],
+            reason: Some("Failed to parse source URL".to_string()),
+        };
+    };
+
+    // Collect all IPs to check (either the literal IP or all resolved addresses)
+    let source_ips: Vec<std::net::IpAddr> = match host.parse::<std::net::IpAddr>() {
+        Ok(ip) => vec![ip],
+        Err(_) => {
+            // Not an IP - try DNS resolution
+            let Some(port) = extract_port_from_source(source) else {
+                return SourceCheckResult {
+                    allowed: false,
+                    resolved_ips: vec![],
+                    reason: Some("Failed to parse port from source URL".to_string()),
+                };
+            };
+            let lookup_target = format!("{}:{}", host, port);
+            let addrs = match lookup_host(&lookup_target).await {
+                Ok(addrs) => addrs,
+                Err(e) => {
+                    return SourceCheckResult {
+                        allowed: false,
+                        resolved_ips: vec![],
+                        reason: Some(format!("DNS resolution failed: {}", e)),
+                    };
+                }
+            };
+            let ips: Vec<_> = addrs.map(|a| a.ip()).collect();
+            if ips.is_empty() {
+                return SourceCheckResult {
+                    allowed: false,
+                    resolved_ips: vec![],
+                    reason: Some("DNS resolution returned no IPs".to_string()),
+                };
+            }
+            ips
+        }
+    };
+
+    // Parse allowed networks (validated at startup in validate_allowed_networks)
+    let mut allowed = false;
+    for ip in &source_ips {
+        for network_str in allowed_networks {
+            if let Ok(network) = network_str.parse::<ipnet::IpNet>() {
+                if network.contains(ip) {
+                    allowed = true;
+                    break;
+                }
+            }
+        }
+        if allowed {
+            break;
+        }
+    }
+
+    SourceCheckResult {
+        allowed,
+        resolved_ips: source_ips,
+        reason: None,
+    }
+}
+
+// ============================================================================
+// Exponential backoff helper
+// ============================================================================
+
+/// Retry an async operation with exponential backoff.
+pub async fn retry_with_backoff<T, E, F, Fut>(
+    mut operation: F,
+    max_attempts: u32,
+    base_delay_ms: u64,
+) -> Result<T, E>
+where
+    F: FnMut(u32) -> Fut,
+    Fut: std::future::Future<Output = Result<T, E>>,
+{
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        match operation(attempt).await {
+            Ok(value) => return Ok(value),
+            Err(err) => {
+                if attempt >= max_attempts {
+                    return Err(err);
+                }
+                let multiplier = 2_u64.pow(attempt.saturating_sub(1));
+                let bounded = multiplier.min(BACKOFF_MAX_MULTIPLIER);
+                let delay = Duration::from_millis(base_delay_ms.saturating_mul(bounded));
+                tokio::time::sleep(delay).await;
+            }
+        }
+    }
+}
+
+// ============================================================================
+// Stream copy helper
+// ============================================================================
+
+/// Copy a stream until EOF.
+pub async fn copy_stream<R, W>(reader: &mut R, writer: &mut W) -> Result<()>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    tokio::io::copy(reader, writer)
+        .await
+        .context("Failed to copy stream")?;
+    Ok(())
+}
+
+// ============================================================================
+// UDP bind helper (kept for iroh compatibility)
+// ============================================================================
+
+/// Bind a UDP socket for a set of target addresses, preferring dual-stack.
+pub async fn bind_udp_for_targets(target_addrs: &[SocketAddr]) -> Result<UdpSocket> {
+    // Prefer IPv6 wildcard if we have any IPv6 targets; it can accept IPv4 via v6-mapped.
+    let bind_addr = if target_addrs.iter().any(|addr| addr.is_ipv6()) {
+        "[::]:0"
+    } else {
+        "0.0.0.0:0"
+    };
+
+    let socket = UdpSocket::bind(bind_addr)
+        .await
+        .with_context(|| format!("Failed to bind UDP socket at {}", bind_addr))?;
+
+    Ok(socket)
+}

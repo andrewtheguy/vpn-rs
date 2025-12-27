@@ -21,6 +21,10 @@ This document provides a comprehensive overview of the tunnel-rs architecture, i
 
 tunnel-rs is a P2P TCP/UDP port forwarding tool that supports multiple distinct operational modes, each optimized for different use cases and network environments.
 
+Binary layout:
+- `tunnel-rs`: iroh-only
+- `tunnel-rs-ice`: ice-manual and ice-nostr
+
 > **Design Goal:** The project's primary goal is to provide a convenient way to connect to different networks for development or homelab purposes without the hassle and security risk of opening a port. It is **not** meant for production setups or designed to be performant at scale.
 
 ```mermaid
@@ -56,16 +60,16 @@ graph TB
     style D2 fill:#9C27B0
 ```
 
-### Feature Flags
+### Binaries & Crates
 
-The `ice` feature is enabled by default and provides additional modules:
+The project is split into separate binaries to isolate dependencies:
 
-| Feature | Modules Enabled | Description |
-|---------|-----------------|-------------|
-| `ice` (default) | `custom`, `nostr`, `transport` | ICE/STUN-based NAT traversal for `ice-manual` and `ice-nostr` modes |
-| `test-utils` | - | Enables `--relay-only` flag for testing |
+| Binary | Modes | Key Modules |
+|--------|-------|-------------|
+| `tunnel-rs` | `iroh` | `iroh_mode`, `auth`, `socks5_bridge` |
+| `tunnel-rs-ice` | `ice-manual`, `ice-nostr` | `custom`, `nostr`, `transport` |
 
-Without the `ice` feature, only `iroh` mode is available.
+The `test-utils` feature is still available on the iroh crates/binary to enable `--relay-only` for testing.
 
 ### Core Components
 
