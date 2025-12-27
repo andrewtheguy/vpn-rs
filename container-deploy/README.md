@@ -6,7 +6,7 @@ Note: The container image `ghcr.io/andrewtheguy/tunnel-rs:latest` is iroh-only.
 The `tunnel-rs-ice` binary is published in GitHub releases but is not containerized.
 
 > [!TIP]
-> **Recommended Mode:** Use `iroh` mode for all deployments. It provides the best NAT traversal with relay fallback, client authentication via NodeId, and multi-source capability where clients choose what to tunnel.
+> **Recommended Mode:** Use iroh mode for all deployments. It is the default behavior for `tunnel-rs server` and `tunnel-rs client`, and provides the best NAT traversal with relay fallback, client authentication via NodeId, and multi-source capability where clients choose what to tunnel.
 
 ## How It Works
 
