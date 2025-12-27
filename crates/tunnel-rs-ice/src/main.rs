@@ -163,7 +163,7 @@ enum Command {
 #[derive(Subcommand)]
 enum ServerMode {
     /// Client-initiated mode: Full ICE with manual signaling (str0m+quinn)
-    #[command(name = "ice-manual")]
+    #[command(name = "manual")]
     CustomManual {
         /// Allowed TCP source networks in CIDR notation (repeatable)
         /// E.g., --allowed-tcp 127.0.0.0/8 --allowed-tcp 192.168.0.0/16
@@ -184,7 +184,7 @@ enum ServerMode {
         no_stun: bool,
     },
     /// Full ICE with Nostr-based signaling (WireGuard-like static keys)
-    #[command(name = "ice-nostr")]
+    #[command(name = "nostr")]
     Nostr {
         /// Allowed TCP source networks in CIDR notation (repeatable)
         /// E.g., --allowed-tcp 127.0.0.0/8 --allowed-tcp 192.168.0.0/16
@@ -237,7 +237,7 @@ enum ServerMode {
 #[derive(Subcommand)]
 enum ClientMode {
     /// Client-initiated mode: Full ICE with manual signaling (str0m+quinn)
-    #[command(name = "ice-manual")]
+    #[command(name = "manual")]
     CustomManual {
         /// Source address to request from server (tcp://host:port or udp://host:port)
         /// The server must have this in its --allowed-tcp or --allowed-udp list
@@ -257,7 +257,7 @@ enum ClientMode {
         no_stun: bool,
     },
     /// Full ICE with Nostr-based signaling (WireGuard-like static keys)
-    #[command(name = "ice-nostr")]
+    #[command(name = "nostr")]
     Nostr {
         /// Local address to listen on (e.g., 127.0.0.1:2222 or tcp://127.0.0.1:2222)
         #[arg(short, long)]
@@ -364,7 +364,7 @@ async fn main() -> Result<()> {
             };
 
             let effective_mode = effective_mode.context(
-                "No mode specified. Either use a subcommand (ice-manual, ice-nostr) or provide a config file with 'mode' field.",
+                "No mode specified. Either use a subcommand (manual, nostr) or provide a config file with 'mode' field.",
             )?;
 
             if from_file {
@@ -568,7 +568,7 @@ async fn main() -> Result<()> {
             };
 
             let effective_mode = effective_mode.context(
-                "No mode specified. Either use a subcommand (ice-manual, ice-nostr) or provide a config file with 'mode' field.",
+                "No mode specified. Either use a subcommand (manual, nostr) or provide a config file with 'mode' field.",
             )?;
 
             if from_file {
@@ -607,7 +607,7 @@ async fn main() -> Result<()> {
                     };
 
                     let source: String = source.context(
-                        "--source is required for ice-manual client. Specify the source to request from server (e.g., --source tcp://127.0.0.1:22)",
+                        "--source is required for manual client. Specify the source to request from server (e.g., --source tcp://127.0.0.1:22)",
                     )?;
                     let target: String = target.context(
                         "--target is required. Specify local address to listen on (e.g., --target 127.0.0.1:2222)",

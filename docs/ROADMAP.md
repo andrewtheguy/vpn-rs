@@ -41,13 +41,13 @@ tunnel-rs client \
 **Usage (nostr mode):**
 ```bash
 # Server: allow networks via CIDR
-tunnel-rs-ice server ice-nostr --nsec-file ./server.nsec \
+tunnel-rs-ice server nostr --nsec-file ./server.nsec \
   --peer-npub npub1receiver... \
   --allowed-tcp 127.0.0.0/8 \
   --allowed-udp 10.0.0.0/8
 
 # Client: request a specific source
-tunnel-rs-ice client ice-nostr --nsec-file ./receiver.nsec \
+tunnel-rs-ice client nostr --nsec-file ./receiver.nsec \
   --peer-npub npub1sender... \
   --source tcp://127.0.0.1:22 \
   --target 127.0.0.1:2222

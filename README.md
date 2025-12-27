@@ -38,7 +38,7 @@ tunnel-rs provides multiple modes for establishing tunnels. **Use `iroh` mode** 
 
 Binary layout:
 - `tunnel-rs`: iroh-only
-- `tunnel-rs-ice`: ice-manual and ice-nostr
+- `tunnel-rs-ice`: manual and nostr
 
 | Mode | NAT Traversal | Discovery | External Dependency |
 |------|---------------|-----------|---------------------|
@@ -617,14 +617,14 @@ Uses full ICE (Interactive Connectivity Establishment) with str0m + quinn QUIC. 
 
 1. **Client** starts first and outputs an offer:
    ```bash
-   tunnel-rs-ice client ice-manual --source tcp://127.0.0.1:22 --target 127.0.0.1:2222
+   tunnel-rs-ice client manual --source tcp://127.0.0.1:22 --target 127.0.0.1:2222
    ```
 
    Copy the `-----BEGIN TUNNEL-RS MANUAL OFFER-----` block.
 
 2. **Server** validates the source request and outputs an answer:
    ```bash
-   tunnel-rs-ice server ice-manual --allowed-tcp 127.0.0.0/8
+   tunnel-rs-ice server manual --allowed-tcp 127.0.0.0/8
    ```
 
    Paste the offer, then copy the `-----BEGIN TUNNEL-RS MANUAL ANSWER-----` block.
@@ -642,15 +642,15 @@ Uses full ICE (Interactive Connectivity Establishment) with str0m + quinn QUIC. 
 
 ```bash
 # Client (starts first)
-tunnel-rs-ice client ice-manual --source udp://127.0.0.1:51820 --target 0.0.0.0:51820
+tunnel-rs-ice client manual --source udp://127.0.0.1:51820 --target 0.0.0.0:51820
 
 # Server (validates and responds)
-tunnel-rs-ice server ice-manual --allowed-udp 127.0.0.0/8
+tunnel-rs-ice server manual --allowed-udp 127.0.0.0/8
 ```
 
 ## CLI Options
 
-### server ice-manual
+### server manual
 
 | Option | Default | Description |
 |--------|---------|-------------|
@@ -659,7 +659,7 @@ tunnel-rs-ice server ice-manual --allowed-udp 127.0.0.0/8
 | `--stun-server` | public | STUN server(s), repeatable |
 | `--no-stun` | false | Disable STUN (no external infrastructure, CLI only) |
 
-### client ice-manual
+### client manual
 
 | Option | Default | Description |
 |--------|---------|-------------|
@@ -739,7 +739,7 @@ Exchange public keys (npub) between peers.
 
 **Server** (on server with SSH — waits for client connections):
 ```bash
-tunnel-rs-ice server ice-nostr \
+tunnel-rs-ice server nostr \
   --allowed-tcp 127.0.0.0/8 \
   --nsec-file ./server.nsec \
   --peer-npub npub1client...
@@ -747,7 +747,7 @@ tunnel-rs-ice server ice-nostr \
 
 **Client** (on client — initiates connection):
 ```bash
-tunnel-rs-ice client ice-nostr \
+tunnel-rs-ice client nostr \
   --source tcp://127.0.0.1:22 \
   --target 127.0.0.1:2222 \
   --nsec-file ./client.nsec \
@@ -764,13 +764,13 @@ ssh -p 2222 user@127.0.0.1
 
 ```bash
 # Server (allows UDP traffic to localhost)
-tunnel-rs-ice server ice-nostr \
+tunnel-rs-ice server nostr \
   --allowed-udp 127.0.0.0/8 \
   --nsec-file ./server.nsec \
   --peer-npub npub1client...
 
 # Client (requests WireGuard tunnel)
-tunnel-rs-ice client ice-nostr \
+tunnel-rs-ice client nostr \
   --source udp://127.0.0.1:51820 \
   --target udp://0.0.0.0:51820 \
   --nsec-file ./client.nsec \
@@ -779,7 +779,7 @@ tunnel-rs-ice client ice-nostr \
 
 ## CLI Options
 
-### server ice-nostr
+### server nostr
 
 | Option | Default | Description |
 |--------|---------|-------------|
@@ -793,7 +793,7 @@ tunnel-rs-ice client ice-nostr \
 | `--no-stun` | false | Disable STUN |
 | `--max-sessions` | 10 | Maximum concurrent sessions (0 = unlimited) |
 
-### client ice-nostr
+### client nostr
 
 | Option | Default | Description |
 |--------|---------|-------------|
@@ -875,13 +875,13 @@ Server whitelists networks; clients choose which service to tunnel:
 
 ```bash
 # Server: whitelist networks, clients choose destination
-tunnel-rs-ice server ice-nostr --allowed-tcp 127.0.0.0/8 --nsec-file ./server.nsec --peer-npub <NPUB> --max-sessions 5
+tunnel-rs-ice server nostr --allowed-tcp 127.0.0.0/8 --nsec-file ./server.nsec --peer-npub <NPUB> --max-sessions 5
 
 # Client 1: tunnel to SSH
-tunnel-rs-ice client ice-nostr --source tcp://127.0.0.1:22 --target 127.0.0.1:2222 ...
+tunnel-rs-ice client nostr --source tcp://127.0.0.1:22 --target 127.0.0.1:2222 ...
 
 # Client 2: tunnel to web server (same server!)
-tunnel-rs-ice client ice-nostr --source tcp://127.0.0.1:80 --target 127.0.0.1:8080 ...
+tunnel-rs-ice client nostr --source tcp://127.0.0.1:80 --target 127.0.0.1:8080 ...
 ```
 
 ### Single-Session Mode (ice-manual)

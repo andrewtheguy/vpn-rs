@@ -23,7 +23,7 @@ tunnel-rs is a P2P TCP/UDP port forwarding tool that supports multiple distinct 
 
 Binary layout:
 - `tunnel-rs`: iroh-only
-- `tunnel-rs-ice`: ice-manual and ice-nostr
+- `tunnel-rs-ice`: manual and nostr
 
 > **Design Goal:** The project's primary goal is to provide a convenient way to connect to different networks for development or homelab purposes without the hassle and security risk of opening a port. It is **not** meant for production setups or designed to be performant at scale.
 
@@ -67,7 +67,7 @@ The project is split into separate binaries to isolate dependencies:
 | Binary | Modes | Key Modules |
 |--------|-------|-------------|
 | `tunnel-rs` | `iroh` | `iroh_mode`, `auth`, `socks5_bridge` |
-| `tunnel-rs-ice` | `ice-manual`, `ice-nostr` | `custom`, `nostr`, `transport` |
+| `tunnel-rs-ice` | `manual`, `nostr` | `custom`, `nostr`, `transport` |
 
 The `test-utils` feature is still available on the iroh crates/binary to enable `--relay-only` for testing.
 

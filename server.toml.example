@@ -2,8 +2,8 @@
 #
 # Usage: tunnel-rs server -c server.toml
 #        tunnel-rs server --default-config
-#        tunnel-rs-ice server ice-manual -c server.toml
-#        tunnel-rs-ice server ice-nostr -c server.toml
+#        tunnel-rs-ice server manual -c server.toml
+#        tunnel-rs-ice server nostr -c server.toml
 #
 # Mode is inferred from the 'mode' field below.
 # CLI arguments take precedence over config file values.
