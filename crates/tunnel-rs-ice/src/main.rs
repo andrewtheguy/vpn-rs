@@ -115,7 +115,7 @@ struct Args {
 #[derive(Subcommand)]
 enum Command {
     /// Run as server (accepts connections and forwards to source)
-    #[command(subcommand_negates_reqs = true)]
+    #[command(subcommand_negates_reqs = true, subcommand_required = false)]
     Server {
         /// Path to config file
         #[arg(short, long)]
@@ -129,7 +129,7 @@ enum Command {
         mode: Option<ServerMode>,
     },
     /// Run as client (connects to server and exposes local port)
-    #[command(subcommand_negates_reqs = true)]
+    #[command(subcommand_negates_reqs = true, subcommand_required = false)]
     Client {
         /// Path to config file
         #[arg(short, long)]

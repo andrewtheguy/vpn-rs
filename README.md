@@ -292,6 +292,12 @@ Use `--default-config` to load from the default location, or `-c <path>` for a c
 - **manual** mode: `[manual]` section
 - **nostr** mode: `[nostr]` section
 
+When using `tunnel-rs-ice` with a config file, the mode is inferred from the file, so you can omit the subcommand:
+```bash
+tunnel-rs-ice server -c server_ice.toml
+tunnel-rs-ice client -c client_ice.toml
+```
+
 **Default locations:**
 - Server: `~/.config/tunnel-rs/server.toml` (`tunnel-rs`) or `~/.config/tunnel-rs/server_ice.toml` (`tunnel-rs-ice`)
 - Client: `~/.config/tunnel-rs/client.toml` (`tunnel-rs`) or `~/.config/tunnel-rs/client_ice.toml` (`tunnel-rs-ice`)

@@ -1,7 +1,6 @@
 # tunnel-rs-ice server configuration example (ICE modes)
 #
-# Usage: tunnel-rs-ice server manual -c server_ice.toml
-#        tunnel-rs-ice server nostr -c server_ice.toml
+# Usage: tunnel-rs-ice server -c server_ice.toml
 #        tunnel-rs-ice server --default-config
 #
 # Mode is inferred from the 'mode' field below.

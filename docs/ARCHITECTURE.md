@@ -1013,6 +1013,8 @@ sequenceDiagram
     Main->>Main: Proceed with merged config
 ```
 
+Note: For `tunnel-rs-ice`, the mode is inferred from the config file, so `server -c <file>` / `client -c <file>` can be used without a subcommand.
+
 ### Config Validation
 
 ```mermaid
