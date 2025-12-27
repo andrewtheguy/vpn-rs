@@ -1,7 +1,7 @@
 //! Signaling layer for tunnel connection establishment.
 //!
 //! This module provides signaling mechanisms for exchanging connection information:
-//! - `codec`: Payload types and encoding/decoding for ICE offers/answers
+//! - `codec`: Re-exported from `tunnel_common::signaling` (payloads + encode/decode)
 //! - `manual`: Stdin/stdout helpers for manual copy-paste signaling
 //! - `nostr`: Nostr relay-based automated signaling
 

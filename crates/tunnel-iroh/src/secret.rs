@@ -15,7 +15,7 @@ fn write_secret_to_output(
     force: bool,
     secret_label: &str,
 ) -> Result<()> {
-    if output.to_str() == Some("-") {
+    if output.as_os_str() == std::ffi::OsStr::new("-") {
         println!("{}", secret_content);
         eprintln!("{}", public_info);
         return Ok(());
@@ -31,14 +31,26 @@ fn write_secret_to_output(
     if let Some(parent) = output.parent() {
         std::fs::create_dir_all(parent).context("Failed to create parent directory")?;
     }
-    std::fs::write(output, secret_content).context("Failed to write secret key file")?;
 
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = std::fs::metadata(output)?.permissions();
-        perms.set_mode(0o600);
-        std::fs::set_permissions(output, perms)?;
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(output)
+            .context("Failed to open secret key file")?;
+        file.write_all(secret_content.as_bytes())
+            .context("Failed to write secret key file")?;
+    }
+
+    #[cfg(not(unix))]
+    {
+        std::fs::write(output, secret_content).context("Failed to write secret key file")?;
     }
 
     info!("{} saved to: {}", secret_label, output.display());

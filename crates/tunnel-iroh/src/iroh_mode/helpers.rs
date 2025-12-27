@@ -190,20 +190,25 @@ pub(super) async fn forward_stream_to_udp_server(
         }
 
         if !sent {
-            // All addresses failed
-            response_task.abort();
+            // All addresses failed for this packet; reset so the next packet retries from the start.
+            if active_addr_idx >= ordered_addrs.len() {
+                active_addr_idx = 0;
+                logged_active = false;
+            }
             if errors.len() == 1 {
                 let (addr, e) = errors.remove(0);
-                anyhow::bail!("Failed to send UDP packet to {}: {}", addr, e);
-            } else {
+                log::warn!("Failed to send UDP packet to {}: {}", addr, e);
+            } else if !errors.is_empty() {
                 let error_details: Vec<String> = errors
                     .iter()
                     .map(|(addr, e)| format!("{}: {}", addr, e))
                     .collect();
-                anyhow::bail!(
+                log::warn!(
                     "Failed to send UDP packet to any address:\n  {}",
                     error_details.join("\n  ")
                 );
+            } else {
+                log::warn!("Failed to send UDP packet: no target addresses available");
             }
         }
     }

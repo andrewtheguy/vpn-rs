@@ -282,17 +282,21 @@ fn validate_socks5_proxy(value: &str, relay_urls: Option<&Vec<String>>) -> Resul
     // Validate that ALL relay URLs are .onion addresses
     if let Some(urls) = relay_urls {
         for relay_url in urls {
-            let is_onion = url::Url::parse(relay_url)
-                .ok()
-                .and_then(|parsed| parsed.host_str().map(|h| h.ends_with(".onion")))
-                .unwrap_or(false);
-
-            if !is_onion {
+            let parsed = url::Url::parse(relay_url)
+                .with_context(|| format!("Invalid relay URL '{}'", relay_url))?;
+            let host = parsed.host_str().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Relay URL '{}' missing host; SOCKS5 proxy requires .onion relay URLs",
+                    relay_url
+                )
+            })?;
+            if !host.ends_with(".onion") {
                 anyhow::bail!(
                     "SOCKS5 proxy is only supported for Tor hidden service (.onion) relay URLs. \
-                     Relay URL '{}' is not a .onion address. \
+                     Relay URL '{}' host '{}' is not a .onion address. \
                      All relay URLs must end with '.onion' when using --socks5-proxy.",
-                    relay_url
+                    relay_url,
+                    host
                 );
             }
         }
@@ -526,6 +530,9 @@ impl ClientConfig {
         // Mode-specific validation
         if expected_mode == "iroh" {
             if let Some(ref iroh) = self.iroh {
+                if iroh.secret.is_some() && iroh.secret_file.is_some() {
+                    anyhow::bail!("[iroh] Use only one of 'secret' or 'secret_file'.");
+                }
                 // Note: secret/secret_file are allowed for clients (needed for authentication)
                 // Reject server-only fields
                 if iroh.allowed_sources.is_some() {

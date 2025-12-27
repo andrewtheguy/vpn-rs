@@ -292,11 +292,11 @@ enum ClientMode {
         #[arg(long = "relay")]
         relays: Vec<String>,
 
-        /// Interval in seconds to re-publish offer while waiting for answer (default: 5)
+        /// Interval in seconds to re-publish offer while waiting for an answer (default: 5)
         #[arg(long, default_value = "5")]
         republish_interval: u64,
 
-        /// Maximum time in seconds to wait for offer before giving up (default: 120)
+        /// Maximum time in seconds to wait for an answer before giving up (default: 120)
         #[arg(long, default_value = "120")]
         max_wait: u64,
     },
