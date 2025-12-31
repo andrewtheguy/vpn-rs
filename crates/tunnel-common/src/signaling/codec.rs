@@ -158,21 +158,19 @@ impl std::ops::Deref for AuthToken {
 
 /// Source request sent by receiver after iroh connection established.
 /// Used in iroh multi-source mode to request a specific forwarding target.
+/// Note: Authentication is handled at connection level via AuthRequest/AuthResponse.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SourceRequest {
     pub version: u16,
     /// Requested source endpoint (e.g., "tcp://127.0.0.1:22" or "udp://127.0.0.1:53")
     pub source: String,
-    /// Authentication token (required for server validation)
-    pub auth_token: AuthToken,
 }
 
 impl SourceRequest {
-    pub fn new(source: String, auth_token: impl Into<String>) -> Self {
+    pub fn new(source: String) -> Self {
         Self {
             version: IROH_MULTI_VERSION,
             source,
-            auth_token: AuthToken::new(auth_token),
         }
     }
 }
@@ -561,20 +559,12 @@ mod tests {
     }
 
     #[test]
-    fn test_source_request_debug_redacts_token() {
-        let request = SourceRequest::new("tcp://127.0.0.1:22".to_string(), "secret_auth_token");
-        let debug_output = format!("{:?}", request);
-        assert!(debug_output.contains("AuthToken(***)"));
-        assert!(!debug_output.contains("secret_auth_token"));
-    }
-
-    #[test]
     fn test_source_request_serde_roundtrip() {
-        let request = SourceRequest::new("tcp://127.0.0.1:22".to_string(), "my_auth_token_123");
+        let request = SourceRequest::new("tcp://127.0.0.1:22".to_string());
         let encoded = encode_source_request(&request).unwrap();
         let decoded = decode_source_request(&encoded).unwrap();
         assert_eq!(decoded.source, "tcp://127.0.0.1:22");
-        assert_eq!(decoded.auth_token.as_str(), "my_auth_token_123");
+        assert_eq!(decoded.version, IROH_MULTI_VERSION);
     }
 
     #[test]

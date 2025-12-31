@@ -230,12 +230,12 @@ async fn handle_multi_source_connection(
         Ok(Err(e)) => {
             log::warn!("Authentication failed for {}: {}", remote_id, e);
             conn.close(1u32.into(), b"auth_failed");
-            return Ok(());
+            return Err(anyhow::anyhow!("auth_failed: {}", e));
         }
         Err(_) => {
             log::warn!("Authentication timeout for {}", remote_id);
             conn.close(2u32.into(), b"auth_timeout");
-            return Ok(());
+            return Err(anyhow::anyhow!("auth_timeout"));
         }
     }
 
@@ -327,8 +327,6 @@ async fn handle_multi_source_stream(
     let request = decode_source_request(&request_bytes).context("Invalid source request")?;
 
     log::info!("Source request: {}", request.source);
-
-    // Note: auth_token is validated at connection level, not per-stream
 
     // Determine protocol and validate
     let is_tcp = request.source.starts_with("tcp://");
@@ -508,13 +506,13 @@ pub async fn run_multi_source_client(
     let tunnel_established = Arc::new(AtomicBool::new(false));
 
     if is_tcp {
-        run_multi_source_tcp_client(conn, source, &listen_addrs, tunnel_established, auth_token.clone()).await?;
+        run_multi_source_tcp_client(conn, source, &listen_addrs, tunnel_established).await?;
     } else {
         // UDP still uses single address (first one) - multi-listener for UDP is more complex
         let listen_addr = listen_addrs
             .first()
             .ok_or_else(|| anyhow::anyhow!("No listen addresses resolved for target"))?;
-        run_multi_source_udp_client(conn, source, *listen_addr, auth_token).await?;
+        run_multi_source_udp_client(conn, source, *listen_addr).await?;
     }
 
     endpoint.close().await;
@@ -533,7 +531,6 @@ async fn run_multi_source_tcp_client(
     source: String,
     listen_addrs: &[SocketAddr],
     tunnel_established: Arc<AtomicBool>,
-    auth_token: String,
 ) -> Result<()> {
     use tokio::sync::mpsc;
 
@@ -596,7 +593,6 @@ async fn run_multi_source_tcp_client(
                 let conn_clone = conn.clone();
                 let source_clone = source.clone();
                 let established = tunnel_established.clone();
-                let token = auth_token.clone();
 
                 connection_tasks.spawn(async move {
                     match handle_multi_source_tcp_client_connection(
@@ -605,7 +601,6 @@ async fn run_multi_source_tcp_client(
                         peer_addr,
                         source_clone,
                         established,
-                        token,
                     ).await {
                         Ok(()) => {}
                         Err(e) => {
@@ -643,12 +638,11 @@ async fn handle_multi_source_tcp_client_connection(
     peer_addr: SocketAddr,
     source: String,
     tunnel_established: Arc<AtomicBool>,
-    auth_token: String,
 ) -> Result<()> {
     let (mut send_stream, mut recv_stream) = open_bi_with_retry(&conn).await?;
 
-    // Send source request with auth token
-    let request = SourceRequest::new(source.clone(), auth_token);
+    // Send source request (auth already validated at connection level)
+    let request = SourceRequest::new(source.clone());
     let encoded = encode_source_request(&request)?;
     send_stream.write_all(&encoded).await?;
 
@@ -681,12 +675,11 @@ async fn run_multi_source_udp_client(
     conn: Arc<iroh::endpoint::Connection>,
     source: String,
     listen_addr: SocketAddr,
-    auth_token: String,
 ) -> Result<()> {
     let (mut send_stream, mut recv_stream) = open_bi_with_retry(&conn).await?;
 
-    // Send source request with auth token
-    let request = SourceRequest::new(source.clone(), auth_token);
+    // Send source request (auth already validated at connection level)
+    let request = SourceRequest::new(source.clone());
     let encoded = encode_source_request(&request)?;
     send_stream.write_all(&encoded).await?;
 
