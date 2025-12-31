@@ -11,8 +11,8 @@ use serde::{Deserialize, Serialize};
 
 /// Version 1: Custom mode (str0m ICE + quinn QUIC)
 pub const MANUAL_SIGNAL_VERSION: u16 = 1;
-/// Version 1: Iroh multi-source handshake protocol
-pub const IROH_MULTI_VERSION: u16 = 1;
+/// Version 2: Iroh multi-source handshake protocol (with token auth)
+pub const IROH_MULTI_VERSION: u16 = 2;
 
 pub(crate) const PREFIX: &str = "TRS";
 pub const LINE_WIDTH: usize = 76;
@@ -124,13 +124,16 @@ pub struct SourceRequest {
     pub version: u16,
     /// Requested source endpoint (e.g., "tcp://127.0.0.1:22" or "udp://127.0.0.1:53")
     pub source: String,
+    /// Authentication token (required for server validation)
+    pub auth_token: String,
 }
 
 impl SourceRequest {
-    pub fn new(source: String) -> Self {
+    pub fn new(source: String, auth_token: String) -> Self {
         Self {
             version: IROH_MULTI_VERSION,
             source,
+            auth_token,
         }
     }
 }

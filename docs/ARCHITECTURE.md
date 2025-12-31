@@ -81,7 +81,7 @@ graph LR
         C[tunnel.rs<br/>TCP/UDP Forwarding]
         D[endpoint.rs<br/>iroh Endpoint]
         E[secret.rs<br/>Identity Management]
-        E2[auth.rs<br/>NodeId Authentication]
+        E2[auth.rs<br/>Token Authentication]
     end
 
     subgraph "Manual/Custom Mode"
@@ -1083,36 +1083,37 @@ graph TB
 ```mermaid
 graph TB
     subgraph "iroh Mode"
-        A[Secret Key File] --> B[Ed25519 Private Key]
+        A[Server Secret Key] --> B[Ed25519 Private Key]
         B --> C[EndpointId - Public Key]
-        C --> D[NodeId Whitelist Check]
-        D --> E{In allowed_clients?}
-        E -->|Yes| F[Authenticated]
-        E -->|No| G[Rejected]
+        C --> D[Client Connects]
+        D --> E[Token Validation]
+        E --> F{Valid Token?}
+        F -->|Yes| G[Authenticated]
+        F -->|No| H[Rejected]
     end
 
     subgraph "manual Mode"
-        H[ICE Credentials] --> I[ufrag + pwd]
-        I --> J[STUN Auth]
-        J --> K[QUIC TLS]
+        I[ICE Credentials] --> J[ufrag + pwd]
+        J --> K[STUN Auth]
+        K --> L[QUIC TLS]
     end
 
     style B fill:#FFE0B2
     style C fill:#C8E6C9
-    style F fill:#C8E6C9
-    style G fill:#FFCCBC
-    style K fill:#C8E6C9
+    style G fill:#C8E6C9
+    style H fill:#FFCCBC
+    style L fill:#C8E6C9
 ```
 
-### NodeId Whitelist (iroh Mode)
+### Token Authentication (iroh Mode)
 
-Iroh mode requires server-side authentication using NodeId whitelisting:
+Iroh mode requires authentication using pre-shared tokens. Clients use ephemeral identities but must provide a valid token:
 
-1. **Server Configuration**: Server specifies `--allowed-clients` with one or more client NodeIds
-2. **Client Identity**: Each client has an Ed25519 keypair; the NodeId is derived from the public key
-3. **Authentication**: When a client connects, iroh's TLS handshake verifies the client's NodeId
-4. **Validation**: Server checks if `conn.remote_id()` is in the allowed clients list
-5. **Rejection**: Unauthorized clients are immediately disconnected with `conn.close(1, b"unauthorized")`
+1. **Server Configuration**: Server specifies `--auth-tokens` with one or more pre-shared tokens
+2. **Client Configuration**: Client specifies `--auth-token` with the token received from the server admin
+3. **Protocol Flow**: Client sends the token in the `SourceRequest` message (within the encrypted QUIC connection)
+4. **Validation**: Server validates the token using `is_token_valid()`
+5. **Rejection**: Invalid tokens receive a `SourceResponse::rejected()` and the stream is closed
 
 ```mermaid
 sequenceDiagram
@@ -1120,17 +1121,19 @@ sequenceDiagram
     participant S as Server
     participant A as Auth Module
 
-    C->>S: Connect (TLS handshake includes NodeId)
-    S->>S: conn.remote_id() → NodeId
-    S->>A: is_client_allowed(NodeId, allowed_clients)
-    alt NodeId in allowed_clients
+    C->>S: Connect (QUIC TLS handshake)
+    S->>C: Accept connection
+    C->>S: SourceRequest {source, auth_token}
+    S->>A: is_token_valid(auth_token, auth_tokens)
+    alt Token is valid
         A-->>S: true
-        S->>C: Accept connection
-        Note over S,C: Proceed with tunnel setup
-    else NodeId not in allowed_clients
+        S->>S: Validate source against allowed networks
+        S->>C: SourceResponse::accepted()
+        Note over S,C: Proceed with tunnel data transfer
+    else Token is invalid
         A-->>S: false
-        S->>S: conn.close(1, b"unauthorized")
-        S->>C: Connection rejected
+        S->>C: SourceResponse::rejected("Invalid authentication token")
+        S->>S: Close stream
     end
 ```
 
@@ -1143,14 +1146,14 @@ graph TB
         B[MITM<br/>Peer authentication]
         C[Replay Attacks<br/>QUIC nonces]
         D[Tampering<br/>Authenticated encryption]
-        E2[Unauthorized Access<br/>NodeId Whitelist - iroh mode]
+        E2[Unauthorized Access<br/>Token Authentication - iroh mode]
     end
 
     subgraph "User Responsibility"
         E[Signaling Channel Security<br/>Manual modes]
-        F[Secret Key Protection<br/>iroh]
+        F[Secret Key Protection<br/>iroh server]
         G[EndpointId Verification<br/>Trust on first use]
-        H[Allowed Clients List<br/>Server admin maintains whitelist]
+        H[Auth Token Security<br/>Treat tokens like passwords]
     end
 
     style A fill:#C8E6C9
@@ -1165,7 +1168,9 @@ graph TB
     style H fill:#FFF9C4
 ```
 
-### Secret Key Management
+### Secret Key Management (Server Only)
+
+In iroh mode, only the **server** needs a persistent secret key to maintain a stable EndpointId. Clients use ephemeral identities and authenticate via tokens.
 
 ```mermaid
 sequenceDiagram
@@ -1173,28 +1178,28 @@ sequenceDiagram
     participant CLI as CLI
     participant Secret as Secret Module
     participant FS as File System
-    
-    alt Generate New Secret
-        User->>CLI: generate-iroh-key --output key.file
+
+    alt Generate Server Key
+        User->>CLI: generate-iroh-key --output server.key
         CLI->>Secret: Generate Ed25519 key
         Secret->>Secret: Derive EndpointId
         Secret->>FS: Write with 0600 permissions
         FS-->>Secret: Success
         Secret->>CLI: Display EndpointId
-        CLI->>User: Show EndpointId
+        CLI->>User: Show EndpointId (share with clients)
     end
-    
-    alt Load Existing Secret
-        User->>CLI: sender --secret-file key.file
+
+    alt Load Server Secret
+        User->>CLI: server --secret-file server.key
         CLI->>FS: Read key file
         FS-->>Secret: Key bytes
         Secret->>Secret: Parse Ed25519 key
         Secret->>Secret: Derive EndpointId
         Secret-->>CLI: Secret + EndpointId
     end
-    
+
     alt Show EndpointId
-        User->>CLI: show-iroh-node-id --secret-file key.file
+        User->>CLI: show-iroh-node-id --secret-file server.key
         CLI->>FS: Read key file
         FS-->>Secret: Key bytes
         Secret->>Secret: Derive EndpointId
