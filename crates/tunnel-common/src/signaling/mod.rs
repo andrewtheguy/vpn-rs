@@ -4,7 +4,7 @@ pub mod codec;
 
 pub use codec::{
     decode_source_request, decode_source_response, encode_source_request, encode_source_response,
-    read_length_prefixed, SourceRequest, SourceResponse,
+    read_length_prefixed, AuthToken, SourceRequest, SourceResponse,
 };
 
 pub use codec::{

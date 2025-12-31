@@ -42,11 +42,14 @@ pub struct IrohConfig {
     pub max_sessions: Option<usize>,
     /// Authentication tokens (server only).
     /// Clients must provide one of these tokens to authenticate.
+    /// Prefer `auth_tokens_file` in production; inline tokens are best kept to testing or
+    /// special cases due to VCS/log exposure risk.
     pub auth_tokens: Option<Vec<String>>,
     /// Path to file containing authentication tokens (server only).
     /// One token per line, # comments allowed.
     pub auth_tokens_file: Option<PathBuf>,
     /// Authentication token to send to server (client only).
+    /// Prefer `auth_token_file` in production to avoid exposing tokens in config files.
     pub auth_token: Option<String>,
     /// Path to file containing authentication token (client only).
     pub auth_token_file: Option<PathBuf>,
