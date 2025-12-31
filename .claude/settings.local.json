@@ -32,7 +32,8 @@
       "Bash(cat:*)",
       "Bash(cargo metadata:*)",
       "mcp__fetch__fetch_markdown",
-      "Bash(wc:*)"
+      "Bash(wc:*)",
+      "Bash(cargo test:*)"
     ]
   }
 }

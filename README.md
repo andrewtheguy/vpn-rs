@@ -186,9 +186,9 @@ Generate a server key and create an authentication token:
 tunnel-rs generate-iroh-key --output ./server.key
 # Output: EndpointId: 2xnbkpbc7izsilvewd7c62w7wnwziacmpfwvhcrya5nt76dqkpga
 
-# Create a shared authentication token (exactly 16 alphanumeric characters)
+# Create a shared authentication token
 # Share this token with authorized clients
-AUTH_TOKEN=$(openssl rand -hex 8)  # produces 16 hex characters
+AUTH_TOKEN=$(tunnel-rs generate-token)
 echo $AUTH_TOKEN
 ```
 
@@ -334,10 +334,11 @@ relay_urls = ["https://relay.example.com"]
 dns_server = "https://dns.example.com/pkarr"
 max_sessions = 100
 
-# Authentication: clients must provide one of these tokens (16 chars)
+# Authentication: clients must provide one of these tokens (18 chars)
+# Generate with: tunnel-rs generate-token
 auth_tokens = [
-    "a1b2c3d4e5f6g7h8",
-    "x9y8z7w6v5u4t3s2",
+    "ikAdvudu_ZxNXhNLCD",
+    "iw3nLKic3oV7zmFJ8v",
 ]
 # Or use: auth_tokens_file = "/etc/tunnel-rs/auth_tokens.txt"
 
@@ -373,8 +374,8 @@ target = "127.0.0.1:2222"
 relay_urls = ["https://relay.example.com"]
 dns_server = "https://dns.example.com/pkarr"
 
-# Authentication token (get from server admin, 16 chars)
-auth_token = "a1b2c3d4e5f6g7h8"
+# Authentication token (get from server admin, 18 chars)
+auth_token = "ikAdvudu_ZxNXhNLCD"
 # Or use: auth_token_file = "~/.config/tunnel-rs/token.txt"
 ```
 
@@ -414,8 +415,12 @@ tunnel-rs server --allowed-tcp 127.0.0.0/8 --secret-file ./server.key --auth-tok
 Iroh mode requires authentication using pre-shared tokens. Clients must provide a valid token to connect.
 
 **Token Format:**
-- Exactly 16 characters
-- Allowed characters: `A-Za-z0-9` and `-` `_` `.`
+- Exactly 18 characters
+- Starts with `i` (for iroh)
+- Ends with a checksum character
+- Middle 16 characters: `A-Za-z0-9` and `-` `_` `.`
+
+Generate tokens with: `tunnel-rs generate-token`
 
 ### Setup Workflow
 
@@ -426,9 +431,12 @@ Iroh mode requires authentication using pre-shared tokens. Clients must provide 
 
 2. **Create authentication tokens:**
    ```bash
-   # Generate secure random token (16 hex characters)
-   AUTH_TOKEN=$(openssl rand -hex 8)
+   # Generate a valid token
+   AUTH_TOKEN=$(tunnel-rs generate-token)
    echo $AUTH_TOKEN  # Share this with authorized clients
+
+   # Generate multiple tokens
+   tunnel-rs generate-token -c 5
    ```
 
 3. **Start server with auth tokens:**
@@ -465,11 +473,11 @@ tunnel-rs server \
 
 **Example `auth_tokens.txt`:**
 ```text
-# Alice's token (16 characters)
-a1b2c3d4e5f6g7h8
+# Alice's token (generate with: tunnel-rs generate-token)
+ikAdvudu_ZxNXhNLCD
 
 # Bob's token
-x9y8z7w6v5u4t3s2
+iw3nLKic3oV7zmFJ8v
 ```
 
 ### Configuration File
@@ -478,10 +486,11 @@ In `server.toml`:
 
 ```toml
 [iroh]
-# Inline list (tokens must be exactly 16 characters)
+# Inline list (tokens must be exactly 18 characters)
+# Generate with: tunnel-rs generate-token
 auth_tokens = [
-    "a1b2c3d4e5f6g7h8",  # Alice
-    "x9y8z7w6v5u4t3s2",  # Bob
+    "ikAdvudu_ZxNXhNLCD",  # Alice
+    "iw3nLKic3oV7zmFJ8v",  # Bob
 ]
 
 # Or use a file
@@ -961,6 +970,21 @@ stderr (npub):
 ```
 npub1...
 ```
+
+## generate-token
+
+Generate authentication tokens for iroh mode:
+
+```bash
+# Generate a single token
+tunnel-rs generate-token
+# Output: ikAdvudu_ZxNXhNLCD
+
+# Generate multiple tokens
+tunnel-rs generate-token -c 5
+```
+
+Token format: `i` + 16 random chars + checksum = 18 characters total.
 
 ## generate-iroh-key
 

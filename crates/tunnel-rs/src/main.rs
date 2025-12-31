@@ -155,6 +155,12 @@ enum Command {
         #[arg(short, long)]
         secret_file: PathBuf,
     },
+    /// Generate a new authentication token
+    GenerateToken {
+        /// Number of tokens to generate (default: 1)
+        #[arg(short, long, default_value = "1")]
+        count: usize,
+    },
 }
 
 fn normalize_optional_endpoint(value: Option<String>) -> Option<String> {
@@ -539,5 +545,11 @@ async fn main() -> Result<()> {
             secret::generate_secret(expand_tilde(output), *force)
         }
         Command::ShowIrohNodeId { secret_file } => secret::show_id(expand_tilde(secret_file)),
+        Command::GenerateToken { count } => {
+            for _ in 0..*count {
+                println!("{}", auth::generate_token());
+            }
+            Ok(())
+        }
     }
 }
