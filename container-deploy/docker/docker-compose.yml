@@ -9,7 +9,7 @@
 # Setup:
 #   1. Generate server key for stable EndpointId:
 #      docker run --rm ghcr.io/andrewtheguy/tunnel-rs:latest \
-#        generate-iroh-key --output - > server.key
+#        generate-server-key --output - > server.key
 #
 #   2. Generate authentication token:
 #      docker run --rm ghcr.io/andrewtheguy/tunnel-rs:latest \

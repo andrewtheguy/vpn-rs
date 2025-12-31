@@ -183,7 +183,7 @@ Generate a server key and create an authentication token:
 
 ```bash
 # On server machine - generate persistent identity
-tunnel-rs generate-iroh-key --output ./server.key
+tunnel-rs generate-server-key --output ./server.key
 # Output: EndpointId: 2xnbkpbc7izsilvewd7c62w7wnwziacmpfwvhcrya5nt76dqkpga
 
 # Create a shared authentication token
@@ -396,10 +396,10 @@ By default, a new EndpointId is generated each run. For long-running setups, use
 
 ```bash
 # Generate key and output EndpointId
-tunnel-rs generate-iroh-key --output ./server.key
+tunnel-rs generate-server-key --output ./server.key
 
 # Show EndpointId for existing key
-tunnel-rs show-iroh-node-id --secret-file ./server.key
+tunnel-rs show-server-id --secret-file ./server.key
 ```
 
 Then use the key for the server:
@@ -426,7 +426,7 @@ Generate tokens with: `tunnel-rs generate-token`
 
 1. **Generate a server key:**
    ```bash
-   tunnel-rs generate-iroh-key --output ./server.key
+   tunnel-rs generate-server-key --output ./server.key
    ```
 
 2. **Create authentication tokens:**
@@ -986,18 +986,18 @@ tunnel-rs generate-token -c 5
 
 Token format: `i` + 16 random chars + checksum = 18 characters total.
 
-## generate-iroh-key
+## generate-server-key
 
 *For iroh mode.*
 
 ```bash
-tunnel-rs generate-iroh-key --output ./server.key
+tunnel-rs generate-server-key --output ./server.key
 ```
 
-## show-iroh-node-id
+## show-server-id
 
 ```bash
-tunnel-rs show-iroh-node-id --secret-file ./server.key
+tunnel-rs show-server-id --secret-file ./server.key
 ```
 
 ## show-npub

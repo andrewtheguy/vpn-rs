@@ -15,7 +15,7 @@
 #
 # Setup:
 #   1. Generate server key:
-#      tunnel-rs generate-iroh-key --output server.key
+#      tunnel-rs generate-server-key --output server.key
 #
 #   2. Generate authentication token:
 #      tunnel-rs generate-token > tokens.txt
