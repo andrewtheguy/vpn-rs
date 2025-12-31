@@ -3,8 +3,9 @@
 pub mod codec;
 
 pub use codec::{
-    decode_source_request, decode_source_response, encode_source_request, encode_source_response,
-    read_length_prefixed, AuthToken, SourceRequest, SourceResponse,
+    decode_auth_request, decode_auth_response, decode_source_request, decode_source_response,
+    encode_auth_request, encode_auth_response, encode_source_request, encode_source_response,
+    read_length_prefixed, AuthRequest, AuthResponse, AuthToken, SourceRequest, SourceResponse,
 };
 
 pub use codec::{

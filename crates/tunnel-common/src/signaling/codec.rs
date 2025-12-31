@@ -11,8 +11,8 @@ use serde::{Deserialize, Serialize};
 
 /// Version 1: Custom mode (str0m ICE + quinn QUIC)
 pub const MANUAL_SIGNAL_VERSION: u16 = 1;
-/// Version 2: Iroh multi-source handshake protocol (with token auth)
-pub const IROH_MULTI_VERSION: u16 = 2;
+/// Version 3: Iroh multi-source handshake protocol (with early connection-level auth)
+pub const IROH_MULTI_VERSION: u16 = 3;
 
 pub(crate) const PREFIX: &str = "TRS";
 pub const LINE_WIDTH: usize = 76;
@@ -190,6 +190,54 @@ pub struct SourceResponse {
 }
 
 impl SourceResponse {
+    pub fn accepted() -> Self {
+        Self {
+            version: IROH_MULTI_VERSION,
+            accepted: true,
+            reason: None,
+        }
+    }
+
+    pub fn rejected(reason: impl Into<String>) -> Self {
+        Self {
+            version: IROH_MULTI_VERSION,
+            accepted: false,
+            reason: Some(reason.into()),
+        }
+    }
+}
+
+/// Authentication request sent by client immediately after iroh connection.
+/// Must be sent on the first bidirectional stream opened by the client.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuthRequest {
+    pub version: u16,
+    /// Authentication token for server validation
+    pub auth_token: AuthToken,
+}
+
+impl AuthRequest {
+    pub fn new(auth_token: impl Into<String>) -> Self {
+        Self {
+            version: IROH_MULTI_VERSION,
+            auth_token: AuthToken::new(auth_token),
+        }
+    }
+}
+
+/// Authentication response from server to client.
+/// Sent in response to AuthRequest on the auth stream.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuthResponse {
+    pub version: u16,
+    /// Whether authentication was accepted
+    pub accepted: bool,
+    /// Reason for rejection (if rejected)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+impl AuthResponse {
     pub fn accepted() -> Self {
         Self {
             version: IROH_MULTI_VERSION,
@@ -415,6 +463,36 @@ pub fn decode_source_response(data: &[u8]) -> Result<SourceResponse> {
         IROH_MULTI_VERSION,
         |r: &SourceResponse| r.version,
         "SourceResponse",
+    )
+}
+
+/// Encode an AuthRequest as length-prefixed JSON bytes.
+pub fn encode_auth_request(req: &AuthRequest) -> Result<Vec<u8>> {
+    encode_length_prefixed(req, "AuthRequest")
+}
+
+/// Decode an AuthRequest from length-prefixed JSON bytes.
+pub fn decode_auth_request(data: &[u8]) -> Result<AuthRequest> {
+    decode_length_prefixed(
+        data,
+        IROH_MULTI_VERSION,
+        |r: &AuthRequest| r.version,
+        "AuthRequest",
+    )
+}
+
+/// Encode an AuthResponse as length-prefixed JSON bytes.
+pub fn encode_auth_response(resp: &AuthResponse) -> Result<Vec<u8>> {
+    encode_length_prefixed(resp, "AuthResponse")
+}
+
+/// Decode an AuthResponse from length-prefixed JSON bytes.
+pub fn decode_auth_response(data: &[u8]) -> Result<AuthResponse> {
+    decode_length_prefixed(
+        data,
+        IROH_MULTI_VERSION,
+        |r: &AuthResponse| r.version,
+        "AuthResponse",
     )
 }
 
