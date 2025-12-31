@@ -245,12 +245,16 @@ impl AuthResponse {
     }
 
     /// Create a rejection response with the given reason.
-    /// The reason will be truncated if it exceeds [`MAX_REJECT_REASON_LENGTH`] bytes.
+    /// The reason will be truncated at a UTF-8 boundary with "..." appended
+    /// if it exceeds [`MAX_REJECT_REASON_LENGTH`] bytes.
     pub fn rejected(reason: impl Into<String>) -> Self {
+        const TRUNCATION_SUFFIX: &str = "...";
         let reason_str = reason.into();
-        let reason_bytes = reason_str.as_bytes();
-        let truncated = if reason_bytes.len() > MAX_REJECT_REASON_LENGTH {
-            String::from_utf8_lossy(&reason_bytes[..MAX_REJECT_REASON_LENGTH]).to_string()
+        let truncated = if reason_str.len() > MAX_REJECT_REASON_LENGTH {
+            // Reserve space for suffix, then truncate at a valid UTF-8 boundary
+            let max_content_len = MAX_REJECT_REASON_LENGTH.saturating_sub(TRUNCATION_SUFFIX.len());
+            let truncated = &reason_str[..reason_str.floor_char_boundary(max_content_len)];
+            format!("{}{}", truncated, TRUNCATION_SUFFIX)
         } else {
             reason_str
         };

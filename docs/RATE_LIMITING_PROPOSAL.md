@@ -75,9 +75,9 @@ struct TokenFailureRecord {
 
 **Behavior during global lockout:**
 - Failed auth attempts during lockout are rejected immediately with "Too many failed attempts, try again later"
-- These rejections are logged at `warn` level for auditing (e.g., `log::warn!("Auth rejected during global lockout")`)
+- To avoid log spam under sustained attack, rejections are logged using **sampled logging**: only every Nth rejection is logged (default N=100), with a count of total rejections since lockout began
 - The sliding window is NOT updated during lockout to prevent attackers from keeping the system locked indefinitely
-- When lockout expires, the sliding window is cleared to give a fresh start
+- When lockout expires, the sliding window is cleared and the rejection counter is reset
 
 **Valid tokens**: Tokens in the server's configured `valid_tokens` set bypass both per-token and global limits
 
@@ -97,7 +97,10 @@ Config file options: `max_token_auth_failures`, `token_lockout_duration`, `globa
 ### Logging
 
 - Per-token: `log::warn!("Token [redacted] locked out after {} failed attempts", count)`
-- Global: `log::warn!("Distributed attack detected ({} unique tokens failed in {}s), global lockout for {}s", count, window, duration)`
+- Global lockout trigger: `log::warn!("Distributed attack detected ({} unique tokens failed in {}s), global lockout for {}s", count, window, duration)`
+- During lockout: Sampled at 1st and every 100th rejection to avoid log spam under attack
+
+**Operator note:** The sample interval (default 100) can be adjusted via `lockout_log_sample_interval`. For high-traffic deployments under sustained attack, operators may also configure external log filtering or rate limiting at the log aggregator level.
 
 ## Implementation Plan
 
@@ -155,6 +158,10 @@ pub struct AuthRateLimiter {
     global_failure_threshold: u32,
     global_lockout_duration: Duration,
 
+    // Lockout rejection counter for sampled logging (avoids log spam under attack)
+    lockout_rejections: AtomicU64,
+    lockout_log_sample_interval: u64,  // Log every Nth rejection (default: 100)
+
     // Valid tokens bypass rate limiting
     valid_tokens: Arc<HashSet<String>>,
 }
@@ -182,6 +189,8 @@ impl AuthRateLimiter {
             global_failure_window,
             global_failure_threshold,
             global_lockout_duration,
+            lockout_rejections: AtomicU64::new(0),
+            lockout_log_sample_interval: 100,  // Log every 100th rejection; adjust as needed
             valid_tokens,
         }
     }
@@ -231,12 +240,17 @@ impl AuthRateLimiter {
                 .unwrap()
                 .as_millis() as u64;
             if now_millis < lockout_until_millis {
-                log::warn!("Auth rejected during global lockout ({}ms remaining)",
-                    lockout_until_millis - now_millis);
+                // Sampled logging: only log every Nth rejection to avoid log spam
+                let count = self.lockout_rejections.fetch_add(1, Ordering::Relaxed) + 1;
+                if count % self.lockout_log_sample_interval == 0 || count == 1 {
+                    log::warn!("Auth rejected during global lockout ({} rejections, {}ms remaining)",
+                        count, lockout_until_millis - now_millis);
+                }
                 return false;
             }
-            // Lockout expired - clear window and reset
+            // Lockout expired - clear window and reset counters
             self.global_lockout_until.store(0, Ordering::Relaxed);
+            self.lockout_rejections.store(0, Ordering::Relaxed);
             self.recent_failures.lock().unwrap().clear();
         }
 
