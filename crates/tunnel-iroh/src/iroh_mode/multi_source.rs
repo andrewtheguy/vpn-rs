@@ -26,7 +26,7 @@ use crate::iroh_mode::helpers::{
 };
 use tunnel_common::net::{
     bind_udp_for_targets, check_source_allowed, extract_addr_from_source, resolve_all_target_addrs,
-    resolve_listen_addr, validate_allowed_networks,
+    resolve_listen_addrs, validate_allowed_networks,
 };
 use tunnel_common::signaling::{
     decode_source_request, decode_source_response, encode_source_request, encode_source_response,
@@ -395,7 +395,9 @@ pub async fn run_multi_source_client(
         anyhow::bail!("Source must start with tcp:// or udp:// (got: {})", source);
     }
 
-    let listen_addr: SocketAddr = resolve_listen_addr(&target)
+    // Resolve listen addresses - for localhost, returns both IPv4 and IPv6
+    // to handle macOS clients that prefer IPv6 when connecting to "localhost"
+    let listen_addrs: Vec<SocketAddr> = resolve_listen_addrs(&target)
         .await
         .context("Invalid target address format. Use format like localhost:2222, 127.0.0.1:2222 or [::]:2222")?;
 
@@ -426,9 +428,10 @@ pub async fn run_multi_source_client(
     let tunnel_established = Arc::new(AtomicBool::new(false));
 
     if is_tcp {
-        run_multi_source_tcp_client(conn, source, listen_addr, tunnel_established, auth_token).await?;
+        run_multi_source_tcp_client(conn, source, &listen_addrs, tunnel_established, auth_token).await?;
     } else {
-        run_multi_source_udp_client(conn, source, listen_addr, auth_token).await?;
+        // UDP still uses single address (first one) - multi-listener for UDP is more complex
+        run_multi_source_udp_client(conn, source, listen_addrs[0], auth_token).await?;
     }
 
     endpoint.close().await;
@@ -439,32 +442,70 @@ pub async fn run_multi_source_client(
 
 /// Run TCP client for multi-source mode.
 /// Opens streams for each local connection and sends source requests.
+///
+/// Binds to multiple addresses when localhost is specified, to handle clients
+/// that may connect via IPv4 (127.0.0.1) or IPv6 (::1).
 async fn run_multi_source_tcp_client(
     conn: Arc<iroh::endpoint::Connection>,
     source: String,
-    listen_addr: SocketAddr,
+    listen_addrs: &[SocketAddr],
     tunnel_established: Arc<AtomicBool>,
     auth_token: String,
 ) -> Result<()> {
-    let listener = TcpListener::bind(listen_addr)
-        .await
-        .context("Failed to bind TCP listener")?;
-    log::info!(
-        "Listening on TCP {} - configure your client to connect here",
-        listen_addr
-    );
+    use tokio::sync::mpsc;
+
+    // Create listeners for all addresses
+    let mut listeners = Vec::with_capacity(listen_addrs.len());
+    for addr in listen_addrs {
+        match TcpListener::bind(addr).await {
+            Ok(listener) => {
+                log::info!("Listening on TCP {} - configure your client to connect here", addr);
+                listeners.push(listener);
+            }
+            Err(e) => {
+                // Log warning but continue - some addresses may fail (e.g., IPv6 disabled)
+                log::warn!("Failed to bind TCP listener on {}: {}", addr, e);
+            }
+        }
+    }
+
+    if listeners.is_empty() {
+        anyhow::bail!("Failed to bind any TCP listeners");
+    }
+
+    // Channel to receive accepted connections from all listeners
+    let (tx, mut rx) = mpsc::channel::<(TcpStream, SocketAddr)>(32);
+
+    // Spawn accept tasks for each listener
+    let mut accept_tasks: JoinSet<()> = JoinSet::new();
+    for listener in listeners {
+        let tx = tx.clone();
+        accept_tasks.spawn(async move {
+            loop {
+                match listener.accept().await {
+                    Ok((stream, peer_addr)) => {
+                        if tx.send((stream, peer_addr)).await.is_err() {
+                            // Channel closed, stop accepting
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        log::warn!("Failed to accept TCP connection: {}", e);
+                    }
+                }
+            }
+        });
+    }
+    drop(tx); // Drop our copy so channel closes when all accept tasks stop
 
     let mut connection_tasks: JoinSet<()> = JoinSet::new();
 
     loop {
         tokio::select! {
-            accept_result = listener.accept() => {
-                let (tcp_stream, peer_addr) = match accept_result {
-                    Ok(result) => result,
-                    Err(e) => {
-                        log::warn!("Failed to accept TCP connection: {}", e);
-                        continue;
-                    }
+            accept_result = rx.recv() => {
+                let Some((tcp_stream, peer_addr)) = accept_result else {
+                    log::info!("All listeners closed");
+                    break;
                 };
 
                 log::info!("New local connection from {}", peer_addr);
@@ -504,6 +545,7 @@ async fn run_multi_source_tcp_client(
         }
     }
 
+    accept_tasks.shutdown().await;
     connection_tasks.shutdown().await;
     conn.close(0u32.into(), b"done");
     log::info!("TCP client stopped.");

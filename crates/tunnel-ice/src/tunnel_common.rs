@@ -86,6 +86,9 @@ pub async fn resolve_all_target_addrs(target: &str) -> Result<Vec<SocketAddr>> {
 ///
 /// Supports both IP addresses (127.0.0.1:8080) and hostnames (localhost:8080).
 /// For hostnames, returns the first resolved address (preferring IPv4 for local binding).
+///
+/// Note: For localhost, consider using `resolve_listen_addrs` (plural) to get both
+/// IPv4 and IPv6 addresses, since dual-stack sockets don't work for loopback.
 pub async fn resolve_listen_addr(target: &str) -> Result<SocketAddr> {
     // First try direct parse for IP addresses (fast path)
     if let Ok(addr) = target.parse::<SocketAddr>() {
@@ -118,6 +121,69 @@ pub async fn resolve_listen_addr(target: &str) -> Result<SocketAddr> {
     );
 
     Ok(addr)
+}
+
+/// Resolve a listen address to all available socket addresses.
+///
+/// For localhost/loopback, returns BOTH IPv4 (127.0.0.1) and IPv6 (::1) addresses.
+/// This is necessary because dual-stack sockets don't work for loopback addresses -
+/// they are distinct addresses requiring separate listeners.
+///
+/// On macOS, clients connecting to "localhost" try IPv6 (::1) first. If the server
+/// only listens on IPv4 (127.0.0.1), connections fail. Binding to both addresses
+/// ensures compatibility with all clients regardless of their IPv4/IPv6 preference.
+///
+/// For non-loopback hostnames, returns a single address (preferring IPv4).
+#[allow(dead_code)]
+pub async fn resolve_listen_addrs(target: &str) -> Result<Vec<SocketAddr>> {
+    // First try direct parse for IP addresses (fast path) - single address
+    if let Ok(addr) = target.parse::<SocketAddr>() {
+        return Ok(vec![addr]);
+    }
+
+    // Resolve hostname
+    let addrs: Vec<SocketAddr> = lookup_host(target)
+        .await
+        .with_context(|| format!("Failed to resolve listen address '{}'", target))?
+        .collect();
+
+    if addrs.is_empty() {
+        anyhow::bail!("No addresses found for listen address '{}'", target);
+    }
+
+    // Check if all resolved addresses are loopback
+    let is_loopback = addrs.iter().all(|a| a.ip().is_loopback());
+
+    if is_loopback {
+        // For loopback, return ALL addresses (both IPv4 and IPv6) with IPv4 first.
+        // Dual-stack sockets don't work for loopback - need separate listeners.
+        let mut sorted = addrs;
+        sorted.sort_by_key(|a| if a.is_ipv4() { 0 } else { 1 });
+        // Deduplicate (in case resolver returns duplicates)
+        sorted.dedup();
+        log::debug!(
+            "Resolved loopback listen address '{}' to {} addresses: {:?}",
+            target,
+            sorted.len(),
+            sorted
+        );
+        Ok(sorted)
+    } else {
+        // For non-loopback, return single address (prefer IPv4)
+        let addr = addrs
+            .iter()
+            .find(|a| a.is_ipv4())
+            .or_else(|| addrs.first())
+            .copied()
+            .expect("no listen addresses available after resolution");
+        log::debug!(
+            "Resolved listen address '{}' to {} (from {} candidates)",
+            target,
+            addr,
+            addrs.len()
+        );
+        Ok(vec![addr])
+    }
 }
 
 /// Resolve a STUN server address asynchronously.
