@@ -77,6 +77,14 @@ pub async fn run_multi_source_server(
         );
     }
 
+    if auth_tokens.is_empty() {
+        anyhow::bail!(
+            "At least one authentication token must be configured.\n\
+            Use --auth-tokens <TOKEN> or --auth-tokens-file <FILE>.\n\
+            Generate tokens with: tunnel-rs generate-token"
+        );
+    }
+
     validate_relay_only(relay_only, &relay_urls)?;
 
     log::info!("Multi-Source Tunnel - Server Mode");
