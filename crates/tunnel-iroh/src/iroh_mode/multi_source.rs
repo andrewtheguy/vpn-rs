@@ -24,7 +24,7 @@ use crate::iroh_mode::helpers::{
 };
 use tunnel_common::net::{
     bind_udp_for_targets, check_source_allowed, extract_addr_from_source, resolve_all_target_addrs,
-    validate_allowed_networks,
+    resolve_listen_addr, validate_allowed_networks,
 };
 use tunnel_common::signaling::{
     decode_source_request, decode_source_response, encode_source_request, encode_source_response,
@@ -370,9 +370,9 @@ pub async fn run_multi_source_client(
         anyhow::bail!("Source must start with tcp:// or udp:// (got: {})", source);
     }
 
-    let listen_addr: SocketAddr = target
-        .parse()
-        .context("Invalid target address format. Use format like 127.0.0.1:2222 or [::]:2222")?;
+    let listen_addr: SocketAddr = resolve_listen_addr(&target)
+        .await
+        .context("Invalid target address format. Use format like localhost:2222, 127.0.0.1:2222 or [::]:2222")?;
 
     let server_id: EndpointId = node_id
         .parse()

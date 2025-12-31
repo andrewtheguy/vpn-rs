@@ -20,7 +20,7 @@ use crate::transport::ice::{IceEndpoint, IceRole};
 use crate::transport::quic;
 use crate::tunnel_common::{
     current_timestamp, forward_stream_to_udp_client, forward_udp_to_stream, generate_session_id,
-    handle_tcp_client_connection, open_bi_with_retry, QUIC_CONNECTION_TIMEOUT,
+    handle_tcp_client_connection, open_bi_with_retry, resolve_listen_addr, QUIC_CONNECTION_TIMEOUT,
 };
 
 // ============================================================================
@@ -119,9 +119,9 @@ pub async fn run_nostr_tcp_client(
         anyhow::bail!("Source URL '{}' missing port", source);
     }
 
-    let listen_addr: SocketAddr = listen
-        .parse()
-        .context("Invalid listen address format. Use format like 127.0.0.1:2222 or [::]:2222")?;
+    let listen_addr: SocketAddr = resolve_listen_addr(&listen)
+        .await
+        .context("Invalid listen address format. Use format like localhost:2222, 127.0.0.1:2222 or [::]:2222")?;
 
     log::info!("Nostr TCP Tunnel - Client Mode");
     log::info!("===============================");
@@ -351,9 +351,9 @@ pub async fn run_nostr_udp_client(
         anyhow::bail!("Source URL '{}' missing port", source);
     }
 
-    let listen_addr: SocketAddr = listen
-        .parse()
-        .context("Invalid listen address format. Use format like 127.0.0.1:51820 or [::]:51820")?;
+    let listen_addr: SocketAddr = resolve_listen_addr(&listen)
+        .await
+        .context("Invalid listen address format. Use format like localhost:51820, 127.0.0.1:51820 or [::]:51820")?;
 
     log::info!("Nostr UDP Tunnel - Client Mode");
     log::info!("===============================");
