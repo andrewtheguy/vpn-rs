@@ -489,4 +489,41 @@ mod tests {
         assert_eq!(decoded.source, "tcp://127.0.0.1:22");
         assert_eq!(decoded.auth_token.as_str(), "my_auth_token_123");
     }
+
+    #[test]
+    fn test_auth_token_empty_string() {
+        let token = AuthToken::new("");
+        // Accessors should return empty string
+        assert_eq!(token.as_str(), "");
+        assert_eq!(token.as_ref(), "");
+        assert_eq!(&*token, ""); // Deref
+        // Debug should still be redacted
+        let debug_output = format!("{:?}", token);
+        assert_eq!(debug_output, "AuthToken(***)");
+    }
+
+    #[test]
+    fn test_auth_token_special_characters_unicode() {
+        // Test with special characters and unicode
+        let special_token = "tök€n-with_spëcial.chars!@#$%^&*()🔐";
+        let token = AuthToken::new(special_token);
+        // Accessors should return original value unchanged
+        assert_eq!(token.as_str(), special_token);
+        assert_eq!(token.as_ref(), special_token);
+        assert_eq!(&*token, special_token); // Deref
+        // Debug should still be redacted (not expose unicode/special chars)
+        let debug_output = format!("{:?}", token);
+        assert_eq!(debug_output, "AuthToken(***)");
+        assert!(!debug_output.contains("tök€n"));
+        assert!(!debug_output.contains("🔐"));
+    }
+
+    #[test]
+    fn test_auth_token_special_characters_serde_roundtrip() {
+        let special_token = "tök€n-with_spëcial.chars!@#🔐";
+        let token = AuthToken::new(special_token);
+        let json = serde_json::to_string(&token).unwrap();
+        let parsed: AuthToken = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.as_str(), special_token);
+    }
 }
