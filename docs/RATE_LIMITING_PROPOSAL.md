@@ -96,12 +96,15 @@ Config file options: `max_token_auth_failures`, `token_lockout_duration`, `globa
    - Record failure on invalid token
 
 3. **`crates/tunnel-rs/src/main.rs`**
-   - Add CLI args: `--max-auth-failures`, `--auth-lockout-duration`
+   - Add CLI args: `--max-token-auth-failures`, `--token-lockout-duration`, `--global-auth-failure-window`, `--global-auth-failure-threshold`, `--global-lockout-duration`
    - Add to `ServerIrohParams` struct
 
 4. **`crates/tunnel-common/src/config.rs`**
-   - Add `max_auth_failures: Option<u32>` to `IrohConfig`
-   - Add `auth_lockout_duration: Option<u64>` to `IrohConfig`
+   - Add `max_token_auth_failures: Option<u32>` to `IrohConfig`
+   - Add `token_lockout_duration: Option<u64>` to `IrohConfig`
+   - Add `global_auth_failure_window: Option<u64>` to `IrohConfig`
+   - Add `global_auth_failure_threshold: Option<u32>` to `IrohConfig`
+   - Add `global_lockout_duration: Option<u64>` to `IrohConfig`
 
 5. **`server.toml.example`**
    - Add commented examples for new config options
