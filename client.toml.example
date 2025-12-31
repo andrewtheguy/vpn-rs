@@ -12,7 +12,8 @@ role = "client"
 mode = "iroh"
 
 [iroh]
-# EndpointId of the server to connect to (required for iroh)
+# Server's EndpointId to connect to (required for iroh)
+# Get this from the server operator (shown when server starts, or via show-iroh-node-id)
 server_node_id = "2xnbkpbc7izsilvewd7c62w7wnwziacmpfwvhcrya5nt76dqkpga"
 
 # ============================================================================
