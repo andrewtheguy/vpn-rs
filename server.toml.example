@@ -48,12 +48,13 @@ max_sessions = 100
 # Authentication (REQUIRED)
 # ============================================================================
 # Clients must provide one of these tokens to connect.
-# Generate secure tokens with: openssl rand -hex 16
+# Token format: exactly 16 characters, alphanumeric + - _ .
+# Generate with: openssl rand -hex 8 (produces 16 hex characters)
 
 # Authentication tokens (inline list)
 auth_tokens = [
-    "tunnel-abc123def456",  # Alice's token
-    "tunnel-xyz789uvw012",  # Bob's token
+    "a1b2c3d4e5f6g7h8",  # Alice's token
+    "x9y8z7w6v5u4t3s2",  # Bob's token
 ]
 
 # Or use a file (one token per line, # comments allowed)

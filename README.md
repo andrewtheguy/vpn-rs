@@ -186,9 +186,9 @@ Generate a server key and create an authentication token:
 tunnel-rs generate-iroh-key --output ./server.key
 # Output: EndpointId: 2xnbkpbc7izsilvewd7c62w7wnwziacmpfwvhcrya5nt76dqkpga
 
-# Create a shared authentication token (use a secure random string)
+# Create a shared authentication token (exactly 16 alphanumeric characters)
 # Share this token with authorized clients
-AUTH_TOKEN="my-secret-token-$(openssl rand -hex 16)"
+AUTH_TOKEN=$(openssl rand -hex 8)  # produces 16 hex characters
 echo $AUTH_TOKEN
 ```
 
@@ -334,10 +334,10 @@ relay_urls = ["https://relay.example.com"]
 dns_server = "https://dns.example.com/pkarr"
 max_sessions = 100
 
-# Authentication: clients must provide one of these tokens
+# Authentication: clients must provide one of these tokens (16 chars)
 auth_tokens = [
-    "my-secret-token-abc123",
-    "another-token-xyz789",
+    "a1b2c3d4e5f6g7h8",
+    "x9y8z7w6v5u4t3s2",
 ]
 # Or use: auth_tokens_file = "/etc/tunnel-rs/auth_tokens.txt"
 
@@ -373,8 +373,8 @@ target = "127.0.0.1:2222"
 relay_urls = ["https://relay.example.com"]
 dns_server = "https://dns.example.com/pkarr"
 
-# Authentication token (get from server admin)
-auth_token = "my-secret-token-abc123"
+# Authentication token (get from server admin, 16 chars)
+auth_token = "a1b2c3d4e5f6g7h8"
 # Or use: auth_token_file = "~/.config/tunnel-rs/token.txt"
 ```
 
@@ -411,7 +411,11 @@ tunnel-rs server --allowed-tcp 127.0.0.0/8 --secret-file ./server.key --auth-tok
 
 ## Authentication
 
-Iroh mode requires authentication using pre-shared tokens. Clients must provide a valid token to connect. Tokens are simple strings shared between server admin and authorized clients.
+Iroh mode requires authentication using pre-shared tokens. Clients must provide a valid token to connect.
+
+**Token Format:**
+- Exactly 16 characters
+- Allowed characters: `A-Za-z0-9` and `-` `_` `.`
 
 ### Setup Workflow
 
@@ -422,8 +426,8 @@ Iroh mode requires authentication using pre-shared tokens. Clients must provide 
 
 2. **Create authentication tokens:**
    ```bash
-   # Generate secure random tokens
-   AUTH_TOKEN="tunnel-$(openssl rand -hex 16)"
+   # Generate secure random token (16 hex characters)
+   AUTH_TOKEN=$(openssl rand -hex 8)
    echo $AUTH_TOKEN  # Share this with authorized clients
    ```
 
@@ -461,11 +465,11 @@ tunnel-rs server \
 
 **Example `auth_tokens.txt`:**
 ```text
-# Alice's token
-tunnel-abc123def456
+# Alice's token (16 characters)
+a1b2c3d4e5f6g7h8
 
 # Bob's token
-tunnel-xyz789uvw012
+x9y8z7w6v5u4t3s2
 ```
 
 ### Configuration File
@@ -474,10 +478,10 @@ In `server.toml`:
 
 ```toml
 [iroh]
-# Inline list
+# Inline list (tokens must be exactly 16 characters)
 auth_tokens = [
-    "tunnel-abc123def456",  # Alice
-    "tunnel-xyz789uvw012",  # Bob
+    "a1b2c3d4e5f6g7h8",  # Alice
+    "x9y8z7w6v5u4t3s2",  # Bob
 ]
 
 # Or use a file

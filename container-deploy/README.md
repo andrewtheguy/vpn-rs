@@ -34,8 +34,8 @@ tunnel-rs uses a **client-initiated** model similar to SSH `-L` tunneling:
 tunnel-rs generate-iroh-key --output server.key
 # Output: EndpointId: <SERVER_NODE_ID>
 
-# 2. Create an authentication token
-AUTH_TOKEN="tunnel-$(openssl rand -hex 16)"
+# 2. Create an authentication token (exactly 16 chars, alphanumeric + - _ .)
+AUTH_TOKEN=$(openssl rand -hex 8)
 echo $AUTH_TOKEN  # Share this with authorized clients
 
 # 3. Server: allow connections with token authentication
@@ -65,8 +65,8 @@ cd docker
 docker run --rm ghcr.io/andrewtheguy/tunnel-rs:latest \
   generate-iroh-key --output - > server.key
 
-# 2. Create an authentication token
-AUTH_TOKEN="tunnel-$(openssl rand -hex 16)"
+# 2. Create an authentication token (exactly 16 chars)
+AUTH_TOKEN=$(openssl rand -hex 8)
 echo "$AUTH_TOKEN" > tokens.txt
 
 # 3. Start services (update docker-compose.yml to mount tokens.txt)
@@ -101,8 +101,8 @@ Access ClusterIP services from outside the cluster — like SSH tunneling but ov
 # 1. Generate server key
 tunnel-rs generate-iroh-key --output server.key
 
-# 2. Create an authentication token
-AUTH_TOKEN="tunnel-$(openssl rand -hex 16)"
+# 2. Create an authentication token (exactly 16 chars)
+AUTH_TOKEN=$(openssl rand -hex 8)
 
 # 3. Create secrets
 kubectl create secret generic tunnel-iroh-keys \
