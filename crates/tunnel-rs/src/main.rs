@@ -78,15 +78,15 @@ enum Command {
         #[arg(long)]
         socks5_proxy: Option<String>,
 
-        /// Allowed client NodeIds (repeatable). Only clients with these NodeIds can connect.
-        /// Required for authentication. Use with --allowed-clients-file for file-based config.
-        #[arg(long = "allowed-clients", value_name = "NODE_ID")]
-        allowed_clients: Vec<String>,
+        /// Authentication tokens (repeatable). Clients must provide one of these tokens to connect.
+        /// Required for authentication. Use with --auth-tokens-file for file-based config.
+        #[arg(long = "auth-tokens", value_name = "TOKEN")]
+        auth_tokens: Vec<String>,
 
-        /// Path to file containing allowed client NodeIds (one per line, # comments allowed).
-        /// Can be combined with --allowed-clients for additional inline NodeIds.
+        /// Path to file containing authentication tokens (one per line, # comments allowed).
+        /// Can be combined with --auth-tokens for additional inline tokens.
         #[arg(long, value_name = "FILE")]
-        allowed_clients_file: Option<PathBuf>,
+        auth_tokens_file: Option<PathBuf>,
     },
     /// Run as client (connects to server and exposes local port)
     Client {
@@ -131,13 +131,13 @@ enum Command {
         #[arg(long)]
         socks5_proxy: Option<String>,
 
-        /// Base64-encoded secret key for persistent identity (for authentication)
+        /// Authentication token to send to server
         #[arg(long)]
-        secret: Option<String>,
+        auth_token: Option<String>,
 
-        /// Path to secret key file for persistent identity (for authentication)
+        /// Path to file containing authentication token
         #[arg(long)]
-        secret_file: Option<PathBuf>,
+        auth_token_file: Option<PathBuf>,
     },
     /// Generate a new iroh secret key file (for automation/setup)
     GenerateIrohKey {
@@ -154,6 +154,12 @@ enum Command {
         /// Path to the secret key file
         #[arg(short, long)]
         secret_file: PathBuf,
+    },
+    /// Generate a new authentication token
+    GenerateToken {
+        /// Number of tokens to generate (default: 1)
+        #[arg(short, long, default_value = "1")]
+        count: usize,
     },
 }
 
@@ -172,8 +178,8 @@ struct ServerIrohParams {
     relay_urls: Vec<String>,
     dns_server: Option<String>,
     socks5_proxy: Option<String>,
-    allowed_clients: Vec<String>,
-    allowed_clients_file: Option<PathBuf>,
+    auth_tokens: Vec<String>,
+    auth_tokens_file: Option<PathBuf>,
 }
 
 /// Resolve iroh server parameters from CLI and config.
@@ -194,8 +200,8 @@ fn resolve_server_iroh_params(
         relay_urls,
         dns_server,
         socks5_proxy,
-        allowed_clients,
-        allowed_clients_file,
+        auth_tokens,
+        auth_tokens_file,
         ..
     } = cli
     else {
@@ -229,14 +235,14 @@ fn resolve_server_iroh_params(
         },
         dns_server: dns_server.clone().or(cfg.dns_server.clone()),
         socks5_proxy: socks5_proxy.clone().or(cfg.socks5_proxy.clone()),
-        allowed_clients: if allowed_clients.is_empty() {
-            cfg.allowed_clients.clone().unwrap_or_default()
+        auth_tokens: if auth_tokens.is_empty() {
+            cfg.auth_tokens.clone().unwrap_or_default()
         } else {
-            allowed_clients.clone()
+            auth_tokens.clone()
         },
-        allowed_clients_file: allowed_clients_file
+        auth_tokens_file: auth_tokens_file
             .clone()
-            .or(cfg.allowed_clients_file.clone()),
+            .or(cfg.auth_tokens_file.clone()),
     }
 }
 
@@ -249,8 +255,8 @@ struct ClientIrohParams {
     relay_urls: Vec<String>,
     dns_server: Option<String>,
     socks5_proxy: Option<String>,
-    secret: Option<String>,
-    secret_file: Option<PathBuf>,
+    auth_token: Option<String>,
+    auth_token_file: Option<PathBuf>,
 }
 
 /// Resolve iroh client parameters from CLI and config.
@@ -268,18 +274,18 @@ fn resolve_client_iroh_params(
         relay_urls,
         dns_server,
         socks5_proxy,
-        secret,
-        secret_file,
+        auth_token,
+        auth_token_file,
         ..
     } = cli
     else {
         unreachable!("resolve_client_iroh_params called with non-client command");
     };
 
-    let (secret, secret_file) = if secret.is_some() || secret_file.is_some() {
-        (secret.clone(), secret_file.clone())
+    let (auth_token, auth_token_file) = if auth_token.is_some() || auth_token_file.is_some() {
+        (auth_token.clone(), auth_token_file.clone())
     } else {
-        (cfg.secret.clone(), cfg.secret_file.clone())
+        (cfg.auth_token.clone(), cfg.auth_token_file.clone())
     };
 
     ClientIrohParams {
@@ -293,8 +299,8 @@ fn resolve_client_iroh_params(
         },
         dns_server: dns_server.clone().or(cfg.dns_server.clone()),
         socks5_proxy: socks5_proxy.clone().or(cfg.socks5_proxy.clone()),
-        secret,
-        secret_file,
+        auth_token,
+        auth_token_file,
     }
 }
 
@@ -407,8 +413,8 @@ async fn main() -> Result<()> {
                 relay_urls,
                 dns_server,
                 socks5_proxy,
-                allowed_clients,
-                allowed_clients_file,
+                auth_tokens,
+                auth_tokens_file,
             } = resolve_server_iroh_params(&command, iroh_cfg);
 
             #[cfg(feature = "test-utils")]
@@ -421,26 +427,24 @@ async fn main() -> Result<()> {
 
             let secret = resolve_iroh_secret(secret, secret_file)?;
 
-            // Load allowed clients for authentication
-            let allowed_clients_file_expanded =
-                allowed_clients_file.as_ref().map(|p| expand_tilde(p));
-            let allowed_clients = auth::load_allowed_clients(
-                &allowed_clients,
-                allowed_clients_file_expanded.as_deref(),
+            // Load auth tokens for authentication
+            let auth_tokens_file_expanded =
+                auth_tokens_file.as_ref().map(|p| expand_tilde(p));
+            let auth_tokens = auth::load_auth_tokens(
+                &auth_tokens,
+                auth_tokens_file_expanded.as_deref(),
             )?;
 
-            if allowed_clients.is_empty() {
+            if auth_tokens.is_empty() {
                 anyhow::bail!(
-                    "Authentication required: specify --allowed-clients or --allowed-clients-file.\n\
-                    Clients need to provide their NodeId, which can be generated with:\n\
-                    tunnel-rs generate-iroh-key --output <key-file>\n\
-                    tunnel-rs show-iroh-node-id --secret-file <key-file>"
+                    "Authentication required: specify --auth-tokens or --auth-tokens-file.\n\
+                    Clients will need to provide one of these tokens via --auth-token."
                 );
             }
 
             log::info!(
-                "Allowed clients: {} NodeId(s) configured",
-                allowed_clients.len()
+                "Auth tokens: {} token(s) configured",
+                auth_tokens.len()
             );
 
             validate_socks5_proxy_if_present(&socks5_proxy).await?;
@@ -457,7 +461,7 @@ async fn main() -> Result<()> {
                 relay_urls,
                 relay_only,
                 dns_server,
-                allowed_clients,
+                auth_tokens,
             )
             .await
         }
@@ -480,8 +484,8 @@ async fn main() -> Result<()> {
                 relay_urls,
                 dns_server,
                 socks5_proxy,
-                secret,
-                secret_file,
+                auth_token,
+                auth_token_file,
             } = resolve_client_iroh_params(&command, iroh_cfg);
 
             #[cfg(feature = "test-utils")]
@@ -502,7 +506,24 @@ async fn main() -> Result<()> {
                 "--target is required. Provide the local address to listen on (e.g., --target 127.0.0.1:2222)",
             )?;
 
-            let secret = resolve_iroh_secret(secret, secret_file)?;
+            // Resolve auth token from CLI or file
+            let auth_token = match (auth_token, auth_token_file) {
+                (Some(_), Some(_)) => {
+                    anyhow::bail!(
+                        "Cannot combine --auth-token with --auth-token-file (or auth_token and auth_token_file in config)."
+                    );
+                }
+                (Some(token), None) => token,
+                (None, Some(file)) => {
+                    let expanded = expand_tilde(&file);
+                    auth::load_auth_token_from_file(&expanded)?
+                }
+                (None, None) => {
+                    anyhow::bail!(
+                        "--auth-token is required. Provide an authentication token to connect to the server."
+                    );
+                }
+            };
 
             validate_socks5_proxy_if_present(&socks5_proxy).await?;
 
@@ -516,7 +537,7 @@ async fn main() -> Result<()> {
                 relay_urls,
                 relay_only,
                 dns_server,
-                secret,
+                auth_token,
             )
             .await
         }
@@ -524,5 +545,11 @@ async fn main() -> Result<()> {
             secret::generate_secret(expand_tilde(output), *force)
         }
         Command::ShowIrohNodeId { secret_file } => secret::show_id(expand_tilde(secret_file)),
+        Command::GenerateToken { count } => {
+            for _ in 0..*count {
+                println!("{}", auth::generate_token());
+            }
+            Ok(())
+        }
     }
 }

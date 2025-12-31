@@ -11,8 +11,8 @@ use serde::{Deserialize, Serialize};
 
 /// Version 1: Custom mode (str0m ICE + quinn QUIC)
 pub const MANUAL_SIGNAL_VERSION: u16 = 1;
-/// Version 1: Iroh multi-source handshake protocol
-pub const IROH_MULTI_VERSION: u16 = 1;
+/// Version 2: Iroh multi-source handshake protocol (with token auth)
+pub const IROH_MULTI_VERSION: u16 = 2;
 
 pub(crate) const PREFIX: &str = "TRS";
 pub const LINE_WIDTH: usize = 76;
@@ -117,6 +117,45 @@ impl ManualReject {
 // Iroh Multi-Source Handshake Protocol
 // ============================================================================
 
+/// Wrapper type for authentication tokens that redacts the value in Debug output.
+///
+/// This prevents accidental token exposure in logs or error messages.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct AuthToken(String);
+
+impl AuthToken {
+    /// Create a new AuthToken from a string.
+    pub fn new(token: impl Into<String>) -> Self {
+        Self(token.into())
+    }
+
+    /// Get the token value as a string slice.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for AuthToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "AuthToken(***)")
+    }
+}
+
+impl AsRef<str> for AuthToken {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::ops::Deref for AuthToken {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
 /// Source request sent by receiver after iroh connection established.
 /// Used in iroh multi-source mode to request a specific forwarding target.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -124,13 +163,16 @@ pub struct SourceRequest {
     pub version: u16,
     /// Requested source endpoint (e.g., "tcp://127.0.0.1:22" or "udp://127.0.0.1:53")
     pub source: String,
+    /// Authentication token (required for server validation)
+    pub auth_token: AuthToken,
 }
 
 impl SourceRequest {
-    pub fn new(source: String) -> Self {
+    pub fn new(source: String, auth_token: impl Into<String>) -> Self {
         Self {
             version: IROH_MULTI_VERSION,
             source,
+            auth_token: AuthToken::new(auth_token),
         }
     }
 }
@@ -398,4 +440,90 @@ pub async fn read_length_prefixed<R: tokio::io::AsyncReadExt + Unpin>(
         .await
         .context("Failed to read message body")?;
     Ok(buf)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_auth_token_debug_redacts_value() {
+        let token = AuthToken::new("super_secret_token");
+        let debug_output = format!("{:?}", token);
+        assert_eq!(debug_output, "AuthToken(***)");
+        assert!(!debug_output.contains("super_secret"));
+    }
+
+    #[test]
+    fn test_auth_token_accessors() {
+        let token = AuthToken::new("my_token_value_");
+        assert_eq!(token.as_str(), "my_token_value_");
+        assert_eq!(token.as_ref(), "my_token_value_");
+        assert_eq!(&*token, "my_token_value_"); // Deref
+    }
+
+    #[test]
+    fn test_auth_token_serde_roundtrip() {
+        let token = AuthToken::new("test_token_12345");
+        let json = serde_json::to_string(&token).unwrap();
+        // Should serialize as plain string (transparent)
+        assert_eq!(json, "\"test_token_12345\"");
+
+        let parsed: AuthToken = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.as_str(), "test_token_12345");
+    }
+
+    #[test]
+    fn test_source_request_debug_redacts_token() {
+        let request = SourceRequest::new("tcp://127.0.0.1:22".to_string(), "secret_auth_token");
+        let debug_output = format!("{:?}", request);
+        assert!(debug_output.contains("AuthToken(***)"));
+        assert!(!debug_output.contains("secret_auth_token"));
+    }
+
+    #[test]
+    fn test_source_request_serde_roundtrip() {
+        let request = SourceRequest::new("tcp://127.0.0.1:22".to_string(), "my_auth_token_123");
+        let encoded = encode_source_request(&request).unwrap();
+        let decoded = decode_source_request(&encoded).unwrap();
+        assert_eq!(decoded.source, "tcp://127.0.0.1:22");
+        assert_eq!(decoded.auth_token.as_str(), "my_auth_token_123");
+    }
+
+    #[test]
+    fn test_auth_token_empty_string() {
+        let token = AuthToken::new("");
+        // Accessors should return empty string
+        assert_eq!(token.as_str(), "");
+        assert_eq!(token.as_ref(), "");
+        assert_eq!(&*token, ""); // Deref
+        // Debug should still be redacted
+        let debug_output = format!("{:?}", token);
+        assert_eq!(debug_output, "AuthToken(***)");
+    }
+
+    #[test]
+    fn test_auth_token_special_characters_unicode() {
+        // Test with special characters and unicode
+        let special_token = "tök€n-with_spëcial.chars!@#$%^&*()🔐";
+        let token = AuthToken::new(special_token);
+        // Accessors should return original value unchanged
+        assert_eq!(token.as_str(), special_token);
+        assert_eq!(token.as_ref(), special_token);
+        assert_eq!(&*token, special_token); // Deref
+        // Debug should still be redacted (not expose unicode/special chars)
+        let debug_output = format!("{:?}", token);
+        assert_eq!(debug_output, "AuthToken(***)");
+        assert!(!debug_output.contains("tök€n"));
+        assert!(!debug_output.contains("🔐"));
+    }
+
+    #[test]
+    fn test_auth_token_special_characters_serde_roundtrip() {
+        let special_token = "tök€n-with_spëcial.chars!@#🔐";
+        let token = AuthToken::new(special_token);
+        let json = serde_json::to_string(&token).unwrap();
+        let parsed: AuthToken = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.as_str(), special_token);
+    }
 }

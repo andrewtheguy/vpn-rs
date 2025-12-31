@@ -14,6 +14,8 @@ use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::sync::Mutex;
 use tokio::task::JoinSet;
 
+use crate::auth::is_token_valid;
+
 use crate::iroh_mode::endpoint::{
     connect_to_server, create_client_endpoint, create_server_endpoint, print_connection_type,
     validate_relay_only, MULTI_ALPN,
@@ -42,7 +44,7 @@ const DEFAULT_MAX_SESSIONS: usize = 100;
 ///
 /// This mode allows clients to request specific sources (tcp://host:port or udp://host:port).
 /// The server validates requests against allowed_tcp and allowed_udp CIDR lists.
-/// Authentication is enforced via allowed_clients - only clients with NodeIds in this set can connect.
+/// Authentication is enforced via pre-shared tokens - clients must provide a valid token in their request.
 /// Note: relay_only is only meaningful when the 'test-utils' feature is enabled.
 pub async fn run_multi_source_server(
     allowed_tcp: Vec<String>,
@@ -52,7 +54,7 @@ pub async fn run_multi_source_server(
     relay_urls: Vec<String>,
     relay_only: bool,
     dns_server: Option<String>,
-    allowed_clients: HashSet<EndpointId>,
+    auth_tokens: HashSet<String>,
 ) -> Result<()> {
     // relay_only is only meaningful with test-utils feature
     #[cfg(not(feature = "test-utils"))]
@@ -72,6 +74,14 @@ pub async fn run_multi_source_server(
         anyhow::bail!(
             "At least one --allowed-tcp or --allowed-udp network must be specified.\n\
             Example: --allowed-tcp 127.0.0.0/8 --allowed-udp 10.0.0.0/8"
+        );
+    }
+
+    if auth_tokens.is_empty() {
+        anyhow::bail!(
+            "At least one authentication token must be configured.\n\
+            Use --auth-tokens <TOKEN> or --auth-tokens-file <FILE>.\n\
+            Generate tokens with: tunnel-rs generate-token"
         );
     }
 
@@ -97,12 +107,17 @@ pub async fn run_multi_source_server(
     log::info!("Allowed TCP networks: {:?}", allowed_tcp);
     log::info!("Allowed UDP networks: {:?}", allowed_udp);
     log::info!("Max concurrent sessions: {}", max_sessions);
+    log::info!("Auth tokens configured: {}", auth_tokens.len());
+
+    // Wrap auth_tokens in Arc for cheap cloning across tasks
+    let auth_tokens = Arc::new(auth_tokens);
+
     log::info!("\nOn the client side, run:");
     log::info!(
-        "  tunnel-rs client iroh --secret-file <key-file> --node-id {} --source tcp://target:port --target 127.0.0.1:port\n",
+        "  tunnel-rs client iroh --auth-token <token> --node-id {} --source tcp://target:port --target 127.0.0.1:port\n",
         endpoint_id
     );
-    log::info!("Note: Clients must use --secret-file for authentication (their NodeId must be in --allowed-clients)");
+    log::info!("Note: Clients must provide a valid --auth-token for authentication");
     log::info!("Waiting for clients to connect...");
 
     // Session management with semaphore for concurrency limit
@@ -131,23 +146,17 @@ pub async fn run_multi_source_server(
 
         let remote_id = conn.remote_id();
 
-        // Authentication check: verify client NodeId is in allowed list
-        if !allowed_clients.contains(&remote_id) {
-            log::warn!("Rejected unauthorized client: {}", remote_id);
-            conn.close(1u32.into(), b"unauthorized");
-            continue;
-        }
-
-        log::info!("Client connected (authenticated): {}", remote_id);
+        log::info!("Client connected: {} (auth will be checked per-stream)", remote_id);
 
         // Clone for the spawned task
         let allowed_tcp = allowed_tcp.clone();
         let allowed_udp = allowed_udp.clone();
         let semaphore = session_semaphore.clone();
+        let auth_tokens = Arc::clone(&auth_tokens);
 
         connection_tasks.spawn(async move {
             if let Err(e) =
-                handle_multi_source_connection(conn, allowed_tcp, allowed_udp, semaphore).await
+                handle_multi_source_connection(conn, allowed_tcp, allowed_udp, semaphore, auth_tokens).await
             {
                 log::warn!("Connection error for {}: {}", remote_id, e);
             }
@@ -169,6 +178,7 @@ async fn handle_multi_source_connection(
     allowed_tcp: Vec<String>,
     allowed_udp: Vec<String>,
     semaphore: Arc<tokio::sync::Semaphore>,
+    auth_tokens: Arc<HashSet<String>>,
 ) -> Result<()> {
     let remote_id = conn.remote_id();
     let mut stream_tasks: JoinSet<()> = JoinSet::new();
@@ -211,6 +221,7 @@ async fn handle_multi_source_connection(
 
                 let allowed_tcp = allowed_tcp.clone();
                 let allowed_udp = allowed_udp.clone();
+                let auth_tokens = Arc::clone(&auth_tokens);
 
                 stream_tasks.spawn(async move {
                     let _permit = permit; // Hold permit until task completes
@@ -219,6 +230,7 @@ async fn handle_multi_source_connection(
                         recv_stream,
                         allowed_tcp,
                         allowed_udp,
+                        auth_tokens,
                     ).await {
                         log::warn!("Stream error: {}", e);
                     }
@@ -243,12 +255,13 @@ async fn handle_multi_source_connection(
 }
 
 /// Handle a single stream within a multi-source connection.
-/// Reads SourceRequest, validates, sends SourceResponse, then forwards traffic.
+/// Reads SourceRequest, validates auth token and source, sends SourceResponse, then forwards traffic.
 async fn handle_multi_source_stream(
     mut send_stream: iroh::endpoint::SendStream,
     mut recv_stream: iroh::endpoint::RecvStream,
     allowed_tcp: Vec<String>,
     allowed_udp: Vec<String>,
+    auth_tokens: Arc<HashSet<String>>,
 ) -> Result<()> {
     // Read the source request
     let request_bytes = read_length_prefixed(&mut recv_stream)
@@ -257,6 +270,18 @@ async fn handle_multi_source_stream(
     let request = decode_source_request(&request_bytes).context("Invalid source request")?;
 
     log::info!("Source request: {}", request.source);
+
+    // Validate auth token FIRST
+    if !is_token_valid(&request.auth_token, &auth_tokens) {
+        log::warn!("Invalid auth token for source request: {}", request.source);
+        let response = SourceResponse::rejected("Invalid authentication token");
+        let encoded = encode_source_response(&response)?;
+        send_stream.write_all(&encoded).await?;
+        send_stream.finish()?;
+        anyhow::bail!("Invalid auth token");
+    }
+
+    log::debug!("Auth token validated for source: {}", request.source);
 
     // Determine protocol and validate
     let is_tcp = request.source.starts_with("tcp://");
@@ -341,7 +366,7 @@ async fn handle_multi_source_stream(
 /// Connects to a server and requests a specific source (tcp://host:port or udp://host:port).
 /// The server validates the request and either accepts or rejects it.
 /// Note: relay_only is only meaningful when the 'test-utils' feature is enabled.
-/// If a secret key is provided, the client will use a persistent identity for authentication.
+/// Authentication is done via pre-shared token sent in the SourceRequest.
 pub async fn run_multi_source_client(
     node_id: String,
     source: String,
@@ -349,7 +374,7 @@ pub async fn run_multi_source_client(
     relay_urls: Vec<String>,
     relay_only: bool,
     dns_server: Option<String>,
-    secret: Option<SecretKey>,
+    auth_token: String,
 ) -> Result<()> {
     // relay_only is only meaningful with test-utils feature
     #[cfg(not(feature = "test-utils"))]
@@ -381,13 +406,14 @@ pub async fn run_multi_source_client(
     log::info!("Multi-Source Tunnel - Client Mode");
     log::info!("==================================");
     log::info!("Requesting source: {}", source);
-    log::info!("Creating iroh endpoint...");
+    log::info!("Creating iroh endpoint (ephemeral identity)...");
 
+    // Client uses ephemeral identity - auth is done via token in protocol
     let endpoint = create_client_endpoint(
         &relay_urls,
         relay_only,
         dns_server.as_deref(),
-        secret.as_ref(),
+        None,
     )
     .await?;
 
@@ -400,9 +426,9 @@ pub async fn run_multi_source_client(
     let tunnel_established = Arc::new(AtomicBool::new(false));
 
     if is_tcp {
-        run_multi_source_tcp_client(conn, source, listen_addr, tunnel_established).await?;
+        run_multi_source_tcp_client(conn, source, listen_addr, tunnel_established, auth_token).await?;
     } else {
-        run_multi_source_udp_client(conn, source, listen_addr).await?;
+        run_multi_source_udp_client(conn, source, listen_addr, auth_token).await?;
     }
 
     endpoint.close().await;
@@ -418,6 +444,7 @@ async fn run_multi_source_tcp_client(
     source: String,
     listen_addr: SocketAddr,
     tunnel_established: Arc<AtomicBool>,
+    auth_token: String,
 ) -> Result<()> {
     let listener = TcpListener::bind(listen_addr)
         .await
@@ -445,6 +472,7 @@ async fn run_multi_source_tcp_client(
                 let conn_clone = conn.clone();
                 let source_clone = source.clone();
                 let established = tunnel_established.clone();
+                let token = auth_token.clone();
 
                 connection_tasks.spawn(async move {
                     match handle_multi_source_tcp_client_connection(
@@ -453,6 +481,7 @@ async fn run_multi_source_tcp_client(
                         peer_addr,
                         source_clone,
                         established,
+                        token,
                     ).await {
                         Ok(()) => {}
                         Err(e) => {
@@ -489,11 +518,12 @@ async fn handle_multi_source_tcp_client_connection(
     peer_addr: SocketAddr,
     source: String,
     tunnel_established: Arc<AtomicBool>,
+    auth_token: String,
 ) -> Result<()> {
     let (mut send_stream, mut recv_stream) = open_bi_with_retry(&conn).await?;
 
-    // Send source request
-    let request = SourceRequest::new(source.clone());
+    // Send source request with auth token
+    let request = SourceRequest::new(source.clone(), auth_token);
     let encoded = encode_source_request(&request)?;
     send_stream.write_all(&encoded).await?;
 
@@ -526,11 +556,12 @@ async fn run_multi_source_udp_client(
     conn: Arc<iroh::endpoint::Connection>,
     source: String,
     listen_addr: SocketAddr,
+    auth_token: String,
 ) -> Result<()> {
     let (mut send_stream, mut recv_stream) = open_bi_with_retry(&conn).await?;
 
-    // Send source request
-    let request = SourceRequest::new(source.clone());
+    // Send source request with auth token
+    let request = SourceRequest::new(source.clone(), auth_token);
     let encoded = encode_source_request(&request)?;
     send_stream.write_all(&encoded).await?;
 

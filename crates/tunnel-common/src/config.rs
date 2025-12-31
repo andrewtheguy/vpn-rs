@@ -21,14 +21,13 @@ use std::path::{Path, PathBuf};
 /// iroh mode configuration (multi-source).
 ///
 /// Some fields are role-specific (enforced by validate()):
-/// - Server-only: `allowed_sources`, `max_sessions`, `allowed_clients`, `allowed_clients_file`
-/// - Client-only: `request_source`, `target`, `server_node_id`
-/// - Both: `secret`, `secret_file` (server identity / client authentication)
+/// - Server-only: `allowed_sources`, `max_sessions`, `auth_tokens`, `auth_tokens_file`, `secret`, `secret_file`
+/// - Client-only: `request_source`, `target`, `server_node_id`, `auth_token`, `auth_token_file`
 #[derive(Deserialize, Default, Clone)]
 pub struct IrohConfig {
-    /// Path to secret key file for persistent identity (server or client)
+    /// Path to secret key file for persistent server identity (server only)
     pub secret_file: Option<PathBuf>,
-    /// Base64-encoded secret key for persistent identity (server or client).
+    /// Base64-encoded secret key for persistent server identity (server only).
     /// Prefer `secret_file` in production; inline secrets are best kept to testing or
     /// special cases due to VCS/log exposure risk. Secret files should be 0600 on Unix.
     pub secret: Option<String>,
@@ -41,12 +40,19 @@ pub struct IrohConfig {
     pub allowed_sources: Option<AllowedSources>,
     /// Maximum concurrent sessions (server only, default: 100)
     pub max_sessions: Option<usize>,
-    /// Allowed client NodeIds (server only).
-    /// Only clients with these NodeIds can connect.
-    pub allowed_clients: Option<Vec<String>>,
-    /// Path to file containing allowed client NodeIds (server only).
-    /// One NodeId per line, # comments allowed.
-    pub allowed_clients_file: Option<PathBuf>,
+    /// Authentication tokens (server only).
+    /// Clients must provide one of these tokens to authenticate.
+    /// Prefer `auth_tokens_file` in production; inline tokens are best kept to testing or
+    /// special cases due to VCS/log exposure risk.
+    pub auth_tokens: Option<Vec<String>>,
+    /// Path to file containing authentication tokens (server only).
+    /// One token per line, # comments allowed.
+    pub auth_tokens_file: Option<PathBuf>,
+    /// Authentication token to send to server (client only).
+    /// Prefer `auth_token_file` in production to avoid exposing tokens in config files.
+    pub auth_token: Option<String>,
+    /// Path to file containing authentication token (client only).
+    pub auth_token_file: Option<PathBuf>,
     /// Source URL to request from server (client only).
     /// Format: tcp://host:port or udp://host:port
     #[serde(alias = "source")]
@@ -393,28 +399,17 @@ impl ServerConfig {
                 if iroh.secret.is_some() && iroh.secret_file.is_some() {
                     anyhow::bail!("[iroh] Use only one of 'secret' or 'secret_file'.");
                 }
-                // Validate allowed_clients mutual exclusion and format
-                if iroh.allowed_clients.is_some() && iroh.allowed_clients_file.is_some() {
+                // Validate auth_tokens mutual exclusion
+                if iroh.auth_tokens.is_some() && iroh.auth_tokens_file.is_some() {
                     anyhow::bail!(
-                        "[iroh] Use only one of 'allowed_clients' or 'allowed_clients_file'."
+                        "[iroh] Use only one of 'auth_tokens' or 'auth_tokens_file'."
                     );
                 }
-                if let Some(ref clients) = iroh.allowed_clients {
-                    for client_id in clients {
-                        let trimmed = client_id.trim();
-                        if trimmed.is_empty() || trimmed.starts_with('#') {
-                            continue; // Skip empty lines and comments
-                        }
-                        // NodeId validation is deferred to the iroh runtime to avoid
-                        // coupling config parsing to the iroh crate.
-                        if trimmed.contains(' ') {
-                            anyhow::bail!(
-                                "[iroh] Invalid NodeId in 'allowed_clients': '{}'. \
-                                 Expected a base32 or hex string without spaces.",
-                                client_id
-                            );
-                        }
-                    }
+                // Reject client-only fields (auth_token is for clients)
+                if iroh.auth_token.is_some() || iroh.auth_token_file.is_some() {
+                    anyhow::bail!(
+                        "[iroh] 'auth_token' and 'auth_token_file' are client-only fields."
+                    );
                 }
                 // Reject client-only fields
                 if iroh.request_source.is_some() || iroh.target.is_some() {
@@ -545,10 +540,10 @@ impl ClientConfig {
         // Mode-specific validation
         if expected_mode == Mode::Iroh {
             if let Some(ref iroh) = self.iroh {
-                if iroh.secret.is_some() && iroh.secret_file.is_some() {
-                    anyhow::bail!("[iroh] Use only one of 'secret' or 'secret_file'.");
+                // Validate auth_token mutual exclusion
+                if iroh.auth_token.is_some() && iroh.auth_token_file.is_some() {
+                    anyhow::bail!("[iroh] Use only one of 'auth_token' or 'auth_token_file'.");
                 }
-                // Note: secret/secret_file are allowed for clients (needed for authentication)
                 // Reject server-only fields
                 if iroh.allowed_sources.is_some() {
                     anyhow::bail!(
@@ -559,9 +554,15 @@ impl ClientConfig {
                 if iroh.max_sessions.is_some() {
                     anyhow::bail!("[iroh] 'max_sessions' is a server-only field.");
                 }
-                if iroh.allowed_clients.is_some() || iroh.allowed_clients_file.is_some() {
+                if iroh.auth_tokens.is_some() || iroh.auth_tokens_file.is_some() {
                     anyhow::bail!(
-                        "[iroh] 'allowed_clients' and 'allowed_clients_file' are server-only fields."
+                        "[iroh] 'auth_tokens' and 'auth_tokens_file' are server-only fields."
+                    );
+                }
+                if iroh.secret.is_some() || iroh.secret_file.is_some() {
+                    anyhow::bail!(
+                        "[iroh] 'secret' and 'secret_file' are server-only fields. \
+                        Clients use ephemeral identities with token authentication."
                     );
                 }
                 // Validate request_source URL format

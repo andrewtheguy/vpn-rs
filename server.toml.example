@@ -47,18 +47,20 @@ max_sessions = 100
 # ============================================================================
 # Authentication (REQUIRED)
 # ============================================================================
-# Only clients with NodeIds in this list can connect.
-# Generate client keys with: tunnel-rs generate-iroh-key --output client.key
-# Get client's NodeId with: tunnel-rs show-iroh-node-id --secret-file client.key
+# Clients must provide one of these tokens to connect.
+# Token format: exactly 18 characters (i + 16 body chars + checksum)
+# Generate with: tunnel-rs generate-token
 
-# Allowed client NodeIds (inline list)
-allowed_clients = [
-    "2xnbkpbc7izsilvewd7c62w7wnwziacmpfwvhcrya5nt76dqkpga",  # Alice
-    "3k4j5l6k7j8k9l0m1n2o3p4q5r6s7t8u9v0w1x2y3z4a5b6c7d8e",  # Bob
+# Authentication tokens (inline list)
+# NOTE: Use either auth_tokens OR auth_tokens_file, not both.
+auth_tokens = [
+    "ikAdvudu_ZxNXhNLCD",  # Alice's token
+    "iw3nLKic3oV7zmFJ8v",  # Bob's token
 ]
 
-# Or use a file (one NodeId per line, # comments allowed)
-# allowed_clients_file = "/etc/tunnel-rs/allowed_clients.txt"
+# Or use a file (one token per line, # comments allowed)
+# NOTE: Use either auth_tokens OR auth_tokens_file, not both.
+# auth_tokens_file = "/etc/tunnel-rs/auth_tokens.txt"
 
 # ============================================================================
 # Allowed source networks that clients can request (CIDR notation)

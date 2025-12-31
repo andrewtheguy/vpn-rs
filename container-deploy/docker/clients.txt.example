@@ -1,7 +1,0 @@
-# Allowed client NodeIds (one per line)
-# Generate a client key and get the NodeId:
-#   tunnel-rs generate-iroh-key --output client.key
-#   tunnel-rs show-iroh-node-id --secret-file client.key
-#
-# Example NodeId (replace with your actual client NodeId):
-# 3k4j5l6k7j8k9l0m1n2o3p4q5r6s7t8u9v0w1x2y3z4a5b6c7d8e

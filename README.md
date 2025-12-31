@@ -177,22 +177,20 @@ Uses iroh's P2P network for automatic peer discovery and NAT traversal with rela
 
 ## Quick Start
 
-### 1. Generate Keys (One-Time Setup)
+### 1. Setup (One-Time)
 
-Each peer needs their own keypair for authentication:
+Generate a server key and create an authentication token:
 
 ```bash
-# On server machine
+# On server machine - generate persistent identity
 tunnel-rs generate-iroh-key --output ./server.key
 # Output: EndpointId: 2xnbkpbc7izsilvewd7c62w7wnwziacmpfwvhcrya5nt76dqkpga
 
-# On client machine
-tunnel-rs generate-iroh-key --output ./client.key
-tunnel-rs show-iroh-node-id --secret-file ./client.key
-# Output: 3k4j5l6k7j8k9l0m1n2o3p4q5r6s7t8u9v0w1x2y3z4a5b6c7d8e
+# Create a shared authentication token
+# Share this token with authorized clients
+AUTH_TOKEN=$(tunnel-rs generate-token)
+echo $AUTH_TOKEN
 ```
-
-Exchange NodeIds between peers (server needs client's NodeId).
 
 ### 2. TCP Tunnel (e.g., SSH)
 
@@ -201,23 +199,23 @@ Exchange NodeIds between peers (server needs client's NodeId).
 tunnel-rs server \
   --secret-file ./server.key \
   --allowed-tcp 127.0.0.0/8 \
-  --allowed-clients <CLIENT_NODE_ID>
+  --auth-tokens "$AUTH_TOKEN"
 ```
 
 Output:
 ```
 EndpointId: 2xnbkpbc7izsilvewd7c62w7wnwziacmpfwvhcrya5nt76dqkpga
-Allowed clients: 1 NodeId(s) configured
+Auth tokens: 1 token(s) configured
 Waiting for clients to connect...
 ```
 
 **Client** (on client — requests source from server):
 ```bash
 tunnel-rs client \
-  --secret-file ./client.key \
   --server-node-id <SERVER_ENDPOINT_ID> \
   --source tcp://127.0.0.1:22 \
-  --target 127.0.0.1:2222
+  --target 127.0.0.1:2222 \
+  --auth-token "$AUTH_TOKEN"
 ```
 
 Then connect: `ssh -p 2222 user@127.0.0.1`
@@ -229,16 +227,16 @@ Then connect: `ssh -p 2222 user@127.0.0.1`
 tunnel-rs server \
   --secret-file ./server.key \
   --allowed-udp 127.0.0.0/8 \
-  --allowed-clients <CLIENT_NODE_ID>
+  --auth-tokens "$AUTH_TOKEN"
 ```
 
 **Client**:
 ```bash
 tunnel-rs client \
-  --secret-file ./client.key \
   --server-node-id <SERVER_ENDPOINT_ID> \
   --source udp://127.0.0.1:51820 \
-  --target 0.0.0.0:51820
+  --target 0.0.0.0:51820 \
+  --auth-token "$AUTH_TOKEN"
 ```
 
 ## CLI Options
@@ -256,11 +254,11 @@ tunnel-rs client \
 |--------|---------|-------------|
 | `--allowed-tcp` | - | Allowed TCP networks in CIDR notation (repeatable) |
 | `--allowed-udp` | - | Allowed UDP networks in CIDR notation (repeatable) |
-| `--allowed-clients` | required | Allowed client NodeIds (repeatable). Only clients with these NodeIds can connect. |
-| `--allowed-clients-file` | - | Path to file containing allowed NodeIds (one per line, # comments allowed) |
+| `--auth-tokens` | required | Authentication tokens (repeatable). Clients must provide one of these tokens to connect. |
+| `--auth-tokens-file` | - | Path to file containing authentication tokens (one per line, # comments allowed) |
 | `--max-sessions` | 100 | Maximum concurrent sessions |
-| `--secret` | - | Base64-encoded secret key for persistent identity |
-| `--secret-file` | - | Path to secret key file for persistent identity |
+| `--secret` | - | Base64-encoded secret key for persistent server identity |
+| `--secret-file` | - | Path to secret key file for persistent server identity |
 | `--relay-url` | public | Custom relay server URL(s), repeatable |
 | `--relay-only` | false | Force all traffic through relay (requires `test-utils` feature) |
 | `--dns-server` | public | Custom DNS server URL for peer discovery |
@@ -280,6 +278,8 @@ tunnel-rs client \
 | `--server-node-id`, `-n` | required | EndpointId of the server |
 | `--source`, `-s` | required | Source address to request from server (tcp://host:port or udp://host:port) |
 | `--target`, `-t` | required | Local address to listen on |
+| `--auth-token` | required | Authentication token to send to server |
+| `--auth-token-file` | - | Path to file containing authentication token |
 | `--relay-url` | public | Custom relay server URL(s), repeatable |
 | `--relay-only` | false | Force all traffic through relay (requires `test-utils` feature) |
 | `--dns-server` | public | Custom DNS server URL for peer discovery |
@@ -334,11 +334,13 @@ relay_urls = ["https://relay.example.com"]
 dns_server = "https://dns.example.com/pkarr"
 max_sessions = 100
 
-# Authentication: only these clients can connect
-allowed_clients = [
-    "3k4j5l6k7j8k9l0m1n2o3p4q5r6s7t8u9v0w1x2y3z4a5b6c7d8e",
+# Authentication: clients must provide one of these tokens (18 chars)
+# Generate with: tunnel-rs generate-token
+auth_tokens = [
+    "ikAdvudu_ZxNXhNLCD",
+    "iw3nLKic3oV7zmFJ8v",
 ]
-# Or use: allowed_clients_file = "/etc/tunnel-rs/allowed_clients.txt"
+# Or use: auth_tokens_file = "/etc/tunnel-rs/auth_tokens.txt"
 
 [iroh.allowed_sources]
 tcp = ["127.0.0.0/8", "192.168.0.0/16"]
@@ -371,6 +373,10 @@ request_source = "tcp://127.0.0.1:22"
 target = "127.0.0.1:2222"
 relay_urls = ["https://relay.example.com"]
 dns_server = "https://dns.example.com/pkarr"
+
+# Authentication token (get from server admin, 18 chars)
+auth_token = "ikAdvudu_ZxNXhNLCD"
+# Or use: auth_token_file = "~/.config/tunnel-rs/token.txt"
 ```
 
 > [!NOTE]
@@ -384,9 +390,9 @@ tunnel-rs client --default-config
 tunnel-rs client -c ./my-client.toml
 ```
 
-## Persistent Identity
+## Persistent Server Identity
 
-By default, a new EndpointId is generated each run. For long-running setups, use persistent identity:
+By default, a new EndpointId is generated each run. For long-running setups, use persistent identity for the **server**:
 
 ```bash
 # Generate key and output EndpointId
@@ -399,60 +405,79 @@ tunnel-rs show-iroh-node-id --secret-file ./server.key
 Then use the key for the server:
 
 ```bash
-tunnel-rs server --allowed-tcp 127.0.0.0/8 --secret-file ./server.key --allowed-clients <CLIENT_NODE_ID>
+tunnel-rs server --allowed-tcp 127.0.0.0/8 --secret-file ./server.key --auth-tokens "$AUTH_TOKEN"
 ```
+
+> **Note:** Clients use ephemeral identities by default. Only the server needs a persistent key to maintain a stable EndpointId that clients can connect to.
 
 ## Authentication
 
-Iroh mode requires authentication using NodeId whitelisting. Only clients whose NodeIds are in the server's allowed list can connect. This leverages iroh's built-in Ed25519 identity system—each peer has a cryptographic identity, and the server validates the client's NodeId during the TLS handshake.
+Iroh mode requires authentication using pre-shared tokens. Clients must provide a valid token to connect.
+
+**Token Format:**
+- Exactly 18 characters
+- Starts with `i` (for iroh)
+- Ends with a checksum character
+- Middle 16 characters: `A-Za-z0-9` and `-` `_` `.` (period is valid but rare in generated tokens)
+
+Generate tokens with: `tunnel-rs generate-token`
 
 ### Setup Workflow
 
-1. **Generate keys for both peers:**
+1. **Generate a server key:**
    ```bash
-   # Server
    tunnel-rs generate-iroh-key --output ./server.key
-
-   # Client
-   tunnel-rs generate-iroh-key --output ./client.key
    ```
 
-2. **Get the client's NodeId:**
+2. **Create authentication tokens:**
    ```bash
-   tunnel-rs show-iroh-node-id --secret-file ./client.key
-   # Output: 3k4j5l6k7j8k9l0m1n2o3p4q5r6s7t8u9v0w1x2y3z4a5b6c7d8e
+   # Generate a valid token
+   AUTH_TOKEN=$(tunnel-rs generate-token)
+   echo $AUTH_TOKEN  # Share this with authorized clients
+
+   # Generate multiple tokens
+   tunnel-rs generate-token -c 5
    ```
 
-3. **Start server with allowed clients:**
+3. **Start server with auth tokens:**
    ```bash
    tunnel-rs server \
      --secret-file ./server.key \
      --allowed-tcp 127.0.0.0/8 \
-     --allowed-clients 3k4j5l6k7j8k9l0m1n2o3p4q5r6s7t8u9v0w1x2y3z4a5b6c7d8e
+     --auth-tokens "$AUTH_TOKEN"
    ```
 
-### Multiple Clients
+4. **Start client with auth token:**
+   ```bash
+   tunnel-rs client \
+     --server-node-id <SERVER_ENDPOINT_ID> \
+     --source tcp://127.0.0.1:22 \
+     --target 127.0.0.1:2222 \
+     --auth-token "$AUTH_TOKEN"
+   ```
+
+### Multiple Tokens
 
 ```bash
-# Multiple --allowed-clients flags
+# Multiple --auth-tokens flags
 tunnel-rs server \
   --allowed-tcp 127.0.0.0/8 \
-  --allowed-clients <ALICE_NODE_ID> \
-  --allowed-clients <BOB_NODE_ID>
+  --auth-tokens "token-for-alice" \
+  --auth-tokens "token-for-bob"
 
-# Or use a file (one NodeId per line, # comments allowed)
+# Or use a file (one token per line, # comments allowed)
 tunnel-rs server \
   --allowed-tcp 127.0.0.0/8 \
-  --allowed-clients-file /etc/tunnel-rs/allowed_clients.txt
+  --auth-tokens-file /etc/tunnel-rs/auth_tokens.txt
 ```
 
-**Example `allowed_clients.txt`:**
+**Example `auth_tokens.txt`:**
 ```text
-# Alice's laptop
-3k4j5l6k7j8k9l0m1n2o3p4q5r6s7t8u9v0w1x2y3z4a5b6c7d8e
+# Alice's token (generate with: tunnel-rs generate-token)
+ikAdvudu_ZxNXhNLCD
 
-# Bob's workstation
-2xnbkpbc7izsilvewd7c62w7wnwziacmpfwvhcrya5nt76dqkpga
+# Bob's token
+iw3nLKic3oV7zmFJ8v
 ```
 
 ### Configuration File
@@ -461,14 +486,15 @@ In `server.toml`:
 
 ```toml
 [iroh]
-# Inline list
-allowed_clients = [
-    "3k4j5l6k7j8k9l0m1n2o3p4q5r6s7t8u9v0w1x2y3z4a5b6c7d8e",  # Alice
-    "2xnbkpbc7izsilvewd7c62w7wnwziacmpfwvhcrya5nt76dqkpga",  # Bob
+# Inline list (tokens must be exactly 18 characters)
+# Generate with: tunnel-rs generate-token
+auth_tokens = [
+    "ikAdvudu_ZxNXhNLCD",  # Alice
+    "iw3nLKic3oV7zmFJ8v",  # Bob
 ]
 
 # Or use a file
-# allowed_clients_file = "/etc/tunnel-rs/allowed_clients.txt"
+# auth_tokens_file = "/etc/tunnel-rs/auth_tokens.txt"
 ```
 
 ## Custom Relay Server
@@ -479,12 +505,12 @@ Use a custom relay server instead of the public iroh relay infrastructure.
 
 ```bash
 # Both sides must use the same relay
-tunnel-rs server --relay-url https://relay.example.com --allowed-tcp 127.0.0.0/8 --allowed-clients <CLIENT_NODE_ID>
-tunnel-rs client --relay-url https://relay.example.com --server-node-id <ID> --source tcp://127.0.0.1:22 --target 127.0.0.1:2222
+tunnel-rs server --relay-url https://relay.example.com --allowed-tcp 127.0.0.0/8 --auth-tokens "$AUTH_TOKEN"
+tunnel-rs client --relay-url https://relay.example.com --server-node-id <ID> --source tcp://127.0.0.1:22 --target 127.0.0.1:2222 --auth-token "$AUTH_TOKEN"
 
 # Force relay-only (no direct P2P) - requires test-utils feature
 # Build with: cargo build --features test-utils
-tunnel-rs server --relay-url https://relay.example.com --relay-only --allowed-tcp 127.0.0.0/8 --allowed-clients <CLIENT_NODE_ID>
+tunnel-rs server --relay-url https://relay.example.com --relay-only --allowed-tcp 127.0.0.0/8 --auth-tokens "$AUTH_TOKEN"
 ```
 
 ### Running iroh-relay
@@ -500,8 +526,8 @@ For fully independent operation without public infrastructure:
 
 ```bash
 # Both sides use custom DNS server
-tunnel-rs server --dns-server https://dns.example.com/pkarr --secret-file ./server.key --allowed-tcp 127.0.0.0/8 --allowed-clients <CLIENT_NODE_ID>
-tunnel-rs client --dns-server https://dns.example.com/pkarr --server-node-id <ID> --source tcp://127.0.0.1:22 --target 127.0.0.1:2222
+tunnel-rs server --dns-server https://dns.example.com/pkarr --secret-file ./server.key --allowed-tcp 127.0.0.0/8 --auth-tokens "$AUTH_TOKEN"
+tunnel-rs client --dns-server https://dns.example.com/pkarr --server-node-id <ID> --source tcp://127.0.0.1:22 --target 127.0.0.1:2222 --auth-token "$AUTH_TOKEN"
 ```
 
 ## Self-Hosted Infrastructure
@@ -539,16 +565,16 @@ tunnel-rs server \
   --dns-server https://dns.example.com/pkarr \
   --secret-file ./server.key \
   --allowed-tcp 127.0.0.0/8 \
-  --allowed-clients <CLIENT_NODE_ID>
+  --auth-tokens "$AUTH_TOKEN"
 
 # Client
 tunnel-rs client \
   --relay-url https://relay.example.com \
   --dns-server https://dns.example.com/pkarr \
-  --secret-file ./client.key \
   --server-node-id <ID> \
   --source tcp://127.0.0.1:22 \
-  --target 127.0.0.1:2222
+  --target 127.0.0.1:2222 \
+  --auth-token "$AUTH_TOKEN"
 ```
 
 ### Relay Behavior
@@ -582,16 +608,16 @@ tunnel-rs server \
   --socks5-proxy socks5h://127.0.0.1:9050 \
   --secret-file ./server.key \
   --allowed-tcp 127.0.0.0/8 \
-  --allowed-clients <CLIENT_NODE_ID>
+  --auth-tokens "$AUTH_TOKEN"
 
 # Client side: use --socks5-proxy to reach .onion relay (direct P2P bypasses Tor)
 tunnel-rs client \
   --relay-url http://YOUR_RELAY.onion \
   --socks5-proxy socks5h://127.0.0.1:9050 \
-  --secret-file ./client.key \
   --server-node-id <ID> \
   --source tcp://127.0.0.1:22 \
-  --target 127.0.0.1:2222
+  --target 127.0.0.1:2222 \
+  --auth-token "$AUTH_TOKEN"
 ```
 
 > **Note:** When using `--socks5-proxy`, all relay URLs must be `.onion` addresses. The proxy is validated as a real Tor proxy at startup. DNS discovery is not used with Tor — the relay handles peer discovery.
@@ -867,13 +893,13 @@ Server whitelists networks; clients choose which service to tunnel:
 
 ```bash
 # Server: whitelist networks, clients choose destination
-tunnel-rs server --allowed-tcp 127.0.0.0/8 --max-sessions 100 --allowed-clients <CLIENT1_NODE_ID> --allowed-clients <CLIENT2_NODE_ID>
+tunnel-rs server --allowed-tcp 127.0.0.0/8 --max-sessions 100 --auth-tokens "$AUTH_TOKEN"
 
 # Client 1: tunnel to SSH
-tunnel-rs client --secret-file ./client1.key --server-node-id <ID> --source tcp://127.0.0.1:22 --target 127.0.0.1:2222
+tunnel-rs client --server-node-id <ID> --source tcp://127.0.0.1:22 --target 127.0.0.1:2222 --auth-token "$AUTH_TOKEN"
 
 # Client 2: tunnel to web server (same server!)
-tunnel-rs client --secret-file ./client2.key --server-node-id <ID> --source tcp://127.0.0.1:80 --target 127.0.0.1:8080
+tunnel-rs client --server-node-id <ID> --source tcp://127.0.0.1:80 --target 127.0.0.1:8080 --auth-token "$AUTH_TOKEN"
 ```
 
 ### nostr (Multi-Session + Dynamic Source)
@@ -945,6 +971,21 @@ stderr (npub):
 npub1...
 ```
 
+## generate-token
+
+Generate authentication tokens for iroh mode:
+
+```bash
+# Generate a single token
+tunnel-rs generate-token
+# Output: ikAdvudu_ZxNXhNLCD
+
+# Generate multiple tokens
+tunnel-rs generate-token -c 5
+```
+
+Token format: `i` + 16 random chars + checksum = 18 characters total.
+
 ## generate-iroh-key
 
 *For iroh mode.*
@@ -981,21 +1022,21 @@ All protocol modes and features are available on all platforms.
 ## Security
 
 - All traffic is encrypted using QUIC/TLS 1.3
-- The EndpointId is a public key that identifies the sender
-- **NodeId Whitelisting (iroh mode):** Server rejects clients not in the `--allowed-clients` list. Authentication uses iroh's built-in Ed25519 identity—the NodeId is verified during the TLS handshake.
+- The EndpointId is a public key that identifies the server
+- **Token Authentication (iroh mode):** Server validates client-provided tokens against the `--auth-tokens` list. Tokens are sent securely within the encrypted QUIC connection.
 - Secret key files are created with `0600` permissions (Unix) and appropriate permissions on Windows
-- Treat secret key files like SSH private keys
+- Treat secret key files and auth tokens like passwords
 
 ## How It Works
 
 ### iroh Mode
-1. Sender creates an iroh endpoint with discovery services
-2. Sender publishes its address via Pkarr/DNS
-3. Receiver resolves the sender via discovery
-4. Connection established via iroh's NAT traversal (TLS handshake verifies NodeId)
-5. **Sender validates client NodeId against allowed clients list**
-6. Receiver sends `SourceRequest` with desired source address
-7. Sender validates against allowed networks and responds
+1. Server creates an iroh endpoint with discovery services
+2. Server publishes its address via Pkarr/DNS
+3. Client resolves the server via discovery
+4. Connection established via iroh's NAT traversal
+5. Client sends `SourceRequest` with desired source address and auth token
+6. **Server validates auth token against allowed tokens**
+7. Server validates source against allowed networks and responds
 8. If accepted, traffic forwarding begins
 
 
