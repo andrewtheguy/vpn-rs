@@ -117,8 +117,8 @@ pub async fn try_connect_tcp(addrs: &[SocketAddr]) -> Result<TcpStream> {
     let is_loopback = addrs.iter().all(|a| a.ip().is_loopback());
 
     let ordered = if is_loopback {
-        // For loopback, preserve input order (resolve_all_target_addrs already
-        // sorted IPv4 first for loopback addresses)
+        // For loopback, preserve input order. Callers (e.g., resolve_all_target_addrs)
+        // are responsible for any preferred ordering such as IPv4-first.
         addrs.to_vec()
     } else {
         // For non-loopback, apply Happy Eyeballs: IPv6 first, interleaved with IPv4
@@ -448,17 +448,30 @@ mod tests {
         let is_loopback = addrs.iter().all(|a| a.ip().is_loopback());
         assert!(is_loopback);
 
-        let mut sorted = addrs.clone();
-        sorted.sort_by_key(|a| if a.is_ipv4() { 0 } else { 1 });
+        // Apply the same ordering logic as resolve_all_target_addrs
+        let result = order_resolved_addrs(addrs);
 
         // IPv4 should be first after sorting
-        assert!(sorted[0].is_ipv4());
-        assert!(sorted[1].is_ipv6());
+        assert!(result[0].is_ipv4(), "IPv4 should be preferred for loopback");
+        assert!(result[1].is_ipv6(), "IPv6 should be second for loopback");
+    }
+
+    /// Helper to simulate the address ordering logic from resolve_all_target_addrs.
+    /// For loopback: sort IPv4 first. For non-loopback: preserve input order.
+    fn order_resolved_addrs(addrs: Vec<SocketAddr>) -> Vec<SocketAddr> {
+        let is_loopback = addrs.iter().all(|a| a.ip().is_loopback());
+        if is_loopback {
+            let mut sorted = addrs;
+            sorted.sort_by_key(|a| if a.is_ipv4() { 0 } else { 1 });
+            sorted
+        } else {
+            addrs
+        }
     }
 
     #[test]
     fn test_non_loopback_addresses_preserve_order() {
-        // Non-loopback addresses should keep resolver order for Happy Eyeballs
+        // Non-loopback addresses should preserve input order (no sorting)
         let addrs = vec![
             SocketAddr::new(IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1)), 80),
             SocketAddr::new(IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34)), 80),
@@ -467,8 +480,13 @@ mod tests {
         let is_loopback = addrs.iter().all(|a| a.ip().is_loopback());
         assert!(!is_loopback);
 
-        // Non-loopback should not be reordered in resolve_all_target_addrs
-        // (the Happy Eyeballs reordering happens in try_connect_tcp)
+        // Apply the same ordering logic as resolve_all_target_addrs
+        let result = order_resolved_addrs(addrs.clone());
+
+        // Order should be preserved exactly (IPv6 still first, as input)
+        assert_eq!(result, addrs, "Non-loopback addresses should preserve input order");
+        assert!(result[0].is_ipv6(), "First address should remain IPv6");
+        assert!(result[1].is_ipv4(), "Second address should remain IPv4");
     }
 
     #[test]

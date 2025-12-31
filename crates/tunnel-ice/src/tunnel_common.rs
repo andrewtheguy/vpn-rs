@@ -158,8 +158,8 @@ pub async fn try_connect_tcp(addrs: &[SocketAddr]) -> Result<TcpStream> {
     let is_loopback = addrs.iter().all(|a| a.ip().is_loopback());
 
     let ordered = if is_loopback {
-        // For loopback, preserve input order (resolve_all_target_addrs already
-        // sorted IPv4 first for loopback addresses)
+        // For loopback, preserve input order. Callers (e.g., resolve_all_target_addrs)
+        // are responsible for any preferred ordering such as IPv4-first.
         addrs.to_vec()
     } else {
         // For non-loopback, apply Happy Eyeballs: IPv6 first, interleaved with IPv4
