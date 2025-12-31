@@ -86,6 +86,52 @@ tunnel-rs-ice client nostr --nsec-file ./receiver.nsec \
 
 ---
 
+#### Multi-Source/Target per Client
+
+**Status:** Idea
+
+Currently, each client connection tunnels a single source to a single target. This feature would allow a single client to tunnel multiple source/target pairs simultaneously, with live updates.
+
+**Proposed Features:**
+- **Multiple tunnels per client**: Configure multiple `--source`/`--target` pairs in one client instance
+- **Live update**: Add/remove tunnels without restarting the client (via config file reload, API, or CLI command)
+- **Config file support**: Define multiple tunnels in TOML config
+
+**Example (proposed config):**
+```toml
+role = "client"
+mode = "iroh"
+
+[iroh]
+server_node_id = "..."
+auth_token = "..."
+
+[[iroh.tunnels]]
+source = "tcp://127.0.0.1:22"
+target = "127.0.0.1:2222"
+
+[[iroh.tunnels]]
+source = "tcp://127.0.0.1:5432"
+target = "127.0.0.1:5432"
+
+[[iroh.tunnels]]
+source = "udp://127.0.0.1:53"
+target = "udp://127.0.0.1:5353"
+```
+
+**Complexity:** High
+- Requires refactoring client to manage multiple listener loops
+- Live update needs signal handling (SIGHUP) or control socket/API
+- State management for adding/removing tunnels without disrupting existing connections
+- Error handling per-tunnel (one tunnel failure shouldn't affect others)
+
+**Use Cases:**
+- Single client exposing multiple services (SSH + database + DNS)
+- Dynamic service discovery and tunnel provisioning
+- Reduced overhead vs. running multiple client processes
+
+---
+
 #### Relay Fallback for manual/nostr Modes
 
 **Status:** Idea
