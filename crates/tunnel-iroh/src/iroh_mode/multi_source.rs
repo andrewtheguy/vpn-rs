@@ -431,7 +431,10 @@ pub async fn run_multi_source_client(
         run_multi_source_tcp_client(conn, source, &listen_addrs, tunnel_established, auth_token).await?;
     } else {
         // UDP still uses single address (first one) - multi-listener for UDP is more complex
-        run_multi_source_udp_client(conn, source, listen_addrs[0], auth_token).await?;
+        let listen_addr = listen_addrs
+            .first()
+            .ok_or_else(|| anyhow::anyhow!("No listen addresses resolved for target"))?;
+        run_multi_source_udp_client(conn, source, *listen_addr, auth_token).await?;
     }
 
     endpoint.close().await;
