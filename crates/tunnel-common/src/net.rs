@@ -36,6 +36,44 @@ pub async fn resolve_all_target_addrs(target: &str) -> Result<Vec<SocketAddr>> {
     Ok(addrs)
 }
 
+/// Resolve a listen address (host:port) to a single SocketAddr.
+///
+/// Supports both IP addresses (127.0.0.1:8080) and hostnames (localhost:8080).
+/// For hostnames, returns the first resolved address (preferring IPv4 for local binding).
+pub async fn resolve_listen_addr(target: &str) -> Result<SocketAddr> {
+    // First try direct parse for IP addresses (fast path)
+    if let Ok(addr) = target.parse::<SocketAddr>() {
+        return Ok(addr);
+    }
+
+    // Resolve hostname
+    let addrs: Vec<SocketAddr> = lookup_host(target)
+        .await
+        .with_context(|| format!("Failed to resolve listen address '{}'", target))?
+        .collect();
+
+    if addrs.is_empty() {
+        anyhow::bail!("No addresses found for listen address '{}'", target);
+    }
+
+    // Prefer IPv4 for local binding (more compatible), then IPv6
+    let addr = addrs
+        .iter()
+        .find(|a| a.is_ipv4())
+        .or_else(|| addrs.first())
+        .copied()
+        .expect("no listen addresses available after resolution");
+
+    log::debug!(
+        "Resolved listen address '{}' to {} (from {} candidates)",
+        target,
+        addr,
+        addrs.len()
+    );
+
+    Ok(addr)
+}
+
 // ============================================================================
 // Happy Eyeballs TCP Connection
 // ============================================================================

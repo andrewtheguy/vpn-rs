@@ -12,6 +12,7 @@ use tunnel_common::config::{
     default_stun_servers, expand_tilde, load_client_config, load_server_config, ClientConfig,
     ServerConfig,
 };
+use tunnel_common::net::resolve_listen_addr;
 use tunnel_ice::{custom, nostr, secret};
 
 #[derive(Clone, Copy, ValueEnum, Default, Debug, PartialEq)]
@@ -632,8 +633,9 @@ async fn main() -> Result<()> {
                     let _ = parse_endpoint(&source)
                         .with_context(|| format!("Invalid source '{}'. Expected format: tcp://host:port or udp://host:port", source))?;
 
-                    let listen: SocketAddr = target.parse()
-                        .with_context(|| format!("Invalid target '{}'. Expected format: host:port (e.g., 127.0.0.1:2222)", target))?;
+                    let listen: SocketAddr = resolve_listen_addr(&target)
+                        .await
+                        .with_context(|| format!("Invalid target '{}'. Expected format: host:port (e.g., localhost:2222 or 127.0.0.1:2222)", target))?;
 
                     custom::run_manual_client(source, listen, stun_servers).await
                 }
