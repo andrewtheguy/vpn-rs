@@ -192,9 +192,9 @@ mod tests {
 
     #[test]
     fn test_validate_token_valid() {
-        assert!(validate_token("abcdef1234567890").is_ok());
-        assert!(validate_token("ABCDEF1234567890").is_ok());
-        assert!(validate_token("abc-def_123.456").is_ok());
+        assert!(validate_token("abcdef1234567890").is_ok()); // 16 chars alphanumeric
+        assert!(validate_token("ABCDEF1234567890").is_ok()); // 16 chars uppercase
+        assert!(validate_token("abc-def_123.4567").is_ok()); // 16 chars with symbols
     }
 
     #[test]
