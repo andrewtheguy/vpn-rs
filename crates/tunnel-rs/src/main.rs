@@ -7,7 +7,9 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
-use tunnel_common::config::{load_client_config, load_server_config, ClientConfig, ServerConfig};
+use tunnel_common::config::{
+    expand_tilde, load_client_config, load_server_config, ClientConfig, ServerConfig,
+};
 use tunnel_iroh::iroh_mode::endpoint::{
     load_secret, load_secret_from_string, secret_to_endpoint_id,
 };
@@ -319,9 +321,10 @@ fn resolve_iroh_secret(
             Ok(Some(secret))
         }
         (None, Some(path)) => {
-            let secret = load_secret(&path)?;
+            let expanded = expand_tilde(&path);
+            let secret = load_secret(&expanded)?;
             let endpoint_id = secret_to_endpoint_id(&secret);
-            log::info!("Loaded identity from: {}", path.display());
+            log::info!("Loaded identity from: {}", expanded.display());
             log::info!("EndpointId: {}", endpoint_id);
             Ok(Some(secret))
         }
@@ -419,8 +422,12 @@ async fn main() -> Result<()> {
             let secret = resolve_iroh_secret(secret, secret_file)?;
 
             // Load allowed clients for authentication
-            let allowed_clients =
-                auth::load_allowed_clients(&allowed_clients, allowed_clients_file.as_deref())?;
+            let allowed_clients_file_expanded =
+                allowed_clients_file.as_ref().map(|p| expand_tilde(p));
+            let allowed_clients = auth::load_allowed_clients(
+                &allowed_clients,
+                allowed_clients_file_expanded.as_deref(),
+            )?;
 
             if allowed_clients.is_empty() {
                 anyhow::bail!(
@@ -514,8 +521,8 @@ async fn main() -> Result<()> {
             .await
         }
         Command::GenerateIrohKey { output, force } => {
-            secret::generate_secret(output.clone(), *force)
+            secret::generate_secret(expand_tilde(output), *force)
         }
-        Command::ShowIrohNodeId { secret_file } => secret::show_id(secret_file.clone()),
+        Command::ShowIrohNodeId { secret_file } => secret::show_id(expand_tilde(secret_file)),
     }
 }

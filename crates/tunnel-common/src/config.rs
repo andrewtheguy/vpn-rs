@@ -637,6 +637,29 @@ impl ClientConfig {
 }
 
 // ============================================================================
+// Path Expansion
+// ============================================================================
+
+/// Expand tilde (~) in paths to the user's home directory.
+///
+/// - `~/...` expands to the user's home directory
+/// - `~` alone expands to the home directory
+/// - Other paths are returned unchanged
+pub fn expand_tilde(path: &Path) -> PathBuf {
+    let path_str = path.to_string_lossy();
+    if path_str.starts_with("~/") {
+        if let Some(home) = dirs::home_dir() {
+            return home.join(&path_str[2..]);
+        }
+    } else if path_str == "~" {
+        if let Some(home) = dirs::home_dir() {
+            return home;
+        }
+    }
+    path.to_path_buf()
+}
+
+// ============================================================================
 // Config Loading
 // ============================================================================
 
@@ -660,11 +683,11 @@ fn default_client_config_path() -> Option<PathBuf> {
 
 /// Load server configuration from an explicit path, or from default location.
 ///
-/// - `path`: Some(path) loads from the specified path
+/// - `path`: Some(path) loads from the specified path (tilde-expanded)
 /// - `path`: None loads from the default path (~/.config/tunnel-rs/server.toml)
 pub fn load_server_config(path: Option<&Path>) -> Result<ServerConfig> {
     let config_path = match path {
-        Some(p) => p.to_path_buf(),
+        Some(p) => expand_tilde(p),
         None => default_server_config_path().ok_or_else(|| {
             anyhow::anyhow!("Could not find default config path. Use -c to specify a config file.")
         })?,
@@ -674,11 +697,11 @@ pub fn load_server_config(path: Option<&Path>) -> Result<ServerConfig> {
 
 /// Load client configuration from an explicit path, or from default location.
 ///
-/// - `path`: Some(path) loads from the specified path
+/// - `path`: Some(path) loads from the specified path (tilde-expanded)
 /// - `path`: None loads from the default path (~/.config/tunnel-rs/client.toml)
 pub fn load_client_config(path: Option<&Path>) -> Result<ClientConfig> {
     let config_path = match path {
-        Some(p) => p.to_path_buf(),
+        Some(p) => expand_tilde(p),
         None => default_client_config_path().ok_or_else(|| {
             anyhow::anyhow!("Could not find default config path. Use -c to specify a config file.")
         })?,

@@ -9,7 +9,8 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use tunnel_common::config::{
-    default_stun_servers, load_client_config, load_server_config, ClientConfig, ServerConfig,
+    default_stun_servers, expand_tilde, load_client_config, load_server_config, ClientConfig,
+    ServerConfig,
 };
 use tunnel_ice::{custom, nostr, secret};
 
@@ -90,13 +91,14 @@ fn resolve_nostr_nsec(nsec: Option<String>, nsec_file: Option<PathBuf>) -> Resul
             Ok(Some(trimmed.to_string()))
         }
         (None, Some(path)) => {
-            let content = fs::read_to_string(&path)
-                .with_context(|| format!("Failed to read nsec file: {}", path.display()))?;
+            let expanded = expand_tilde(&path);
+            let content = fs::read_to_string(&expanded)
+                .with_context(|| format!("Failed to read nsec file: {}", expanded.display()))?;
             let trimmed = content.trim();
             if trimmed.is_empty() {
-                anyhow::bail!("nsec file is empty: {}", path.display());
+                anyhow::bail!("nsec file is empty: {}", expanded.display());
             }
-            log::info!("Loaded nsec from file: {}", path.display());
+            log::info!("Loaded nsec from file: {}", expanded.display());
             Ok(Some(trimmed.to_string()))
         }
         (None, None) => Ok(None),
@@ -777,7 +779,9 @@ async fn main() -> Result<()> {
                 ),
             }
         }
-        Command::ShowNpub { nsec_file } => secret::show_npub(nsec_file),
-        Command::GenerateNostrKey { output, force } => secret::generate_nostr_key(output, force),
+        Command::ShowNpub { nsec_file } => secret::show_npub(expand_tilde(&nsec_file)),
+        Command::GenerateNostrKey { output, force } => {
+            secret::generate_nostr_key(expand_tilde(&output), force)
+        }
     }
 }
