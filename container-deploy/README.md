@@ -31,7 +31,7 @@ tunnel-rs uses a **client-initiated** model similar to SSH `-L` tunneling:
 
 ```bash
 # 1. Generate server key
-tunnel-rs generate-iroh-key --output server.key
+tunnel-rs generate-server-key --output server.key
 # Output: EndpointId: <SERVER_NODE_ID>
 
 # 2. Create an authentication token
@@ -63,7 +63,7 @@ cd docker
 
 # 1. Generate server key
 docker run --rm ghcr.io/andrewtheguy/tunnel-rs:latest \
-  generate-iroh-key --output - > server.key
+  generate-server-key --output - > server.key
 
 # 2. Create an authentication token
 AUTH_TOKEN=$(docker run --rm ghcr.io/andrewtheguy/tunnel-rs:latest generate-token)
@@ -99,13 +99,13 @@ Access ClusterIP services from outside the cluster — like SSH tunneling but ov
 
 ```bash
 # 1. Generate server key
-tunnel-rs generate-iroh-key --output server.key
+tunnel-rs generate-server-key --output server.key
 
 # 2. Create an authentication token
 AUTH_TOKEN=$(tunnel-rs generate-token)
 
 # 3. Create secrets
-kubectl create secret generic tunnel-iroh-keys \
+kubectl create secret generic tunnel-server-secrets \
   --from-file=server.key=./server.key \
   --from-literal=tokens.txt="$AUTH_TOKEN"
 

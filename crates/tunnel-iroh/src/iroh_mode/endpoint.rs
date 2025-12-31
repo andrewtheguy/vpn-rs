@@ -53,7 +53,7 @@ pub const QUIC_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 pub fn load_secret(path: &Path) -> Result<SecretKey> {
     if !path.exists() {
         anyhow::bail!(
-            "Secret key file not found: {}\nGenerate one with: tunnel-rs generate-iroh-key --output {}",
+            "Secret key file not found: {}\nGenerate one with: tunnel-rs generate-server-key --output {}",
             path.display(),
             path.display()
         );

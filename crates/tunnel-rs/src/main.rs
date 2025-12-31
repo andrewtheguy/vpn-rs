@@ -139,9 +139,12 @@ enum Command {
         #[arg(long)]
         auth_token_file: Option<PathBuf>,
     },
-    /// Generate a new iroh secret key file (for automation/setup)
-    GenerateIrohKey {
-        /// Path where to save the secret key file
+    /// Generate a server private key for persistent identity
+    ///
+    /// The private key gives the server a stable EndpointId that clients connect to.
+    /// Use show-server-id to display the public EndpointId derived from this key.
+    GenerateServerKey {
+        /// Path where to save the private key file
         #[arg(short, long)]
         output: PathBuf,
 
@@ -149,13 +152,18 @@ enum Command {
         #[arg(long)]
         force: bool,
     },
-    /// Show the iroh node ID (EndpointId) for an existing secret key file
-    ShowIrohNodeId {
-        /// Path to the secret key file
+    /// Show the server's public EndpointId derived from a private key
+    ///
+    /// Clients use this EndpointId with --server-node-id to connect.
+    ShowServerId {
+        /// Path to the private key file
         #[arg(short, long)]
         secret_file: PathBuf,
     },
-    /// Generate a new authentication token
+    /// Generate a client authentication token
+    ///
+    /// Tokens are shared with clients for authentication (like API keys).
+    /// Server configures accepted tokens via --auth-tokens or --auth-tokens-file.
     GenerateToken {
         /// Number of tokens to generate (default: 1)
         #[arg(short, long, default_value = "1")]
@@ -541,10 +549,10 @@ async fn main() -> Result<()> {
             )
             .await
         }
-        Command::GenerateIrohKey { output, force } => {
+        Command::GenerateServerKey { output, force } => {
             secret::generate_secret(expand_tilde(output), *force)
         }
-        Command::ShowIrohNodeId { secret_file } => secret::show_id(expand_tilde(secret_file)),
+        Command::ShowServerId { secret_file } => secret::show_id(expand_tilde(secret_file)),
         Command::GenerateToken { count } => {
             for _ in 0..*count {
                 println!("{}", auth::generate_token());

@@ -15,14 +15,14 @@
 #
 # Setup:
 #   1. Generate server key:
-#      tunnel-rs generate-iroh-key --output server.key
+#      tunnel-rs generate-server-key --output server.key
 #
 #   2. Generate authentication token:
 #      tunnel-rs generate-token > tokens.txt
 #      # Share this token with authorized clients
 #
 #   3. Create secrets:
-#      kubectl create secret generic tunnel-iroh-keys \
+#      kubectl create secret generic tunnel-server-secrets \
 #        --from-file=server.key=./server.key \
 #        --from-file=tokens.txt=./tokens.txt
 #
@@ -81,7 +81,7 @@ spec:
             - --max-sessions
             - "20"
           volumeMounts:
-            - name: iroh-keys
+            - name: server-secrets
               mountPath: /secrets
               readOnly: true
           resources:
@@ -92,6 +92,6 @@ spec:
               memory: "256Mi"
               cpu: "500m"
       volumes:
-        - name: iroh-keys
+        - name: server-secrets
           secret:
-            secretName: tunnel-iroh-keys
+            secretName: tunnel-server-secrets
