@@ -1023,7 +1023,7 @@ All protocol modes and features are available on all platforms.
 
 - All traffic is encrypted using QUIC/TLS 1.3
 - The EndpointId is a public key that identifies the server
-- **Token Authentication (iroh mode):** Server validates client-provided tokens against the `--auth-tokens` list. Tokens are sent securely within the encrypted QUIC connection.
+- **Token Authentication (iroh mode):** Clients authenticate immediately after QUIC connection via a dedicated auth stream. Invalid tokens are rejected within 10 seconds and the connection is closed. See [Architecture: Token Authentication](docs/ARCHITECTURE.md#token-authentication-iroh-mode).
 - Secret key files are created with `0600` permissions (Unix) and appropriate permissions on Windows
 - Treat secret key files and auth tokens like passwords
 
@@ -1033,11 +1033,12 @@ All protocol modes and features are available on all platforms.
 1. Server creates an iroh endpoint with discovery services
 2. Server publishes its address via Pkarr/DNS
 3. Client resolves the server via discovery
-4. Connection established via iroh's NAT traversal
-5. Client sends `SourceRequest` with desired source address and auth token
-6. **Server validates auth token against allowed tokens**
-7. Server validates source against allowed networks and responds
-8. If accepted, traffic forwarding begins
+4. QUIC connection established via iroh's NAT traversal
+5. **Authentication phase:** Client opens dedicated auth stream and sends `AuthRequest` with token
+6. **Server validates token immediately** (10s timeout) — invalid tokens close connection
+7. **Source request phase:** Client opens source stream with `SourceRequest`
+8. Server validates source against allowed networks and responds
+9. If accepted, traffic forwarding begins
 
 
 ### manual Mode

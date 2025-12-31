@@ -8,7 +8,8 @@ Currently, there's no rate limiting for invalid token attempts. An attacker can 
 
 ## Current State
 
-- Token validation happens per-stream in `multi_source.rs`
+- Token validation happens per-connection via dedicated auth stream in `multi_source.rs`
+- Authentication occurs immediately after QUIC connection (10s timeout), before any source requests
 - `remote_id` (EndpointId) is ephemeral and changes per connection - not suitable for tracking
 - Session semaphore limits concurrent sessions but not auth failures
 - No tracking of failed auth attempts
@@ -104,9 +105,9 @@ Config file options: `max_token_auth_failures`, `token_lockout_duration`, `globa
 
 2. **`crates/tunnel-iroh/src/iroh_mode/multi_source.rs`**
    - Add `Arc<AuthRateLimiter>` to server state
-   - Pass rate limiter to `handle_multi_source_connection()` and `handle_multi_source_stream()`
-   - Check rate limit before token validation
-   - Record failure on invalid token
+   - Pass rate limiter to `handle_multi_source_connection()`
+   - Check rate limit in auth phase before token validation
+   - Record failure on invalid token (closes connection immediately)
 
 3. **`crates/tunnel-rs/src/main.rs`**
    - Add CLI args: `--max-token-auth-failures`, `--token-lockout-duration`, `--global-auth-failure-window`, `--global-auth-failure-threshold`, `--global-lockout-duration`
@@ -289,12 +290,15 @@ let rate_limiter = Arc::new(AuthRateLimiter::new(
     Duration::from_secs(60),        // global_lockout_duration
 ));
 
-// In handle_multi_source_stream(), before token validation:
+// In handle_multi_source_connection(), during auth phase:
 let token_str = request.auth_token.as_str();
 if let Err(remaining) = rate_limiter.check_allowed(token_str) {
     log::warn!("Rate limit active, rejecting auth attempt for {:?}", remaining);
-    let response = SourceResponse::rejected("Too many failed attempts, try again later");
-    // ... send response and return
+    let response = AuthResponse::rejected("Too many failed attempts, try again later");
+    send_stream.write_all(&encode_auth_response(&response)?).await?;
+    send_stream.finish()?;
+    conn.close(3u32.into(), b"rate_limited");
+    return Ok(());
 }
 
 // After invalid token:
