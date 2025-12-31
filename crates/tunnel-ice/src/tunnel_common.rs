@@ -88,7 +88,7 @@ pub async fn resolve_listen_addr(target: &str) -> Result<SocketAddr> {
         .find(|a| a.is_ipv4())
         .or_else(|| addrs.first())
         .copied()
-        .unwrap();
+        .expect("no listen addresses available after resolution");
 
     log::debug!(
         "Resolved listen address '{}' to {} (from {} candidates)",
