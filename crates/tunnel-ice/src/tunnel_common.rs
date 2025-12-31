@@ -141,12 +141,13 @@ pub async fn resolve_stun_addrs(stun: &str) -> Result<Vec<SocketAddr>> {
 
 /// Try to connect to any of the given addresses using Happy Eyeballs algorithm (RFC 8305).
 /// - For non-loopback: Prefers IPv6 addresses (tried first), interleaves with IPv4
-/// - For loopback: Preserves input order (typically IPv4 first for local services)
+/// - For loopback: Prefers IPv4 addresses (most local services bind to 127.0.0.1 only)
 /// - Staggers connection attempts with a small delay
 /// - Returns first successful connection, cancels remaining attempts
 ///
-/// Note: For loopback addresses, most local services bind to 127.0.0.1 only,
-/// so we skip the IPv6-first reordering to avoid unnecessary delays.
+/// Note: For loopback addresses, IPv4 is preferred because most local services
+/// bind to 127.0.0.1 only. This avoids the 250ms Happy Eyeballs delay when IPv6
+/// fails on macOS (which returns ::1 before 127.0.0.1 by default).
 pub async fn try_connect_tcp(addrs: &[SocketAddr]) -> Result<TcpStream> {
     use tokio::sync::mpsc;
 
@@ -158,9 +159,11 @@ pub async fn try_connect_tcp(addrs: &[SocketAddr]) -> Result<TcpStream> {
     let is_loopback = addrs.iter().all(|a| a.ip().is_loopback());
 
     let ordered = if is_loopback {
-        // For loopback, preserve input order. Callers (e.g., resolve_all_target_addrs)
-        // are responsible for any preferred ordering such as IPv4-first.
-        addrs.to_vec()
+        // For loopback, prefer IPv4 since most local services bind to 127.0.0.1.
+        // This is self-contained and does not depend on caller's ordering.
+        let mut sorted = addrs.to_vec();
+        sorted.sort_by_key(|a| if a.is_ipv4() { 0 } else { 1 });
+        sorted
     } else {
         // For non-loopback, apply Happy Eyeballs: IPv6 first, interleaved with IPv4
         let (ipv6, ipv4): (Vec<SocketAddr>, Vec<SocketAddr>) =
