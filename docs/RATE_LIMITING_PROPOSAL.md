@@ -31,7 +31,15 @@ struct AuthRateLimiter {
     token_lockout_duration: Duration,   // default: 60 seconds
 
     // Global tracking (distributed attack detection)
-    recent_failures: Mutex<VecDeque<(Instant, String)>>,  // sliding window of (time, token)
+    // Sliding window of recent failures. Cleanup happens synchronously in record_failure():
+    //   1. Lock mutex
+    //   2. Push new (Instant::now(), token) entry
+    //   3. Pop entries from front while oldest.0 + global_failure_window < now
+    //   4. Count unique tokens in remaining window
+    // This approach avoids background tasks and keeps cleanup O(n) where n = window entries.
+    // Mutex contention is acceptable since failures are infrequent in normal operation;
+    // under attack, the global lockout activates quickly, stopping further window updates.
+    recent_failures: Mutex<VecDeque<(Instant, String)>>,
     global_lockout_until: AtomicU64,    // millis since UNIX_EPOCH, 0 = not locked
     global_failure_window: Duration,    // default: 10 seconds
     global_failure_threshold: u32,      // default: 10 unique tokens
@@ -58,7 +66,12 @@ struct TokenFailureRecord {
 1. Track recent failures in sliding window (last 10 seconds)
 2. If failures from N unique tokens in window: Trigger global lockout
 3. Global lockout: Reject ALL new auth attempts (except already-valid tokens)
-4. After lockout expires: Clear window, allow new attempts
+4. After lockout expires: Clear sliding window and resume normal operation
+
+**Behavior during global lockout:**
+- Failed auth attempts during lockout are logged for auditing but do NOT extend or retrigger the lockout
+- The sliding window is NOT updated during lockout to prevent attackers from keeping the system locked indefinitely
+- When lockout expires, the sliding window is cleared to give a fresh start
 
 **Valid tokens**: Tokens in the server's configured `valid_tokens` set bypass both per-token and global limits
 
@@ -129,7 +142,7 @@ pub struct AuthRateLimiter {
     max_token_failures: u32,
     token_lockout_duration: Duration,
 
-    // Global tracking
+    // Global tracking (see struct definition above for cleanup strategy)
     recent_failures: Mutex<VecDeque<(Instant, String)>>,
     global_lockout_until: AtomicU64,
     global_failure_window: Duration,
@@ -146,7 +159,26 @@ struct TokenFailureRecord {
 }
 
 impl AuthRateLimiter {
-    pub fn new(valid_tokens: Arc<HashSet<String>>, /* config params */) -> Self { ... }
+    pub fn new(
+        valid_tokens: Arc<HashSet<String>>,
+        max_token_failures: u32,
+        token_lockout_duration: Duration,
+        global_failure_window: Duration,
+        global_failure_threshold: u32,
+        global_lockout_duration: Duration,
+    ) -> Self {
+        Self {
+            token_failures: DashMap::new(),
+            max_token_failures,
+            token_lockout_duration,
+            recent_failures: Mutex::new(VecDeque::new()),
+            global_lockout_until: AtomicU64::new(0),
+            global_failure_window,
+            global_failure_threshold,
+            global_lockout_duration,
+            valid_tokens,
+        }
+    }
 
     /// Check if token is allowed to attempt auth
     /// Returns Ok(()) if allowed, Err with remaining lockout time if blocked
@@ -155,8 +187,27 @@ impl AuthRateLimiter {
         if self.valid_tokens.contains(token) {
             return Ok(());
         }
-        // Check per-token lockout, then global lockout
-        // ...
+        // Check per-token lockout
+        if let Some(record) = self.token_failures.get(token) {
+            if let Some(locked_until) = record.locked_until {
+                if Instant::now() < locked_until {
+                    return Err(locked_until - Instant::now());
+                }
+            }
+        }
+        // Check global lockout
+        let lockout_until_millis = self.global_lockout_until.load(Ordering::Relaxed);
+        if lockout_until_millis > 0 {
+            let now_millis = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64;
+            if now_millis < lockout_until_millis {
+                let remaining = Duration::from_millis(lockout_until_millis - now_millis);
+                return Err(remaining);
+            }
+        }
+        Ok(())
     }
 
     /// Record a failed auth attempt, returns true if global lockout triggered
@@ -165,10 +216,62 @@ impl AuthRateLimiter {
         if self.valid_tokens.contains(token) {
             return false;
         }
-        // Increment per-token failure count
-        // Add to sliding window
-        // Check if global threshold reached
-        // ...
+
+        // Skip recording if global lockout is active (don't extend/retrigger)
+        let lockout_until_millis = self.global_lockout_until.load(Ordering::Relaxed);
+        if lockout_until_millis > 0 {
+            let now_millis = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64;
+            if now_millis < lockout_until_millis {
+                // Log for auditing but don't update sliding window
+                return false;
+            }
+            // Lockout expired - clear window and reset
+            self.global_lockout_until.store(0, Ordering::Relaxed);
+            self.recent_failures.lock().unwrap().clear();
+        }
+
+        let now = Instant::now();
+
+        // Update per-token failure count
+        let mut entry = self.token_failures.entry(token.to_string()).or_insert(
+            TokenFailureRecord { count: 0, locked_until: None }
+        );
+        entry.count += 1;
+        if entry.count >= self.max_token_failures {
+            entry.locked_until = Some(now + self.token_lockout_duration);
+        }
+
+        // Update sliding window (synchronous cleanup)
+        let mut window = self.recent_failures.lock().unwrap();
+        window.push_back((now, token.to_string()));
+
+        // Prune old entries: pop from front while oldest is outside window
+        let cutoff = now - self.global_failure_window;
+        while let Some((timestamp, _)) = window.front() {
+            if *timestamp < cutoff {
+                window.pop_front();
+            } else {
+                break;
+            }
+        }
+
+        // Count unique tokens in window
+        let unique_tokens: HashSet<&String> = window.iter().map(|(_, t)| t).collect();
+        if unique_tokens.len() as u32 >= self.global_failure_threshold {
+            // Trigger global lockout
+            let lockout_until = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64
+                + self.global_lockout_duration.as_millis() as u64;
+            self.global_lockout_until.store(lockout_until, Ordering::Relaxed);
+            return true;
+        }
+
+        false
     }
 }
 ```
@@ -179,7 +282,11 @@ impl AuthRateLimiter {
 // In run_multi_source_server(), after creating auth_tokens Arc:
 let rate_limiter = Arc::new(AuthRateLimiter::new(
     auth_tokens.clone(),
-    /* config */
+    5,                              // max_token_failures
+    Duration::from_secs(60),        // token_lockout_duration
+    Duration::from_secs(10),        // global_failure_window
+    10,                             // global_failure_threshold
+    Duration::from_secs(60),        // global_lockout_duration
 ));
 
 // In handle_multi_source_stream(), before token validation:
