@@ -69,6 +69,11 @@ pub fn generate_token() -> String {
 ///
 /// Returns Ok(()) if valid, Err with description if invalid.
 pub fn validate_token(token: &str) -> Result<()> {
+    // Early ASCII check - all valid tokens are ASCII
+    if !token.is_ascii() {
+        anyhow::bail!("Token must contain only ASCII characters");
+    }
+
     if token.len() != TOKEN_LENGTH {
         anyhow::bail!(
             "Token must be exactly {} characters, got {} characters",
@@ -301,6 +306,18 @@ mod tests {
         let result = validate_token("iabc@def#123$456!X");
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("invalid character"));
+    }
+
+    #[test]
+    fn test_validate_token_non_ascii() {
+        // Token with non-ASCII characters (emoji, accented chars)
+        let result = validate_token("i🔐secret_token!");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("ASCII"));
+
+        let result = validate_token("iàbcdéf1234567890");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("ASCII"));
     }
 
     #[test]
