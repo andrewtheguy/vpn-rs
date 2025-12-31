@@ -20,11 +20,41 @@ pub const STREAM_OPEN_BASE_DELAY_MS: u64 = 100;
 pub const BACKOFF_MAX_MULTIPLIER: u64 = 1024;
 
 // ============================================================================
+// Address Ordering Helpers
+// ============================================================================
+
+/// Orders socket addresses by loopback preference.
+///
+/// If all addresses are loopback (127.x.x.x or ::1), sorts IPv4 before IPv6.
+/// This is because most local services bind to 127.0.0.1 only, and macOS
+/// resolves "localhost" to ::1 first, causing connection failures or 250ms delays.
+///
+/// For non-loopback addresses, preserves the original order to allow Happy Eyeballs
+/// to work as designed (resolver typically returns IPv6 first per RFC 6724).
+pub fn order_by_loopback_preference(addrs: Vec<SocketAddr>) -> Vec<SocketAddr> {
+    let is_loopback = addrs.iter().all(|a| a.ip().is_loopback());
+    if is_loopback {
+        let mut sorted = addrs;
+        sorted.sort_by_key(|a| if a.is_ipv4() { 0 } else { 1 });
+        sorted
+    } else {
+        addrs
+    }
+}
+
+// ============================================================================
 // Address Resolution
 // ============================================================================
 
 /// Resolve a target address to all available socket addresses.
 /// Returns all IPv4 and IPv6 addresses for the hostname.
+///
+/// For localhost/loopback addresses, IPv4 is preferred because most local services
+/// bind to 127.0.0.1 only. This avoids the 250ms Happy Eyeballs delay when IPv6
+/// fails on macOS (which returns ::1 before 127.0.0.1 by default).
+///
+/// For non-local addresses, the resolver's native order is preserved (typically
+/// IPv6 first per RFC 6724), allowing Happy Eyeballs to work as designed.
 pub async fn resolve_all_target_addrs(target: &str) -> Result<Vec<SocketAddr>> {
     let addrs: Vec<SocketAddr> = lookup_host(target)
         .await
@@ -33,13 +63,17 @@ pub async fn resolve_all_target_addrs(target: &str) -> Result<Vec<SocketAddr>> {
     if addrs.is_empty() {
         anyhow::bail!("No addresses found for host '{}'", target);
     }
-    Ok(addrs)
+
+    Ok(order_by_loopback_preference(addrs))
 }
 
 /// Resolve a listen address (host:port) to a single SocketAddr.
 ///
 /// Supports both IP addresses (127.0.0.1:8080) and hostnames (localhost:8080).
 /// For hostnames, returns the first resolved address (preferring IPv4 for local binding).
+///
+/// Note: For localhost, consider using `resolve_listen_addrs` (plural) to get both
+/// IPv4 and IPv6 addresses, since dual-stack sockets don't work for loopback.
 pub async fn resolve_listen_addr(target: &str) -> Result<SocketAddr> {
     // First try direct parse for IP addresses (fast path)
     if let Ok(addr) = target.parse::<SocketAddr>() {
@@ -74,15 +108,80 @@ pub async fn resolve_listen_addr(target: &str) -> Result<SocketAddr> {
     Ok(addr)
 }
 
+/// Resolve a listen address to all available socket addresses.
+///
+/// For localhost/loopback, returns BOTH IPv4 (127.0.0.1) and IPv6 (::1) addresses.
+/// This is necessary because dual-stack sockets don't work for loopback addresses -
+/// they are distinct addresses requiring separate listeners.
+///
+/// On macOS, clients connecting to "localhost" try IPv6 (::1) first. If the server
+/// only listens on IPv4 (127.0.0.1), connections fail. Binding to both addresses
+/// ensures compatibility with all clients regardless of their IPv4/IPv6 preference.
+///
+/// For non-loopback hostnames, returns a single address (preferring IPv4).
+pub async fn resolve_listen_addrs(target: &str) -> Result<Vec<SocketAddr>> {
+    // First try direct parse for IP addresses (fast path) - single address
+    if let Ok(addr) = target.parse::<SocketAddr>() {
+        return Ok(vec![addr]);
+    }
+
+    // Resolve hostname
+    let addrs: Vec<SocketAddr> = lookup_host(target)
+        .await
+        .with_context(|| format!("Failed to resolve listen address '{}'", target))?
+        .collect();
+
+    if addrs.is_empty() {
+        anyhow::bail!("No addresses found for listen address '{}'", target);
+    }
+
+    // Check if all resolved addresses are loopback
+    let is_loopback = addrs.iter().all(|a| a.ip().is_loopback());
+
+    if is_loopback {
+        // For loopback, return ALL addresses (both IPv4 and IPv6) with IPv4 first.
+        // Dual-stack sockets don't work for loopback - need separate listeners.
+        let mut sorted = order_by_loopback_preference(addrs);
+        // Deduplicate (in case resolver returns duplicates)
+        sorted.dedup();
+        log::debug!(
+            "Resolved loopback listen address '{}' to {} addresses: {:?}",
+            target,
+            sorted.len(),
+            sorted
+        );
+        Ok(sorted)
+    } else {
+        // For non-loopback, return single address (prefer IPv4)
+        let addr = addrs
+            .iter()
+            .find(|a| a.is_ipv4())
+            .or_else(|| addrs.first())
+            .copied()
+            .expect("no listen addresses available after resolution");
+        log::debug!(
+            "Resolved listen address '{}' to {} (from {} candidates)",
+            target,
+            addr,
+            addrs.len()
+        );
+        Ok(vec![addr])
+    }
+}
+
 // ============================================================================
 // Happy Eyeballs TCP Connection
 // ============================================================================
 
 /// Try to connect to any of the given addresses using Happy Eyeballs algorithm (RFC 8305).
-/// - Prefers IPv6 addresses (tried first)
-/// - Interleaves IPv6 and IPv4 attempts
+/// - For non-loopback: Prefers IPv6 addresses (tried first), interleaves with IPv4
+/// - For loopback: Prefers IPv4 addresses (most local services bind to 127.0.0.1 only)
 /// - Staggers connection attempts with a small delay
 /// - Returns first successful connection, cancels remaining attempts
+///
+/// Note: For loopback addresses, IPv4 is preferred because most local services
+/// bind to 127.0.0.1 only. This avoids the 250ms Happy Eyeballs delay when IPv6
+/// fails on macOS (which returns ::1 before 127.0.0.1 by default).
 pub async fn try_connect_tcp(addrs: &[SocketAddr]) -> Result<TcpStream> {
     use tokio::sync::mpsc;
 
@@ -90,24 +189,34 @@ pub async fn try_connect_tcp(addrs: &[SocketAddr]) -> Result<TcpStream> {
         anyhow::bail!("No addresses to connect to");
     }
 
-    // Separate addresses by family, preferring IPv6
-    let (ipv6, ipv4): (Vec<SocketAddr>, Vec<SocketAddr>) =
-        addrs.iter().copied().partition(|a| a.is_ipv6());
+    // Check if all addresses are loopback
+    let is_loopback = addrs.iter().all(|a| a.ip().is_loopback());
 
-    // Interleave addresses: IPv6 first, then alternate
-    let mut ordered = Vec::with_capacity(addrs.len());
-    let mut v6_iter = ipv6.into_iter();
-    let mut v4_iter = ipv4.into_iter();
+    let ordered = if is_loopback {
+        // For loopback, prefer IPv4 since most local services bind to 127.0.0.1.
+        // This is self-contained and does not depend on caller's ordering.
+        let mut sorted = addrs.to_vec();
+        sorted.sort_by_key(|a| if a.is_ipv4() { 0 } else { 1 });
+        sorted
+    } else {
+        // For non-loopback, apply Happy Eyeballs: IPv6 first, interleaved with IPv4
+        let (ipv6, ipv4): (Vec<SocketAddr>, Vec<SocketAddr>) =
+            addrs.iter().copied().partition(|a| a.is_ipv6());
 
-    // Start with IPv6 if available
-    while ordered.len() < addrs.len() {
-        if let Some(addr) = v6_iter.next() {
-            ordered.push(addr);
+        let mut result = Vec::with_capacity(addrs.len());
+        let mut v6_iter = ipv6.into_iter();
+        let mut v4_iter = ipv4.into_iter();
+
+        while result.len() < addrs.len() {
+            if let Some(addr) = v6_iter.next() {
+                result.push(addr);
+            }
+            if let Some(addr) = v4_iter.next() {
+                result.push(addr);
+            }
         }
-        if let Some(addr) = v4_iter.next() {
-            ordered.push(addr);
-        }
-    }
+        result
+    };
 
     // Channel for connection results
     let (tx, mut rx) =
@@ -394,4 +503,66 @@ pub async fn bind_udp_for_targets(target_addrs: &[SocketAddr]) -> Result<UdpSock
         .with_context(|| format!("Failed to bind UDP socket at {}", bind_addr))?;
 
     Ok(socket)
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
+    #[test]
+    fn test_loopback_addresses_prefer_ipv4() {
+        // Simulate macOS resolver order: IPv6 first
+        let addrs = vec![
+            SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 8080), // ::1
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080), // 127.0.0.1
+        ];
+
+        // All loopback, should prefer IPv4
+        let is_loopback = addrs.iter().all(|a| a.ip().is_loopback());
+        assert!(is_loopback);
+
+        // Use the shared ordering helper
+        let result = order_by_loopback_preference(addrs);
+
+        // IPv4 should be first after sorting
+        assert!(result[0].is_ipv4(), "IPv4 should be preferred for loopback");
+        assert!(result[1].is_ipv6(), "IPv6 should be second for loopback");
+    }
+
+    #[test]
+    fn test_non_loopback_addresses_preserve_order() {
+        // Non-loopback addresses should preserve input order (no sorting)
+        let addrs = vec![
+            SocketAddr::new(IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1)), 80),
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34)), 80),
+        ];
+
+        let is_loopback = addrs.iter().all(|a| a.ip().is_loopback());
+        assert!(!is_loopback);
+
+        // Use the shared ordering helper
+        let result = order_by_loopback_preference(addrs.clone());
+
+        // Order should be preserved exactly (IPv6 still first, as input)
+        assert_eq!(result, addrs, "Non-loopback addresses should preserve input order");
+        assert!(result[0].is_ipv6(), "First address should remain IPv6");
+        assert!(result[1].is_ipv4(), "Second address should remain IPv4");
+    }
+
+    #[test]
+    fn test_mixed_loopback_non_loopback_not_treated_as_loopback() {
+        // If there's a mix, it's not pure loopback
+        let addrs = vec![
+            SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 8080),
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)), 8080),
+        ];
+
+        let is_loopback = addrs.iter().all(|a| a.ip().is_loopback());
+        assert!(!is_loopback);
+    }
 }
