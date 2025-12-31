@@ -12,6 +12,12 @@ use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{lookup_host, TcpStream, UdpSocket};
 
+// Re-export shared address resolution functions from tunnel-common
+pub use tunnel_common::net::{
+    order_by_loopback_preference, resolve_all_target_addrs, resolve_listen_addr,
+    resolve_listen_addrs, try_connect_tcp,
+};
+
 /// Timeout for QUIC connection (matches webrtc crate's 180 second connection timeout)
 pub const QUIC_CONNECTION_TIMEOUT: Duration = Duration::from_secs(180);
 
@@ -46,155 +52,8 @@ pub const STREAM_OPEN_BASE_DELAY_MS: u64 = 100;
 pub const BACKOFF_MAX_MULTIPLIER: u64 = 1024;
 
 // ============================================================================
-// Address Ordering Helpers
+// ICE-specific Address Resolution
 // ============================================================================
-
-/// Orders socket addresses by loopback preference.
-///
-/// If all addresses are loopback (127.x.x.x or ::1), sorts IPv4 before IPv6.
-/// This is because most local services bind to 127.0.0.1 only, and macOS
-/// resolves "localhost" to ::1 first, causing connection failures or 250ms delays.
-///
-/// For non-loopback addresses, preserves the original order to allow Happy Eyeballs
-/// to work as designed (resolver typically returns IPv6 first per RFC 6724).
-pub fn order_by_loopback_preference(addrs: Vec<SocketAddr>) -> Vec<SocketAddr> {
-    let is_loopback = addrs.iter().all(|a| a.ip().is_loopback());
-    if is_loopback {
-        let mut sorted = addrs;
-        sorted.sort_by_key(|a| if a.is_ipv4() { 0 } else { 1 });
-        sorted
-    } else {
-        addrs
-    }
-}
-
-// ============================================================================
-// Address Resolution
-// ============================================================================
-
-/// Resolve a target address to all available socket addresses.
-/// Returns all IPv4 and IPv6 addresses for the hostname.
-///
-/// For localhost/loopback addresses, IPv4 is preferred because most local services
-/// bind to 127.0.0.1 only. This avoids the 250ms Happy Eyeballs delay when IPv6
-/// fails on macOS (which returns ::1 before 127.0.0.1 by default).
-///
-/// For non-local addresses, the resolver's native order is preserved (typically
-/// IPv6 first per RFC 6724), allowing Happy Eyeballs to work as designed.
-pub async fn resolve_all_target_addrs(target: &str) -> Result<Vec<SocketAddr>> {
-    let addrs: Vec<SocketAddr> = lookup_host(target)
-        .await
-        .with_context(|| format!("Failed to resolve '{}'", target))?
-        .collect();
-    if addrs.is_empty() {
-        anyhow::bail!("No addresses found for host '{}'", target);
-    }
-
-    Ok(order_by_loopback_preference(addrs))
-}
-
-/// Resolve a listen address (host:port) to a single SocketAddr.
-///
-/// Supports both IP addresses (127.0.0.1:8080) and hostnames (localhost:8080).
-/// For hostnames, returns the first resolved address (preferring IPv4 for local binding).
-///
-/// Note: For localhost, consider using `resolve_listen_addrs` (plural) to get both
-/// IPv4 and IPv6 addresses, since dual-stack sockets don't work for loopback.
-pub async fn resolve_listen_addr(target: &str) -> Result<SocketAddr> {
-    // First try direct parse for IP addresses (fast path)
-    if let Ok(addr) = target.parse::<SocketAddr>() {
-        return Ok(addr);
-    }
-
-    // Resolve hostname
-    let addrs: Vec<SocketAddr> = lookup_host(target)
-        .await
-        .with_context(|| format!("Failed to resolve listen address '{}'", target))?
-        .collect();
-
-    if addrs.is_empty() {
-        anyhow::bail!("No addresses found for listen address '{}'", target);
-    }
-
-    // Prefer IPv4 for local binding (more compatible), then IPv6
-    let addr = addrs
-        .iter()
-        .find(|a| a.is_ipv4())
-        .or_else(|| addrs.first())
-        .copied()
-        .expect("no listen addresses available after resolution");
-
-    log::debug!(
-        "Resolved listen address '{}' to {} (from {} candidates)",
-        target,
-        addr,
-        addrs.len()
-    );
-
-    Ok(addr)
-}
-
-/// Resolve a listen address to all available socket addresses.
-///
-/// For localhost/loopback, returns BOTH IPv4 (127.0.0.1) and IPv6 (::1) addresses.
-/// This is necessary because dual-stack sockets don't work for loopback addresses -
-/// they are distinct addresses requiring separate listeners.
-///
-/// On macOS, clients connecting to "localhost" try IPv6 (::1) first. If the server
-/// only listens on IPv4 (127.0.0.1), connections fail. Binding to both addresses
-/// ensures compatibility with all clients regardless of their IPv4/IPv6 preference.
-///
-/// For non-loopback hostnames, returns a single address (preferring IPv4).
-#[allow(dead_code)]
-pub async fn resolve_listen_addrs(target: &str) -> Result<Vec<SocketAddr>> {
-    // First try direct parse for IP addresses (fast path) - single address
-    if let Ok(addr) = target.parse::<SocketAddr>() {
-        return Ok(vec![addr]);
-    }
-
-    // Resolve hostname
-    let addrs: Vec<SocketAddr> = lookup_host(target)
-        .await
-        .with_context(|| format!("Failed to resolve listen address '{}'", target))?
-        .collect();
-
-    if addrs.is_empty() {
-        anyhow::bail!("No addresses found for listen address '{}'", target);
-    }
-
-    // Check if all resolved addresses are loopback
-    let is_loopback = addrs.iter().all(|a| a.ip().is_loopback());
-
-    if is_loopback {
-        // For loopback, return ALL addresses (both IPv4 and IPv6) with IPv4 first.
-        // Dual-stack sockets don't work for loopback - need separate listeners.
-        let mut sorted = order_by_loopback_preference(addrs);
-        // Deduplicate (in case resolver returns duplicates)
-        sorted.dedup();
-        log::debug!(
-            "Resolved loopback listen address '{}' to {} addresses: {:?}",
-            target,
-            sorted.len(),
-            sorted
-        );
-        Ok(sorted)
-    } else {
-        // For non-loopback, return single address (prefer IPv4)
-        let addr = addrs
-            .iter()
-            .find(|a| a.is_ipv4())
-            .or_else(|| addrs.first())
-            .copied()
-            .expect("no listen addresses available after resolution");
-        log::debug!(
-            "Resolved listen address '{}' to {} (from {} candidates)",
-            target,
-            addr,
-            addrs.len()
-        );
-        Ok(vec![addr])
-    }
-}
 
 /// Resolve a STUN server address asynchronously.
 ///
@@ -209,111 +68,6 @@ pub async fn resolve_stun_addrs(stun: &str) -> Result<Vec<SocketAddr>> {
         anyhow::bail!("No addresses found for STUN server '{}'", stun);
     }
     Ok(addrs)
-}
-
-// ============================================================================
-// Happy Eyeballs TCP Connection
-// ============================================================================
-
-/// Try to connect to any of the given addresses using Happy Eyeballs algorithm (RFC 8305).
-/// - For non-loopback: Prefers IPv6 addresses (tried first), interleaves with IPv4
-/// - For loopback: Prefers IPv4 addresses (most local services bind to 127.0.0.1 only)
-/// - Staggers connection attempts with a small delay
-/// - Returns first successful connection, cancels remaining attempts
-///
-/// Note: For loopback addresses, IPv4 is preferred because most local services
-/// bind to 127.0.0.1 only. This avoids the 250ms Happy Eyeballs delay when IPv6
-/// fails on macOS (which returns ::1 before 127.0.0.1 by default).
-pub async fn try_connect_tcp(addrs: &[SocketAddr]) -> Result<TcpStream> {
-    use tokio::sync::mpsc;
-
-    if addrs.is_empty() {
-        anyhow::bail!("No addresses to connect to");
-    }
-
-    // Check if all addresses are loopback
-    let is_loopback = addrs.iter().all(|a| a.ip().is_loopback());
-
-    let ordered = if is_loopback {
-        // For loopback, prefer IPv4 since most local services bind to 127.0.0.1.
-        // This is self-contained and does not depend on caller's ordering.
-        order_by_loopback_preference(addrs.to_vec())
-    } else {
-        // For non-loopback, apply Happy Eyeballs: IPv6 first, interleaved with IPv4
-        let (ipv6, ipv4): (Vec<SocketAddr>, Vec<SocketAddr>) =
-            addrs.iter().copied().partition(|a| a.is_ipv6());
-
-        let mut result = Vec::with_capacity(addrs.len());
-        let mut v6_iter = ipv6.into_iter();
-        let mut v4_iter = ipv4.into_iter();
-
-        while result.len() < addrs.len() {
-            if let Some(addr) = v6_iter.next() {
-                result.push(addr);
-            }
-            if let Some(addr) = v4_iter.next() {
-                result.push(addr);
-            }
-        }
-        result
-    };
-
-    // Channel for connection results
-    let (tx, mut rx) =
-        mpsc::channel::<(SocketAddr, Result<TcpStream, std::io::Error>)>(ordered.len());
-
-    // Spawn staggered connection attempts
-    let mut handles = Vec::with_capacity(ordered.len());
-    for (i, addr) in ordered.into_iter().enumerate() {
-        let tx = tx.clone();
-        let handle = tokio::spawn(async move {
-            // Stagger attempts: first immediately, then with delay
-            if i > 0 {
-                tokio::time::sleep(CONNECTION_ATTEMPT_DELAY * i as u32).await;
-            }
-            let result = TcpStream::connect(addr).await;
-            // Ignore send error (receiver may have closed on success)
-            let _ = tx.send((addr, result)).await;
-        });
-        handles.push(handle);
-    }
-    drop(tx); // Close sender so rx completes when all attempts finish
-
-    // Collect errors for reporting if all fail
-    let mut errors: Vec<(SocketAddr, std::io::Error)> = Vec::new();
-
-    // Wait for first success or all failures
-    while let Some((addr, result)) = rx.recv().await {
-        match result {
-            Ok(stream) => {
-                // Success! Cancel remaining attempts
-                for handle in handles {
-                    handle.abort();
-                }
-                return Ok(stream);
-            }
-            Err(e) => {
-                errors.push((addr, e));
-            }
-        }
-    }
-
-    // All attempts failed - build error message
-    if errors.is_empty() {
-        anyhow::bail!("No addresses to connect to");
-    } else if errors.len() == 1 {
-        let (addr, e) = errors.remove(0);
-        anyhow::bail!("Failed to connect to {}: {}", addr, e);
-    } else {
-        let error_details: Vec<String> = errors
-            .iter()
-            .map(|(addr, e)| format!("{}: {}", addr, e))
-            .collect();
-        anyhow::bail!(
-            "Failed to connect to any address:\n  {}",
-            error_details.join("\n  ")
-        );
-    }
 }
 
 // ============================================================================
