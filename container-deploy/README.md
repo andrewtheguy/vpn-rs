@@ -105,7 +105,7 @@ tunnel-rs generate-server-key --output server.key
 AUTH_TOKEN=$(tunnel-rs generate-token)
 
 # 3. Create secrets
-kubectl create secret generic tunnel-iroh-keys \
+kubectl create secret generic tunnel-server-secrets \
   --from-file=server.key=./server.key \
   --from-literal=tokens.txt="$AUTH_TOKEN"
 
