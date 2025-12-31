@@ -418,7 +418,7 @@ Iroh mode requires authentication using pre-shared tokens. Clients must provide 
 - Exactly 18 characters
 - Starts with `i` (for iroh)
 - Ends with a checksum character
-- Middle 16 characters: `A-Za-z0-9` and `-` `_` `.`
+- Middle 16 characters: `A-Za-z0-9` and `-` `_` `.` (period is valid but rare in generated tokens)
 
 Generate tokens with: `tunnel-rs generate-token`
 
