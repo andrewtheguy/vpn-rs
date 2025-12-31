@@ -51,6 +51,13 @@ pub const BACKOFF_MAX_MULTIPLIER: u64 = 1024;
 
 /// Resolve a target address to all available socket addresses.
 /// Returns all IPv4 and IPv6 addresses for the hostname.
+///
+/// For localhost/loopback addresses, IPv4 is preferred because most local services
+/// bind to 127.0.0.1 only. This avoids the 250ms Happy Eyeballs delay when IPv6
+/// fails on macOS (which returns ::1 before 127.0.0.1 by default).
+///
+/// For non-local addresses, the resolver's native order is preserved (typically
+/// IPv6 first per RFC 6724), allowing Happy Eyeballs to work as designed.
 pub async fn resolve_all_target_addrs(target: &str) -> Result<Vec<SocketAddr>> {
     let addrs: Vec<SocketAddr> = lookup_host(target)
         .await
@@ -59,7 +66,20 @@ pub async fn resolve_all_target_addrs(target: &str) -> Result<Vec<SocketAddr>> {
     if addrs.is_empty() {
         anyhow::bail!("No addresses found for host '{}'", target);
     }
-    Ok(addrs)
+
+    // Check if this is a localhost/loopback target
+    let is_loopback = addrs.iter().all(|a| a.ip().is_loopback());
+
+    if is_loopback {
+        // For loopback, prefer IPv4 since most local services bind to 127.0.0.1
+        // This avoids 250ms delay on macOS where ::1 is returned first
+        let mut sorted = addrs;
+        sorted.sort_by_key(|a| if a.is_ipv4() { 0 } else { 1 });
+        Ok(sorted)
+    } else {
+        // For non-local addresses, preserve resolver order for Happy Eyeballs
+        Ok(addrs)
+    }
 }
 
 /// Resolve a listen address (host:port) to a single SocketAddr.
@@ -120,10 +140,13 @@ pub async fn resolve_stun_addrs(stun: &str) -> Result<Vec<SocketAddr>> {
 // ============================================================================
 
 /// Try to connect to any of the given addresses using Happy Eyeballs algorithm (RFC 8305).
-/// - Prefers IPv6 addresses (tried first)
-/// - Interleaves IPv6 and IPv4 attempts
+/// - For non-loopback: Prefers IPv6 addresses (tried first), interleaves with IPv4
+/// - For loopback: Preserves input order (typically IPv4 first for local services)
 /// - Staggers connection attempts with a small delay
 /// - Returns first successful connection, cancels remaining attempts
+///
+/// Note: For loopback addresses, most local services bind to 127.0.0.1 only,
+/// so we skip the IPv6-first reordering to avoid unnecessary delays.
 pub async fn try_connect_tcp(addrs: &[SocketAddr]) -> Result<TcpStream> {
     use tokio::sync::mpsc;
 
@@ -131,24 +154,32 @@ pub async fn try_connect_tcp(addrs: &[SocketAddr]) -> Result<TcpStream> {
         anyhow::bail!("No addresses to connect to");
     }
 
-    // Separate addresses by family, preferring IPv6
-    let (ipv6, ipv4): (Vec<SocketAddr>, Vec<SocketAddr>) =
-        addrs.iter().copied().partition(|a| a.is_ipv6());
+    // Check if all addresses are loopback
+    let is_loopback = addrs.iter().all(|a| a.ip().is_loopback());
 
-    // Interleave addresses: IPv6 first, then alternate
-    let mut ordered = Vec::with_capacity(addrs.len());
-    let mut v6_iter = ipv6.into_iter();
-    let mut v4_iter = ipv4.into_iter();
+    let ordered = if is_loopback {
+        // For loopback, preserve input order (resolve_all_target_addrs already
+        // sorted IPv4 first for loopback addresses)
+        addrs.to_vec()
+    } else {
+        // For non-loopback, apply Happy Eyeballs: IPv6 first, interleaved with IPv4
+        let (ipv6, ipv4): (Vec<SocketAddr>, Vec<SocketAddr>) =
+            addrs.iter().copied().partition(|a| a.is_ipv6());
 
-    // Start with IPv6 if available
-    while ordered.len() < addrs.len() {
-        if let Some(addr) = v6_iter.next() {
-            ordered.push(addr);
+        let mut result = Vec::with_capacity(addrs.len());
+        let mut v6_iter = ipv6.into_iter();
+        let mut v4_iter = ipv4.into_iter();
+
+        while result.len() < addrs.len() {
+            if let Some(addr) = v6_iter.next() {
+                result.push(addr);
+            }
+            if let Some(addr) = v4_iter.next() {
+                result.push(addr);
+            }
         }
-        if let Some(addr) = v4_iter.next() {
-            ordered.push(addr);
-        }
-    }
+        result
+    };
 
     // Channel for connection results
     let (tx, mut rx) =
