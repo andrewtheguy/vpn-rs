@@ -275,7 +275,22 @@ sequenceDiagram
     end
     
     Note over S,R: Encrypted QUIC tunnel established
-    
+
+    Note over R,S: Authentication Phase
+    R->>S: Open auth stream
+    R->>S: AuthRequest {token}
+    alt Token Valid
+        S-->>R: AuthResponse {accepted}
+    else Token Invalid
+        S-->>R: AuthResponse {rejected}
+        S->>R: Close connection
+    end
+
+    Note over R,S: Source Request Phase
+    R->>S: Open source stream
+    R->>S: SourceRequest {source}
+    S-->>R: SourceResponse {accepted}
+
     loop Data Transfer
         R->>S: Forward client traffic
         S->>S: Forward to target
@@ -1107,13 +1122,15 @@ graph TB
 
 ### Token Authentication (iroh Mode)
 
-Iroh mode requires authentication using pre-shared tokens. Clients use ephemeral identities but must provide a valid token:
+Iroh mode requires authentication using pre-shared tokens. Clients use ephemeral identities but must provide a valid token. Authentication happens immediately after QUIC connection establishment, before any source requests are accepted.
 
 1. **Server Configuration**: Server specifies `--auth-tokens` with one or more pre-shared tokens
 2. **Client Configuration**: Client specifies `--auth-token` with the token received from the server admin
-3. **Protocol Flow**: Client sends the token in the `SourceRequest` message (within the encrypted QUIC connection)
-4. **Validation**: Server validates the token using `is_token_valid()`
-5. **Rejection**: Invalid tokens receive a `SourceResponse::rejected()` and the stream is closed
+3. **Protocol Flow**: Client opens a dedicated auth stream immediately after connection and sends an `AuthRequest`
+4. **Validation**: Server validates the token using `is_token_valid()` within a 10-second timeout
+5. **Rejection**: Invalid tokens receive an `AuthResponse::rejected()` and the connection is closed immediately
+
+This early validation prevents unauthorized clients from holding open connections or attempting source requests.
 
 ```mermaid
 sequenceDiagram
@@ -1123,18 +1140,31 @@ sequenceDiagram
 
     C->>S: Connect (QUIC TLS handshake)
     S->>C: Accept connection
-    C->>S: SourceRequest {source, auth_token}
+
+    Note over C,S: Auth Phase (10s timeout)
+    C->>S: Open auth stream
+    C->>S: AuthRequest {version, auth_token}
     S->>A: is_token_valid(auth_token, auth_tokens)
     alt Token is valid
         A-->>S: true
-        S->>S: Validate source against allowed networks
-        S->>C: SourceResponse::accepted()
-        Note over S,C: Proceed with tunnel data transfer
+        S->>C: AuthResponse {accepted: true}
+        Note over S,C: Connection authenticated
     else Token is invalid
         A-->>S: false
-        S->>C: SourceResponse::rejected("Invalid authentication token")
-        S->>S: Close stream
+        S->>C: AuthResponse {accepted: false, reason}
+        S->>S: Close connection (error code 1)
+        Note over S,C: Connection rejected
+    else Timeout (no auth within 10s)
+        S->>S: Close connection (error code 2)
+        Note over S,C: Connection rejected
     end
+
+    Note over C,S: Source Request Phase (after successful auth)
+    C->>S: Open source stream
+    C->>S: SourceRequest {source}
+    S->>S: Validate source against allowed networks
+    S->>C: SourceResponse::accepted()
+    Note over S,C: Proceed with tunnel data transfer
 ```
 
 ### Threat Model
