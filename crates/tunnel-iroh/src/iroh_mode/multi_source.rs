@@ -424,9 +424,10 @@ async fn authenticate_connection(
     send_stream.write_all(&encoded).await?;
     send_stream.finish()?;
 
-    // Read AuthResponse
-    let response_bytes = read_length_prefixed(&mut recv_stream)
+    // Read AuthResponse with timeout
+    let response_bytes = tokio::time::timeout(AUTH_TIMEOUT, read_length_prefixed(&mut recv_stream))
         .await
+        .map_err(|_| anyhow::anyhow!("Auth response timed out"))?
         .context("Failed to read auth response")?;
     let response = decode_auth_response(&response_bytes).context("Invalid auth response")?;
 

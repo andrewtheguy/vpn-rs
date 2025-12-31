@@ -957,10 +957,12 @@ graph TB
 
     subgraph "iroh Options"
         I[secret_file]
+        I2[auth_tokens - server only]
+        I3[auth_token - client only]
         J[relay_urls]
         K[relay_only]
         L[dns_server]
-        M[server_node_id - receiver only]
+        M[server_node_id - client only]
     end
 
     subgraph "manual Options"
@@ -981,6 +983,8 @@ graph TB
     S --> H
 
     E --> I
+    E --> I2
+    E --> I3
     E --> J
     E --> K
     E --> L
@@ -1122,11 +1126,11 @@ graph TB
 
 ### Token Authentication (iroh Mode)
 
-Iroh mode requires authentication using pre-shared tokens. Clients use ephemeral identities but must provide a valid token. Authentication happens immediately after QUIC connection establishment, before any source requests are accepted.
+Iroh mode requires authentication using pre-shared tokens. Clients use ephemeral identities but must provide a valid token. **Authentication is mandatory and must complete successfully before any source requests are permitted.** The client must authenticate via a dedicated auth stream with a valid token within a 10-second timeout immediately after QUIC connection establishment.
 
 1. **Server Configuration**: Server specifies `--auth-tokens` with one or more pre-shared tokens
 2. **Client Configuration**: Client specifies `--auth-token` with the token received from the server admin
-3. **Protocol Flow**: Client opens a dedicated auth stream immediately after connection and sends an `AuthRequest`
+3. **Protocol Flow**: Client opens a dedicated auth stream immediately after connection and sends an `AuthRequest`. **No source requests are accepted until authentication succeeds.**
 4. **Validation**: Server validates the token using `is_token_valid()` within a 10-second timeout
 5. **Rejection**: Invalid tokens receive an `AuthResponse::rejected()` and the connection is closed immediately
 

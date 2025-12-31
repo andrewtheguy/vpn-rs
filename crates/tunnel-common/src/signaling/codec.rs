@@ -246,11 +246,20 @@ impl AuthResponse {
         }
     }
 
+    /// Create a rejection response with the given reason.
+    /// The reason will be truncated if it exceeds [`MAX_REJECT_REASON_LENGTH`] bytes.
     pub fn rejected(reason: impl Into<String>) -> Self {
+        let reason_str = reason.into();
+        let reason_bytes = reason_str.as_bytes();
+        let truncated = if reason_bytes.len() > MAX_REJECT_REASON_LENGTH {
+            String::from_utf8_lossy(&reason_bytes[..MAX_REJECT_REASON_LENGTH]).to_string()
+        } else {
+            reason_str
+        };
         Self {
             version: IROH_MULTI_VERSION,
             accepted: false,
-            reason: Some(reason.into()),
+            reason: Some(truncated),
         }
     }
 }

@@ -1036,6 +1036,7 @@ All protocol modes and features are available on all platforms.
 4. QUIC connection established via iroh's NAT traversal
 5. **Authentication phase:** Client opens dedicated auth stream and sends `AuthRequest` with token
 6. **Server validates token immediately** (10s timeout) — invalid tokens close connection
+   - *If authentication fails, the connection is closed and steps 7–9 do not occur*
 7. **Source request phase:** Client opens source stream with `SourceRequest`
 8. Server validates source against allowed networks and responds
 9. If accepted, traffic forwarding begins
