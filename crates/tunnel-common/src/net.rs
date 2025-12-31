@@ -20,6 +20,29 @@ pub const STREAM_OPEN_BASE_DELAY_MS: u64 = 100;
 pub const BACKOFF_MAX_MULTIPLIER: u64 = 1024;
 
 // ============================================================================
+// Address Ordering Helpers
+// ============================================================================
+
+/// Orders socket addresses by loopback preference.
+///
+/// If all addresses are loopback (127.x.x.x or ::1), sorts IPv4 before IPv6.
+/// This is because most local services bind to 127.0.0.1 only, and macOS
+/// resolves "localhost" to ::1 first, causing connection failures or 250ms delays.
+///
+/// For non-loopback addresses, preserves the original order to allow Happy Eyeballs
+/// to work as designed (resolver typically returns IPv6 first per RFC 6724).
+pub fn order_by_loopback_preference(addrs: Vec<SocketAddr>) -> Vec<SocketAddr> {
+    let is_loopback = addrs.iter().all(|a| a.ip().is_loopback());
+    if is_loopback {
+        let mut sorted = addrs;
+        sorted.sort_by_key(|a| if a.is_ipv4() { 0 } else { 1 });
+        sorted
+    } else {
+        addrs
+    }
+}
+
+// ============================================================================
 // Address Resolution
 // ============================================================================
 
@@ -41,19 +64,7 @@ pub async fn resolve_all_target_addrs(target: &str) -> Result<Vec<SocketAddr>> {
         anyhow::bail!("No addresses found for host '{}'", target);
     }
 
-    // Check if this is a localhost/loopback target
-    let is_loopback = addrs.iter().all(|a| a.ip().is_loopback());
-
-    if is_loopback {
-        // For loopback, prefer IPv4 since most local services bind to 127.0.0.1
-        // This avoids 250ms delay on macOS where ::1 is returned first
-        let mut sorted = addrs;
-        sorted.sort_by_key(|a| if a.is_ipv4() { 0 } else { 1 });
-        Ok(sorted)
-    } else {
-        // For non-local addresses, preserve resolver order for Happy Eyeballs
-        Ok(addrs)
-    }
+    Ok(order_by_loopback_preference(addrs))
 }
 
 /// Resolve a listen address (host:port) to a single SocketAddr.
@@ -130,8 +141,7 @@ pub async fn resolve_listen_addrs(target: &str) -> Result<Vec<SocketAddr>> {
     if is_loopback {
         // For loopback, return ALL addresses (both IPv4 and IPv6) with IPv4 first.
         // Dual-stack sockets don't work for loopback - need separate listeners.
-        let mut sorted = addrs;
-        sorted.sort_by_key(|a| if a.is_ipv4() { 0 } else { 1 });
+        let mut sorted = order_by_loopback_preference(addrs);
         // Deduplicate (in case resolver returns duplicates)
         sorted.dedup();
         log::debug!(
@@ -516,25 +526,12 @@ mod tests {
         let is_loopback = addrs.iter().all(|a| a.ip().is_loopback());
         assert!(is_loopback);
 
-        // Apply the same ordering logic as resolve_all_target_addrs
-        let result = order_resolved_addrs(addrs);
+        // Use the shared ordering helper
+        let result = order_by_loopback_preference(addrs);
 
         // IPv4 should be first after sorting
         assert!(result[0].is_ipv4(), "IPv4 should be preferred for loopback");
         assert!(result[1].is_ipv6(), "IPv6 should be second for loopback");
-    }
-
-    /// Helper to simulate the address ordering logic from resolve_all_target_addrs.
-    /// For loopback: sort IPv4 first. For non-loopback: preserve input order.
-    fn order_resolved_addrs(addrs: Vec<SocketAddr>) -> Vec<SocketAddr> {
-        let is_loopback = addrs.iter().all(|a| a.ip().is_loopback());
-        if is_loopback {
-            let mut sorted = addrs;
-            sorted.sort_by_key(|a| if a.is_ipv4() { 0 } else { 1 });
-            sorted
-        } else {
-            addrs
-        }
     }
 
     #[test]
@@ -548,8 +545,8 @@ mod tests {
         let is_loopback = addrs.iter().all(|a| a.ip().is_loopback());
         assert!(!is_loopback);
 
-        // Apply the same ordering logic as resolve_all_target_addrs
-        let result = order_resolved_addrs(addrs.clone());
+        // Use the shared ordering helper
+        let result = order_by_loopback_preference(addrs.clone());
 
         // Order should be preserved exactly (IPv6 still first, as input)
         assert_eq!(result, addrs, "Non-loopback addresses should preserve input order");
