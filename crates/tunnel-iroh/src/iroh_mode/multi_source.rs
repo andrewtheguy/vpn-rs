@@ -313,7 +313,8 @@ async fn handle_multi_source_connection(
 
 /// Handle a single stream within a multi-source connection.
 /// Reads SourceRequest, validates source against allowed networks, sends SourceResponse, then forwards traffic.
-/// Note: Authentication is done at connection level, so auth_token in SourceRequest is ignored here.
+/// Note: Authentication is handled at the connection level via a dedicated auth stream;
+/// SourceRequest does not contain an auth_token field.
 async fn handle_multi_source_stream(
     mut send_stream: iroh::endpoint::SendStream,
     mut recv_stream: iroh::endpoint::RecvStream,
