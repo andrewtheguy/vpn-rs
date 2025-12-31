@@ -146,16 +146,16 @@ pub fn load_auth_tokens(cli_tokens: &[String], file: Option<&Path>) -> Result<Ha
 /// Load authentication tokens from a file.
 ///
 /// # File Format
-/// - One token per line (exactly 16 characters, alphanumeric + - _ .)
+/// - One token per line (18 chars: 'i' + 16 body + checksum)
 /// - Lines starting with `#` are treated as comments
 /// - Empty lines are ignored
 /// - Inline comments (after token) are supported with `#`
 ///
 /// # Example file:
 /// ```text
-/// # Authentication tokens
-/// a1b2c3d4e5f6g7h8  # Client A
-/// x9y8z7w6v5u4t3s2  # Client B
+/// # Authentication tokens (generate with: tunnel-rs generate-token)
+/// ikAdvudu_ZxNXhNLCD  # Client A
+/// iw3nLKic3oV7zmFJ8v  # Client B
 /// ```
 pub fn load_auth_tokens_from_file(path: &Path) -> Result<HashSet<String>> {
     let content = std::fs::read_to_string(path)
