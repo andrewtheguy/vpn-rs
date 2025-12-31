@@ -142,6 +142,18 @@ See [RATE_LIMITING_PROPOSAL.md](RATE_LIMITING_PROPOSAL.md) for detailed design.
 
 ---
 
+#### macOS Localhost Multi-Binding (tunnel-ice only)
+
+**Status:** Idea
+
+**Note:** This issue affects **tunnel-ice only** (nostr and manual modes). The iroh mode is already fixed.
+
+On macOS, third-party apps connecting to `localhost` try IPv6 (`::1`) before IPv4 (`127.0.0.1`). If the tunnel-ice client only binds to one address, connections may fail or experience 250ms delays. The fix is to bind to both addresses when listening on localhost.
+
+See [MACOS_LOCALHOST_PROPOSAL.md](MACOS_LOCALHOST_PROPOSAL.md) for detailed design.
+
+---
+
 #### Relay Fallback for manual/nostr Modes
 
 **Status:** Idea
