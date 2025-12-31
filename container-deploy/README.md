@@ -66,7 +66,7 @@ docker run --rm ghcr.io/andrewtheguy/tunnel-rs:latest \
   generate-iroh-key --output - > server.key
 
 # 2. Create an authentication token
-AUTH_TOKEN=$(tunnel-rs generate-token)
+AUTH_TOKEN=$(docker run --rm ghcr.io/andrewtheguy/tunnel-rs:latest generate-token)
 echo "$AUTH_TOKEN" > tokens.txt
 
 # 3. Start services (update docker-compose.yml to mount tokens.txt)

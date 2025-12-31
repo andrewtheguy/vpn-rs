@@ -52,12 +52,14 @@ max_sessions = 100
 # Generate with: tunnel-rs generate-token
 
 # Authentication tokens (inline list)
+# NOTE: Use either auth_tokens OR auth_tokens_file, not both.
 auth_tokens = [
     "ikAdvudu_ZxNXhNLCD",  # Alice's token
     "iw3nLKic3oV7zmFJ8v",  # Bob's token
 ]
 
 # Or use a file (one token per line, # comments allowed)
+# NOTE: Use either auth_tokens OR auth_tokens_file, not both.
 # auth_tokens_file = "/etc/tunnel-rs/auth_tokens.txt"
 
 # ============================================================================

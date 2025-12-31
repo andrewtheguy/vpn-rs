@@ -100,6 +100,10 @@ pub async fn run_multi_source_server(
     log::info!("Allowed UDP networks: {:?}", allowed_udp);
     log::info!("Max concurrent sessions: {}", max_sessions);
     log::info!("Auth tokens configured: {}", auth_tokens.len());
+
+    // Wrap auth_tokens in Arc for cheap cloning across tasks
+    let auth_tokens = Arc::new(auth_tokens);
+
     log::info!("\nOn the client side, run:");
     log::info!(
         "  tunnel-rs client iroh --auth-token <token> --node-id {} --source tcp://target:port --target 127.0.0.1:port\n",
@@ -140,7 +144,7 @@ pub async fn run_multi_source_server(
         let allowed_tcp = allowed_tcp.clone();
         let allowed_udp = allowed_udp.clone();
         let semaphore = session_semaphore.clone();
-        let auth_tokens = auth_tokens.clone();
+        let auth_tokens = Arc::clone(&auth_tokens);
 
         connection_tasks.spawn(async move {
             if let Err(e) =
@@ -166,7 +170,7 @@ async fn handle_multi_source_connection(
     allowed_tcp: Vec<String>,
     allowed_udp: Vec<String>,
     semaphore: Arc<tokio::sync::Semaphore>,
-    auth_tokens: HashSet<String>,
+    auth_tokens: Arc<HashSet<String>>,
 ) -> Result<()> {
     let remote_id = conn.remote_id();
     let mut stream_tasks: JoinSet<()> = JoinSet::new();
@@ -209,7 +213,7 @@ async fn handle_multi_source_connection(
 
                 let allowed_tcp = allowed_tcp.clone();
                 let allowed_udp = allowed_udp.clone();
-                let auth_tokens = auth_tokens.clone();
+                let auth_tokens = Arc::clone(&auth_tokens);
 
                 stream_tasks.spawn(async move {
                     let _permit = permit; // Hold permit until task completes
@@ -249,7 +253,7 @@ async fn handle_multi_source_stream(
     mut recv_stream: iroh::endpoint::RecvStream,
     allowed_tcp: Vec<String>,
     allowed_udp: Vec<String>,
-    auth_tokens: HashSet<String>,
+    auth_tokens: Arc<HashSet<String>>,
 ) -> Result<()> {
     // Read the source request
     let request_bytes = read_length_prefixed(&mut recv_stream)
