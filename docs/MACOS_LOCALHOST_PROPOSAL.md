@@ -127,6 +127,22 @@ More complex, defer unless users report issues. Would require:
 - Shared client state across sockets
 - Response routing based on which socket received the request
 
+**Feedback Tracking:** User feedback for Phase 2 will be gathered via GitHub Issues. If users encounter UDP connectivity issues on macOS with localhost bindings, they should open an issue with the label `udp-multi-bind`. We will prioritize Phase 2 implementation based on reported issues.
+
+## Breaking Changes
+
+This proposal introduces breaking changes to function signatures. Since the project is pre-release, backwards compatibility is not a concern.
+
+| Function | Current Signature | New Signature | Impact |
+|----------|------------------|---------------|--------|
+| `run_manual_client` | `listen: SocketAddr` | `listen_addrs: &[SocketAddr]` | Callers must pass a slice instead of single address |
+| `run_nostr_tcp_client` | Uses `resolve_listen_addr` (singular) internally | Uses `resolve_listen_addrs` (plural) internally | No external API change; internal behavior change |
+| `run_nostr_udp_client` | Uses `resolve_listen_addr` (singular) internally | No change in Phase 1 | Unchanged until Phase 2 |
+
+**Dependent Code:**
+- `crates/tunnel-rs-ice/src/main.rs`: Must update manual client call site to use `resolve_listen_addrs` and pass `&listen_addrs`
+- Any external consumers of `run_manual_client`: Must update to pass `&[SocketAddr]`
+
 ## Testing
 
 - Verify on macOS: third-party apps can connect via both `localhost` and `127.0.0.1`
