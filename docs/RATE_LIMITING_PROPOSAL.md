@@ -1,0 +1,324 @@
+# Rate Limiting for Token Authentication
+
+**Status:** Proposal (not yet implemented)
+
+## Problem
+
+Currently, there's no rate limiting for invalid token attempts. An attacker can brute-force tokens by making many connections/streams up to `max_sessions`, enabling online guessing or resource abuse.
+
+## Current State
+
+- Token validation happens per-stream in `multi_source.rs`
+- `remote_id` (EndpointId) is ephemeral and changes per connection - not suitable for tracking
+- Session semaphore limits concurrent sessions but not auth failures
+- No tracking of failed auth attempts
+
+## Proposed Solution: Hybrid Rate Limiting (Per-Token + Global)
+
+### Design
+
+Two-tier protection:
+1. **Per-token limit**: Handles typos - lock out individual token after N failures
+2. **Global limit**: Detects distributed attacks - lock out globally if many different tokens fail fast
+
+**Key insight**: Track by submitted auth token, not EndpointId. Auth tokens are persistent identifiers that clients use, while EndpointId is ephemeral (changes each connection).
+
+```rust
+struct AuthRateLimiter {
+    // Per-token tracking (by submitted token string)
+    token_failures: DashMap<String, TokenFailureRecord>,
+    max_token_failures: u32,        // default: 5
+    token_lockout_duration: Duration,   // default: 60 seconds
+
+    // Global tracking (distributed attack detection)
+    // Sliding window of recent failures. Cleanup happens synchronously in record_failure():
+    //   1. Lock mutex
+    //   2. Push new (Instant::now(), token) entry
+    //   3. Pop entries from front while oldest.0 + global_failure_window < now
+    //   4. Count unique tokens in remaining window
+    // This approach avoids background tasks and keeps cleanup O(n) where n = window entries.
+    // Mutex contention is acceptable since failures are infrequent in normal operation;
+    // under attack, the global lockout activates quickly, stopping further window updates.
+    recent_failures: Mutex<VecDeque<(Instant, String)>>,
+    global_lockout_until: AtomicU64,    // millis since UNIX_EPOCH, 0 = not locked
+    global_failure_window: Duration,    // default: 10 seconds
+    global_failure_threshold: u32,      // default: 10 unique tokens
+    global_lockout_duration: Duration,  // default: 60 seconds
+
+    // Valid tokens from config (bypass rate limiting)
+    valid_tokens: Arc<HashSet<String>>,
+}
+
+struct TokenFailureRecord {
+    count: u32,
+    locked_until: Option<Instant>,
+}
+```
+
+### Behavior
+
+**Per-Token (handles typos):**
+1. On invalid token X: Increment X's failure count
+2. After N failures for same token X: Lock out attempts with token X
+3. On valid token: Token is in `valid_tokens` set, no tracking needed
+
+**Global (detects distributed attacks):**
+1. Track recent failures in sliding window (last 10 seconds)
+2. If failures from N unique tokens in window: Trigger global lockout
+3. Global lockout: Reject ALL new auth attempts (except already-valid tokens)
+4. After lockout expires: Clear sliding window and resume normal operation
+
+**Behavior during global lockout:**
+- Failed auth attempts during lockout are logged for auditing but do NOT extend or retrigger the lockout
+- The sliding window is NOT updated during lockout to prevent attackers from keeping the system locked indefinitely
+- When lockout expires, the sliding window is cleared to give a fresh start
+
+**Valid tokens**: Tokens in the server's configured `valid_tokens` set bypass both per-token and global limits
+
+### Configuration Options
+
+**Per-token:**
+- `--max-token-auth-failures <N>` (default: 5)
+- `--token-lockout-duration <SECONDS>` (default: 60)
+
+**Global (distributed attack):**
+- `--global-auth-failure-window <SECONDS>` (default: 10)
+- `--global-auth-failure-threshold <N>` (default: 10 unique tokens)
+- `--global-lockout-duration <SECONDS>` (default: 60)
+
+Config file options: `max_token_auth_failures`, `token_lockout_duration`, `global_auth_failure_window`, `global_auth_failure_threshold`, `global_lockout_duration`
+
+### Logging
+
+- Per-token: `log::warn!("Token [redacted] locked out after {} failed attempts", count)`
+- Global: `log::warn!("Distributed attack detected ({} unique tokens failed in {}s), global lockout for {}s", count, window, duration)`
+
+## Implementation Plan
+
+### Files to Modify
+
+1. **`crates/tunnel-iroh/src/auth.rs`**
+   - Add `AuthRateLimiter` struct with `DashMap<String, FailureRecord>`
+   - Add methods: `check_rate_limit()`, `record_failure()`, `is_valid_token()`
+   - Add periodic cleanup for expired entries
+
+2. **`crates/tunnel-iroh/src/iroh_mode/multi_source.rs`**
+   - Add `Arc<AuthRateLimiter>` to server state
+   - Pass rate limiter to `handle_multi_source_connection()` and `handle_multi_source_stream()`
+   - Check rate limit before token validation
+   - Record failure on invalid token
+
+3. **`crates/tunnel-rs/src/main.rs`**
+   - Add CLI args: `--max-token-auth-failures`, `--token-lockout-duration`, `--global-auth-failure-window`, `--global-auth-failure-threshold`, `--global-lockout-duration`
+   - Add to `ServerIrohParams` struct
+
+4. **`crates/tunnel-common/src/config.rs`**
+   - Add `max_token_auth_failures: Option<u32>` to `IrohConfig`
+   - Add `token_lockout_duration: Option<u64>` to `IrohConfig`
+   - Add `global_auth_failure_window: Option<u64>` to `IrohConfig`
+   - Add `global_auth_failure_threshold: Option<u32>` to `IrohConfig`
+   - Add `global_lockout_duration: Option<u64>` to `IrohConfig`
+
+5. **`server.toml.example`**
+   - Add commented examples for new config options
+
+6. **`Cargo.toml` (tunnel-iroh)**
+   - Add `dashmap` dependency for concurrent HashMap
+
+### Code Sketch
+
+#### In `auth.rs` - New rate limiter:
+
+```rust
+use dashmap::DashMap;
+use std::collections::{HashSet, VecDeque};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+pub struct AuthRateLimiter {
+    // Per-token tracking
+    token_failures: DashMap<String, TokenFailureRecord>,
+    max_token_failures: u32,
+    token_lockout_duration: Duration,
+
+    // Global tracking (see struct definition above for cleanup strategy)
+    recent_failures: Mutex<VecDeque<(Instant, String)>>,
+    global_lockout_until: AtomicU64,
+    global_failure_window: Duration,
+    global_failure_threshold: u32,
+    global_lockout_duration: Duration,
+
+    // Valid tokens bypass rate limiting
+    valid_tokens: Arc<HashSet<String>>,
+}
+
+struct TokenFailureRecord {
+    count: u32,
+    locked_until: Option<Instant>,
+}
+
+impl AuthRateLimiter {
+    pub fn new(
+        valid_tokens: Arc<HashSet<String>>,
+        max_token_failures: u32,
+        token_lockout_duration: Duration,
+        global_failure_window: Duration,
+        global_failure_threshold: u32,
+        global_lockout_duration: Duration,
+    ) -> Self {
+        Self {
+            token_failures: DashMap::new(),
+            max_token_failures,
+            token_lockout_duration,
+            recent_failures: Mutex::new(VecDeque::new()),
+            global_lockout_until: AtomicU64::new(0),
+            global_failure_window,
+            global_failure_threshold,
+            global_lockout_duration,
+            valid_tokens,
+        }
+    }
+
+    /// Check if token is allowed to attempt auth
+    /// Returns Ok(()) if allowed, Err with remaining lockout time if blocked
+    pub fn check_allowed(&self, token: &str) -> Result<(), Duration> {
+        // Valid tokens bypass rate limit entirely
+        if self.valid_tokens.contains(token) {
+            return Ok(());
+        }
+        // Check per-token lockout
+        if let Some(record) = self.token_failures.get(token) {
+            if let Some(locked_until) = record.locked_until {
+                if Instant::now() < locked_until {
+                    return Err(locked_until - Instant::now());
+                }
+            }
+        }
+        // Check global lockout
+        let lockout_until_millis = self.global_lockout_until.load(Ordering::Relaxed);
+        if lockout_until_millis > 0 {
+            let now_millis = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64;
+            if now_millis < lockout_until_millis {
+                let remaining = Duration::from_millis(lockout_until_millis - now_millis);
+                return Err(remaining);
+            }
+        }
+        Ok(())
+    }
+
+    /// Record a failed auth attempt, returns true if global lockout triggered
+    pub fn record_failure(&self, token: &str) -> bool {
+        // Don't track valid tokens (they won't fail anyway)
+        if self.valid_tokens.contains(token) {
+            return false;
+        }
+
+        // Skip recording if global lockout is active (don't extend/retrigger)
+        let lockout_until_millis = self.global_lockout_until.load(Ordering::Relaxed);
+        if lockout_until_millis > 0 {
+            let now_millis = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64;
+            if now_millis < lockout_until_millis {
+                // Log for auditing but don't update sliding window
+                return false;
+            }
+            // Lockout expired - clear window and reset
+            self.global_lockout_until.store(0, Ordering::Relaxed);
+            self.recent_failures.lock().unwrap().clear();
+        }
+
+        let now = Instant::now();
+
+        // Update per-token failure count
+        let mut entry = self.token_failures.entry(token.to_string()).or_insert(
+            TokenFailureRecord { count: 0, locked_until: None }
+        );
+        entry.count += 1;
+        if entry.count >= self.max_token_failures {
+            entry.locked_until = Some(now + self.token_lockout_duration);
+        }
+
+        // Update sliding window (synchronous cleanup)
+        let mut window = self.recent_failures.lock().unwrap();
+        window.push_back((now, token.to_string()));
+
+        // Prune old entries: pop from front while oldest is outside window
+        let cutoff = now - self.global_failure_window;
+        while let Some((timestamp, _)) = window.front() {
+            if *timestamp < cutoff {
+                window.pop_front();
+            } else {
+                break;
+            }
+        }
+
+        // Count unique tokens in window
+        let unique_tokens: HashSet<&String> = window.iter().map(|(_, t)| t).collect();
+        if unique_tokens.len() as u32 >= self.global_failure_threshold {
+            // Trigger global lockout
+            let lockout_until = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64
+                + self.global_lockout_duration.as_millis() as u64;
+            self.global_lockout_until.store(lockout_until, Ordering::Relaxed);
+            return true;
+        }
+
+        false
+    }
+}
+```
+
+#### In `multi_source.rs` - Integration:
+
+```rust
+// In run_multi_source_server(), after creating auth_tokens Arc:
+let rate_limiter = Arc::new(AuthRateLimiter::new(
+    auth_tokens.clone(),
+    5,                              // max_token_failures
+    Duration::from_secs(60),        // token_lockout_duration
+    Duration::from_secs(10),        // global_failure_window
+    10,                             // global_failure_threshold
+    Duration::from_secs(60),        // global_lockout_duration
+));
+
+// In handle_multi_source_stream(), before token validation:
+let token_str = request.auth_token.as_str();
+if let Err(remaining) = rate_limiter.check_allowed(token_str) {
+    log::warn!("Rate limit active, rejecting auth attempt for {:?}", remaining);
+    let response = SourceResponse::rejected("Too many failed attempts, try again later");
+    // ... send response and return
+}
+
+// After invalid token:
+if rate_limiter.record_failure(token_str) {
+    log::warn!("Global auth rate limit reached, lockout activated");
+}
+
+// Valid tokens don't need explicit success recording - they're in valid_tokens set
+```
+
+## Testing
+
+- Unit tests for `AuthRateLimiter` (failure counting, lockout, decay)
+- Integration test: verify lockout after N failures
+- Verify legitimate clients with valid tokens unaffected
+
+## Alternatives Considered
+
+1. **Per-EndpointId tracking**: EndpointId is ephemeral, changes each connection - ineffective
+2. **Global only**: Punishes legitimate users for attacker's actions
+3. **Per-connection tracking only**: Attacker can just reconnect
+4. **IP-based tracking**: IP not available in iroh, and NAT issues
+5. **Token-based delay**: Slows legitimate clients too
+
+## Dependencies
+
+- `dashmap` crate for DashMap (concurrent HashMap)

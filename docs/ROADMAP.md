@@ -132,6 +132,16 @@ target = "udp://127.0.0.1:5353"
 
 ---
 
+#### Auth Rate Limiting
+
+**Status:** Idea
+
+Rate limiting for token authentication to prevent brute-force attacks. Hybrid approach with per-client limits (for typo handling) and global limits (for distributed attack detection).
+
+See [RATE_LIMITING_PROPOSAL.md](RATE_LIMITING_PROPOSAL.md) for detailed design.
+
+---
+
 #### Relay Fallback for manual/nostr Modes
 
 **Status:** Idea
