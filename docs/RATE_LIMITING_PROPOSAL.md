@@ -24,6 +24,10 @@ Two-tier protection:
 
 **Key insight**: Track by submitted auth token, not EndpointId. Auth tokens are persistent identifiers that clients use, while EndpointId is ephemeral (changes each connection).
 
+**Token normalization**: The rate limiter tracks tokens exactly as submitted (case-sensitive, no whitespace trimming). This matches the behavior of the token validator in `auth.rs`. Operators should ensure tokens in configuration are consistently formatted (e.g., all lowercase, no leading/trailing whitespace). The rate limiter does NOT normalize tokens because:
+- Attackers may probe with case/whitespace variations; treating them as distinct catches more attack patterns
+- Consistent with the token validator which does exact string comparison
+
 ```rust
 struct AuthRateLimiter {
     // Per-token tracking (by submitted token string)
@@ -70,7 +74,8 @@ struct TokenFailureRecord {
 4. After lockout expires: Clear sliding window and resume normal operation
 
 **Behavior during global lockout:**
-- Failed auth attempts during lockout are logged for auditing but do NOT extend or retrigger the lockout
+- Failed auth attempts during lockout are rejected immediately with "Too many failed attempts, try again later"
+- These rejections are logged at `warn` level for auditing (e.g., `log::warn!("Auth rejected during global lockout")`)
 - The sliding window is NOT updated during lockout to prevent attackers from keeping the system locked indefinitely
 - When lockout expires, the sliding window is cleared to give a fresh start
 
@@ -226,7 +231,8 @@ impl AuthRateLimiter {
                 .unwrap()
                 .as_millis() as u64;
             if now_millis < lockout_until_millis {
-                // Log for auditing but don't update sliding window
+                log::warn!("Auth rejected during global lockout ({}ms remaining)",
+                    lockout_until_millis - now_millis);
                 return false;
             }
             // Lockout expired - clear window and reset
@@ -277,17 +283,58 @@ impl AuthRateLimiter {
 }
 ```
 
+#### Configuration Flow
+
+CLI args and config file values flow through `ServerIrohParams` into `run_multi_source_server()`:
+
+```
+CLI / config.toml
+       │
+       ▼
+┌─────────────────────────────────────────────────┐
+│ ServerIrohParams {                              │
+│   auth_tokens: Vec<String>,                     │
+│   max_token_auth_failures: u32,      // default 5     │
+│   token_lockout_duration: u64,       // default 60s   │
+│   global_auth_failure_window: u64,   // default 10s   │
+│   global_auth_failure_threshold: u32, // default 10   │
+│   global_lockout_duration: u64,      // default 60s   │
+│   ...                                           │
+│ }                                               │
+└─────────────────────────────────────────────────┘
+       │
+       ▼
+run_multi_source_server(params: ServerIrohParams)
+       │
+       ▼
+AuthRateLimiter::new(
+    valid_tokens,
+    params.max_token_auth_failures,
+    Duration::from_secs(params.token_lockout_duration),
+    Duration::from_secs(params.global_auth_failure_window),
+    params.global_auth_failure_threshold,
+    Duration::from_secs(params.global_lockout_duration),
+)
+```
+
+In `main.rs`, CLI args merge with config file (CLI takes precedence):
+```rust
+let max_token_auth_failures = args.max_token_auth_failures
+    .or(config.iroh.as_ref().and_then(|c| c.max_token_auth_failures))
+    .unwrap_or(5);
+```
+
 #### In `multi_source.rs` - Integration:
 
 ```rust
 // In run_multi_source_server(), after creating auth_tokens Arc:
 let rate_limiter = Arc::new(AuthRateLimiter::new(
     auth_tokens.clone(),
-    5,                              // max_token_failures
-    Duration::from_secs(60),        // token_lockout_duration
-    Duration::from_secs(10),        // global_failure_window
-    10,                             // global_failure_threshold
-    Duration::from_secs(60),        // global_lockout_duration
+    params.max_token_auth_failures,
+    Duration::from_secs(params.token_lockout_duration),
+    Duration::from_secs(params.global_auth_failure_window),
+    params.global_auth_failure_threshold,
+    Duration::from_secs(params.global_lockout_duration),
 ));
 
 // In handle_multi_source_connection(), during auth phase:
@@ -314,6 +361,40 @@ if rate_limiter.record_failure(token_str) {
 - Unit tests for `AuthRateLimiter` (failure counting, lockout, decay)
 - Integration test: verify lockout after N failures
 - Verify legitimate clients with valid tokens unaffected
+
+## Metrics and Observability
+
+Beyond logging, consider exposing metrics for monitoring dashboards:
+
+**Counters** (monotonically increasing):
+- `auth_attempts_total` - Total auth attempts (labels: `result={success,rejected_invalid,rejected_rate_limited}`)
+- `token_lockouts_total` - Number of times individual tokens were locked out
+- `global_lockouts_total` - Number of times global lockout was triggered
+
+**Gauges** (current state):
+- `tokens_currently_locked` - Number of tokens currently in per-token lockout
+- `global_lockout_active` - Boolean (0/1) indicating if global lockout is active
+- `global_lockout_remaining_seconds` - Seconds remaining in current global lockout (0 if not active)
+
+**Example with `metrics` crate:**
+```rust
+use metrics::{counter, gauge};
+
+// On auth success
+counter!("auth_attempts_total", "result" => "success").increment(1);
+
+// On rate limit rejection
+counter!("auth_attempts_total", "result" => "rejected_rate_limited").increment(1);
+
+// On global lockout trigger
+counter!("global_lockouts_total").increment(1);
+gauge!("global_lockout_active").set(1.0);
+
+// On global lockout expiry
+gauge!("global_lockout_active").set(0.0);
+```
+
+**Implementation note**: If adding metrics, consider using `metrics` crate with a compatible exporter (e.g., `metrics-exporter-prometheus` for Prometheus). This is optional and can be added in a follow-up PR.
 
 ## Alternatives Considered
 
