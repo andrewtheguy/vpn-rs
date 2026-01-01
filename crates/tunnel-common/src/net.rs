@@ -20,6 +20,36 @@ pub const STREAM_OPEN_BASE_DELAY_MS: u64 = 100;
 pub const BACKOFF_MAX_MULTIPLIER: u64 = 1024;
 
 // ============================================================================
+// Address Ordering (Happy Eyeballs)
+// ============================================================================
+
+/// Interleave addresses for Happy Eyeballs style connection attempts.
+/// Returns addresses with IPv6 preferred first, then alternates IPv4 and IPv6.
+/// Preserves original counts and alternates until all addresses are consumed.
+///
+/// This implements RFC 8305 address sorting for dual-stack connections,
+/// giving IPv6 a slight head start while still trying IPv4 quickly.
+pub fn interleave_addresses(addrs: &[SocketAddr]) -> Vec<SocketAddr> {
+    let (ipv6, ipv4): (Vec<SocketAddr>, Vec<SocketAddr>) =
+        addrs.iter().copied().partition(|a| a.is_ipv6());
+
+    let mut ordered = Vec::with_capacity(addrs.len());
+    let mut v6_iter = ipv6.into_iter();
+    let mut v4_iter = ipv4.into_iter();
+
+    // Interleave addresses: IPv6 first, then alternate
+    while ordered.len() < addrs.len() {
+        if let Some(addr) = v6_iter.next() {
+            ordered.push(addr);
+        }
+        if let Some(addr) = v4_iter.next() {
+            ordered.push(addr);
+        }
+    }
+    ordered
+}
+
+// ============================================================================
 // Address Ordering Helpers
 // ============================================================================
 
@@ -200,22 +230,7 @@ pub async fn try_connect_tcp(addrs: &[SocketAddr]) -> Result<TcpStream> {
         sorted
     } else {
         // For non-loopback, apply Happy Eyeballs: IPv6 first, interleaved with IPv4
-        let (ipv6, ipv4): (Vec<SocketAddr>, Vec<SocketAddr>) =
-            addrs.iter().copied().partition(|a| a.is_ipv6());
-
-        let mut result = Vec::with_capacity(addrs.len());
-        let mut v6_iter = ipv6.into_iter();
-        let mut v4_iter = ipv4.into_iter();
-
-        while result.len() < addrs.len() {
-            if let Some(addr) = v6_iter.next() {
-                result.push(addr);
-            }
-            if let Some(addr) = v4_iter.next() {
-                result.push(addr);
-            }
-        }
-        result
+        interleave_addresses(addrs)
     };
 
     // Channel for connection results
@@ -259,26 +274,10 @@ pub async fn try_connect_tcp(addrs: &[SocketAddr]) -> Result<TcpStream> {
 // ============================================================================
 
 /// Order UDP target addresses for connection attempts (Happy Eyeballs style).
-/// Interleaves addresses: IPv6 preferred first, then alternates IPv4 and IPv6.
-/// Preserves original counts and alternates until all addresses are consumed.
+/// This is an alias for [`interleave_addresses`] for API compatibility.
+#[inline]
 pub fn order_udp_addresses(addrs: &[SocketAddr]) -> Vec<SocketAddr> {
-    let (ipv6, ipv4): (Vec<SocketAddr>, Vec<SocketAddr>) =
-        addrs.iter().copied().partition(|a| a.is_ipv6());
-
-    let mut ordered = Vec::with_capacity(addrs.len());
-    let mut v6_iter = ipv6.into_iter();
-    let mut v4_iter = ipv4.into_iter();
-
-    // Interleave addresses: IPv6 first, then alternate
-    while ordered.len() < addrs.len() {
-        if let Some(addr) = v6_iter.next() {
-            ordered.push(addr);
-        }
-        if let Some(addr) = v4_iter.next() {
-            ordered.push(addr);
-        }
-    }
-    ordered
+    interleave_addresses(addrs)
 }
 
 // ============================================================================
@@ -570,36 +569,40 @@ mod tests {
         assert!(!is_loopback);
     }
 
+    // =========================================================================
+    // interleave_addresses tests (shared by TCP and UDP Happy Eyeballs)
+    // =========================================================================
+
     #[test]
-    fn test_order_udp_addresses_empty() {
-        let result = order_udp_addresses(&[]);
+    fn test_interleave_addresses_empty() {
+        let result = interleave_addresses(&[]);
         assert!(result.is_empty());
     }
 
     #[test]
-    fn test_order_udp_addresses_only_ipv4() {
+    fn test_interleave_addresses_only_ipv4() {
         let addrs = vec![
             SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)), 8080),
             SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 8080),
         ];
-        let result = order_udp_addresses(&addrs);
+        let result = interleave_addresses(&addrs);
         assert_eq!(result.len(), 2);
         assert!(result.iter().all(|a| a.is_ipv4()));
     }
 
     #[test]
-    fn test_order_udp_addresses_only_ipv6() {
+    fn test_interleave_addresses_only_ipv6() {
         let addrs = vec![
             SocketAddr::new(IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1)), 8080),
             SocketAddr::new(IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 2)), 8080),
         ];
-        let result = order_udp_addresses(&addrs);
+        let result = interleave_addresses(&addrs);
         assert_eq!(result.len(), 2);
         assert!(result.iter().all(|a| a.is_ipv6()));
     }
 
     #[test]
-    fn test_order_udp_addresses_interleaves_ipv6_first() {
+    fn test_interleave_addresses_ipv6_first() {
         let v4_1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)), 8080);
         let v4_2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 8080);
         let v6_1 = SocketAddr::new(IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1)), 8080);
@@ -607,7 +610,7 @@ mod tests {
 
         // Input: v4, v4, v6, v6
         let addrs = vec![v4_1, v4_2, v6_1, v6_2];
-        let result = order_udp_addresses(&addrs);
+        let result = interleave_addresses(&addrs);
 
         // Expected: v6, v4, v6, v4 (interleaved with IPv6 first)
         assert_eq!(result.len(), 4);
@@ -618,7 +621,7 @@ mod tests {
     }
 
     #[test]
-    fn test_order_udp_addresses_unequal_counts() {
+    fn test_interleave_addresses_unequal_counts() {
         let v4_1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)), 8080);
         let v6_1 = SocketAddr::new(IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1)), 8080);
         let v6_2 = SocketAddr::new(IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 2)), 8080);
@@ -626,7 +629,7 @@ mod tests {
 
         // Input: 1 IPv4, 3 IPv6
         let addrs = vec![v4_1, v6_1, v6_2, v6_3];
-        let result = order_udp_addresses(&addrs);
+        let result = interleave_addresses(&addrs);
 
         // Expected: v6, v4, v6, v6 (all addresses consumed)
         assert_eq!(result.len(), 4);
@@ -637,18 +640,28 @@ mod tests {
     }
 
     #[test]
-    fn test_order_udp_addresses_preserves_all_addresses() {
+    fn test_interleave_addresses_preserves_all() {
         let v4_1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)), 8080);
         let v4_2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 8081);
         let v6_1 = SocketAddr::new(IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1)), 8082);
 
         let addrs = vec![v4_1, v4_2, v6_1];
-        let result = order_udp_addresses(&addrs);
+        let result = interleave_addresses(&addrs);
 
         // All original addresses should be present
         assert_eq!(result.len(), 3);
         assert!(result.contains(&v4_1));
         assert!(result.contains(&v4_2));
         assert!(result.contains(&v6_1));
+    }
+
+    #[test]
+    fn test_order_udp_addresses_is_alias() {
+        // Verify order_udp_addresses returns same result as interleave_addresses
+        let addrs = vec![
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)), 8080),
+            SocketAddr::new(IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1)), 8080),
+        ];
+        assert_eq!(order_udp_addresses(&addrs), interleave_addresses(&addrs));
     }
 }
