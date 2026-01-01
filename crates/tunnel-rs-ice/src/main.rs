@@ -549,17 +549,17 @@ async fn main() -> Result<()> {
                         relays
                     };
 
-                    nostr::run_nostr_server(
+                    nostr::run_nostr_server(nostr::NostrServerConfig {
                         allowed_tcp,
                         allowed_udp,
                         stun_servers,
                         nsec,
                         peer_npub,
                         relays,
-                        republish_interval,
-                        max_wait,
+                        republish_interval_secs: republish_interval,
+                        max_wait_secs: max_wait,
                         max_sessions,
-                    )
+                    })
                     .await
                 }
                 _ => anyhow::bail!(
@@ -735,43 +735,43 @@ async fn main() -> Result<()> {
                             .with_context(|| format!("Invalid receiver target '{}'", listen))?;
                         match protocol {
                             Protocol::Udp => {
-                                nostr::run_nostr_udp_client(
-                                    addr,
+                                nostr::run_nostr_udp_client(nostr::NostrClientConfig {
+                                    listen: addr,
                                     source,
                                     stun_servers,
                                     nsec,
                                     peer_npub,
                                     relays,
-                                    republish_interval,
-                                    max_wait,
-                                )
+                                    republish_interval_secs: republish_interval,
+                                    max_wait_secs: max_wait,
+                                })
                                 .await
                             }
                             Protocol::Tcp => {
-                                nostr::run_nostr_tcp_client(
-                                    addr,
+                                nostr::run_nostr_tcp_client(nostr::NostrClientConfig {
+                                    listen: addr,
                                     source,
                                     stun_servers,
                                     nsec,
                                     peer_npub,
                                     relays,
-                                    republish_interval,
-                                    max_wait,
-                                )
+                                    republish_interval_secs: republish_interval,
+                                    max_wait_secs: max_wait,
+                                })
                                 .await
                             }
                         }
                     } else {
-                        nostr::run_nostr_tcp_client(
+                        nostr::run_nostr_tcp_client(nostr::NostrClientConfig {
                             listen,
                             source,
                             stun_servers,
                             nsec,
                             peer_npub,
                             relays,
-                            republish_interval,
-                            max_wait,
-                        )
+                            republish_interval_secs: republish_interval,
+                            max_wait_secs: max_wait,
+                        })
                         .await
                     }
                 }

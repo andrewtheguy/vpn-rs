@@ -14,6 +14,18 @@ use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::sync::Mutex;
 use tokio::task::JoinSet;
 
+/// Configuration for the multi-source server.
+pub struct MultiSourceServerConfig {
+    pub allowed_tcp: Vec<String>,
+    pub allowed_udp: Vec<String>,
+    pub max_sessions: Option<usize>,
+    pub secret: Option<SecretKey>,
+    pub relay_urls: Vec<String>,
+    pub relay_only: bool,
+    pub dns_server: Option<String>,
+    pub auth_tokens: HashSet<String>,
+}
+
 use crate::auth::is_token_valid;
 
 use crate::iroh_mode::endpoint::{
@@ -50,38 +62,31 @@ const AUTH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 /// The server validates requests against allowed_tcp and allowed_udp CIDR lists.
 /// Authentication is enforced via pre-shared tokens - clients must provide a valid token in their request.
 /// Note: relay_only is only meaningful when the 'test-utils' feature is enabled.
-pub async fn run_multi_source_server(
-    allowed_tcp: Vec<String>,
-    allowed_udp: Vec<String>,
-    max_sessions: Option<usize>,
-    secret: Option<SecretKey>,
-    relay_urls: Vec<String>,
-    relay_only: bool,
-    dns_server: Option<String>,
-    auth_tokens: HashSet<String>,
-) -> Result<()> {
+pub async fn run_multi_source_server(config: MultiSourceServerConfig) -> Result<()> {
     // relay_only is only meaningful with test-utils feature
     #[cfg(not(feature = "test-utils"))]
     {
-        if relay_only {
+        if config.relay_only {
             log::warn!("relay_only=true requires 'test-utils' feature; ignoring and using relay_only=false");
         }
     }
     #[cfg(not(feature = "test-utils"))]
     let relay_only = false;
+    #[cfg(feature = "test-utils")]
+    let relay_only = config.relay_only;
 
     // Validate CIDR notation at startup
-    validate_allowed_networks(&allowed_tcp, "--allowed-tcp")?;
-    validate_allowed_networks(&allowed_udp, "--allowed-udp")?;
+    validate_allowed_networks(&config.allowed_tcp, "--allowed-tcp")?;
+    validate_allowed_networks(&config.allowed_udp, "--allowed-udp")?;
 
-    if allowed_tcp.is_empty() && allowed_udp.is_empty() {
+    if config.allowed_tcp.is_empty() && config.allowed_udp.is_empty() {
         anyhow::bail!(
             "At least one --allowed-tcp or --allowed-udp network must be specified.\n\
             Example: --allowed-tcp 127.0.0.0/8 --allowed-udp 10.0.0.0/8"
         );
     }
 
-    if auth_tokens.is_empty() {
+    if config.auth_tokens.is_empty() {
         anyhow::bail!(
             "At least one authentication token must be configured.\n\
             Use --auth-tokens <TOKEN> or --auth-tokens-file <FILE>.\n\
@@ -89,32 +94,34 @@ pub async fn run_multi_source_server(
         );
     }
 
-    validate_relay_only(relay_only, &relay_urls)?;
+    validate_relay_only(relay_only, &config.relay_urls)?;
 
     log::info!("Multi-Source Tunnel - Server Mode");
     log::info!("==================================");
     log::info!("Creating iroh endpoint...");
 
     let endpoint = create_server_endpoint(
-        &relay_urls,
+        &config.relay_urls,
         relay_only,
-        secret,
-        dns_server.as_deref(),
+        config.secret,
+        config.dns_server.as_deref(),
         MULTI_ALPN,
     )
     .await?;
 
     let endpoint_id = endpoint.id();
-    let max_sessions = max_sessions.unwrap_or(DEFAULT_MAX_SESSIONS);
+    let max_sessions = config.max_sessions.unwrap_or(DEFAULT_MAX_SESSIONS);
 
     log::info!("\nEndpointId: {}", endpoint_id);
-    log::info!("Allowed TCP networks: {:?}", allowed_tcp);
-    log::info!("Allowed UDP networks: {:?}", allowed_udp);
+    log::info!("Allowed TCP networks: {:?}", config.allowed_tcp);
+    log::info!("Allowed UDP networks: {:?}", config.allowed_udp);
     log::info!("Max concurrent sessions: {}", max_sessions);
-    log::info!("Auth tokens configured: {}", auth_tokens.len());
+    log::info!("Auth tokens configured: {}", config.auth_tokens.len());
 
     // Wrap auth_tokens in Arc for cheap cloning across tasks
-    let auth_tokens = Arc::new(auth_tokens);
+    let auth_tokens = Arc::new(config.auth_tokens);
+    let allowed_tcp = config.allowed_tcp;
+    let allowed_udp = config.allowed_udp;
 
     log::info!("\nOn the client side, run:");
     log::info!(

@@ -461,7 +461,7 @@ async fn main() -> Result<()> {
             let (relay_urls, _relay_bridges) =
                 socks5_bridge::setup_relay_bridges(relay_urls, socks5_proxy.as_deref()).await?;
 
-            iroh_mode::run_multi_source_server(
+            iroh_mode::run_multi_source_server(iroh_mode::MultiSourceServerConfig {
                 allowed_tcp,
                 allowed_udp,
                 max_sessions,
@@ -470,7 +470,7 @@ async fn main() -> Result<()> {
                 relay_only,
                 dns_server,
                 auth_tokens,
-            )
+            })
             .await
         }
         Command::Client {

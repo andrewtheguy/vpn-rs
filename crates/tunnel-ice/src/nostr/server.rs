@@ -11,6 +11,19 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::task::JoinSet;
 
+/// Configuration for the nostr server.
+pub struct NostrServerConfig {
+    pub allowed_tcp: Vec<String>,
+    pub allowed_udp: Vec<String>,
+    pub stun_servers: Vec<String>,
+    pub nsec: String,
+    pub peer_npub: String,
+    pub relays: Vec<String>,
+    pub republish_interval_secs: u64,
+    pub max_wait_secs: u64,
+    pub max_sessions: usize,
+}
+
 use crate::signaling::{
     ManualOffer, ManualReject, ManualRequest, NostrSignaling, SignalingError, MANUAL_SIGNAL_VERSION,
 };
@@ -39,6 +52,7 @@ type SessionHandler = fn(
     -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>>;
 
 /// Generic nostr server loop that handles session management.
+#[allow(clippy::too_many_arguments)]
 async fn run_nostr_server_loop(
     allowed_tcp: Vec<String>,
     allowed_udp: Vec<String>,
@@ -657,43 +671,33 @@ async fn handle_nostr_udp_session_impl(
 // ============================================================================
 
 /// Unified nostr server that handles both TCP and UDP requests.
-pub async fn run_nostr_server(
-    allowed_tcp: Vec<String>,
-    allowed_udp: Vec<String>,
-    stun_servers: Vec<String>,
-    nsec: String,
-    peer_npub: String,
-    relays: Vec<String>,
-    republish_interval_secs: u64,
-    max_wait_secs: u64,
-    max_sessions: usize,
-) -> Result<()> {
+pub async fn run_nostr_server(config: NostrServerConfig) -> Result<()> {
     // Ensure crypto provider is installed before nostr-sdk uses rustls
     quic::ensure_crypto_provider();
 
     // Validate CIDR networks upfront (fail fast on misconfiguration)
-    validate_allowed_networks(&allowed_tcp, "--allowed-tcp")?;
-    validate_allowed_networks(&allowed_udp, "--allowed-udp")?;
+    validate_allowed_networks(&config.allowed_tcp, "--allowed-tcp")?;
+    validate_allowed_networks(&config.allowed_udp, "--allowed-udp")?;
 
     log::info!("Nostr Tunnel - Server Mode (Multi-Session)");
     log::info!("==========================================");
 
     // Create Nostr signaling client
-    let relay_list = if relays.is_empty() {
+    let relay_list = if config.relays.is_empty() {
         None
     } else {
-        Some(relays)
+        Some(config.relays)
     };
-    let signaling = Arc::new(NostrSignaling::new(&nsec, &peer_npub, relay_list).await?);
+    let signaling = Arc::new(NostrSignaling::new(&config.nsec, &config.peer_npub, relay_list).await?);
 
     log::info!("Your pubkey: {}", signaling.public_key_bech32());
     log::info!("Transfer ID: {}", signaling.transfer_id());
     log::info!("Relays: {:?}", signaling.relay_urls());
-    if !allowed_tcp.is_empty() {
-        log::info!("Allowed TCP networks: {:?}", allowed_tcp);
+    if !config.allowed_tcp.is_empty() {
+        log::info!("Allowed TCP networks: {:?}", config.allowed_tcp);
     }
-    if !allowed_udp.is_empty() {
-        log::info!("Allowed UDP networks: {:?}", allowed_udp);
+    if !config.allowed_udp.is_empty() {
+        log::info!("Allowed UDP networks: {:?}", config.allowed_udp);
     }
 
     // Subscribe to incoming events
@@ -701,13 +705,13 @@ pub async fn run_nostr_server(
 
     // Run the session management loop
     run_nostr_server_loop(
-        allowed_tcp,
-        allowed_udp,
+        config.allowed_tcp,
+        config.allowed_udp,
         signaling,
-        stun_servers,
-        republish_interval_secs,
-        max_wait_secs,
-        max_sessions,
+        config.stun_servers,
+        config.republish_interval_secs,
+        config.max_wait_secs,
+        config.max_sessions,
         handle_nostr_session,
     )
     .await

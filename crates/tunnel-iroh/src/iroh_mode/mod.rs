@@ -10,4 +10,4 @@ mod helpers;
 mod multi_source;
 
 // Re-export public API
-pub use multi_source::{run_multi_source_client, run_multi_source_server};
+pub use multi_source::{run_multi_source_client, run_multi_source_server, MultiSourceServerConfig};

@@ -162,10 +162,9 @@ pub fn load_auth_tokens_from_file(path: &Path) -> Result<HashSet<String>> {
         .with_context(|| format!("Failed to read auth tokens file: {}", path.display()))?;
 
     let mut tokens = HashSet::new();
-    let mut line_num = 0;
 
-    for line in content.lines() {
-        line_num += 1;
+    for (line_num, line) in content.lines().enumerate() {
+        let line_num = line_num + 1; // 1-based line numbers
         let line = line.trim();
 
         // Skip empty lines and comment lines
@@ -203,10 +202,8 @@ pub fn load_auth_token_from_file(path: &Path) -> Result<String> {
     let content = std::fs::read_to_string(path)
         .with_context(|| format!("Failed to read auth token file: {}", path.display()))?;
 
-    let mut line_num = 0;
-
-    for line in content.lines() {
-        line_num += 1;
+    for (line_num, line) in content.lines().enumerate() {
+        let line_num = line_num + 1; // 1-based line numbers
         let line = line.trim();
 
         // Skip empty lines and comment lines
