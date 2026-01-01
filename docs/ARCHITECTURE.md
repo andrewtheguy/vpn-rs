@@ -207,15 +207,15 @@ graph LR
 
 ```mermaid
 graph TB
-    subgraph "Sender Side"
+    subgraph "Server Side"
         A[tunnel-rs server]
         B[iroh Endpoint]
         C[Target Service<br/>e.g., SSH:22]
         D[Discovery<br/>Pkarr/DNS]
         E[Relay Server]
     end
-    
-    subgraph "Receiver Side"
+
+    subgraph "Client Side"
         F[tunnel-rs client]
         G[iroh Endpoint]
         H[Local Client<br/>e.g., SSH client]
@@ -247,40 +247,55 @@ graph TB
 
 ```mermaid
 sequenceDiagram
-    participant S as Sender
+    participant S as Server
     participant SD as Discovery Service
-    participant R as Receiver
+    participant C as Client
     participant RS as Relay Server
-    
+
     Note over S: Generate/Load Secret Key
     S->>S: Create iroh Endpoint
     S->>SD: Publish EndpointId + Addresses
     Note over S: Display EndpointId
     S->>RS: Connect to relay
-    
-    Note over R: User provides EndpointId
-    R->>R: Create iroh Endpoint
-    R->>SD: Resolve EndpointId
-    SD-->>R: Return addresses
-    R->>RS: Connect to relay
-    
+
+    Note over C: User provides EndpointId
+    C->>C: Create iroh Endpoint
+    C->>SD: Resolve EndpointId
+    SD-->>C: Return addresses
+    C->>RS: Connect to relay
+
     alt Direct Connection Possible
-        R->>S: Direct QUIC connection
-        S-->>R: Accept connection
+        C->>S: Direct QUIC connection
+        S-->>C: Accept connection
     else NAT Traversal Failed
-        R->>RS: Connect via relay
+        C->>RS: Connect via relay
         RS->>S: Forward connection
         S-->>RS: Accept via relay
-        RS-->>R: Relay established
+        RS-->>C: Relay established
     end
-    
-    Note over S,R: Encrypted QUIC tunnel established
-    
+
+    Note over S,C: Encrypted QUIC tunnel established
+
+    Note over C,S: Authentication Phase
+    C->>S: Open auth stream
+    C->>S: AuthRequest {token}
+    alt Token Valid
+        S-->>C: AuthResponse {accepted}
+    else Token Invalid
+        S-->>C: AuthResponse {rejected}
+        S->>C: Close connection
+    end
+
+    Note over C,S: Source Request Phase
+    C->>S: Open source stream
+    C->>S: SourceRequest {source}
+    S-->>C: SourceResponse {accepted}
+
     loop Data Transfer
-        R->>S: Forward client traffic
+        C->>S: Forward client traffic
         S->>S: Forward to target
-        S->>R: Return target response
-        R->>R: Forward to client
+        S->>C: Return target response
+        C->>C: Forward to client
     end
 ```
 
@@ -288,18 +303,18 @@ sequenceDiagram
 
 ```mermaid
 graph LR
-    subgraph "Receiver"
+    subgraph "Client"
         A[TCP Client] -->|connect| B[Listen Socket]
         B -->|accept| C[TCP Stream]
         C -->|read| D[Buffer]
         D -->|write| E[iroh SendStream]
     end
-    
+
     subgraph "QUIC Transport"
         E <-->|encrypted| F[iroh RecvStream]
     end
-    
-    subgraph "Sender"
+
+    subgraph "Server"
         F -->|read| G[Buffer]
         G -->|write| H[TCP Stream]
         H -->|connect| I[Target Service]
@@ -325,17 +340,17 @@ graph LR
 
 ```mermaid
 graph TB
-    subgraph "Receiver"
+    subgraph "Client"
         A[UDP Client] -->|sendto| B[UDP Socket]
         B -->|recvfrom| C[Packet Buffer]
         C -->|encode length + data| D[iroh SendStream]
     end
-    
+
     subgraph "QUIC Transport"
         D <-->|encrypted| E[iroh RecvStream]
     end
-    
-    subgraph "Sender"
+
+    subgraph "Server"
         E -->|decode| F[Packet Buffer]
         F -->|sendto| G[UDP Socket]
         G -->|forward| H[Target Service]
@@ -399,15 +414,15 @@ graph TB
 
 ```mermaid
 graph TB
-    subgraph "Sender Side"
+    subgraph "Server Side"
         A[tunnel-rs server]
         B[ICE Agent<br/>str0m]
         C[QUIC Endpoint<br/>quinn]
         D[Stream Mux]
         E[Target Service]
     end
-    
-    subgraph "Receiver Side"
+
+    subgraph "Client Side"
         F[tunnel-rs client]
         G[ICE Agent<br/>str0m]
         H[QUIC Endpoint<br/>quinn]
@@ -551,53 +566,53 @@ graph TB
 
 ```mermaid
 sequenceDiagram
-    participant S as Sender
+    participant S as Server
     participant STUN as STUN Server
     participant User as User (Copy/Paste)
-    participant R as Receiver
-    
-    Note over S: Start sender
+    participant C as Client
+
+    Note over S: Start server
     S->>S: Create ICE Agent (Controlling)
     S->>S: Bind UDP sockets
     S->>STUN: Gather candidates
     STUN-->>S: Server reflexive addresses
-    
+
     Note over S: Create Offer (v1)
     S->>S: Encode ufrag, pwd, candidates
     S->>User: Display Offer Block
-    
+
     Note over User: Copy offer
-    Note over R: Start receiver
-    R->>R: Create ICE Agent (Controlled)
-    R->>R: Bind UDP sockets
-    R->>STUN: Gather candidates
-    STUN-->>R: Server reflexive addresses
-    
-    User->>R: Paste offer
-    R->>R: Decode remote credentials
-    R->>R: Set remote candidates
-    R->>R: Create Answer
-    R->>User: Display Answer Block
-    
+    Note over C: Start client
+    C->>C: Create ICE Agent (Controlled)
+    C->>C: Bind UDP sockets
+    C->>STUN: Gather candidates
+    STUN-->>C: Server reflexive addresses
+
+    User->>C: Paste offer
+    C->>C: Decode remote credentials
+    C->>C: Set remote candidates
+    C->>C: Create Answer
+    C->>User: Display Answer Block
+
     Note over User: Copy answer
     User->>S: Paste answer
     S->>S: Decode remote credentials
     S->>S: Set remote candidates
-    
+
     par ICE Connectivity Checks
-        S->>R: STUN Binding Requests
-        R->>S: STUN Binding Requests
+        S->>C: STUN Binding Requests
+        C->>S: STUN Binding Requests
     and
-        R-->>S: STUN Binding Responses
-        S-->>R: STUN Binding Responses
+        C-->>S: STUN Binding Responses
+        S-->>C: STUN Binding Responses
     end
-    
-    Note over S,R: Best candidate pair selected
-    
-    S->>R: QUIC Handshake over ICE socket
-    R-->>S: QUIC Accept
-    
-    Note over S,R: QUIC connection established
+
+    Note over S,C: Best candidate pair selected
+
+    S->>C: QUIC Handshake over ICE socket
+    C-->>S: QUIC Accept
+
+    Note over S,C: QUIC connection established
 ```
 
 ### QUIC Over ICE Socket
@@ -614,8 +629,8 @@ graph TB
         E[Create quinn Endpoint] --> F[Bind to ICE socket]
         F --> G[TLS Configuration]
         G --> H{Role?}
-        H -->|Sender| I[Connect to remote]
-        H -->|Receiver| J[Accept connection]
+        H -->|Server| I[Connect to remote]
+        H -->|Client| J[Accept connection]
     end
     
     subgraph "Data Transfer"
@@ -694,31 +709,31 @@ Nostr mode combines the full ICE implementation from manual mode with automated 
 
 > **Note for Containerized Environments:** Like manual mode, nostr mode uses STUN-only NAT traversal without relay fallback. If both peers are behind restrictive NATs (common in Docker, Kubernetes, or cloud VMs), ICE connectivity may fail. For containerized deployments, consider using `iroh` mode which includes automatic relay fallback.
 
-### Receiver-Initiated Dynamic Source
+### Client-Initiated Dynamic Source
 
-All modes use a **receiver-initiated** model for consistent UX:
+All modes use a **client-initiated** model for consistent UX:
 
-- **Sender**: Whitelists allowed networks with `--allowed-tcp`/`--allowed-udp` (CIDR notation)
-- **Receiver**: Specifies which service to tunnel with `--source` (hostname:port)
+- **Server**: Whitelists allowed networks with `--allowed-tcp`/`--allowed-udp` (CIDR notation)
+- **Client**: Specifies which service to tunnel with `--source` (hostname:port)
 
-This is similar to SSH's `-L` flag for local port forwarding, where the client (receiver) chooses the destination.
+This is similar to SSH's `-L` flag for local port forwarding, where the client chooses the destination.
 
 ```
-Sender: --allowed-tcp 10.0.0.0/8           # Whitelist networks (no ports)
-Receiver: --source tcp://postgres:5432    # Request specific service
-          --target 127.0.0.1:5432         # Local listen address
+Server: --allowed-tcp 10.0.0.0/8           # Whitelist networks (no ports)
+Client: --source tcp://postgres:5432       # Request specific service
+        --target 127.0.0.1:5432            # Local listen address
 ```
 
 ### Architecture Overview
 
 ```mermaid
 graph TB
-    subgraph "Sender Side"
+    subgraph "Server Side"
         A[tunnel-rs server]
         B[ICE Agent<br/>str0m]
         C[QUIC Endpoint<br/>quinn]
         D[Nostr Client]
-        E[Target Service<br/>receiver-specified]
+        E[Target Service<br/>client-specified]
     end
 
     subgraph "Nostr Relays"
@@ -727,7 +742,7 @@ graph TB
         H[Other Relays]
     end
 
-    subgraph "Receiver Side"
+    subgraph "Client Side"
         I[tunnel-rs client]
         J[ICE Agent<br/>str0m]
         K[QUIC Endpoint<br/>quinn]
@@ -762,30 +777,30 @@ graph TB
     style E fill:#FFF9C4
 ```
 
-### Receiver-First Signaling Flow
+### Client-First Signaling Flow
 
-Nostr mode uses a receiver-first protocol where the receiver initiates the signaling exchange. This allows the sender to wait for receivers to come online.
+Nostr mode uses a client-first protocol where the client initiates the signaling exchange. This allows the server to wait for clients to come online.
 
 ```mermaid
 sequenceDiagram
-    participant R as Receiver
+    participant C as Client
     participant NR as Nostr Relays
-    participant S as Sender
+    participant S as Server
     participant STUN as STUN Server
 
-    Note over S: Start sender (waits for request)
+    Note over S: Start server (waits for request)
     S->>NR: Subscribe to events
     S->>S: Wait for fresh request
 
-    Note over R: Start receiver
-    R->>NR: Subscribe to events
-    R->>R: Generate session_id + timestamp
-    R->>STUN: Gather ICE candidates
-    STUN-->>R: Server reflexive addresses
+    Note over C: Start client
+    C->>NR: Subscribe to events
+    C->>C: Generate session_id + timestamp
+    C->>STUN: Gather ICE candidates
+    STUN-->>C: Server reflexive addresses
 
-    Note over R: Create Request
-    R->>R: Encode ufrag, pwd, candidates, session_id, timestamp, source
-    R->>NR: Publish Request (kind 24242)
+    Note over C: Create Request
+    C->>C: Encode ufrag, pwd, candidates, session_id, timestamp, source
+    C->>NR: Publish Request (kind 24242)
 
     NR-->>S: Deliver Request
     S->>S: Validate timestamp (reject stale)
@@ -800,27 +815,27 @@ sequenceDiagram
     S->>S: Encode ufrag, pwd, candidates, session_id
     S->>NR: Publish Offer (kind 24242)
 
-    NR-->>R: Deliver Offer
-    R->>R: Validate session_id matches
+    NR-->>C: Deliver Offer
+    C->>C: Validate session_id matches
 
-    Note over R: Create Answer
-    R->>R: Encode session_id
-    R->>NR: Publish Answer (kind 24242)
+    Note over C: Create Answer
+    C->>C: Encode session_id
+    C->>NR: Publish Answer (kind 24242)
 
     NR-->>S: Deliver Answer
     S->>S: Validate session_id matches
 
     par ICE Connectivity Checks
-        S->>R: STUN Binding Requests
-        R->>S: STUN Binding Requests
+        S->>C: STUN Binding Requests
+        C->>S: STUN Binding Requests
     end
 
-    Note over S,R: Best candidate pair selected
+    Note over S,C: Best candidate pair selected
 
-    S->>R: QUIC Handshake over ICE socket
-    R-->>S: QUIC Accept
+    S->>C: QUIC Handshake over ICE socket
+    C-->>S: QUIC Accept
 
-    Note over S,R: Encrypted tunnel established
+    Note over S,C: Encrypted tunnel established
 ```
 
 ### Session ID and Stale Event Filtering
@@ -836,7 +851,7 @@ graph TB
         C2[source: requested service]
     end
 
-    subgraph "Sender Validation"
+    subgraph "Server Validation"
         D[Check timestamp age]
         E{Age <= 60s?}
         F[Accept request]
@@ -848,7 +863,7 @@ graph TB
         I[Echo session_id in Answer]
     end
 
-    subgraph "Receiver Validation"
+    subgraph "Client Validation"
         J[Check offer session_id]
         K{Matches request?}
         L[Accept offer]
@@ -929,7 +944,7 @@ graph TB
 ```mermaid
 graph TB
     subgraph "Config File"
-        A[role: sender/receiver]
+        A[role: server/client]
         B[mode: iroh/manual/nostr]
         C[source/target: tcp://host:port or udp://host:port]
     end
@@ -942,10 +957,12 @@ graph TB
 
     subgraph "iroh Options"
         I[secret_file]
+        I2[auth_tokens - server only]
+        I3[auth_token - client only]
         J[relay_urls]
         K[relay_only]
         L[dns_server]
-        M[server_node_id - receiver only]
+        M[server_node_id - client only]
     end
 
     subgraph "manual Options"
@@ -966,6 +983,8 @@ graph TB
     S --> H
 
     E --> I
+    E --> I2
+    E --> I3
     E --> J
     E --> K
     E --> L
@@ -1107,13 +1126,15 @@ graph TB
 
 ### Token Authentication (iroh Mode)
 
-Iroh mode requires authentication using pre-shared tokens. Clients use ephemeral identities but must provide a valid token:
+Iroh mode requires authentication using pre-shared tokens. Clients use ephemeral identities but must provide a valid token. **Authentication is mandatory and must complete successfully before any source requests are permitted.** The client must authenticate via a dedicated auth stream with a valid token within a 10-second timeout immediately after QUIC connection establishment.
 
 1. **Server Configuration**: Server specifies `--auth-tokens` with one or more pre-shared tokens
 2. **Client Configuration**: Client specifies `--auth-token` with the token received from the server admin
-3. **Protocol Flow**: Client sends the token in the `SourceRequest` message (within the encrypted QUIC connection)
-4. **Validation**: Server validates the token using `is_token_valid()`
-5. **Rejection**: Invalid tokens receive a `SourceResponse::rejected()` and the stream is closed
+3. **Protocol Flow**: Client opens a dedicated auth stream immediately after connection and sends an `AuthRequest`. **No source requests are accepted until authentication succeeds.**
+4. **Validation**: Server validates the token using `is_token_valid()` within a 10-second timeout
+5. **Rejection**: Invalid tokens receive an `AuthResponse::rejected()` and the connection is closed immediately
+
+This early validation prevents unauthorized clients from holding open connections or attempting source requests.
 
 ```mermaid
 sequenceDiagram
@@ -1123,18 +1144,31 @@ sequenceDiagram
 
     C->>S: Connect (QUIC TLS handshake)
     S->>C: Accept connection
-    C->>S: SourceRequest {source, auth_token}
+
+    Note over C,S: Auth Phase (10s timeout)
+    C->>S: Open auth stream
+    C->>S: AuthRequest {version, auth_token}
     S->>A: is_token_valid(auth_token, auth_tokens)
     alt Token is valid
         A-->>S: true
-        S->>S: Validate source against allowed networks
-        S->>C: SourceResponse::accepted()
-        Note over S,C: Proceed with tunnel data transfer
+        S->>C: AuthResponse {accepted: true}
+        Note over S,C: Connection authenticated
     else Token is invalid
         A-->>S: false
-        S->>C: SourceResponse::rejected("Invalid authentication token")
-        S->>S: Close stream
+        S->>C: AuthResponse {accepted: false, reason}
+        S->>S: Close connection (error code 1)
+        Note over S,C: Connection rejected
+    else Timeout (no auth within 10s)
+        S->>S: Close connection (error code 2)
+        Note over S,C: Connection rejected
     end
+
+    Note over C,S: Source Request Phase (after successful auth)
+    C->>S: Open source stream
+    C->>S: SourceRequest {source}
+    S->>S: Validate source against allowed networks
+    S->>C: SourceResponse::accepted()
+    Note over S,C: Proceed with tunnel data transfer
 ```
 
 ### Threat Model
@@ -1215,19 +1249,19 @@ sequenceDiagram
 
 ```mermaid
 graph TB
-    subgraph "Receiver Side"
+    subgraph "Client Side"
         A[Listen Socket] --> B[Accept Connection]
         B --> C[TCP Stream]
         C --> D[Async Read/Write]
     end
-    
+
     subgraph "QUIC Tunnel"
         E[Open Bi-Stream]
         F[Send Stream]
         G[Recv Stream]
     end
-    
-    subgraph "Sender Side"
+
+    subgraph "Server Side"
         H[Connect to Target]
         I[TCP Stream]
         J[Async Read/Write]
@@ -1250,19 +1284,19 @@ graph TB
 
 ```mermaid
 graph TB
-    subgraph "Receiver Side"
+    subgraph "Client Side"
         A[UDP Socket] --> B[Receive Packet]
         B --> C[Track Client Address]
         C --> D[Encode: u16 len + data]
     end
-    
+
     subgraph "QUIC Tunnel"
         E[Single Bidirectional Stream]
         F[Send Stream]
         G[Recv Stream]
     end
-    
-    subgraph "Sender Side"
+
+    subgraph "Server Side"
         H[Decode Packet]
         I[Send to Target]
         J[Receive Response]
@@ -1271,7 +1305,7 @@ graph TB
     
     subgraph "Return Path"
         L[Send via QUIC]
-        M[Decode at Receiver]
+        M[Decode at Client]
         N[Send to Client]
     end
     
@@ -1440,12 +1474,12 @@ graph TB
 
 | Mode | Multi-Session | Dynamic Source | Description |
 |------|---------------|----------------|-------------|
-| `iroh` | **Yes** | **Yes** | Multiple receivers, receiver specifies `--source` |
-| `nostr` | **Yes** | **Yes** | Multiple receivers, receiver specifies `--source` |
-| `manual` | No | **Yes** | Single session, receiver specifies `--source` |
+| `iroh` | **Yes** | **Yes** | Multiple clients, client specifies `--source` |
+| `nostr` | **Yes** | **Yes** | Multiple clients, client specifies `--source` |
+| `manual` | No | **Yes** | Single session, client specifies `--source` |
 
-**Multi-Session** = Multiple concurrent connections to the same sender
-**Dynamic Source** = Receiver specifies which service to tunnel (via `--source`)
+**Multi-Session** = Multiple concurrent connections to the same server
+**Dynamic Source** = Client specifies which service to tunnel (via `--source`)
 
 ---
 
@@ -1453,20 +1487,20 @@ graph TB
 
 ### Single Session (Manual Signaling Mode)
 
-The `manual` mode currently supports only one tunnel session at a time per sender instance. Each signaling exchange establishes exactly one tunnel.
+The `manual` mode currently supports only one tunnel session at a time per server instance. Each signaling exchange establishes exactly one tunnel.
 
 ```mermaid
 graph TB
     subgraph "manual Behavior"
-        A[Sender starts] --> B[Wait for receiver offer]
+        A[Server starts] --> B[Wait for client offer]
         B --> C[Validate source request]
         C --> D[Establish single tunnel]
         D --> E[Handle streams over this tunnel]
-        E --> F[Additional receivers timeout]
+        E --> F[Additional clients timeout]
     end
 
     subgraph "Workarounds"
-        G[Run multiple sender instances]
+        G[Run multiple server instances]
         I[Use iroh mode]
     end
 
@@ -1476,12 +1510,12 @@ graph TB
 
 **Why this limitation exists:**
 - Manual signaling mode performs a single offer/answer exchange
-- The sender enters a connection handling loop after establishing the tunnel
+- The server enters a connection handling loop after establishing the tunnel
 - No mechanism to accept additional signaling while serving existing tunnel
 
 **Workarounds:**
-- Use `iroh` mode for multi-receiver support
-- Run separate sender instances for each tunnel
+- Use `iroh` mode for multi-client support
+- Run separate server instances for each tunnel
 
 See [Roadmap](ROADMAP.md) for planned multi-session support.
 

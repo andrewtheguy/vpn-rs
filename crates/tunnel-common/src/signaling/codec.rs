@@ -11,8 +11,8 @@ use serde::{Deserialize, Serialize};
 
 /// Version 1: Custom mode (str0m ICE + quinn QUIC)
 pub const MANUAL_SIGNAL_VERSION: u16 = 1;
-/// Version 2: Iroh multi-source handshake protocol (with token auth)
-pub const IROH_MULTI_VERSION: u16 = 2;
+/// Version 3: Iroh multi-source handshake protocol (with early connection-level auth)
+pub const IROH_MULTI_VERSION: u16 = 3;
 
 pub(crate) const PREFIX: &str = "TRS";
 pub const LINE_WIDTH: usize = 76;
@@ -72,6 +72,19 @@ pub struct ManualRequest {
 /// Maximum length for rejection reason to prevent excessively large messages.
 pub const MAX_REJECT_REASON_LENGTH: usize = 512;
 
+/// Truncate a rejection reason to the maximum allowed length.
+/// If truncation is needed, appends "..." suffix at a valid UTF-8 boundary.
+fn truncate_reason(reason: String, max_len: usize) -> String {
+    const TRUNCATION_SUFFIX: &str = "...";
+    if reason.len() > max_len {
+        let max_content_len = max_len.saturating_sub(TRUNCATION_SUFFIX.len());
+        let truncated = &reason[..reason.floor_char_boundary(max_content_len)];
+        format!("{}{}", truncated, TRUNCATION_SUFFIX)
+    } else {
+        reason
+    }
+}
+
 /// Rejection response from sender when it cannot accept a session (for nostr mode).
 /// Sent when sender is at capacity or otherwise unable to handle the request.
 /// The session_id is echoed from the original request so the receiver can match it.
@@ -96,19 +109,10 @@ impl ManualReject {
     /// Create a new rejection with the given session ID and reason.
     /// The reason will be truncated if it exceeds [`MAX_REJECT_REASON_LENGTH`].
     pub fn new(session_id: String, reason: String) -> Self {
-        const TRUNCATION_SUFFIX: &str = "...";
-        let reason = if reason.len() > MAX_REJECT_REASON_LENGTH {
-            // Reserve space for suffix, then truncate at a valid UTF-8 boundary
-            let max_content_len = MAX_REJECT_REASON_LENGTH.saturating_sub(TRUNCATION_SUFFIX.len());
-            let truncated = &reason[..reason.floor_char_boundary(max_content_len)];
-            format!("{}{}", truncated, TRUNCATION_SUFFIX)
-        } else {
-            reason
-        };
         Self {
             version: MANUAL_SIGNAL_VERSION,
             session_id,
-            reason,
+            reason: truncate_reason(reason, MAX_REJECT_REASON_LENGTH),
         }
     }
 }
@@ -158,21 +162,19 @@ impl std::ops::Deref for AuthToken {
 
 /// Source request sent by receiver after iroh connection established.
 /// Used in iroh multi-source mode to request a specific forwarding target.
+/// Note: Authentication is handled at connection level via AuthRequest/AuthResponse.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SourceRequest {
     pub version: u16,
     /// Requested source endpoint (e.g., "tcp://127.0.0.1:22" or "udp://127.0.0.1:53")
     pub source: String,
-    /// Authentication token (required for server validation)
-    pub auth_token: AuthToken,
 }
 
 impl SourceRequest {
-    pub fn new(source: String, auth_token: impl Into<String>) -> Self {
+    pub fn new(source: String) -> Self {
         Self {
             version: IROH_MULTI_VERSION,
             source,
-            auth_token: AuthToken::new(auth_token),
         }
     }
 }
@@ -198,11 +200,63 @@ impl SourceResponse {
         }
     }
 
+    /// Create a rejection response with the given reason.
+    /// The reason will be truncated if it exceeds [`MAX_REJECT_REASON_LENGTH`].
     pub fn rejected(reason: impl Into<String>) -> Self {
         Self {
             version: IROH_MULTI_VERSION,
             accepted: false,
-            reason: Some(reason.into()),
+            reason: Some(truncate_reason(reason.into(), MAX_REJECT_REASON_LENGTH)),
+        }
+    }
+}
+
+/// Authentication request sent by client immediately after iroh connection.
+/// Must be sent on the first bidirectional stream opened by the client.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuthRequest {
+    pub version: u16,
+    /// Authentication token for server validation
+    pub auth_token: AuthToken,
+}
+
+impl AuthRequest {
+    pub fn new(auth_token: impl Into<String>) -> Self {
+        Self {
+            version: IROH_MULTI_VERSION,
+            auth_token: AuthToken::new(auth_token),
+        }
+    }
+}
+
+/// Authentication response from server to client.
+/// Sent in response to AuthRequest on the auth stream.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuthResponse {
+    pub version: u16,
+    /// Whether authentication was accepted
+    pub accepted: bool,
+    /// Reason for rejection (if rejected)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+impl AuthResponse {
+    pub fn accepted() -> Self {
+        Self {
+            version: IROH_MULTI_VERSION,
+            accepted: true,
+            reason: None,
+        }
+    }
+
+    /// Create a rejection response with the given reason.
+    /// The reason will be truncated if it exceeds [`MAX_REJECT_REASON_LENGTH`].
+    pub fn rejected(reason: impl Into<String>) -> Self {
+        Self {
+            version: IROH_MULTI_VERSION,
+            accepted: false,
+            reason: Some(truncate_reason(reason.into(), MAX_REJECT_REASON_LENGTH)),
         }
     }
 }
@@ -418,6 +472,36 @@ pub fn decode_source_response(data: &[u8]) -> Result<SourceResponse> {
     )
 }
 
+/// Encode an AuthRequest as length-prefixed JSON bytes.
+pub fn encode_auth_request(req: &AuthRequest) -> Result<Vec<u8>> {
+    encode_length_prefixed(req, "AuthRequest")
+}
+
+/// Decode an AuthRequest from length-prefixed JSON bytes.
+pub fn decode_auth_request(data: &[u8]) -> Result<AuthRequest> {
+    decode_length_prefixed(
+        data,
+        IROH_MULTI_VERSION,
+        |r: &AuthRequest| r.version,
+        "AuthRequest",
+    )
+}
+
+/// Encode an AuthResponse as length-prefixed JSON bytes.
+pub fn encode_auth_response(resp: &AuthResponse) -> Result<Vec<u8>> {
+    encode_length_prefixed(resp, "AuthResponse")
+}
+
+/// Decode an AuthResponse from length-prefixed JSON bytes.
+pub fn decode_auth_response(data: &[u8]) -> Result<AuthResponse> {
+    decode_length_prefixed(
+        data,
+        IROH_MULTI_VERSION,
+        |r: &AuthResponse| r.version,
+        "AuthResponse",
+    )
+}
+
 /// Read a length-prefixed message from a stream.
 /// Returns the raw bytes including the length prefix.
 pub async fn read_length_prefixed<R: tokio::io::AsyncReadExt + Unpin>(
@@ -474,20 +558,12 @@ mod tests {
     }
 
     #[test]
-    fn test_source_request_debug_redacts_token() {
-        let request = SourceRequest::new("tcp://127.0.0.1:22".to_string(), "secret_auth_token");
-        let debug_output = format!("{:?}", request);
-        assert!(debug_output.contains("AuthToken(***)"));
-        assert!(!debug_output.contains("secret_auth_token"));
-    }
-
-    #[test]
     fn test_source_request_serde_roundtrip() {
-        let request = SourceRequest::new("tcp://127.0.0.1:22".to_string(), "my_auth_token_123");
+        let request = SourceRequest::new("tcp://127.0.0.1:22".to_string());
         let encoded = encode_source_request(&request).unwrap();
         let decoded = decode_source_request(&encoded).unwrap();
         assert_eq!(decoded.source, "tcp://127.0.0.1:22");
-        assert_eq!(decoded.auth_token.as_str(), "my_auth_token_123");
+        assert_eq!(decoded.version, IROH_MULTI_VERSION);
     }
 
     #[test]
@@ -525,5 +601,56 @@ mod tests {
         let json = serde_json::to_string(&token).unwrap();
         let parsed: AuthToken = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.as_str(), special_token);
+    }
+
+    #[test]
+    fn test_truncate_reason_no_truncation() {
+        let reason = "short reason".to_string();
+        let result = truncate_reason(reason.clone(), 100);
+        assert_eq!(result, reason);
+    }
+
+    #[test]
+    fn test_truncate_reason_exact_limit() {
+        let reason = "x".repeat(10);
+        let result = truncate_reason(reason.clone(), 10);
+        assert_eq!(result, reason); // No truncation at exact limit
+    }
+
+    #[test]
+    fn test_truncate_reason_ascii_truncation() {
+        let reason = "a".repeat(20);
+        let result = truncate_reason(reason, 10);
+        assert_eq!(result, "aaaaaaa..."); // 7 chars + "..."
+        assert_eq!(result.len(), 10);
+    }
+
+    #[test]
+    fn test_truncate_reason_utf8_safe_truncation() {
+        // "é" is 2 bytes in UTF-8
+        let reason = "ééééé".to_string(); // 10 bytes
+        let result = truncate_reason(reason, 8);
+        // Should truncate at valid UTF-8 boundary
+        // max_content_len = 8 - 3 = 5, floor_char_boundary(5) = 4 (2 chars)
+        assert_eq!(result, "éé...");
+        assert!(result.len() <= 8);
+    }
+
+    #[test]
+    fn test_truncate_reason_emoji_safe_truncation() {
+        // "🔐" is 4 bytes in UTF-8
+        let reason = "🔐🔐🔐".to_string(); // 12 bytes
+        let result = truncate_reason(reason, 10);
+        // max_content_len = 10 - 3 = 7, floor_char_boundary(7) = 4 (1 emoji)
+        assert_eq!(result, "🔐...");
+        assert!(result.len() <= 10);
+    }
+
+    #[test]
+    fn test_truncate_reason_suffix_only_edge_case() {
+        let reason = "abcdef".to_string();
+        let result = truncate_reason(reason, 3);
+        // max_content_len = 3 - 3 = 0, so just suffix
+        assert_eq!(result, "...");
     }
 }
