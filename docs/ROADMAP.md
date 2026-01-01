@@ -265,6 +265,66 @@ owner = "node_id_b"  # Redirect to Server B
 
 ---
 
+#### Native VPN Mode
+
+**Status:** Idea
+
+Full VPN functionality using IP-over-QUIC, eliminating the need for external VPN solutions like WireGuard.
+
+**Motivation:**
+Traditional VPNs like WireGuard require static keypair configuration per device. If two devices share the same config, they conflict. tunnel-rs can avoid this by using iroh node IDs as identity - each client is inherently unique.
+
+**Concept:**
+- Client creates TUN device, routes traffic through QUIC tunnel to server
+- Server assigns unique internal IP based on client's iroh node_id
+- Server routes traffic to destination (with NAT/masquerade for internet)
+- No keypairs to manage - just auth token
+
+**Architecture:**
+```
+Client (node_id: abc123)                Server
+    │                                      │
+  [tun0: 10.0.0.2] ──QUIC──> [assigns IP based on node_id]
+                                           │
+                              [tun0: 10.0.0.1] ──> Internet/LAN
+```
+
+**Proposed CLI:**
+```bash
+# Server: assign IPs from network, self gets .1
+tunnel-rs vpn server --network 10.0.0.0/24
+
+# Client: auto-assigned IP, routes traffic through tunnel
+tunnel-rs vpn client --server-node-id <id> --auth-token <token>
+```
+
+**Implementation Requirements:**
+- TUN device via `tun-rs` crate (cross-platform: Linux, macOS, Windows, iOS, Android)
+- IP assignment protocol (server tracks node_id → IP mapping)
+- Length-prefixed IP packet framing over QUIC (reuse existing helpers)
+- Platform-specific routing setup
+- Privilege handling (CAP_NET_ADMIN on Linux, root on macOS)
+
+**Phases:**
+1. **MVP**: TUN device, IP assignment, basic packet forwarding (Linux)
+2. **Production**: Privilege dropping, reconnection, multi-client, DNS
+3. **Advanced**: Split tunneling, peer-to-peer mesh, mobile support
+
+**Advantages over WireGuard:**
+| Feature | WireGuard | tunnel-rs VPN |
+|---------|-----------|---------------|
+| Identity | Static keypair | iroh node_id (dynamic) |
+| Config conflict | Same key = conflict | Each client unique |
+| NAT traversal | Manual setup | Built-in via iroh |
+| IP assignment | Static in config | Dynamic from server |
+
+**Complexity:** High
+- Platform-specific TUN handling
+- Routing table manipulation
+- ~2 weeks MVP for Linux, additional time for other platforms
+
+---
+
 ## Contributing
 
 Feature requests and contributions are welcome. Please open an issue on GitHub to discuss proposed changes before submitting a pull request.
