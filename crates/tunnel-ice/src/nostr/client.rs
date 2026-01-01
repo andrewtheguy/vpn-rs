@@ -59,6 +59,64 @@ use crate::tunnel_common::{
 };
 
 // ============================================================================
+// Validation and Setup Helpers
+// ============================================================================
+
+/// Validates a source URL has the expected scheme and required host/port.
+fn validate_source_url(source: &str, expected_scheme: &str) -> Result<url::Url> {
+    let source_url = url::Url::parse(source).with_context(|| {
+        format!(
+            "Invalid source URL '{}'. Expected format: {}://host:port",
+            source, expected_scheme
+        )
+    })?;
+
+    if source_url.scheme() != expected_scheme {
+        anyhow::bail!(
+            "Source URL must use {}:// scheme (got '{}://')",
+            expected_scheme,
+            source_url.scheme()
+        );
+    }
+    if source_url.host_str().is_none() {
+        anyhow::bail!("Source URL '{}' missing host", source);
+    }
+    if source_url.port().is_none() {
+        anyhow::bail!("Source URL '{}' missing port", source);
+    }
+
+    Ok(source_url)
+}
+
+/// Converts a relay list to Option, returning None if empty.
+fn relays_to_option(relays: Vec<String>) -> Option<Vec<String>> {
+    if relays.is_empty() {
+        None
+    } else {
+        Some(relays)
+    }
+}
+
+/// Creates and initializes a NostrSignaling client with subscription.
+async fn init_signaling(
+    nsec: &str,
+    peer_npub: &str,
+    relays: Option<Vec<String>>,
+    source: &str,
+) -> Result<NostrSignaling> {
+    let signaling = NostrSignaling::new(nsec, peer_npub, relays).await?;
+
+    log::info!("Your pubkey: {}", signaling.public_key_bech32());
+    log::info!("Transfer ID: {}", signaling.transfer_id());
+    log::info!("Relays: {:?}", signaling.relay_urls());
+    log::info!("Requesting source: {}", source);
+
+    signaling.subscribe().await?;
+
+    Ok(signaling)
+}
+
+// ============================================================================
 // Nostr Signaling Helpers
 // ============================================================================
 
@@ -125,25 +183,8 @@ pub async fn run_nostr_tcp_client(config: NostrClientConfig) -> Result<()> {
     // Ensure crypto provider is installed before nostr-sdk uses rustls
     quic::ensure_crypto_provider();
 
-    // Validate source URL locally before publishing request
-    let source_url = url::Url::parse(&config.source).with_context(|| {
-        format!(
-            "Invalid source URL '{}'. Expected format: tcp://host:port",
-            config.source
-        )
-    })?;
-    if source_url.scheme() != "tcp" {
-        anyhow::bail!(
-            "Source URL must use tcp:// scheme for TCP client (got '{}://'). Use run_nostr_udp_client for udp://",
-            source_url.scheme()
-        );
-    }
-    if source_url.host_str().is_none() {
-        anyhow::bail!("Source URL '{}' missing host", config.source);
-    }
-    if source_url.port().is_none() {
-        anyhow::bail!("Source URL '{}' missing port", config.source);
-    }
+    // Validate source URL
+    let _source_url = validate_source_url(&config.source, "tcp")?;
 
     let listen_addr: SocketAddr = resolve_listen_addr(&config.listen)
         .await
@@ -152,21 +193,9 @@ pub async fn run_nostr_tcp_client(config: NostrClientConfig) -> Result<()> {
     log::info!("Nostr TCP Tunnel - Client Mode");
     log::info!("===============================");
 
-    // Create Nostr signaling client
-    let relay_list = if config.relays.is_empty() {
-        None
-    } else {
-        Some(config.relays)
-    };
-    let signaling = NostrSignaling::new(&config.nsec, &config.peer_npub, relay_list).await?;
-
-    log::info!("Your pubkey: {}", signaling.public_key_bech32());
-    log::info!("Transfer ID: {}", signaling.transfer_id());
-    log::info!("Relays: {:?}", signaling.relay_urls());
-    log::info!("Requesting source: {}", config.source);
-
-    // Subscribe to incoming events
-    signaling.subscribe().await?;
+    // Create and initialize signaling
+    let relay_list = relays_to_option(config.relays);
+    let signaling = init_signaling(&config.nsec, &config.peer_npub, relay_list, &config.source).await?;
 
     // Generate session ID to filter stale events
     let session_id = generate_session_id();
@@ -348,25 +377,8 @@ pub async fn run_nostr_udp_client(config: NostrClientConfig) -> Result<()> {
     // Ensure crypto provider is installed before nostr-sdk uses rustls
     quic::ensure_crypto_provider();
 
-    // Validate source URL locally before publishing request
-    let source_url = url::Url::parse(&config.source).with_context(|| {
-        format!(
-            "Invalid source URL '{}'. Expected format: udp://host:port",
-            config.source
-        )
-    })?;
-    if source_url.scheme() != "udp" {
-        anyhow::bail!(
-            "Source URL must use udp:// scheme for UDP client (got '{}://'). Use run_nostr_tcp_client for tcp://",
-            source_url.scheme()
-        );
-    }
-    if source_url.host_str().is_none() {
-        anyhow::bail!("Source URL '{}' missing host", config.source);
-    }
-    if source_url.port().is_none() {
-        anyhow::bail!("Source URL '{}' missing port", config.source);
-    }
+    // Validate source URL
+    let _source_url = validate_source_url(&config.source, "udp")?;
 
     let listen_addr: SocketAddr = resolve_listen_addr(&config.listen)
         .await
@@ -375,21 +387,9 @@ pub async fn run_nostr_udp_client(config: NostrClientConfig) -> Result<()> {
     log::info!("Nostr UDP Tunnel - Client Mode");
     log::info!("===============================");
 
-    // Create Nostr signaling client
-    let relay_list = if config.relays.is_empty() {
-        None
-    } else {
-        Some(config.relays)
-    };
-    let signaling = NostrSignaling::new(&config.nsec, &config.peer_npub, relay_list).await?;
-
-    log::info!("Your pubkey: {}", signaling.public_key_bech32());
-    log::info!("Transfer ID: {}", signaling.transfer_id());
-    log::info!("Relays: {:?}", signaling.relay_urls());
-    log::info!("Requesting source: {}", config.source);
-
-    // Subscribe to incoming events
-    signaling.subscribe().await?;
+    // Create and initialize signaling
+    let relay_list = relays_to_option(config.relays);
+    let signaling = init_signaling(&config.nsec, &config.peer_npub, relay_list, &config.source).await?;
 
     // Generate session ID to filter stale events
     let session_id = generate_session_id();
