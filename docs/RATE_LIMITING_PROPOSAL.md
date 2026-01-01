@@ -91,8 +91,9 @@ struct TokenFailureRecord {
 - `--global-auth-failure-window <SECONDS>` (default: 10)
 - `--global-auth-failure-threshold <N>` (default: 10 unique tokens)
 - `--global-lockout-duration <SECONDS>` (default: 60)
+- `--lockout-log-sample-interval <N>` (default: 100) - log every Nth rejection during lockout
 
-Config file options: `max_token_auth_failures`, `token_lockout_duration`, `global_auth_failure_window`, `global_auth_failure_threshold`, `global_lockout_duration`
+Config file options: `max_token_auth_failures`, `token_lockout_duration`, `global_auth_failure_window`, `global_auth_failure_threshold`, `global_lockout_duration`, `lockout_log_sample_interval`
 
 ### Logging
 
@@ -118,7 +119,7 @@ Config file options: `max_token_auth_failures`, `token_lockout_duration`, `globa
    - Record failure on invalid token (closes connection immediately)
 
 3. **`crates/tunnel-rs/src/main.rs`**
-   - Add CLI args: `--max-token-auth-failures`, `--token-lockout-duration`, `--global-auth-failure-window`, `--global-auth-failure-threshold`, `--global-lockout-duration`
+   - Add CLI args: `--max-token-auth-failures`, `--token-lockout-duration`, `--global-auth-failure-window`, `--global-auth-failure-threshold`, `--global-lockout-duration`, `--lockout-log-sample-interval`
    - Add to `ServerIrohParams` struct
 
 4. **`crates/tunnel-common/src/config.rs`**
@@ -127,6 +128,7 @@ Config file options: `max_token_auth_failures`, `token_lockout_duration`, `globa
    - Add `global_auth_failure_window: Option<u64>` to `IrohConfig`
    - Add `global_auth_failure_threshold: Option<u32>` to `IrohConfig`
    - Add `global_lockout_duration: Option<u64>` to `IrohConfig`
+   - Add `lockout_log_sample_interval: Option<u64>` to `IrohConfig`
 
 5. **`server.toml.example`**
    - Add commented examples for new config options
@@ -179,6 +181,7 @@ impl AuthRateLimiter {
         global_failure_window: Duration,
         global_failure_threshold: u32,
         global_lockout_duration: Duration,
+        lockout_log_sample_interval: u64,
     ) -> Self {
         Self {
             token_failures: DashMap::new(),
@@ -190,7 +193,7 @@ impl AuthRateLimiter {
             global_failure_threshold,
             global_lockout_duration,
             lockout_rejections: AtomicU64::new(0),
-            lockout_log_sample_interval: 100,  // Log every 100th rejection; adjust as needed
+            lockout_log_sample_interval,
             valid_tokens,
         }
     }
@@ -313,6 +316,7 @@ CLI / config.toml
 │   global_auth_failure_window: u64,   // default 10s   │
 │   global_auth_failure_threshold: u32, // default 10   │
 │   global_lockout_duration: u64,      // default 60s   │
+│   lockout_log_sample_interval: u64,  // default 100   │
 │   ...                                           │
 │ }                                               │
 └─────────────────────────────────────────────────┘
@@ -328,6 +332,7 @@ AuthRateLimiter::new(
     Duration::from_secs(params.global_auth_failure_window),
     params.global_auth_failure_threshold,
     Duration::from_secs(params.global_lockout_duration),
+    params.lockout_log_sample_interval,
 )
 ```
 
@@ -336,6 +341,10 @@ In `main.rs`, CLI args merge with config file (CLI takes precedence):
 let max_token_auth_failures = args.max_token_auth_failures
     .or(config.iroh.as_ref().and_then(|c| c.max_token_auth_failures))
     .unwrap_or(5);
+
+let lockout_log_sample_interval = args.lockout_log_sample_interval
+    .or(config.iroh.as_ref().and_then(|c| c.lockout_log_sample_interval))
+    .unwrap_or(100);
 ```
 
 #### In `multi_source.rs` - Integration:
@@ -349,6 +358,7 @@ let rate_limiter = Arc::new(AuthRateLimiter::new(
     Duration::from_secs(params.global_auth_failure_window),
     params.global_auth_failure_threshold,
     Duration::from_secs(params.global_lockout_duration),
+    params.lockout_log_sample_interval,
 ));
 
 // In handle_multi_source_connection(), during auth phase:
