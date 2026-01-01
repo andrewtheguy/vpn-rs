@@ -14,8 +14,8 @@ use tokio::net::{lookup_host, TcpStream, UdpSocket};
 
 // Re-export shared address resolution functions from tunnel-common
 pub use tunnel_common::net::{
-    order_by_loopback_preference, resolve_all_target_addrs, resolve_listen_addr,
-    resolve_listen_addrs, try_connect_tcp,
+    order_by_loopback_preference, order_udp_addresses, resolve_all_target_addrs,
+    resolve_listen_addr, resolve_listen_addrs, try_connect_tcp,
 };
 
 /// Timeout for QUIC connection (matches webrtc crate's 180 second connection timeout)
@@ -85,9 +85,8 @@ pub async fn bind_udp_for_targets(addrs: &[SocketAddr]) -> Result<UdpSocket> {
     }
 
     let has_ipv6 = addrs.iter().any(|a| a.is_ipv6());
-    let has_ipv4 = addrs.iter().any(|a| a.is_ipv4());
 
-    let bind_addr: SocketAddr = if has_ipv6 || (has_ipv4 && has_ipv6) {
+    let bind_addr: SocketAddr = if has_ipv6 {
         // Use IPv6 for dual-stack capability
         "[::]:0".parse().unwrap()
     } else {
@@ -98,28 +97,6 @@ pub async fn bind_udp_for_targets(addrs: &[SocketAddr]) -> Result<UdpSocket> {
     UdpSocket::bind(bind_addr)
         .await
         .with_context(|| format!("Failed to bind UDP socket to {}", bind_addr))
-}
-
-/// Order addresses for UDP connection attempts (Happy Eyeballs style).
-/// Returns addresses with IPv6 first, then IPv4.
-pub fn order_udp_addresses(addrs: &[SocketAddr]) -> Vec<SocketAddr> {
-    let (ipv6, ipv4): (Vec<SocketAddr>, Vec<SocketAddr>) =
-        addrs.iter().copied().partition(|a| a.is_ipv6());
-
-    let mut ordered = Vec::with_capacity(addrs.len());
-    let mut v6_iter = ipv6.into_iter();
-    let mut v4_iter = ipv4.into_iter();
-
-    // Interleave addresses: IPv6 first, then alternate
-    while ordered.len() < addrs.len() {
-        if let Some(addr) = v6_iter.next() {
-            ordered.push(addr);
-        }
-        if let Some(addr) = v4_iter.next() {
-            ordered.push(addr);
-        }
-    }
-    ordered
 }
 
 // ============================================================================
@@ -342,7 +319,6 @@ where
             operation_name
         ));
     }
-    debug_assert!(max_attempts > 0, "max_attempts must be > 0");
 
     for attempt in 0..max_attempts {
         match operation().await {
@@ -438,10 +414,10 @@ pub async fn handle_tcp_server_stream(
         .await
         .context("Failed to connect to target TCP service")?;
 
-    let local_addr = tcp_stream.peer_addr().ok();
-    log::info!("-> Connected to target {:?}", local_addr);
+    let peer_addr = tcp_stream.peer_addr().ok();
+    log::info!("-> Connected to target {:?}", peer_addr);
     bridge_quinn_streams(recv_stream, send_stream, tcp_stream).await?;
-    log::info!("<- TCP connection to {:?} closed", local_addr);
+    log::info!("<- TCP connection to {:?} closed", peer_addr);
     Ok(())
 }
 
@@ -549,8 +525,6 @@ pub async fn forward_stream_to_udp_server(
 
     // Order addresses for connection attempts
     let ordered_addrs = order_udp_addresses(&target_addrs);
-    let current_addr_idx = std::sync::atomic::AtomicUsize::new(0);
-    let current_addr_idx = Arc::new(current_addr_idx);
 
     let udp_clone = udp_socket.clone();
     let response_task = tokio::spawn(async move {
@@ -600,9 +574,6 @@ pub async fn forward_stream_to_udp_server(
                                 active_addr_idx
                             );
                         }
-                        // Update shared index for any monitoring
-                        current_addr_idx
-                            .store(active_addr_idx, std::sync::atomic::Ordering::Relaxed);
                         logged_active = true;
                     }
                     log::debug!("<- Forwarded {} bytes to {}", len, target_addr);

@@ -258,22 +258,26 @@ pub async fn try_connect_tcp(addrs: &[SocketAddr]) -> Result<TcpStream> {
 // UDP address ordering
 // ============================================================================
 
-/// Order UDP target addresses to prefer IPv6 first, then IPv4, to maximize reachability.
+/// Order UDP target addresses for connection attempts (Happy Eyeballs style).
+/// Interleaves addresses: IPv6 preferred first, then alternates IPv4 and IPv6.
+/// Preserves original counts and alternates until all addresses are consumed.
 pub fn order_udp_addresses(addrs: &[SocketAddr]) -> Vec<SocketAddr> {
-    let mut ipv6 = Vec::new();
-    let mut ipv4 = Vec::new();
-
-    for addr in addrs {
-        if addr.is_ipv6() {
-            ipv6.push(*addr);
-        } else {
-            ipv4.push(*addr);
-        }
-    }
+    let (ipv6, ipv4): (Vec<SocketAddr>, Vec<SocketAddr>) =
+        addrs.iter().copied().partition(|a| a.is_ipv6());
 
     let mut ordered = Vec::with_capacity(addrs.len());
-    ordered.extend(ipv6);
-    ordered.extend(ipv4);
+    let mut v6_iter = ipv6.into_iter();
+    let mut v4_iter = ipv4.into_iter();
+
+    // Interleave addresses: IPv6 first, then alternate
+    while ordered.len() < addrs.len() {
+        if let Some(addr) = v6_iter.next() {
+            ordered.push(addr);
+        }
+        if let Some(addr) = v4_iter.next() {
+            ordered.push(addr);
+        }
+    }
     ordered
 }
 
@@ -564,5 +568,87 @@ mod tests {
 
         let is_loopback = addrs.iter().all(|a| a.ip().is_loopback());
         assert!(!is_loopback);
+    }
+
+    #[test]
+    fn test_order_udp_addresses_empty() {
+        let result = order_udp_addresses(&[]);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_order_udp_addresses_only_ipv4() {
+        let addrs = vec![
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)), 8080),
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 8080),
+        ];
+        let result = order_udp_addresses(&addrs);
+        assert_eq!(result.len(), 2);
+        assert!(result.iter().all(|a| a.is_ipv4()));
+    }
+
+    #[test]
+    fn test_order_udp_addresses_only_ipv6() {
+        let addrs = vec![
+            SocketAddr::new(IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1)), 8080),
+            SocketAddr::new(IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 2)), 8080),
+        ];
+        let result = order_udp_addresses(&addrs);
+        assert_eq!(result.len(), 2);
+        assert!(result.iter().all(|a| a.is_ipv6()));
+    }
+
+    #[test]
+    fn test_order_udp_addresses_interleaves_ipv6_first() {
+        let v4_1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)), 8080);
+        let v4_2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 8080);
+        let v6_1 = SocketAddr::new(IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1)), 8080);
+        let v6_2 = SocketAddr::new(IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 2)), 8080);
+
+        // Input: v4, v4, v6, v6
+        let addrs = vec![v4_1, v4_2, v6_1, v6_2];
+        let result = order_udp_addresses(&addrs);
+
+        // Expected: v6, v4, v6, v4 (interleaved with IPv6 first)
+        assert_eq!(result.len(), 4);
+        assert!(result[0].is_ipv6(), "First should be IPv6");
+        assert!(result[1].is_ipv4(), "Second should be IPv4");
+        assert!(result[2].is_ipv6(), "Third should be IPv6");
+        assert!(result[3].is_ipv4(), "Fourth should be IPv4");
+    }
+
+    #[test]
+    fn test_order_udp_addresses_unequal_counts() {
+        let v4_1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)), 8080);
+        let v6_1 = SocketAddr::new(IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1)), 8080);
+        let v6_2 = SocketAddr::new(IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 2)), 8080);
+        let v6_3 = SocketAddr::new(IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 3)), 8080);
+
+        // Input: 1 IPv4, 3 IPv6
+        let addrs = vec![v4_1, v6_1, v6_2, v6_3];
+        let result = order_udp_addresses(&addrs);
+
+        // Expected: v6, v4, v6, v6 (all addresses consumed)
+        assert_eq!(result.len(), 4);
+        assert!(result[0].is_ipv6(), "First should be IPv6");
+        assert!(result[1].is_ipv4(), "Second should be IPv4");
+        assert!(result[2].is_ipv6(), "Third should be IPv6");
+        assert!(result[3].is_ipv6(), "Fourth should be IPv6");
+    }
+
+    #[test]
+    fn test_order_udp_addresses_preserves_all_addresses() {
+        let v4_1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)), 8080);
+        let v4_2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 8081);
+        let v6_1 = SocketAddr::new(IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1)), 8082);
+
+        let addrs = vec![v4_1, v4_2, v6_1];
+        let result = order_udp_addresses(&addrs);
+
+        // All original addresses should be present
+        assert_eq!(result.len(), 3);
+        assert!(result.contains(&v4_1));
+        assert!(result.contains(&v4_2));
+        assert!(result.contains(&v6_1));
     }
 }
