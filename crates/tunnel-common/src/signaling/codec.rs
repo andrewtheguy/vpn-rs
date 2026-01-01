@@ -72,6 +72,19 @@ pub struct ManualRequest {
 /// Maximum length for rejection reason to prevent excessively large messages.
 pub const MAX_REJECT_REASON_LENGTH: usize = 512;
 
+/// Truncate a rejection reason to the maximum allowed length.
+/// If truncation is needed, appends "..." suffix at a valid UTF-8 boundary.
+fn truncate_reason(reason: String, max_len: usize) -> String {
+    const TRUNCATION_SUFFIX: &str = "...";
+    if reason.len() > max_len {
+        let max_content_len = max_len.saturating_sub(TRUNCATION_SUFFIX.len());
+        let truncated = &reason[..reason.floor_char_boundary(max_content_len)];
+        format!("{}{}", truncated, TRUNCATION_SUFFIX)
+    } else {
+        reason
+    }
+}
+
 /// Rejection response from sender when it cannot accept a session (for nostr mode).
 /// Sent when sender is at capacity or otherwise unable to handle the request.
 /// The session_id is echoed from the original request so the receiver can match it.
@@ -96,19 +109,10 @@ impl ManualReject {
     /// Create a new rejection with the given session ID and reason.
     /// The reason will be truncated if it exceeds [`MAX_REJECT_REASON_LENGTH`].
     pub fn new(session_id: String, reason: String) -> Self {
-        const TRUNCATION_SUFFIX: &str = "...";
-        let reason = if reason.len() > MAX_REJECT_REASON_LENGTH {
-            // Reserve space for suffix, then truncate at a valid UTF-8 boundary
-            let max_content_len = MAX_REJECT_REASON_LENGTH.saturating_sub(TRUNCATION_SUFFIX.len());
-            let truncated = &reason[..reason.floor_char_boundary(max_content_len)];
-            format!("{}{}", truncated, TRUNCATION_SUFFIX)
-        } else {
-            reason
-        };
         Self {
             version: MANUAL_SIGNAL_VERSION,
             session_id,
-            reason,
+            reason: truncate_reason(reason, MAX_REJECT_REASON_LENGTH),
         }
     }
 }
@@ -196,11 +200,13 @@ impl SourceResponse {
         }
     }
 
+    /// Create a rejection response with the given reason.
+    /// The reason will be truncated if it exceeds [`MAX_REJECT_REASON_LENGTH`].
     pub fn rejected(reason: impl Into<String>) -> Self {
         Self {
             version: IROH_MULTI_VERSION,
             accepted: false,
-            reason: Some(reason.into()),
+            reason: Some(truncate_reason(reason.into(), MAX_REJECT_REASON_LENGTH)),
         }
     }
 }
@@ -245,23 +251,12 @@ impl AuthResponse {
     }
 
     /// Create a rejection response with the given reason.
-    /// The reason will be truncated at a UTF-8 boundary with "..." appended
-    /// if it exceeds [`MAX_REJECT_REASON_LENGTH`] bytes.
+    /// The reason will be truncated if it exceeds [`MAX_REJECT_REASON_LENGTH`].
     pub fn rejected(reason: impl Into<String>) -> Self {
-        const TRUNCATION_SUFFIX: &str = "...";
-        let reason_str = reason.into();
-        let truncated = if reason_str.len() > MAX_REJECT_REASON_LENGTH {
-            // Reserve space for suffix, then truncate at a valid UTF-8 boundary
-            let max_content_len = MAX_REJECT_REASON_LENGTH.saturating_sub(TRUNCATION_SUFFIX.len());
-            let truncated = &reason_str[..reason_str.floor_char_boundary(max_content_len)];
-            format!("{}{}", truncated, TRUNCATION_SUFFIX)
-        } else {
-            reason_str
-        };
         Self {
             version: IROH_MULTI_VERSION,
             accepted: false,
-            reason: Some(truncated),
+            reason: Some(truncate_reason(reason.into(), MAX_REJECT_REASON_LENGTH)),
         }
     }
 }
@@ -606,5 +601,56 @@ mod tests {
         let json = serde_json::to_string(&token).unwrap();
         let parsed: AuthToken = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.as_str(), special_token);
+    }
+
+    #[test]
+    fn test_truncate_reason_no_truncation() {
+        let reason = "short reason".to_string();
+        let result = truncate_reason(reason.clone(), 100);
+        assert_eq!(result, reason);
+    }
+
+    #[test]
+    fn test_truncate_reason_exact_limit() {
+        let reason = "x".repeat(10);
+        let result = truncate_reason(reason.clone(), 10);
+        assert_eq!(result, reason); // No truncation at exact limit
+    }
+
+    #[test]
+    fn test_truncate_reason_ascii_truncation() {
+        let reason = "a".repeat(20);
+        let result = truncate_reason(reason, 10);
+        assert_eq!(result, "aaaaaaa..."); // 7 chars + "..."
+        assert_eq!(result.len(), 10);
+    }
+
+    #[test]
+    fn test_truncate_reason_utf8_safe_truncation() {
+        // "é" is 2 bytes in UTF-8
+        let reason = "ééééé".to_string(); // 10 bytes
+        let result = truncate_reason(reason, 8);
+        // Should truncate at valid UTF-8 boundary
+        // max_content_len = 8 - 3 = 5, floor_char_boundary(5) = 4 (2 chars)
+        assert_eq!(result, "éé...");
+        assert!(result.len() <= 8);
+    }
+
+    #[test]
+    fn test_truncate_reason_emoji_safe_truncation() {
+        // "🔐" is 4 bytes in UTF-8
+        let reason = "🔐🔐🔐".to_string(); // 12 bytes
+        let result = truncate_reason(reason, 10);
+        // max_content_len = 10 - 3 = 7, floor_char_boundary(7) = 4 (1 emoji)
+        assert_eq!(result, "🔐...");
+        assert!(result.len() <= 10);
+    }
+
+    #[test]
+    fn test_truncate_reason_suffix_only_edge_case() {
+        let reason = "abcdef".to_string();
+        let result = truncate_reason(reason, 3);
+        // max_content_len = 3 - 3 = 0, so just suffix
+        assert_eq!(result, "...");
     }
 }
