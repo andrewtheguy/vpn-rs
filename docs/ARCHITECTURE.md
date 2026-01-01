@@ -944,7 +944,7 @@ graph TB
 ```mermaid
 graph TB
     subgraph "Config File"
-        A[role: sender/receiver]
+        A[role: server/client]
         B[mode: iroh/manual/nostr]
         C[source/target: tcp://host:port or udp://host:port]
     end
@@ -957,12 +957,12 @@ graph TB
 
     subgraph "iroh Options"
         I[secret_file]
-        I2[auth_tokens - sender only]
-        I3[auth_token - receiver only]
+        I2[auth_tokens - server only]
+        I3[auth_token - client only]
         J[relay_urls]
         K[relay_only]
         L[dns_server]
-        M[server_node_id - receiver only]
+        M[server_node_id - client only]
     end
 
     subgraph "manual Options"
@@ -1510,12 +1510,12 @@ graph TB
 
 **Why this limitation exists:**
 - Manual signaling mode performs a single offer/answer exchange
-- The sender enters a connection handling loop after establishing the tunnel
+- The server enters a connection handling loop after establishing the tunnel
 - No mechanism to accept additional signaling while serving existing tunnel
 
 **Workarounds:**
-- Use `iroh` mode for multi-receiver support
-- Run separate sender instances for each tunnel
+- Use `iroh` mode for multi-client support
+- Run separate server instances for each tunnel
 
 See [Roadmap](ROADMAP.md) for planned multi-session support.
 
