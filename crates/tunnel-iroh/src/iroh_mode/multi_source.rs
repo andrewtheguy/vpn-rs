@@ -16,14 +16,69 @@ use tokio::task::JoinSet;
 
 /// Configuration for the multi-source server.
 pub struct MultiSourceServerConfig {
+    /// Allowed TCP destination networks in CIDR notation (e.g., "127.0.0.0/8").
     pub allowed_tcp: Vec<String>,
+    /// Allowed UDP destination networks in CIDR notation.
     pub allowed_udp: Vec<String>,
+    /// Maximum number of concurrent sessions (None = use default).
     pub max_sessions: Option<usize>,
+    /// Iroh secret key for the endpoint. **Sensitive field - redacted in Debug output.**
     pub secret: Option<SecretKey>,
+    /// Iroh relay URLs.
     pub relay_urls: Vec<String>,
+    /// Whether to use relay-only mode (requires test-utils feature).
     pub relay_only: bool,
+    /// Custom DNS server for resolution.
     pub dns_server: Option<String>,
+    /// Set of valid authentication tokens. **Sensitive field - redacted in Debug output.**
     pub auth_tokens: HashSet<String>,
+}
+
+impl std::fmt::Debug for MultiSourceServerConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MultiSourceServerConfig")
+            .field("allowed_tcp", &self.allowed_tcp)
+            .field("allowed_udp", &self.allowed_udp)
+            .field("max_sessions", &self.max_sessions)
+            .field("secret", &self.secret.as_ref().map(|_| "[REDACTED]"))
+            .field("relay_urls", &self.relay_urls)
+            .field("relay_only", &self.relay_only)
+            .field("dns_server", &self.dns_server)
+            .field("auth_tokens", &format!("[{} tokens]", self.auth_tokens.len()))
+            .finish()
+    }
+}
+
+/// Configuration for the multi-source client.
+pub struct MultiSourceClientConfig {
+    /// Server's Iroh endpoint ID (node ID) to connect to.
+    pub node_id: String,
+    /// Source URL to request from server (e.g., "tcp://host:port" or "udp://host:port").
+    pub source: String,
+    /// Local target address to listen on (e.g., "127.0.0.1:2222").
+    pub target: String,
+    /// Iroh relay URLs.
+    pub relay_urls: Vec<String>,
+    /// Whether to use relay-only mode (requires test-utils feature).
+    pub relay_only: bool,
+    /// Custom DNS server for resolution.
+    pub dns_server: Option<String>,
+    /// Authentication token for server access. **Sensitive field - redacted in Debug output.**
+    pub auth_token: String,
+}
+
+impl std::fmt::Debug for MultiSourceClientConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MultiSourceClientConfig")
+            .field("node_id", &self.node_id)
+            .field("source", &self.source)
+            .field("target", &self.target)
+            .field("relay_urls", &self.relay_urls)
+            .field("relay_only", &self.relay_only)
+            .field("dns_server", &self.dns_server)
+            .field("auth_token", &"[REDACTED]")
+            .finish()
+    }
 }
 
 use crate::auth::is_token_valid;
@@ -450,77 +505,71 @@ async fn authenticate_connection(
 /// The server validates the request and either accepts or rejects it.
 /// Note: relay_only is only meaningful when the 'test-utils' feature is enabled.
 /// Authentication is done via dedicated auth stream immediately after connection.
-pub async fn run_multi_source_client(
-    node_id: String,
-    source: String,
-    target: String,
-    relay_urls: Vec<String>,
-    relay_only: bool,
-    dns_server: Option<String>,
-    auth_token: String,
-) -> Result<()> {
+pub async fn run_multi_source_client(config: MultiSourceClientConfig) -> Result<()> {
     // relay_only is only meaningful with test-utils feature
     #[cfg(not(feature = "test-utils"))]
     {
-        if relay_only {
+        if config.relay_only {
             log::warn!("relay_only=true requires 'test-utils' feature; ignoring and using relay_only=false");
         }
     }
     #[cfg(not(feature = "test-utils"))]
     let relay_only = false;
+    #[cfg(feature = "test-utils")]
+    let relay_only = config.relay_only;
 
-    validate_relay_only(relay_only, &relay_urls)?;
+    validate_relay_only(relay_only, &config.relay_urls)?;
 
     // Validate source format
-    let is_tcp = source.starts_with("tcp://");
-    let is_udp = source.starts_with("udp://");
+    let is_tcp = config.source.starts_with("tcp://");
+    let is_udp = config.source.starts_with("udp://");
     if !is_tcp && !is_udp {
-        anyhow::bail!("Source must start with tcp:// or udp:// (got: {})", source);
+        anyhow::bail!("Source must start with tcp:// or udp:// (got: {})", config.source);
     }
 
     // Resolve listen addresses - for localhost, returns both IPv4 and IPv6
     // to handle macOS clients that prefer IPv6 when connecting to "localhost"
-    let listen_addrs: Vec<SocketAddr> = resolve_listen_addrs(&target)
+    let listen_addrs: Vec<SocketAddr> = resolve_listen_addrs(&config.target)
         .await
         .context("Invalid target address format. Use format like localhost:2222, 127.0.0.1:2222 or [::]:2222")?;
 
-    let server_id: EndpointId = node_id
+    let server_id: EndpointId = config.node_id
         .parse()
         .context("Invalid EndpointId format. Should be a 52-character base32 string.")?;
 
     log::info!("Multi-Source Tunnel - Client Mode");
     log::info!("==================================");
-    log::info!("Requesting source: {}", source);
+    log::info!("Requesting source: {}", config.source);
     log::info!("Creating iroh endpoint (ephemeral identity)...");
 
     // Client uses ephemeral identity - auth is done via token in protocol
     let endpoint = create_client_endpoint(
-        &relay_urls,
+        &config.relay_urls,
         relay_only,
-        dns_server.as_deref(),
+        config.dns_server.as_deref(),
         None,
     )
     .await?;
 
-    let conn = connect_to_server(&endpoint, server_id, &relay_urls, relay_only, MULTI_ALPN).await?;
+    let conn = connect_to_server(&endpoint, server_id, &config.relay_urls, relay_only, MULTI_ALPN).await?;
 
     log::info!("Connected to server!");
     print_connection_type(&endpoint, conn.remote_id());
 
     // Authenticate immediately after connection
-    authenticate_connection(&conn, &auth_token).await?;
+    authenticate_connection(&conn, &config.auth_token).await?;
 
     let conn = Arc::new(conn);
     let tunnel_established = Arc::new(AtomicBool::new(false));
 
     if is_tcp {
-        run_multi_source_tcp_client(conn, source, &listen_addrs, tunnel_established).await?;
+        run_multi_source_tcp_client(conn, config.source, &listen_addrs, tunnel_established).await?;
     } else {
         // UDP still uses single address (first one) - multi-listener for UDP is more complex
         let listen_addr = listen_addrs
             .first()
             .ok_or_else(|| anyhow::anyhow!("No listen addresses resolved for target"))?;
-        run_multi_source_udp_client(conn, source, *listen_addr).await?;
+        run_multi_source_udp_client(conn, config.source, *listen_addr).await?;
     }
 
     endpoint.close().await;

@@ -15,14 +15,37 @@ use tokio::task::JoinSet;
 
 /// Configuration for the nostr client.
 pub struct NostrClientConfig {
+    /// Local listen address (e.g., "127.0.0.1:2222").
     pub listen: String,
+    /// Source URL to request from server (e.g., "tcp://host:port" or "udp://host:port").
     pub source: String,
+    /// STUN servers for ICE candidate gathering.
     pub stun_servers: Vec<String>,
+    /// Nostr secret key (nsec) for signing messages. **Sensitive field - redacted in Debug output.**
     pub nsec: String,
+    /// Nostr public key (npub) of the peer to communicate with.
     pub peer_npub: String,
+    /// Nostr relay URLs for signaling.
     pub relays: Vec<String>,
+    /// Interval in seconds between republishing signaling messages.
     pub republish_interval_secs: u64,
+    /// Maximum wait time in seconds for signaling responses.
     pub max_wait_secs: u64,
+}
+
+impl std::fmt::Debug for NostrClientConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NostrClientConfig")
+            .field("listen", &self.listen)
+            .field("source", &self.source)
+            .field("stun_servers", &self.stun_servers)
+            .field("nsec", &"[REDACTED]")
+            .field("peer_npub", &self.peer_npub)
+            .field("relays", &self.relays)
+            .field("republish_interval_secs", &self.republish_interval_secs)
+            .field("max_wait_secs", &self.max_wait_secs)
+            .finish()
+    }
 }
 
 use crate::signaling::{

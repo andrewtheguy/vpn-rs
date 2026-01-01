@@ -13,15 +13,40 @@ use tokio::task::JoinSet;
 
 /// Configuration for the nostr server.
 pub struct NostrServerConfig {
+    /// Allowed TCP destination networks in CIDR notation (e.g., "127.0.0.0/8").
     pub allowed_tcp: Vec<String>,
+    /// Allowed UDP destination networks in CIDR notation.
     pub allowed_udp: Vec<String>,
+    /// STUN servers for ICE candidate gathering.
     pub stun_servers: Vec<String>,
+    /// Nostr secret key (nsec) for signing messages. **Sensitive field - redacted in Debug output.**
     pub nsec: String,
+    /// Nostr public key (npub) of the peer to communicate with.
     pub peer_npub: String,
+    /// Nostr relay URLs for signaling.
     pub relays: Vec<String>,
+    /// Interval in seconds between republishing signaling messages.
     pub republish_interval_secs: u64,
+    /// Maximum wait time in seconds for signaling responses.
     pub max_wait_secs: u64,
+    /// Maximum number of concurrent sessions.
     pub max_sessions: usize,
+}
+
+impl std::fmt::Debug for NostrServerConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NostrServerConfig")
+            .field("allowed_tcp", &self.allowed_tcp)
+            .field("allowed_udp", &self.allowed_udp)
+            .field("stun_servers", &self.stun_servers)
+            .field("nsec", &"[REDACTED]")
+            .field("peer_npub", &self.peer_npub)
+            .field("relays", &self.relays)
+            .field("republish_interval_secs", &self.republish_interval_secs)
+            .field("max_wait_secs", &self.max_wait_secs)
+            .field("max_sessions", &self.max_sessions)
+            .finish()
+    }
 }
 
 use crate::signaling::{
