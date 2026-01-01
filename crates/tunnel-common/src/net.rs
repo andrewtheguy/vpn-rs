@@ -38,12 +38,17 @@ pub fn interleave_addresses(addrs: &[SocketAddr]) -> Vec<SocketAddr> {
     let mut v4_iter = ipv4.into_iter();
 
     // Interleave addresses: IPv6 first, then alternate
-    while ordered.len() < addrs.len() {
-        if let Some(addr) = v6_iter.next() {
+    loop {
+        let v6 = v6_iter.next();
+        let v4 = v4_iter.next();
+        if let Some(addr) = v6 {
             ordered.push(addr);
         }
-        if let Some(addr) = v4_iter.next() {
+        if let Some(addr) = v4 {
             ordered.push(addr);
+        }
+        if v6.is_none() && v4.is_none() {
+            break;
         }
     }
     ordered
