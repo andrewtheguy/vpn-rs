@@ -9,5 +9,5 @@ mod client;
 mod server;
 
 // Re-export public API
-pub use client::{run_nostr_tcp_client, run_nostr_udp_client};
-pub use server::run_nostr_server;
+pub use client::{run_nostr_tcp_client, run_nostr_udp_client, NostrClientConfig};
+pub use server::{run_nostr_server, NostrServerConfig};

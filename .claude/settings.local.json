@@ -34,7 +34,8 @@
       "mcp__fetch__fetch_markdown",
       "Bash(wc:*)",
       "Bash(cargo test:*)",
-      "Bash(cargo check:*)"
+      "Bash(cargo check:*)",
+      "Bash(cargo clippy:*)"
     ]
   }
 }

@@ -13,6 +13,41 @@ use tokio::net::{TcpListener, UdpSocket};
 use tokio::sync::Mutex;
 use tokio::task::JoinSet;
 
+/// Configuration for the nostr client.
+pub struct NostrClientConfig {
+    /// Local listen address (e.g., "127.0.0.1:2222").
+    pub listen: String,
+    /// Source URL to request from server (e.g., "tcp://host:port" or "udp://host:port").
+    pub source: String,
+    /// STUN servers for ICE candidate gathering.
+    pub stun_servers: Vec<String>,
+    /// Nostr secret key (nsec) for signing messages. **Sensitive field - redacted in Debug output.**
+    pub nsec: String,
+    /// Nostr public key (npub) of the peer to communicate with.
+    pub peer_npub: String,
+    /// Nostr relay URLs for signaling.
+    pub relays: Vec<String>,
+    /// Interval in seconds between republishing signaling messages.
+    pub republish_interval_secs: u64,
+    /// Maximum wait time in seconds for signaling responses.
+    pub max_wait_secs: u64,
+}
+
+impl std::fmt::Debug for NostrClientConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NostrClientConfig")
+            .field("listen", &self.listen)
+            .field("source", &self.source)
+            .field("stun_servers", &self.stun_servers)
+            .field("nsec", &"[REDACTED]")
+            .field("peer_npub", &self.peer_npub)
+            .field("relays", &self.relays)
+            .field("republish_interval_secs", &self.republish_interval_secs)
+            .field("max_wait_secs", &self.max_wait_secs)
+            .finish()
+    }
+}
+
 use crate::signaling::{
     ManualAnswer, ManualOffer, ManualRequest, NostrSignaling, OfferWaitError, MANUAL_SIGNAL_VERSION,
 };
@@ -22,6 +57,64 @@ use crate::tunnel_common::{
     current_timestamp, forward_stream_to_udp_client, forward_udp_to_stream, generate_session_id,
     handle_tcp_client_connection, open_bi_with_retry, resolve_listen_addr, QUIC_CONNECTION_TIMEOUT,
 };
+
+// ============================================================================
+// Validation and Setup Helpers
+// ============================================================================
+
+/// Validates a source URL has the expected scheme and required host/port.
+fn validate_source_url(source: &str, expected_scheme: &str) -> Result<url::Url> {
+    let source_url = url::Url::parse(source).with_context(|| {
+        format!(
+            "Invalid source URL '{}'. Expected format: {}://host:port",
+            source, expected_scheme
+        )
+    })?;
+
+    if source_url.scheme() != expected_scheme {
+        anyhow::bail!(
+            "Source URL must use {}:// scheme (got '{}://')",
+            expected_scheme,
+            source_url.scheme()
+        );
+    }
+    if source_url.host_str().is_none() {
+        anyhow::bail!("Source URL '{}' missing host", source);
+    }
+    if source_url.port().is_none() {
+        anyhow::bail!("Source URL '{}' missing port", source);
+    }
+
+    Ok(source_url)
+}
+
+/// Converts a relay list to Option, returning None if empty.
+fn relays_to_option(relays: Vec<String>) -> Option<Vec<String>> {
+    if relays.is_empty() {
+        None
+    } else {
+        Some(relays)
+    }
+}
+
+/// Creates and initializes a NostrSignaling client with subscription.
+async fn init_signaling(
+    nsec: &str,
+    peer_npub: &str,
+    relays: Option<Vec<String>>,
+    source: &str,
+) -> Result<NostrSignaling> {
+    let signaling = NostrSignaling::new(nsec, peer_npub, relays).await?;
+
+    log::info!("Your pubkey: {}", signaling.public_key_bech32());
+    log::info!("Transfer ID: {}", signaling.transfer_id());
+    log::info!("Relays: {:?}", signaling.relay_urls());
+    log::info!("Requesting source: {}", source);
+
+    signaling.subscribe().await?;
+
+    Ok(signaling)
+}
 
 // ============================================================================
 // Nostr Signaling Helpers
@@ -86,68 +179,30 @@ async fn publish_request_and_wait_for_offer(
 // Public API
 // ============================================================================
 
-pub async fn run_nostr_tcp_client(
-    listen: String,
-    source: String,
-    stun_servers: Vec<String>,
-    nsec: String,
-    peer_npub: String,
-    relays: Vec<String>,
-    republish_interval_secs: u64,
-    max_wait_secs: u64,
-) -> Result<()> {
+pub async fn run_nostr_tcp_client(config: NostrClientConfig) -> Result<()> {
     // Ensure crypto provider is installed before nostr-sdk uses rustls
     quic::ensure_crypto_provider();
 
-    // Validate source URL locally before publishing request
-    let source_url = url::Url::parse(&source).with_context(|| {
-        format!(
-            "Invalid source URL '{}'. Expected format: tcp://host:port",
-            source
-        )
-    })?;
-    if source_url.scheme() != "tcp" {
-        anyhow::bail!(
-            "Source URL must use tcp:// scheme for TCP client (got '{}://'). Use run_nostr_udp_client for udp://",
-            source_url.scheme()
-        );
-    }
-    if source_url.host_str().is_none() {
-        anyhow::bail!("Source URL '{}' missing host", source);
-    }
-    if source_url.port().is_none() {
-        anyhow::bail!("Source URL '{}' missing port", source);
-    }
+    // Validate source URL
+    let _source_url = validate_source_url(&config.source, "tcp")?;
 
-    let listen_addr: SocketAddr = resolve_listen_addr(&listen)
+    let listen_addr: SocketAddr = resolve_listen_addr(&config.listen)
         .await
         .context("Invalid listen address format. Use format like localhost:2222, 127.0.0.1:2222 or [::]:2222")?;
 
     log::info!("Nostr TCP Tunnel - Client Mode");
     log::info!("===============================");
 
-    // Create Nostr signaling client
-    let relay_list = if relays.is_empty() {
-        None
-    } else {
-        Some(relays)
-    };
-    let signaling = NostrSignaling::new(&nsec, &peer_npub, relay_list).await?;
-
-    log::info!("Your pubkey: {}", signaling.public_key_bech32());
-    log::info!("Transfer ID: {}", signaling.transfer_id());
-    log::info!("Relays: {:?}", signaling.relay_urls());
-    log::info!("Requesting source: {}", source);
-
-    // Subscribe to incoming events
-    signaling.subscribe().await?;
+    // Create and initialize signaling
+    let relay_list = relays_to_option(config.relays);
+    let signaling = init_signaling(&config.nsec, &config.peer_npub, relay_list, &config.source).await?;
 
     // Generate session ID to filter stale events
     let session_id = generate_session_id();
     log::info!("Session ID: {}", session_id);
 
     // Gather ICE candidates first (before sending request)
-    let ice = IceEndpoint::gather(&stun_servers).await?;
+    let ice = IceEndpoint::gather(&config.stun_servers).await?;
     let local_creds = ice.local_credentials();
     let local_candidates = ice.local_candidates();
 
@@ -159,15 +214,15 @@ pub async fn run_nostr_tcp_client(
         candidates: local_candidates.clone(),
         session_id: session_id.clone(),
         timestamp: current_timestamp(),
-        source: Some(source),
+        source: Some(config.source),
     };
 
     // Publish request and wait for offer (re-publish periodically)
     let offer = publish_request_and_wait_for_offer(
         &signaling,
         &request,
-        republish_interval_secs,
-        max_wait_secs,
+        config.republish_interval_secs,
+        config.max_wait_secs,
     )
     .await?;
 
@@ -318,68 +373,30 @@ pub async fn run_nostr_tcp_client(
     Ok(())
 }
 
-pub async fn run_nostr_udp_client(
-    listen: String,
-    source: String,
-    stun_servers: Vec<String>,
-    nsec: String,
-    peer_npub: String,
-    relays: Vec<String>,
-    republish_interval_secs: u64,
-    max_wait_secs: u64,
-) -> Result<()> {
+pub async fn run_nostr_udp_client(config: NostrClientConfig) -> Result<()> {
     // Ensure crypto provider is installed before nostr-sdk uses rustls
     quic::ensure_crypto_provider();
 
-    // Validate source URL locally before publishing request
-    let source_url = url::Url::parse(&source).with_context(|| {
-        format!(
-            "Invalid source URL '{}'. Expected format: udp://host:port",
-            source
-        )
-    })?;
-    if source_url.scheme() != "udp" {
-        anyhow::bail!(
-            "Source URL must use udp:// scheme for UDP client (got '{}://'). Use run_nostr_tcp_client for tcp://",
-            source_url.scheme()
-        );
-    }
-    if source_url.host_str().is_none() {
-        anyhow::bail!("Source URL '{}' missing host", source);
-    }
-    if source_url.port().is_none() {
-        anyhow::bail!("Source URL '{}' missing port", source);
-    }
+    // Validate source URL
+    let _source_url = validate_source_url(&config.source, "udp")?;
 
-    let listen_addr: SocketAddr = resolve_listen_addr(&listen)
+    let listen_addr: SocketAddr = resolve_listen_addr(&config.listen)
         .await
         .context("Invalid listen address format. Use format like localhost:51820, 127.0.0.1:51820 or [::]:51820")?;
 
     log::info!("Nostr UDP Tunnel - Client Mode");
     log::info!("===============================");
 
-    // Create Nostr signaling client
-    let relay_list = if relays.is_empty() {
-        None
-    } else {
-        Some(relays)
-    };
-    let signaling = NostrSignaling::new(&nsec, &peer_npub, relay_list).await?;
-
-    log::info!("Your pubkey: {}", signaling.public_key_bech32());
-    log::info!("Transfer ID: {}", signaling.transfer_id());
-    log::info!("Relays: {:?}", signaling.relay_urls());
-    log::info!("Requesting source: {}", source);
-
-    // Subscribe to incoming events
-    signaling.subscribe().await?;
+    // Create and initialize signaling
+    let relay_list = relays_to_option(config.relays);
+    let signaling = init_signaling(&config.nsec, &config.peer_npub, relay_list, &config.source).await?;
 
     // Generate session ID to filter stale events
     let session_id = generate_session_id();
     log::info!("Session ID: {}", session_id);
 
     // Gather ICE candidates first (before sending request)
-    let ice = IceEndpoint::gather(&stun_servers).await?;
+    let ice = IceEndpoint::gather(&config.stun_servers).await?;
     let local_creds = ice.local_credentials();
     let local_candidates = ice.local_candidates();
 
@@ -391,15 +408,15 @@ pub async fn run_nostr_udp_client(
         candidates: local_candidates.clone(),
         session_id: session_id.clone(),
         timestamp: current_timestamp(),
-        source: Some(source),
+        source: Some(config.source),
     };
 
     // Publish request and wait for offer (re-publish periodically)
     let offer = publish_request_and_wait_for_offer(
         &signaling,
         &request,
-        republish_interval_secs,
-        max_wait_secs,
+        config.republish_interval_secs,
+        config.max_wait_secs,
     )
     .await?;
 

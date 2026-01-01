@@ -648,9 +648,9 @@ impl ClientConfig {
 /// - Other paths are returned unchanged
 pub fn expand_tilde(path: &Path) -> PathBuf {
     let path_str = path.to_string_lossy();
-    if path_str.starts_with("~/") {
+    if let Some(stripped) = path_str.strip_prefix("~/") {
         if let Some(home) = dirs::home_dir() {
-            return home.join(&path_str[2..]);
+            return home.join(stripped);
         }
     } else if path_str == "~" {
         if let Some(home) = dirs::home_dir() {
