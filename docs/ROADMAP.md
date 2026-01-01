@@ -213,6 +213,58 @@ Browser-based interface for configuration, monitoring, and key management.
 
 ---
 
+#### Smart Routing (Server Mesh)
+
+**Status:** Idea
+
+A mesh of tunnel-rs servers where clients can connect to any server and be redirected to the optimal server based on routing rules.
+
+**Concept:**
+- Multiple tunnel-rs servers form a mesh, each responsible for certain CIDR ranges or services
+- Client connects to any server in the mesh
+- Server evaluates the requested source against routing rules and either:
+  - Handles the connection directly if it owns the route
+  - Returns the address of the best server for that destination
+  - Proxies the connection through the mesh
+
+**Proposed Routing Criteria:**
+- **CIDR-based**: Route `10.0.0.0/8` to Server A, `192.168.0.0/16` to Server B
+- **Service-based**: Route database connections to Server A, SSH to Server B
+- **Geographic**: Route based on client location for latency optimization
+- **Load-based**: Distribute connections across servers based on current load
+
+**Example (proposed config):**
+```toml
+role = "server"
+mode = "iroh"
+
+[mesh]
+enabled = true
+peers = ["node_id_a", "node_id_b", "node_id_c"]
+
+[[mesh.routes]]
+cidr = "10.0.0.0/8"
+owner = "self"  # This server handles this range
+
+[[mesh.routes]]
+cidr = "192.168.0.0/16"
+owner = "node_id_b"  # Redirect to Server B
+```
+
+**Complexity:** High
+- Requires mesh discovery and health checking between servers
+- Routing table synchronization across the mesh
+- Decision: redirect client vs. proxy through mesh
+- Fallback handling when preferred server is unavailable
+
+**Use Cases:**
+- Distributed infrastructure with region-specific access
+- High availability with automatic failover
+- Load distribution across multiple servers
+- Simplified client configuration (connect to any entry point)
+
+---
+
 ## Contributing
 
 Feature requests and contributions are welcome. Please open an issue on GitHub to discuss proposed changes before submitting a pull request.
