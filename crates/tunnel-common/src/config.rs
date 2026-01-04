@@ -723,12 +723,16 @@ pub fn default_stun_servers() -> Vec<String> {
 }
 
 /// Default public Nostr relays for signaling.
-pub fn default_nostr_relays() -> Vec<String> {
-    vec![
-        "wss://relay.damus.io".to_string(),
-        "wss://nos.lol".to_string(),
-        "wss://relay.primal.net".to_string(),
-        "wss://nostr.mom".to_string(),
-        "wss://relay.snort.social".to_string(),
-    ]
+pub const DEFAULT_NOSTR_RELAYS: &[&str] = &[
+    "wss://nos.lol",
+    //"wss://relay.damus.io", // acceptable for index queries; not recommended for high-volume operations due to rate limiting
+    //"wss://relay.nostr.band",
+    "wss://relay.nostr.net",
+    "wss://relay.primal.net",
+    "wss://relay.snort.social",
+];
+
+/// Default public Nostr relays for signaling.
+pub fn default_nostr_relays() -> &'static [&'static str] {
+    DEFAULT_NOSTR_RELAYS
 }

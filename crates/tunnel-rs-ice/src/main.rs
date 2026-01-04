@@ -545,6 +545,9 @@ async fn main() -> Result<()> {
                     )?;
                     let relays = if relays.is_empty() {
                         tunnel_common::config::default_nostr_relays()
+                            .iter()
+                            .map(|&relay| relay.to_string())
+                            .collect()
                     } else {
                         relays
                     };
@@ -724,6 +727,9 @@ async fn main() -> Result<()> {
                     )?;
                     let relays = if relays.is_empty() {
                         tunnel_common::config::default_nostr_relays()
+                            .iter()
+                            .map(|&relay| relay.to_string())
+                            .collect()
                     } else {
                         relays
                     };

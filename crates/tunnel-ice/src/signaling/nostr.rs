@@ -134,7 +134,12 @@ impl NostrSignaling {
         // Derive transfer ID from both pubkeys (deterministic)
         let transfer_id = derive_transfer_id(&keys.public_key(), &peer_pubkey);
 
-        let relay_urls = relays.unwrap_or_else(tunnel_common::config::default_nostr_relays);
+        let relay_urls = relays.unwrap_or_else(|| {
+            tunnel_common::config::default_nostr_relays()
+                .iter()
+                .map(|&relay| relay.to_string())
+                .collect()
+        });
 
         let client = Client::new(keys.clone());
 
