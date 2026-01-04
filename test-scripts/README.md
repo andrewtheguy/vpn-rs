@@ -13,7 +13,7 @@ In receiver-initiated mode:
 
 ```
 [Echo Server]     [Sender]                      [Receiver]              [Test Client]
-  :19999    <--  --allowed-tcp 127.0.0.0/8  <--  --source localhost:19999  <-->  :17001-17003
+  :19999    <--  --allowed-tcp 127.0.0.0/8  <--  --source tcp://localhost:19999  <-->  :17001-17003
                   (waits for connections)       (initiates, tests DNS)
 ```
 

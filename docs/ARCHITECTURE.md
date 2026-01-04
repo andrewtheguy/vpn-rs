@@ -566,38 +566,38 @@ graph TB
 
 ```mermaid
 sequenceDiagram
-    participant S as Server
+    participant C as Client
     participant STUN as STUN Server
     participant User as User (Copy/Paste)
-    participant C as Client
+    participant S as Server
 
-    Note over S: Start server
-    S->>S: Create ICE Agent (Controlling)
-    S->>S: Bind UDP sockets
-    S->>STUN: Gather candidates
-    STUN-->>S: Server reflexive addresses
-
-    Note over S: Create Offer (v1)
-    S->>S: Encode ufrag, pwd, candidates
-    S->>User: Display Offer Block
-
-    Note over User: Copy offer
     Note over C: Start client
-    C->>C: Create ICE Agent (Controlled)
+    C->>C: Create ICE Agent (Controlling)
     C->>C: Bind UDP sockets
     C->>STUN: Gather candidates
     STUN-->>C: Server reflexive addresses
 
-    User->>C: Paste offer
-    C->>C: Decode remote credentials
-    C->>C: Set remote candidates
-    C->>C: Create Answer
-    C->>User: Display Answer Block
+    Note over C: Create Offer (v1)
+    C->>C: Encode ufrag, pwd, candidates, source
+    C->>User: Display Offer Block
+
+    Note over User: Copy offer
+    Note over S: Start server
+    S->>S: Create ICE Agent (Controlled)
+    S->>S: Bind UDP sockets
+    S->>STUN: Gather candidates
+    STUN-->>S: Server reflexive addresses
+
+    User->>S: Paste offer
+    S->>S: Decode remote credentials + source
+    S->>S: Validate source against --allowed-tcp/udp
+    S->>S: Create Answer
+    S->>User: Display Answer Block
 
     Note over User: Copy answer
-    User->>S: Paste answer
-    S->>S: Decode remote credentials
-    S->>S: Set remote candidates
+    User->>C: Paste answer
+    C->>C: Decode remote credentials
+    C->>C: Set remote candidates
 
     par ICE Connectivity Checks
         S->>C: STUN Binding Requests
@@ -737,9 +737,9 @@ graph TB
     end
 
     subgraph "Nostr Relays"
-        F[relay.damus.io]
+        F[relay.nostr.net]
         G[nos.lol]
-        H[Other Relays]
+        H[relay.primal.net / relay.snort.social]
     end
 
     subgraph "Client Side"
@@ -853,7 +853,7 @@ graph TB
 
     subgraph "Server Validation"
         D[Check timestamp age]
-        E{Age <= 60s?}
+        E{Age <= 30s?}
         F[Accept request]
         G[Ignore stale request]
     end
@@ -1045,7 +1045,7 @@ graph TB
     D -->|Yes| F{Check sections}
     
     F --> G{Extra sections?}
-    G -->|Yes| H[Error: Unexpected section]
+    G -->|Yes| H[Ignored by parser]
     G -->|No| I{Required fields?}
     
     I -->|Missing| J[Error: Missing field]
@@ -1053,7 +1053,7 @@ graph TB
     
     style C fill:#FFCCBC
     style E fill:#FFCCBC
-    style H fill:#FFCCBC
+    style H fill:#FFF9C4
     style J fill:#FFCCBC
     style K fill:#C8E6C9
 ```

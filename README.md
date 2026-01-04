@@ -719,7 +719,7 @@ ICE connection established!
 
 ## Notes
 
-- Full ICE provides reliable NAT traversal - works with most symmetric NATs
+- Full ICE improves NAT traversal, but without TURN/relay servers symmetric NATs can still fail
 - Signaling payloads include a version number; mismatches are rejected
 
 ---
@@ -859,10 +859,9 @@ tcp = ["127.0.0.0/8", "10.0.0.0/8"]
 ## Default Nostr Relays
 
 When no relays are specified, these public relays are used:
-- `wss://relay.damus.io`
 - `wss://nos.lol`
+- `wss://relay.nostr.net`
 - `wss://relay.primal.net`
-- `wss://nostr.mom`
 - `wss://relay.snort.social`
 
 ## Notes
@@ -880,12 +879,12 @@ When no relays are specified, these public relays are used:
 
 | Mode | Multi-Session | Dynamic Source | Description |
 |------|---------------|----------------|-------------|
-| `iroh` | **Yes** | **Yes** | Multiple receivers, receiver chooses source |
-| `nostr` | **Yes** | **Yes** | Multiple receivers, receiver chooses source |
-| `manual` | No | **Yes** | Single session, receiver chooses source |
+| `iroh` | **Yes** | **Yes** | Multiple clients, client chooses source |
+| `nostr` | **Yes** | **Yes** | Multiple clients, client chooses source |
+| `manual` | No | **Yes** | Single session, client chooses source |
 
 **Multi-Session** = Multiple concurrent connections to the same sender
-**Dynamic Source** = Receiver specifies which service to tunnel (like SSH `-L`)
+**Dynamic Source** = Client specifies which service to tunnel (like SSH `-L`)
 
 ### iroh (Multi-Session + Dynamic Source)
 
@@ -924,21 +923,6 @@ For `manual`, use separate instances for each tunnel:
 - Or use `iroh` or `nostr` mode for multi-session support
 
 ---
-
-## How It Works
-
-1. Both peers register with the signaling server
-2. Server measures RTT to each peer (5 ping rounds)
-3. Client requests connection to server by peer ID
-4. Signaling server calculates synchronized start time
-5. Both peers receive sync_connect with peer's ICE candidates and start time
-6. Both peers begin ICE simultaneously at the coordinated time
-7. Direct QUIC connection established over ICE
-
-**Key optimizations:**
-- True RTT measurement (client-measured, not clock-dependent)
-- Fast ICE timing parameters for coordinated attempts
-- 500ms timing buffer for clock skew and jitter
 
 ---
 
@@ -1054,9 +1038,9 @@ All protocol modes and features are available on all platforms.
 ### nostr Mode (Receiver-Initiated)
 1. Both peers derive deterministic transfer ID from their sorted public keys
 2. Sender waits for connection requests from receivers
-3. Receiver publishes connection request with desired source to Nostr relays
-4. Sender receives request, gathers ICE candidates, publishes offer
-5. Receiver receives offer, gathers candidates, publishes answer
+3. Receiver publishes connection request (ICE credentials + candidates + source) to Nostr relays
+4. Sender receives request, gathers its ICE candidates, publishes offer, starts ICE immediately
+5. Receiver receives offer, publishes answer (echo session_id), starts ICE immediately
 6. ICE connectivity checks begin, best path selected
 7. QUIC connection established over ICE socket
 
