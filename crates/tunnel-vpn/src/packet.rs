@@ -13,8 +13,9 @@ use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
 use tokio::time::interval;
 
-/// Maximum WireGuard packet size (MTU + overhead).
-const MAX_PACKET_SIZE: usize = 1500;
+/// Maximum WireGuard packet size (MTU + WireGuard overhead).
+/// Standard MTU (1500) + WireGuard transport overhead (~60 bytes for safety).
+const MAX_PACKET_SIZE: usize = 1560;
 
 /// Timer interval for WireGuard keepalives and handshakes.
 const TIMER_INTERVAL: Duration = Duration::from_millis(100);

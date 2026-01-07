@@ -181,9 +181,10 @@ impl VpnClient {
             VpnError::Signaling("Server response missing server IP".into())
         })?;
 
-        // Close handshake stream
-        let _ = send.finish();
-
+        // Close handshake stream (best-effort, handshake already completed)
+        if let Err(e) = send.finish() {
+            log::debug!("Failed to finish handshake stream: {}", e);
+        }
         Ok(ServerInfo {
             wg_public_key,
             assigned_ip,
@@ -238,13 +239,11 @@ impl VpnClient {
                         match tunnel.encapsulate(packet) {
                             Ok(PacketResult::WriteToNetwork(data)) => {
                                 let mut send = send_outbound.lock().await;
-                                // Write length-prefixed packet
-                                let len = data.len() as u32;
-                                if let Err(e) = send.write_all(&len.to_be_bytes()).await {
-                                    log::warn!("Failed to write WG packet length: {}", e);
-                                    break;
-                                }
-                                if let Err(e) = send.write_all(&data).await {
+                                // Write length-prefixed packet atomically
+                                let mut buf = Vec::with_capacity(4 + data.len());
+                                buf.extend_from_slice(&(data.len() as u32).to_be_bytes());
+                                buf.extend_from_slice(&data);
+                                if let Err(e) = send.write_all(&buf).await {
                                     log::warn!("Failed to write WG packet: {}", e);
                                     break;
                                 }
@@ -304,12 +303,15 @@ impl VpnClient {
                         }
                     }
                     Ok(PacketResult::WriteToNetwork(data)) => {
-                        // Need to send response back through stream
+                        // Need to send response back through stream atomically
                         drop(tunnel);
                         let mut send = send_timers.lock().await;
-                        let len = data.len() as u32;
-                        let _ = send.write_all(&len.to_be_bytes()).await;
-                        let _ = send.write_all(&data).await;
+                        let mut buf = Vec::with_capacity(4 + data.len());
+                        buf.extend_from_slice(&(data.len() as u32).to_be_bytes());
+                        buf.extend_from_slice(&data);
+                        if let Err(e) = send.write_all(&buf).await {
+                            log::warn!("Failed to send response packet: {}", e);
+                        }
                     }
                     Ok(_) => {}
                     Err(e) => {
@@ -331,11 +333,11 @@ impl VpnClient {
                     match result {
                         PacketResult::WriteToNetwork(data) => {
                             let mut send = wg_send.lock().await;
-                            let len = data.len() as u32;
-                            if let Err(e) = send.write_all(&len.to_be_bytes()).await {
-                                log::warn!("Failed to send timer packet length: {}", e);
-                            }
-                            if let Err(e) = send.write_all(&data).await {
+                            // Write length-prefixed packet atomically
+                            let mut buf = Vec::with_capacity(4 + data.len());
+                            buf.extend_from_slice(&(data.len() as u32).to_be_bytes());
+                            buf.extend_from_slice(&data);
+                            if let Err(e) = send.write_all(&buf).await {
                                 log::warn!("Failed to send timer packet: {}", e);
                             }
                         }
