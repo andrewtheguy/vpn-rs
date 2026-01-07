@@ -245,6 +245,12 @@ pub enum VpnCommand {
         /// Path to file containing authentication token
         #[arg(long)]
         auth_token_file: Option<PathBuf>,
+
+        /// Route specific CIDRs through the VPN (repeatable)
+        /// E.g., --route 192.168.1.0/24 --route 10.0.0.0/8
+        /// If not specified, only VPN network traffic is routed.
+        #[arg(long = "route")]
+        routes: Vec<String>,
     },
 }
 

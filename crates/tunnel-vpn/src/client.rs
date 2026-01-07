@@ -7,7 +7,7 @@
 //! NAT traversal automatically.
 
 use crate::config::VpnClientConfig;
-use crate::device::{TunConfig, TunDevice};
+use crate::device::{add_routes, TunConfig, TunDevice};
 use crate::error::{VpnError, VpnResult};
 use crate::keys::{WgKeyPair, WgPublicKey};
 use crate::lock::VpnLock;
@@ -105,6 +105,11 @@ impl VpnClient {
 
         // Create TUN device
         let tun_device = self.create_tun_device(&server_info)?;
+
+        // Add custom routes through the VPN
+        if !self.config.routes.is_empty() {
+            add_routes(tun_device.name(), &self.config.routes)?;
+        }
 
         // Open data stream for WireGuard packets
         let (wg_send, wg_recv) = connection.open_bi().await.map_err(|e| {

@@ -49,6 +49,7 @@ pub async fn run_vpn_command(cmd: &VpnCommand) -> Result<()> {
             dns_server,
             auth_token,
             auth_token_file,
+            routes,
         } => {
             run_vpn_client(
                 server_node_id,
@@ -58,6 +59,7 @@ pub async fn run_vpn_command(cmd: &VpnCommand) -> Result<()> {
                 dns_server.as_deref(),
                 auth_token.as_deref(),
                 auth_token_file.as_ref().map(|p| expand_tilde(p)).as_deref(),
+                routes,
             )
             .await
         }
@@ -157,6 +159,7 @@ async fn run_vpn_client(
     dns_server: Option<&str>,
     auth_token: Option<&str>,
     auth_token_file: Option<&std::path::Path>,
+    routes: &[String],
 ) -> Result<()> {
     // Load auth token (from CLI or file)
     let token = if let Some(token) = auth_token {
@@ -171,12 +174,27 @@ async fn run_vpn_client(
         );
     };
 
+    // Parse routes
+    let parsed_routes: Vec<Ipv4Net> = routes
+        .iter()
+        .map(|r| r.parse::<Ipv4Net>())
+        .collect::<Result<Vec<_>, _>>()
+        .context("Invalid route CIDR (e.g., 192.168.1.0/24)")?;
+
+    if !parsed_routes.is_empty() {
+        log::info!("Will add {} route(s) through VPN", parsed_routes.len());
+        for route in &parsed_routes {
+            log::info!("  Route: {}", route);
+        }
+    }
+
     // Create VPN client config (WireGuard key is ephemeral, auto-generated)
     let config = VpnClientConfig {
         server_node_id: server_node_id.to_string(),
         mtu,
         keepalive_secs,
         auth_token: Some(token),
+        routes: parsed_routes,
         ..Default::default()
     };
 

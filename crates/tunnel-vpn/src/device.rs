@@ -4,7 +4,9 @@
 //! for VPN traffic.
 
 use crate::error::{VpnError, VpnResult};
+use ipnet::Ipv4Net;
 use std::net::Ipv4Addr;
+use std::process::Command;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tun::{AbstractDevice, AsyncDevice, Configuration, DeviceReader, DeviceWriter};
 
@@ -179,4 +181,122 @@ impl TunWriter {
     pub async fn write_all(&mut self, buf: &[u8]) -> VpnResult<()> {
         self.writer.write_all(buf).await.map_err(VpnError::Network)
     }
+}
+
+/// Add a route through the VPN TUN interface.
+///
+/// # Platform Support
+/// - macOS: Uses `route add -net <cidr> -interface <tun_device>`
+/// - Linux: Uses `ip route add <cidr> dev <tun_device>`
+pub fn add_route(tun_name: &str, route: &Ipv4Net) -> VpnResult<()> {
+    #[cfg(target_os = "macos")]
+    {
+        let output = Command::new("route")
+            .args([
+                "add",
+                "-net",
+                &route.network().to_string(),
+                "-netmask",
+                &route.netmask().to_string(),
+                "-interface",
+                tun_name,
+            ])
+            .output()
+            .map_err(|e| VpnError::TunDevice(format!("Failed to execute route command: {}", e)))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(VpnError::TunDevice(format!(
+                "Failed to add route {}: {}",
+                route, stderr
+            )));
+        }
+        log::info!("Added route {} via {}", route, tun_name);
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let output = Command::new("ip")
+            .args(["route", "add", &route.to_string(), "dev", tun_name])
+            .output()
+            .map_err(|e| VpnError::TunDevice(format!("Failed to execute ip route command: {}", e)))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(VpnError::TunDevice(format!(
+                "Failed to add route {}: {}",
+                route, stderr
+            )));
+        }
+        log::info!("Added route {} via {}", route, tun_name);
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        let _ = (tun_name, route);
+        return Err(VpnError::TunDevice(
+            "Route management not supported on this platform".into(),
+        ));
+    }
+
+    Ok(())
+}
+
+/// Add multiple routes through the VPN TUN interface.
+pub fn add_routes(tun_name: &str, routes: &[Ipv4Net]) -> VpnResult<()> {
+    for route in routes {
+        add_route(tun_name, route)?;
+    }
+    Ok(())
+}
+
+/// Remove a route from the system.
+///
+/// This is called during cleanup to remove routes added by add_route.
+#[allow(dead_code)]
+pub fn remove_route(tun_name: &str, route: &Ipv4Net) -> VpnResult<()> {
+    #[cfg(target_os = "macos")]
+    {
+        let output = Command::new("route")
+            .args([
+                "delete",
+                "-net",
+                &route.network().to_string(),
+                "-netmask",
+                &route.netmask().to_string(),
+                "-interface",
+                tun_name,
+            ])
+            .output()
+            .map_err(|e| VpnError::TunDevice(format!("Failed to execute route command: {}", e)))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            log::warn!("Failed to remove route {}: {}", route, stderr);
+        } else {
+            log::info!("Removed route {} via {}", route, tun_name);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let output = Command::new("ip")
+            .args(["route", "del", &route.to_string(), "dev", tun_name])
+            .output()
+            .map_err(|e| VpnError::TunDevice(format!("Failed to execute ip route command: {}", e)))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            log::warn!("Failed to remove route {}: {}", route, stderr);
+        } else {
+            log::info!("Removed route {} via {}", route, tun_name);
+        }
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        let _ = (tun_name, route);
+    }
+
+    Ok(())
 }
