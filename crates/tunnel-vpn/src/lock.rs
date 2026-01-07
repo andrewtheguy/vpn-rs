@@ -2,14 +2,20 @@
 //!
 //! Ensures only one VPN client instance runs at a time to prevent
 //! routing conflicts and TUN device issues.
+//!
+//! # Platform Support
+//!
+//! This module only supports Unix platforms (Linux, macOS, BSD).
+//! Windows is not supported.
+
+#[cfg(not(unix))]
+compile_error!("VPN lock is only supported on Unix platforms (Linux, macOS, BSD)");
 
 use crate::error::{VpnError, VpnResult};
 use std::fs::{File, OpenOptions};
 use std::io::Write;
-use std::path::PathBuf;
-
-#[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
+use std::path::PathBuf;
 
 /// Lock file name for VPN client.
 const LOCK_FILE_NAME: &str = "tunnel-vpn.lock";
@@ -41,27 +47,20 @@ impl VpnLock {
         let mut opts = OpenOptions::new();
         opts.write(true).create(true).truncate(true);
 
-        #[cfg(unix)]
-        {
-            // Use flock for Unix systems
-            opts.custom_flags(libc::O_CLOEXEC);
-        }
+        opts.custom_flags(libc::O_CLOEXEC);
 
         let file = opts.open(&path).map_err(|e| {
             VpnError::Config(format!("Failed to open lock file: {}", e))
         })?;
 
-        // Try to acquire exclusive lock
-        #[cfg(unix)]
-        {
-            use std::os::unix::io::AsRawFd;
-            let fd = file.as_raw_fd();
-            let result = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
-            if result != 0 {
-                return Err(VpnError::Config(
-                    "Another VPN client is already running. Only one instance allowed.".into(),
-                ));
-            }
+        // Try to acquire exclusive lock (non-blocking)
+        use std::os::unix::io::AsRawFd;
+        let fd = file.as_raw_fd();
+        let result = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
+        if result != 0 {
+            return Err(VpnError::Config(
+                "Another VPN client is already running. Only one instance allowed.".into(),
+            ));
         }
 
         // Write PID to lock file for debugging
@@ -99,17 +98,13 @@ impl VpnLock {
             Err(_) => return false,
         };
 
-        #[cfg(unix)]
-        {
-            use std::os::unix::io::AsRawFd;
-            let fd = file.as_raw_fd();
-            let result = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
-            if result != 0 {
-                return true; // Lock is held by another process
-            }
-            // We got the lock - it will be released when file is dropped
+        use std::os::unix::io::AsRawFd;
+        let fd = file.as_raw_fd();
+        let result = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
+        if result != 0 {
+            return true; // Lock is held by another process
         }
-
+        // We got the lock - it will be released when file is dropped
         false
     }
 }
