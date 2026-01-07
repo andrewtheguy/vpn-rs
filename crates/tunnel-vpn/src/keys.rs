@@ -85,6 +85,14 @@ impl WgKeyPair {
         Self::from_base64_private_key(contents.trim())
     }
 
+    /// Load a keypair from a file synchronously (private key stored as base64).
+    pub fn load_from_file_sync(path: &Path) -> VpnResult<Self> {
+        let contents = std::fs::read_to_string(path)
+            .map_err(|e| VpnError::Key(format!("Failed to read key file: {}", e)))?;
+
+        Self::from_base64_private_key(contents.trim())
+    }
+
     /// Save the private key to a file (as base64).
     pub async fn save_to_file(&self, path: &Path) -> VpnResult<()> {
         let base64_key = self.private_key_base64();
