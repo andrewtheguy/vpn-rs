@@ -173,15 +173,36 @@ pub async fn run_vpn_loop(
     // Wait for any task to complete (or fail)
     tokio::select! {
         res = outbound => {
-            res.map_err(|e| VpnError::Network(std::io::Error::other(e)))??;
+            handle_join_result(res, "outbound")?;
         }
         res = inbound => {
-            res.map_err(|e| VpnError::Network(std::io::Error::other(e)))??;
+            handle_join_result(res, "inbound")?;
         }
         res = timers => {
-            res.map_err(|e| VpnError::Network(std::io::Error::other(e)))??;
+            handle_join_result(res, "timers")?;
         }
     }
 
     Ok(())
+}
+
+/// Handle a JoinResult, propagating panics and converting other errors.
+fn handle_join_result(
+    res: Result<VpnResult<()>, tokio::task::JoinError>,
+    task_name: &str,
+) -> VpnResult<()> {
+    match res {
+        Ok(inner) => inner,
+        Err(e) if e.is_panic() => {
+            // Propagate panics from spawned tasks
+            std::panic::resume_unwind(e.into_panic())
+        }
+        Err(e) => {
+            // Task was cancelled or other non-panic error
+            Err(VpnError::Network(std::io::Error::other(format!(
+                "{} task failed: {}",
+                task_name, e
+            ))))
+        }
+    }
 }
