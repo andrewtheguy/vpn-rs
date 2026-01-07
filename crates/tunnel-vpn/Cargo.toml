@@ -47,6 +47,5 @@ ipnet = { version = "2", features = ["serde"] }
 # Futures utilities
 futures = "0.3"
 
-# Unix system calls (for flock)
-[target.'cfg(unix)'.dependencies]
-libc = "0.2"
+# File locking (safe wrapper around flock/LockFile)
+fs2 = "0.4"

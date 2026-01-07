@@ -11,9 +11,9 @@
 compile_error!("VPN lock is only supported on Linux and macOS");
 
 use crate::error::{VpnError, VpnResult};
+use fs2::FileExt;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
 
 /// Lock file name for VPN client.
@@ -42,25 +42,20 @@ impl VpnLock {
             })?;
         }
 
-        // Try to create/open the lock file with exclusive access
-        let mut opts = OpenOptions::new();
-        opts.write(true).create(true).truncate(true);
-
-        opts.custom_flags(libc::O_CLOEXEC);
-
-        let file = opts.open(&path).map_err(|e| {
-            VpnError::Config(format!("Failed to open lock file: {}", e))
-        })?;
+        // Open or create the lock file
+        let file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&path)
+            .map_err(|e| VpnError::Config(format!("Failed to open lock file: {}", e)))?;
 
         // Try to acquire exclusive lock (non-blocking)
-        use std::os::unix::io::AsRawFd;
-        let fd = file.as_raw_fd();
-        let result = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
-        if result != 0 {
-            return Err(VpnError::Config(
+        file.try_lock_exclusive().map_err(|_| {
+            VpnError::Config(
                 "Another VPN client is already running. Only one instance allowed.".into(),
-            ));
-        }
+            )
+        })?;
 
         // Write PID to lock file for debugging
         let mut file = file;
@@ -97,11 +92,9 @@ impl VpnLock {
             Err(_) => return false,
         };
 
-        use std::os::unix::io::AsRawFd;
-        let fd = file.as_raw_fd();
-        let result = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
-        if result != 0 {
-            return true; // Lock is held by another process
+        // If we can't get the lock, someone else has it
+        if file.try_lock_exclusive().is_err() {
+            return true;
         }
         // We got the lock - it will be released when file is dropped
         false
@@ -110,7 +103,7 @@ impl VpnLock {
 
 impl Drop for VpnLock {
     fn drop(&mut self) {
-        // flock is automatically released when the file descriptor is closed,
+        // The lock is automatically released when the file is closed,
         // which happens when self.file is dropped. We don't remove the lock file
         // to avoid a race condition where another process could acquire a lock
         // on the about-to-be-unlinked inode while a third process creates a new
