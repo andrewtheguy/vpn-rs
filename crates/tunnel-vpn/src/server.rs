@@ -185,8 +185,8 @@ impl VpnServer {
     }
 
     /// Create and configure the TUN device.
-    pub fn setup_tun(&mut self) -> VpnResult<()> {
-        let pool = futures::executor::block_on(self.ip_pool.read());
+    pub async fn setup_tun(&mut self) -> VpnResult<()> {
+        let pool = self.ip_pool.read().await;
         let server_ip = pool.server_ip();
         let netmask = pool.network().netmask();
         drop(pool);
@@ -206,7 +206,7 @@ impl VpnServer {
     /// Run the VPN server, accepting connections via iroh.
     pub async fn run(mut self, endpoint: Endpoint) -> VpnResult<()> {
         // Setup TUN device
-        self.setup_tun()?;
+        self.setup_tun().await?;
 
         let server_ip = self.server_ip().await;
         let network = self.network().await;
