@@ -35,7 +35,7 @@ log = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
-# Cryptographic randomness
+# Cryptographic randomness (0.8 for boringtun/x25519-dalek compatibility)
 rand = "0.8"
 
 # Base64 encoding

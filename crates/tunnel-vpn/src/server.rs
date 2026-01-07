@@ -494,12 +494,12 @@ impl Default for VpnServerBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rand::RngCore;
 
-    /// Helper to create test EndpointId from a u8 seed
-    fn test_endpoint_id(seed: u8) -> EndpointId {
+    /// Helper to create a random EndpointId for testing
+    fn random_endpoint_id() -> EndpointId {
         let mut bytes = [0u8; 32];
-        bytes[0] = seed;
-        // Create a secret key from fixed bytes and get its public key
+        rand::rngs::OsRng.fill_bytes(&mut bytes);
         let secret = iroh::SecretKey::from_bytes(&bytes);
         secret.public()
     }
@@ -513,8 +513,8 @@ mod tests {
         assert_eq!(pool.server_ip(), Ipv4Addr::new(10, 0, 0, 1));
 
         // Allocate IPs for clients
-        let id1 = test_endpoint_id(1);
-        let id2 = test_endpoint_id(2);
+        let id1 = random_endpoint_id();
+        let id2 = random_endpoint_id();
 
         let ip1 = pool.allocate(id1).unwrap();
         let ip2 = pool.allocate(id2).unwrap();
@@ -528,7 +528,7 @@ mod tests {
 
         // Release and reallocate
         pool.release(&id1);
-        let id3 = test_endpoint_id(3);
+        let id3 = random_endpoint_id();
         let ip3 = pool.allocate(id3).unwrap();
         assert_eq!(ip3, ip1); // Should reuse released IP
     }
@@ -540,8 +540,8 @@ mod tests {
         let mut pool = IpPool::new(network);
 
         // Server uses .1, only .2 available for clients
-        let id1 = test_endpoint_id(1);
-        let id2 = test_endpoint_id(2);
+        let id1 = random_endpoint_id();
+        let id2 = random_endpoint_id();
 
         let ip1 = pool.allocate(id1);
         assert!(ip1.is_some());
