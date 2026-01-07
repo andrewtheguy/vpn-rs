@@ -15,6 +15,9 @@ use tunnel_iroh::iroh_mode::endpoint::{
 };
 use tunnel_iroh::{auth, iroh_mode, secret, socks5_bridge};
 
+#[cfg(unix)]
+mod vpn_commands;
+
 #[derive(Parser)]
 #[command(name = "tunnel-rs")]
 #[command(version)]
@@ -168,6 +171,96 @@ enum Command {
         /// Number of tokens to generate (default: 1)
         #[arg(short, long, default_value = "1")]
         count: usize,
+    },
+    /// VPN mode - WireGuard-based full VPN functionality (Unix only)
+    #[cfg(unix)]
+    #[command(subcommand)]
+    Vpn(VpnCommand),
+}
+
+/// VPN subcommands for WireGuard-based VPN mode.
+#[cfg(unix)]
+#[derive(Subcommand)]
+pub enum VpnCommand {
+    /// Run as VPN server (accepts connections and assigns IPs)
+    Server {
+        /// VPN network CIDR (e.g., 10.0.0.0/24)
+        #[arg(short, long, default_value = "10.0.0.0/24")]
+        network: String,
+
+        /// Server's VPN IP address (gateway). Defaults to first IP in network.
+        #[arg(long)]
+        server_ip: Option<String>,
+
+        /// UDP port to bind for WireGuard (default: 51820)
+        #[arg(short, long, default_value = "51820")]
+        wg_port: u16,
+
+        /// MTU for VPN packets (default: 1420)
+        #[arg(long, default_value = "1420")]
+        mtu: u16,
+
+        /// Path to private key file for persistent identity
+        #[arg(long)]
+        private_key_file: Option<PathBuf>,
+
+        /// Custom relay server URL(s) for failover
+        #[arg(long = "relay-url")]
+        relay_urls: Vec<String>,
+
+        /// Custom DNS server URL for peer discovery
+        #[arg(long)]
+        dns_server: Option<String>,
+
+        /// Authentication token (clients must provide this to connect)
+        #[arg(long)]
+        auth_token: Option<String>,
+    },
+    /// Run as VPN client (connects to server and establishes tunnel)
+    Client {
+        /// EndpointId of the VPN server to connect to
+        #[arg(short = 'n', long)]
+        server_node_id: String,
+
+        /// MTU for VPN packets (default: 1420)
+        #[arg(long, default_value = "1420")]
+        mtu: u16,
+
+        /// WireGuard keepalive interval in seconds (default: 25)
+        #[arg(long, default_value = "25")]
+        keepalive_secs: u16,
+
+        /// Path to private key file for persistent identity
+        #[arg(long)]
+        private_key_file: Option<PathBuf>,
+
+        /// Custom relay server URL(s) for failover
+        #[arg(long = "relay-url")]
+        relay_urls: Vec<String>,
+
+        /// Custom DNS server URL for peer discovery
+        #[arg(long)]
+        dns_server: Option<String>,
+
+        /// Authentication token (required by server)
+        #[arg(long)]
+        auth_token: Option<String>,
+    },
+    /// Generate a WireGuard private key
+    GenerateKey {
+        /// Path where to save the private key file
+        #[arg(short, long)]
+        output: PathBuf,
+
+        /// Overwrite existing file if it exists
+        #[arg(long)]
+        force: bool,
+    },
+    /// Show the WireGuard public key derived from a private key
+    ShowPublicKey {
+        /// Path to the private key file
+        #[arg(short, long)]
+        private_key_file: PathBuf,
     },
 }
 
@@ -559,5 +652,7 @@ async fn main() -> Result<()> {
             }
             Ok(())
         }
+        #[cfg(unix)]
+        Command::Vpn(vpn_cmd) => vpn_commands::run_vpn_command(vpn_cmd).await,
     }
 }

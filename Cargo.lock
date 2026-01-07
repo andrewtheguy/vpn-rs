@@ -5127,11 +5127,13 @@ dependencies = [
  "anyhow",
  "clap",
  "env_logger",
+ "ipnet",
  "iroh",
  "log",
  "tokio",
  "tunnel-common",
  "tunnel-iroh",
+ "tunnel-vpn",
 ]
 
 [[package]]
