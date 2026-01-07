@@ -243,9 +243,23 @@ pub fn add_route(tun_name: &str, route: &Ipv4Net) -> VpnResult<()> {
 }
 
 /// Add multiple routes through the VPN TUN interface.
+///
+/// If any route fails to add, previously added routes are rolled back.
 pub fn add_routes(tun_name: &str, routes: &[Ipv4Net]) -> VpnResult<()> {
+    let mut added: Vec<&Ipv4Net> = Vec::with_capacity(routes.len());
+
     for route in routes {
-        add_route(tun_name, route)?;
+        if let Err(e) = add_route(tun_name, route) {
+            // Rollback previously added routes
+            log::warn!("Failed to add route {}, rolling back {} route(s)", route, added.len());
+            for added_route in added.iter().rev() {
+                if let Err(rollback_err) = remove_route(tun_name, added_route) {
+                    log::warn!("Rollback failed for route {}: {}", added_route, rollback_err);
+                }
+            }
+            return Err(e);
+        }
+        added.push(route);
     }
     Ok(())
 }
@@ -253,7 +267,6 @@ pub fn add_routes(tun_name: &str, routes: &[Ipv4Net]) -> VpnResult<()> {
 /// Remove a route from the system.
 ///
 /// This is called during cleanup to remove routes added by add_route.
-#[allow(dead_code)]
 pub fn remove_route(tun_name: &str, route: &Ipv4Net) -> VpnResult<()> {
     #[cfg(target_os = "macos")]
     {
