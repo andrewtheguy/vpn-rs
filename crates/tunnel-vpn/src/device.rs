@@ -246,9 +246,10 @@ pub async fn add_route(tun_name: &str, route: &Ipv4Net) -> VpnResult<()> {
 
 /// Add multiple routes through the VPN TUN interface.
 ///
+/// Returns a `RouteGuard` that automatically removes the routes when dropped.
 /// If any route fails to add, previously added routes are rolled back.
-pub async fn add_routes(tun_name: &str, routes: &[Ipv4Net]) -> VpnResult<()> {
-    let mut added: Vec<&Ipv4Net> = Vec::with_capacity(routes.len());
+pub async fn add_routes(tun_name: &str, routes: &[Ipv4Net]) -> VpnResult<RouteGuard> {
+    let mut added: Vec<Ipv4Net> = Vec::with_capacity(routes.len());
 
     for route in routes {
         if let Err(e) = add_route(tun_name, route).await {
@@ -261,12 +262,12 @@ pub async fn add_routes(tun_name: &str, routes: &[Ipv4Net]) -> VpnResult<()> {
             }
             return Err(e);
         }
-        added.push(route);
+        added.push(*route);
     }
-    Ok(())
+    Ok(RouteGuard::new(tun_name.to_string(), added))
 }
 
-/// Remove a route from the system.
+/// Remove a route from the system (async version).
 ///
 /// This is called during cleanup to remove routes added by add_route.
 pub async fn remove_route(tun_name: &str, route: &Ipv4Net) -> VpnResult<()> {
@@ -316,4 +317,93 @@ pub async fn remove_route(tun_name: &str, route: &Ipv4Net) -> VpnResult<()> {
     }
 
     Ok(())
+}
+
+/// Remove a route from the system (blocking version for Drop).
+fn remove_route_sync(tun_name: &str, route: &Ipv4Net) {
+    #[cfg(target_os = "macos")]
+    {
+        let result = std::process::Command::new("route")
+            .args([
+                "delete",
+                "-net",
+                &route.network().to_string(),
+                "-netmask",
+                &route.netmask().to_string(),
+                "-interface",
+                tun_name,
+            ])
+            .output();
+
+        match result {
+            Ok(output) if output.status.success() => {
+                log::info!("Removed route {} via {}", route, tun_name);
+            }
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                log::warn!("Failed to remove route {}: {}", route, stderr);
+            }
+            Err(e) => {
+                log::warn!("Failed to execute route delete command: {}", e);
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let result = std::process::Command::new("ip")
+            .args(["route", "del", &route.to_string(), "dev", tun_name])
+            .output();
+
+        match result {
+            Ok(output) if output.status.success() => {
+                log::info!("Removed route {} via {}", route, tun_name);
+            }
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                log::warn!("Failed to remove route {}: {}", route, stderr);
+            }
+            Err(e) => {
+                log::warn!("Failed to execute ip route del command: {}", e);
+            }
+        }
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        let _ = (tun_name, route);
+    }
+}
+
+/// Guard that automatically removes routes when dropped.
+///
+/// This ensures routes are cleaned up even if the VPN connection
+/// terminates unexpectedly or the program panics.
+pub struct RouteGuard {
+    tun_name: String,
+    routes: Vec<Ipv4Net>,
+}
+
+impl RouteGuard {
+    /// Create a new RouteGuard (internal use only).
+    fn new(tun_name: String, routes: Vec<Ipv4Net>) -> Self {
+        Self { tun_name, routes }
+    }
+
+    /// Get the routes managed by this guard.
+    pub fn routes(&self) -> &[Ipv4Net] {
+        &self.routes
+    }
+}
+
+impl Drop for RouteGuard {
+    fn drop(&mut self) {
+        if self.routes.is_empty() {
+            return;
+        }
+        log::info!("Cleaning up {} route(s) via {}", self.routes.len(), self.tun_name);
+        for route in self.routes.iter().rev() {
+            remove_route_sync(&self.tun_name, route);
+        }
+    }
 }
