@@ -5,11 +5,10 @@
 //!
 //! # Platform Support
 //!
-//! This module only supports Unix platforms (Linux, macOS, BSD).
-//! Windows is not supported.
+//! This module only supports Linux and macOS.
 
-#[cfg(not(unix))]
-compile_error!("VPN lock is only supported on Unix platforms (Linux, macOS, BSD)");
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+compile_error!("VPN lock is only supported on Linux and macOS");
 
 use crate::error::{VpnError, VpnResult};
 use std::fs::{File, OpenOptions};

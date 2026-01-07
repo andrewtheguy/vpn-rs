@@ -21,8 +21,8 @@
 //! └─────────────────────────────────────────────────────────────┘
 //! ```
 
-#[cfg(not(unix))]
-compile_error!("tunnel-vpn only supports Linux and macOS for now");
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+compile_error!("tunnel-vpn only supports Linux and macOS");
 
 pub mod client;
 pub mod config;

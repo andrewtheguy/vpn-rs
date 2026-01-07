@@ -147,7 +147,8 @@ pub async fn write_message<W: tokio::io::AsyncWriteExt + Unpin>(
     writer: &mut W,
     data: &[u8],
 ) -> VpnResult<()> {
-    let len = data.len() as u32;
+    let len = u32::try_from(data.len())
+        .map_err(|_| VpnError::Signaling(format!("Message too large: {} bytes", data.len())))?;
     writer.write_all(&len.to_be_bytes()).await?;
     writer.write_all(data).await?;
     Ok(())
