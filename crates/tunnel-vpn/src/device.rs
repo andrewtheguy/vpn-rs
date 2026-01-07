@@ -6,8 +6,8 @@
 use crate::error::{VpnError, VpnResult};
 use ipnet::Ipv4Net;
 use std::net::Ipv4Addr;
-use std::process::Command;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::process::Command;
 use tun::{AbstractDevice, AsyncDevice, Configuration, DeviceReader, DeviceWriter};
 
 /// TUN device configuration.
@@ -188,7 +188,7 @@ impl TunWriter {
 /// # Platform Support
 /// - macOS: Uses `route add -net <cidr> -interface <tun_device>`
 /// - Linux: Uses `ip route add <cidr> dev <tun_device>`
-pub fn add_route(tun_name: &str, route: &Ipv4Net) -> VpnResult<()> {
+pub async fn add_route(tun_name: &str, route: &Ipv4Net) -> VpnResult<()> {
     #[cfg(target_os = "macos")]
     {
         let output = Command::new("route")
@@ -202,6 +202,7 @@ pub fn add_route(tun_name: &str, route: &Ipv4Net) -> VpnResult<()> {
                 tun_name,
             ])
             .output()
+            .await
             .map_err(|e| VpnError::TunDevice(format!("Failed to execute route command: {}", e)))?;
 
         if !output.status.success() {
@@ -219,6 +220,7 @@ pub fn add_route(tun_name: &str, route: &Ipv4Net) -> VpnResult<()> {
         let output = Command::new("ip")
             .args(["route", "add", &route.to_string(), "dev", tun_name])
             .output()
+            .await
             .map_err(|e| VpnError::TunDevice(format!("Failed to execute ip route command: {}", e)))?;
 
         if !output.status.success() {
@@ -245,15 +247,15 @@ pub fn add_route(tun_name: &str, route: &Ipv4Net) -> VpnResult<()> {
 /// Add multiple routes through the VPN TUN interface.
 ///
 /// If any route fails to add, previously added routes are rolled back.
-pub fn add_routes(tun_name: &str, routes: &[Ipv4Net]) -> VpnResult<()> {
+pub async fn add_routes(tun_name: &str, routes: &[Ipv4Net]) -> VpnResult<()> {
     let mut added: Vec<&Ipv4Net> = Vec::with_capacity(routes.len());
 
     for route in routes {
-        if let Err(e) = add_route(tun_name, route) {
+        if let Err(e) = add_route(tun_name, route).await {
             // Rollback previously added routes
             log::warn!("Failed to add route {}, rolling back {} route(s)", route, added.len());
             for added_route in added.iter().rev() {
-                if let Err(rollback_err) = remove_route(tun_name, added_route) {
+                if let Err(rollback_err) = remove_route(tun_name, added_route).await {
                     log::warn!("Rollback failed for route {}: {}", added_route, rollback_err);
                 }
             }
@@ -267,7 +269,7 @@ pub fn add_routes(tun_name: &str, routes: &[Ipv4Net]) -> VpnResult<()> {
 /// Remove a route from the system.
 ///
 /// This is called during cleanup to remove routes added by add_route.
-pub fn remove_route(tun_name: &str, route: &Ipv4Net) -> VpnResult<()> {
+pub async fn remove_route(tun_name: &str, route: &Ipv4Net) -> VpnResult<()> {
     #[cfg(target_os = "macos")]
     {
         let output = Command::new("route")
@@ -281,6 +283,7 @@ pub fn remove_route(tun_name: &str, route: &Ipv4Net) -> VpnResult<()> {
                 tun_name,
             ])
             .output()
+            .await
             .map_err(|e| VpnError::TunDevice(format!("Failed to execute route command: {}", e)))?;
 
         if !output.status.success() {
@@ -296,6 +299,7 @@ pub fn remove_route(tun_name: &str, route: &Ipv4Net) -> VpnResult<()> {
         let output = Command::new("ip")
             .args(["route", "del", &route.to_string(), "dev", tun_name])
             .output()
+            .await
             .map_err(|e| VpnError::TunDevice(format!("Failed to execute ip route command: {}", e)))?;
 
         if !output.status.success() {

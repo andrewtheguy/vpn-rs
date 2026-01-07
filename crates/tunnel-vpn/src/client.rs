@@ -108,7 +108,7 @@ impl VpnClient {
 
         // Add custom routes through the VPN
         if !self.config.routes.is_empty() {
-            add_routes(tun_device.name(), &self.config.routes)?;
+            add_routes(tun_device.name(), &self.config.routes).await?;
         }
 
         // Open data stream for WireGuard packets
