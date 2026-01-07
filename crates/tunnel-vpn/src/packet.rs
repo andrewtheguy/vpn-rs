@@ -54,17 +54,23 @@ impl PacketProcessor {
             }
 
             let ip_packet = &buf[..len];
-            let mut tunnel = self.tunnel.lock().await;
 
-            match tunnel.encapsulate(ip_packet)? {
-                PacketResult::WriteToNetwork(data) => {
-                    self.socket.send_to(&data, self.peer_endpoint).await?;
+            // Limit mutex scope to just the encapsulate call
+            let send_data = {
+                let mut tunnel = self.tunnel.lock().await;
+                match tunnel.encapsulate(ip_packet)? {
+                    PacketResult::WriteToNetwork(data) => Some(data),
+                    PacketResult::Error(e) => {
+                        log::warn!("Outbound packet error: {}", e);
+                        None
+                    }
+                    _ => None,
                 }
-                PacketResult::Done => {}
-                PacketResult::Error(e) => {
-                    log::warn!("Outbound packet error: {}", e);
-                }
-                _ => {}
+            };
+
+            // Send outside the lock
+            if let Some(data) = send_data {
+                self.socket.send_to(&data, self.peer_endpoint).await?;
             }
         }
     }
