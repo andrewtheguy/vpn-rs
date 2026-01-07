@@ -38,6 +38,8 @@ pub struct WgTunnel {
     peer_public_key: PublicKey,
     /// Peer's endpoint (UDP address).
     peer_endpoint: Option<SocketAddr>,
+    /// Reusable buffer for packet processing.
+    buf: Vec<u8>,
 }
 
 impl WgTunnel {
@@ -67,6 +69,7 @@ impl WgTunnel {
             keypair,
             peer_public_key,
             peer_endpoint: None,
+            buf: vec![0u8; WG_BUFFER_SIZE],
         })
     }
 
@@ -94,18 +97,24 @@ impl WgTunnel {
     ///
     /// Returns the encrypted WireGuard packet to send to the peer.
     pub fn encapsulate(&mut self, ip_packet: &[u8]) -> VpnResult<PacketResult> {
-        let mut buf = vec![0u8; WG_BUFFER_SIZE];
-
-        match self.inner.encapsulate(ip_packet, &mut buf) {
+        match self.inner.encapsulate(ip_packet, &mut self.buf) {
             TunnResult::Done => Ok(PacketResult::Done),
             TunnResult::WriteToNetwork(data) => {
                 Ok(PacketResult::WriteToNetwork(data.to_vec()))
+            }
+            TunnResult::WriteToTunnelV4(_, _) => {
+                // WriteToTunnel variants should never occur during encapsulation
+                // (encryption produces network packets, not tunnel packets)
+                Ok(PacketResult::Done)
+            }
+            TunnResult::WriteToTunnelV6(_, _) => {
+                // WriteToTunnel variants should never occur during encapsulation
+                Ok(PacketResult::Done)
             }
             TunnResult::Err(e) => Err(VpnError::WireGuard(format!(
                 "Encapsulation failed: {:?}",
                 e
             ))),
-            _ => Ok(PacketResult::Done),
         }
     }
 
@@ -117,9 +126,7 @@ impl WgTunnel {
         src_addr: Option<IpAddr>,
         wg_packet: &[u8],
     ) -> VpnResult<PacketResult> {
-        let mut buf = vec![0u8; WG_BUFFER_SIZE];
-
-        match self.inner.decapsulate(src_addr, wg_packet, &mut buf) {
+        match self.inner.decapsulate(src_addr, wg_packet, &mut self.buf) {
             TunnResult::Done => Ok(PacketResult::Done),
             TunnResult::WriteToNetwork(data) => {
                 Ok(PacketResult::WriteToNetwork(data.to_vec()))
@@ -143,20 +150,27 @@ impl WgTunnel {
     /// keepalives, handshake timeouts, etc.
     pub fn update_timers(&mut self) -> Vec<PacketResult> {
         let mut results = Vec::new();
-        let mut buf = vec![0u8; WG_BUFFER_SIZE];
 
         loop {
-            match self.inner.update_timers(&mut buf) {
+            match self.inner.update_timers(&mut self.buf) {
                 TunnResult::Done => break,
                 TunnResult::WriteToNetwork(data) => {
+                    // Copy data out before next iteration reuses the buffer
                     results.push(PacketResult::WriteToNetwork(data.to_vec()));
-                    buf = vec![0u8; WG_BUFFER_SIZE];
+                }
+                TunnResult::WriteToTunnelV4(_, _) => {
+                    // WriteToTunnel variants should never occur during timer updates
+                    // (timers produce keepalives/handshakes, not decrypted packets)
+                    break;
+                }
+                TunnResult::WriteToTunnelV6(_, _) => {
+                    // WriteToTunnel variants should never occur during timer updates
+                    break;
                 }
                 TunnResult::Err(e) => {
                     results.push(PacketResult::Error(format!("Timer error: {:?}", e)));
                     break;
                 }
-                _ => break,
             }
         }
 
