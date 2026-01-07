@@ -232,20 +232,21 @@ impl VpnClient {
 
         // Spawn outbound task (TUN -> WireGuard -> iroh stream)
         let outbound_handle = tokio::spawn(async move {
-            let mut buf = vec![0u8; buffer_size];
+            let mut read_buf = vec![0u8; buffer_size];
+            let mut write_buf = Vec::with_capacity(4 + MAX_WG_PACKET_SIZE);
             loop {
-                match tun_reader.read(&mut buf).await {
+                match tun_reader.read(&mut read_buf).await {
                     Ok(n) if n > 0 => {
-                        let packet = &buf[..n];
+                        let packet = &read_buf[..n];
                         let mut tunnel = tunnel_outbound.lock().await;
                         match tunnel.encapsulate(packet) {
                             Ok(PacketResult::WriteToNetwork(data)) => {
                                 let mut send = send_outbound.lock().await;
-                                // Write length-prefixed packet atomically
-                                let mut buf = Vec::with_capacity(4 + data.len());
-                                buf.extend_from_slice(&(data.len() as u32).to_be_bytes());
-                                buf.extend_from_slice(&data);
-                                if let Err(e) = send.write_all(&buf).await {
+                                // Write length-prefixed packet atomically (reuse buffer)
+                                write_buf.clear();
+                                write_buf.extend_from_slice(&(data.len() as u32).to_be_bytes());
+                                write_buf.extend_from_slice(&data);
+                                if let Err(e) = send.write_all(&write_buf).await {
                                     log::warn!("Failed to write WG packet: {}", e);
                                     break;
                                 }
@@ -269,6 +270,7 @@ impl VpnClient {
         let inbound_handle = tokio::spawn(async move {
             let mut len_buf = [0u8; 4];
             let mut data_buf = vec![0u8; MAX_WG_PACKET_SIZE];
+            let mut write_buf = Vec::with_capacity(4 + MAX_WG_PACKET_SIZE);
             loop {
                 let mut recv = wg_recv.lock().await;
                 // Read length prefix
@@ -305,13 +307,13 @@ impl VpnClient {
                         }
                     }
                     Ok(PacketResult::WriteToNetwork(data)) => {
-                        // Need to send response back through stream atomically
+                        // Need to send response back through stream atomically (reuse buffer)
                         drop(tunnel);
                         let mut send = send_timers.lock().await;
-                        let mut buf = Vec::with_capacity(4 + data.len());
-                        buf.extend_from_slice(&(data.len() as u32).to_be_bytes());
-                        buf.extend_from_slice(&data);
-                        if let Err(e) = send.write_all(&buf).await {
+                        write_buf.clear();
+                        write_buf.extend_from_slice(&(data.len() as u32).to_be_bytes());
+                        write_buf.extend_from_slice(&data);
+                        if let Err(e) = send.write_all(&write_buf).await {
                             log::warn!("Failed to send response packet: {}", e);
                         }
                     }
@@ -325,6 +327,7 @@ impl VpnClient {
 
         // Spawn timer task
         let timer_handle = tokio::spawn(async move {
+            let mut write_buf = Vec::with_capacity(4 + MAX_WG_PACKET_SIZE);
             loop {
                 tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
                 let mut tunnel = tunnel_timers.lock().await;
@@ -335,11 +338,11 @@ impl VpnClient {
                     match result {
                         PacketResult::WriteToNetwork(data) => {
                             let mut send = wg_send.lock().await;
-                            // Write length-prefixed packet atomically
-                            let mut buf = Vec::with_capacity(4 + data.len());
-                            buf.extend_from_slice(&(data.len() as u32).to_be_bytes());
-                            buf.extend_from_slice(&data);
-                            if let Err(e) = send.write_all(&buf).await {
+                            // Write length-prefixed packet atomically (reuse buffer)
+                            write_buf.clear();
+                            write_buf.extend_from_slice(&(data.len() as u32).to_be_bytes());
+                            write_buf.extend_from_slice(&data);
+                            if let Err(e) = send.write_all(&write_buf).await {
                                 log::warn!("Failed to send timer packet: {}", e);
                             }
                         }
