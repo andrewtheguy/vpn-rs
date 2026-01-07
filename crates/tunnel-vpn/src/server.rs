@@ -21,6 +21,7 @@ use iroh::endpoint::SendStream;
 use iroh::{Endpoint, EndpointId};
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
 
@@ -137,6 +138,8 @@ pub struct VpnServer {
     ip_to_endpoint: Arc<RwLock<HashMap<Ipv4Addr, EndpointId>>>,
     /// TUN device for VPN traffic.
     tun_device: Option<TunDevice>,
+    /// Atomic counter for active connections (prevents race in max_clients check).
+    active_connections: AtomicUsize,
 }
 
 impl VpnServer {
@@ -162,6 +165,7 @@ impl VpnServer {
             clients: Arc::new(RwLock::new(HashMap::new())),
             ip_to_endpoint: Arc::new(RwLock::new(HashMap::new())),
             tun_device: None,
+            active_connections: AtomicUsize::new(0),
         })
     }
 
@@ -310,15 +314,44 @@ impl VpnServer {
             return Err(VpnError::Signaling("Server has no auth tokens configured".into()));
         }
 
-        // Check max clients
-        let client_count = self.clients.read().await.len();
-        if client_count >= self.config.max_clients {
+        // Atomically increment connection count and check max_clients
+        // fetch_add returns the previous value, so if it was >= max_clients, we're over
+        let prev_count = self.active_connections.fetch_add(1, Ordering::SeqCst);
+        if prev_count >= self.config.max_clients {
+            // We exceeded the limit - decrement and reject
+            self.active_connections.fetch_sub(1, Ordering::SeqCst);
             let response = VpnHandshakeResponse::rejected("Server full");
             write_message(&mut send, &response.encode()?).await?;
             let _ = send.finish();
             return Err(VpnError::IpAssignment("Server full".into()));
         }
 
+        // From this point on, we must decrement active_connections on any error
+        let result = self
+            .handle_connection_inner(
+                &mut send,
+                remote_id,
+                connection,
+                tun_writer,
+                handshake.wg_public_key,
+            )
+            .await;
+
+        // Always decrement on exit (success or failure)
+        self.active_connections.fetch_sub(1, Ordering::SeqCst);
+
+        result
+    }
+
+    /// Inner connection handler - separated to ensure atomic counter cleanup.
+    async fn handle_connection_inner(
+        &self,
+        send: &mut iroh::endpoint::SendStream,
+        remote_id: EndpointId,
+        connection: iroh::endpoint::Connection,
+        tun_writer: Arc<Mutex<TunWriter>>,
+        client_wg_public_key: WgPublicKey,
+    ) -> VpnResult<()> {
         // Allocate IP for client
         let assigned_ip = {
             let mut pool = self.ip_pool.write().await;
@@ -333,7 +366,7 @@ impl VpnServer {
         drop(pool);
 
         // Create WireGuard tunnel for this client
-        let peer_public_key = handshake.wg_public_key.to_public_key();
+        let peer_public_key = client_wg_public_key.to_public_key();
         let dummy_endpoint: SocketAddr = "127.0.0.1:51820".parse().unwrap();
         let tunnel = WgTunnelBuilder::new()
             .keypair(self.keypair.clone())
@@ -353,8 +386,10 @@ impl VpnServer {
             server_ip,
         );
 
-        write_message(&mut send, &response.encode()?).await?;
-        let _ = send.finish();
+        write_message(send, &response.encode()?).await?;
+        if let Err(e) = send.finish() {
+            log::debug!("Failed to finish handshake stream: {}", e);
+        }
 
         log::info!(
             "Client {} connected, assigned IP: {}",
