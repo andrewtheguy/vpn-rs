@@ -3,6 +3,9 @@
 //! The VPN server listens for incoming client connections via iroh,
 //! performs WireGuard key exchange, assigns IP addresses, and manages
 //! WireGuard tunnels for each connected client.
+//!
+//! WireGuard packets are tunneled through the iroh QUIC connection to handle
+//! NAT traversal automatically.
 
 use crate::config::VpnServerConfig;
 use crate::device::{TunConfig, TunDevice};
@@ -14,26 +17,28 @@ use crate::signaling::{
 use crate::tunnel::{PacketResult, WgTunnel, WgTunnelBuilder};
 use boringtun::x25519::PublicKey;
 use ipnet::Ipv4Net;
+use iroh::endpoint::{RecvStream, SendStream};
 use iroh::{Endpoint, EndpointId};
 use std::collections::HashMap;
-use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
+use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
-use tokio::net::UdpSocket as TokioUdpSocket;
 use tokio::sync::{Mutex, RwLock};
 
+/// Maximum WireGuard packet size.
+const MAX_WG_PACKET_SIZE: usize = 65536;
+
 /// State for a connected VPN client.
-#[allow(dead_code)]
 struct ClientState {
     /// Client's assigned VPN IP.
     assigned_ip: Ipv4Addr,
     /// Client's WireGuard public key.
+    #[allow(dead_code)]
     wg_public_key: PublicKey,
     /// Client's iroh endpoint ID.
+    #[allow(dead_code)]
     endpoint_id: EndpointId,
     /// WireGuard tunnel for this client.
     tunnel: Arc<Mutex<WgTunnel>>,
-    /// Client's UDP endpoint (for WireGuard traffic).
-    wg_endpoint: Option<SocketAddr>,
 }
 
 /// IP address pool for assigning addresses to clients.
@@ -113,12 +118,6 @@ impl IpPool {
             self.released.push(ip);
         }
     }
-
-    /// Get the number of connected clients.
-    #[allow(dead_code)]
-    fn client_count(&self) -> usize {
-        self.in_use.len()
-    }
 }
 
 /// VPN server instance.
@@ -131,8 +130,6 @@ pub struct VpnServer {
     ip_pool: Arc<RwLock<IpPool>>,
     /// Connected clients (by endpoint ID).
     clients: Arc<RwLock<HashMap<EndpointId, ClientState>>>,
-    /// UDP socket for WireGuard traffic.
-    wg_socket: Arc<TokioUdpSocket>,
     /// TUN device for VPN traffic.
     tun_device: Option<TunDevice>,
 }
@@ -152,24 +149,11 @@ impl VpnServer {
         // Create IP pool
         let ip_pool = Arc::new(RwLock::new(IpPool::new(config.network)));
 
-        // Bind UDP socket for WireGuard
-        let std_socket = UdpSocket::bind(format!("0.0.0.0:{}", config.wg_port)).map_err(|e| {
-            VpnError::Network(std::io::Error::new(
-                e.kind(),
-                format!("Failed to bind WireGuard socket on port {}: {}", config.wg_port, e),
-            ))
-        })?;
-        std_socket.set_nonblocking(true)?;
-        let wg_socket = Arc::new(TokioUdpSocket::from_std(std_socket)?);
-
-        log::info!("WireGuard listening on UDP port {}", config.wg_port);
-
         Ok(Self {
             config,
             keypair,
             ip_pool,
             clients: Arc::new(RwLock::new(HashMap::new())),
-            wg_socket,
             tun_device: None,
         })
     }
@@ -189,11 +173,6 @@ impl VpnServer {
         self.ip_pool.read().await.network()
     }
 
-    /// Get the number of connected clients.
-    pub async fn client_count(&self) -> usize {
-        self.clients.read().await.len()
-    }
-
     /// Create and configure the TUN device.
     pub fn setup_tun(&mut self) -> VpnResult<()> {
         let pool = futures::executor::block_on(self.ip_pool.read());
@@ -201,11 +180,14 @@ impl VpnServer {
         let netmask = pool.network().netmask();
         drop(pool);
 
-        let tun_config = TunConfig::new(server_ip, netmask, server_ip)
-            .with_mtu(self.config.mtu);
+        let tun_config = TunConfig::new(server_ip, netmask, server_ip).with_mtu(self.config.mtu);
 
         let device = TunDevice::create(tun_config)?;
-        log::info!("Created TUN device: {} with IP {}", device.name(), server_ip);
+        log::info!(
+            "Created TUN device: {} with IP {}",
+            device.name(),
+            server_ip
+        );
         self.tun_device = Some(device);
         Ok(())
     }
@@ -217,25 +199,15 @@ impl VpnServer {
 
         let server_ip = self.server_ip().await;
         let network = self.network().await;
-        let wg_port = self.config.wg_port;
         let public_key = self.public_key();
 
         log::info!("VPN Server started:");
         log::info!("  Network: {}", network);
         log::info!("  Server IP: {}", server_ip);
-        log::info!("  WireGuard port: {}", wg_port);
         log::info!("  Public key: {}", public_key.to_base64());
         log::info!("  Node ID: {}", endpoint.id());
 
         let server = Arc::new(self);
-
-        // Spawn WireGuard packet handler
-        let server_clone = server.clone();
-        tokio::spawn(async move {
-            if let Err(e) = server_clone.run_wg_receiver().await {
-                log::error!("WireGuard receiver error: {}", e);
-            }
-        });
 
         // Spawn TUN packet handler
         let server_clone = server.clone();
@@ -250,9 +222,8 @@ impl VpnServer {
             match endpoint.accept().await {
                 Some(incoming) => {
                     let server = server.clone();
-                    let endpoint_clone = endpoint.clone();
                     tokio::spawn(async move {
-                        if let Err(e) = server.handle_connection(incoming, &endpoint_clone).await {
+                        if let Err(e) = server.handle_connection(incoming).await {
                             log::error!("Connection error: {}", e);
                         }
                     });
@@ -268,11 +239,7 @@ impl VpnServer {
     }
 
     /// Handle an incoming VPN connection.
-    async fn handle_connection(
-        &self,
-        incoming: iroh::endpoint::Incoming,
-        _endpoint: &Endpoint,
-    ) -> VpnResult<()> {
+    async fn handle_connection(&self, incoming: iroh::endpoint::Incoming) -> VpnResult<()> {
         let connection = incoming
             .await
             .map_err(|e| VpnError::Signaling(format!("Failed to accept connection: {}", e)))?;
@@ -280,7 +247,7 @@ impl VpnServer {
         let remote_id = connection.remote_id();
         log::info!("New VPN connection from {}", remote_id);
 
-        // Accept bidirectional stream for handshake
+        // Accept handshake stream
         let (mut send, mut recv) = connection
             .accept_bi()
             .await
@@ -308,9 +275,8 @@ impl VpnServer {
         // Allocate IP for client
         let assigned_ip = {
             let mut pool = self.ip_pool.write().await;
-            pool.allocate(remote_id).ok_or_else(|| {
-                VpnError::IpAssignment("IP pool exhausted".into())
-            })?
+            pool.allocate(remote_id)
+                .ok_or_else(|| VpnError::IpAssignment("IP pool exhausted".into()))?
         };
 
         // Get server info for response
@@ -319,15 +285,13 @@ impl VpnServer {
         let network = pool.network();
         drop(pool);
 
-        // WireGuard endpoint will be determined when we receive the first UDP packet
-        // from the client, since iroh doesn't expose the direct remote address
-        let wg_endpoint: Option<SocketAddr> = None;
-
         // Create WireGuard tunnel for this client
         let peer_public_key = handshake.wg_public_key.to_public_key();
+        let dummy_endpoint: SocketAddr = "127.0.0.1:51820".parse().unwrap();
         let tunnel = WgTunnelBuilder::new()
             .keypair(self.keypair.clone())
             .peer_public_key(peer_public_key)
+            .peer_endpoint(dummy_endpoint)
             .keepalive_secs(Some(self.config.keepalive_secs))
             .build()?;
 
@@ -338,19 +302,15 @@ impl VpnServer {
             assigned_ip,
             wg_public_key: peer_public_key,
             endpoint_id: remote_id,
-            tunnel,
-            wg_endpoint,
+            tunnel: tunnel.clone(),
         };
 
         self.clients.write().await.insert(remote_id, client_state);
 
-        // Send response
+        // Send response (no wg_endpoint needed since we tunnel over iroh)
         let response = VpnHandshakeResponse::accepted(
             self.public_key(),
-            SocketAddr::new(
-                std::net::IpAddr::V4(Ipv4Addr::UNSPECIFIED),
-                self.config.wg_port,
-            ),
+            dummy_endpoint, // Not used, but required by protocol
             assigned_ip,
             network,
             server_ip,
@@ -365,13 +325,26 @@ impl VpnServer {
             assigned_ip
         );
 
-        // Keep connection alive for signaling updates
-        // The actual VPN traffic goes through the UDP socket
+        // Accept data stream for WireGuard packets
+        let (wg_send, wg_recv) = connection
+            .accept_bi()
+            .await
+            .map_err(|e| VpnError::Signaling(format!("Failed to accept data stream: {}", e)))?;
+
+        log::info!("Client {} data stream established", remote_id);
+
+        // Handle client data in a separate task
         let clients = self.clients.clone();
         let ip_pool = self.ip_pool.clone();
+        let tun_device = self.tun_device.as_ref().map(|d| d.name().to_string());
+
         tokio::spawn(async move {
-            // Wait for connection to close
-            connection.closed().await;
+            if let Err(e) =
+                Self::handle_client_data(tunnel, wg_send, wg_recv, assigned_ip, tun_device).await
+            {
+                log::error!("Client {} data error: {}", remote_id, e);
+            }
+
             log::info!("Client {} disconnected", remote_id);
 
             // Cleanup
@@ -382,39 +355,113 @@ impl VpnServer {
         Ok(())
     }
 
-    /// Run the WireGuard UDP packet receiver.
-    async fn run_wg_receiver(&self) -> VpnResult<()> {
-        let mut buf = vec![0u8; 2048];
+    /// Handle client WireGuard data stream.
+    async fn handle_client_data(
+        tunnel: Arc<Mutex<WgTunnel>>,
+        wg_send: SendStream,
+        wg_recv: RecvStream,
+        _assigned_ip: Ipv4Addr,
+        _tun_name: Option<String>,
+    ) -> VpnResult<()> {
+        let wg_send = Arc::new(Mutex::new(wg_send));
+        let wg_recv = Arc::new(Mutex::new(wg_recv));
 
-        loop {
-            let (len, src_addr) = self.wg_socket.recv_from(&mut buf).await?;
-            let packet = &buf[..len];
+        let tunnel_inbound = tunnel.clone();
+        let tunnel_timers = tunnel.clone();
+        let send_inbound = wg_send.clone();
 
-            // Find the client by source address
-            let clients = self.clients.read().await;
-            let client = clients.values().find(|c| c.wg_endpoint == Some(src_addr));
-
-            if let Some(client) = client {
-                let mut tunnel = client.tunnel.lock().await;
-                match tunnel.decapsulate(Some(src_addr.ip()), packet)? {
-                    PacketResult::WriteToTunV4(data, _) | PacketResult::WriteToTunV6(data, _) => {
-                        // Write to TUN device
-                        // This would need the TUN writer
-                        log::trace!("Decrypted {} bytes from {}", data.len(), src_addr);
-                    }
-                    PacketResult::WriteToNetwork(data) => {
-                        // Send response back to client
-                        self.wg_socket.send_to(&data, src_addr).await?;
-                    }
-                    PacketResult::Done => {}
-                    PacketResult::Error(e) => {
-                        log::warn!("Decapsulation error from {}: {}", src_addr, e);
+        // Spawn inbound task (iroh stream -> WireGuard -> process)
+        let inbound_handle = tokio::spawn(async move {
+            let mut len_buf = [0u8; 4];
+            let mut data_buf = vec![0u8; MAX_WG_PACKET_SIZE];
+            loop {
+                let mut recv = wg_recv.lock().await;
+                // Read length prefix
+                match recv.read_exact(&mut len_buf).await {
+                    Ok(()) => {}
+                    Err(e) => {
+                        log::debug!("Client stream closed: {}", e);
+                        break;
                     }
                 }
-            } else {
-                log::trace!("Received packet from unknown source: {}", src_addr);
+                let len = u32::from_be_bytes(len_buf) as usize;
+                if len > MAX_WG_PACKET_SIZE {
+                    log::error!("WG packet too large: {}", len);
+                    break;
+                }
+
+                // Read packet data
+                match recv.read_exact(&mut data_buf[..len]).await {
+                    Ok(()) => {}
+                    Err(e) => {
+                        log::debug!("Failed to read WG packet: {}", e);
+                        break;
+                    }
+                }
+                drop(recv);
+
+                let packet = &data_buf[..len];
+                let mut tunnel = tunnel_inbound.lock().await;
+                match tunnel.decapsulate(None, packet) {
+                    Ok(PacketResult::WriteToTunV4(data, _))
+                    | Ok(PacketResult::WriteToTunV6(data, _)) => {
+                        // TODO: Write to TUN device and route to destination
+                        log::trace!("Decrypted {} bytes for TUN", data.len());
+                    }
+                    Ok(PacketResult::WriteToNetwork(data)) => {
+                        // Send response back to client
+                        drop(tunnel);
+                        let mut send = send_inbound.lock().await;
+                        let len = data.len() as u32;
+                        let _ = send.write_all(&len.to_be_bytes()).await;
+                        let _ = send.write_all(&data).await;
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        log::warn!("Decapsulation error: {}", e);
+                    }
+                }
             }
+        });
+
+        // Spawn timer task
+        let timer_handle = tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                let mut tunnel = tunnel_timers.lock().await;
+                let results = tunnel.update_timers();
+                drop(tunnel);
+
+                for result in results {
+                    match result {
+                        PacketResult::WriteToNetwork(data) => {
+                            let mut send = wg_send.lock().await;
+                            let len = data.len() as u32;
+                            if let Err(e) = send.write_all(&len.to_be_bytes()).await {
+                                log::warn!("Failed to send timer packet: {}", e);
+                                return;
+                            }
+                            if let Err(e) = send.write_all(&data).await {
+                                log::warn!("Failed to send timer packet: {}", e);
+                                return;
+                            }
+                        }
+                        PacketResult::Error(e) => {
+                            log::warn!("Timer error: {}", e);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        });
+
+        // Wait for either task to complete
+        tokio::select! {
+            _ = inbound_handle => {}
+            _ = timer_handle => {}
         }
+
+        Ok(())
     }
 
     /// Run the TUN device packet handler.
@@ -427,7 +474,7 @@ impl VpnServer {
         // 1. Read IP packets from TUN
         // 2. Look up destination IP to find target client
         // 3. Encapsulate with client's WgTunnel
-        // 4. Send via UDP to client's endpoint
+        // 4. Send via client's iroh stream
 
         // For now, just keep the task alive
         loop {
@@ -455,7 +502,7 @@ impl VpnServerBuilder {
         self
     }
 
-    /// Set the WireGuard port.
+    /// Set the WireGuard port (not used in tunneled mode, but kept for API compatibility).
     pub fn wg_port(mut self, port: u16) -> Self {
         self.config.wg_port = port;
         self
