@@ -94,8 +94,7 @@ impl VpnLock {
         }
 
         // Try to acquire lock non-blocking to check
-        let opts = OpenOptions::new();
-        let file = match opts.clone().read(true).open(&path) {
+        let file = match OpenOptions::new().read(true).open(&path) {
             Ok(f) => f,
             Err(_) => return false,
         };
@@ -108,8 +107,7 @@ impl VpnLock {
             if result != 0 {
                 return true; // Lock is held by another process
             }
-            // We got the lock, release it
-            unsafe { libc::flock(fd, libc::LOCK_UN) };
+            // We got the lock - it will be released when file is dropped
         }
 
         false
@@ -118,16 +116,11 @@ impl VpnLock {
 
 impl Drop for VpnLock {
     fn drop(&mut self) {
-        // Release the lock and remove the file
-        #[cfg(unix)]
-        {
-            use std::os::unix::io::AsRawFd;
-            let fd = self.file.as_raw_fd();
-            unsafe { libc::flock(fd, libc::LOCK_UN) };
-        }
-
-        // Try to remove the lock file
-        let _ = std::fs::remove_file(&self.path);
+        // flock is automatically released when the file descriptor is closed,
+        // which happens when self.file is dropped. We don't remove the lock file
+        // to avoid a race condition where another process could acquire a lock
+        // on the about-to-be-unlinked inode while a third process creates a new
+        // file with the same name.
         log::debug!("Released VPN lock: {}", self.path.display());
     }
 }
