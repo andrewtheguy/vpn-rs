@@ -49,21 +49,17 @@ pub struct ServerInfo {
 
 impl VpnClient {
     /// Create a new VPN client.
+    ///
+    /// WireGuard keypair is always ephemeral (generated fresh each session).
+    /// This allows multiple clients to connect without key conflicts.
     pub fn new(config: VpnClientConfig) -> VpnResult<Self> {
         // Acquire single-instance lock
         let lock = VpnLock::acquire()?;
 
-        // Load or generate keypair
-        let keypair = if let Some(ref path) = config.private_key_file {
-            WgKeyPair::load_from_file_sync(path)?
-        } else {
-            let kp = WgKeyPair::generate();
-            log::info!("Generated new WireGuard keypair");
-            kp
-        };
-
+        // Generate ephemeral WireGuard keypair (unique per session)
+        let keypair = WgKeyPair::generate();
         log::info!(
-            "VPN Client initialized, public key: {}",
+            "Generated ephemeral WireGuard keypair: {}",
             keypair.public_key_base64()
         );
 

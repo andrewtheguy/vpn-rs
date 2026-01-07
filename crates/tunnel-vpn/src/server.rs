@@ -136,15 +136,16 @@ pub struct VpnServer {
 
 impl VpnServer {
     /// Create a new VPN server.
+    ///
+    /// WireGuard keypair is always ephemeral (generated fresh each server start).
+    /// This allows clients to use ephemeral keys without conflicts.
     pub async fn new(config: VpnServerConfig) -> VpnResult<Self> {
-        // Load or generate keypair
-        let keypair = if let Some(ref path) = config.private_key_file {
-            WgKeyPair::load_from_file_sync(path)?
-        } else {
-            let kp = WgKeyPair::generate();
-            log::info!("Generated new WireGuard keypair");
-            kp
-        };
+        // Generate ephemeral WireGuard keypair
+        let keypair = WgKeyPair::generate();
+        log::info!(
+            "Generated ephemeral server WireGuard keypair: {}",
+            keypair.public_key_base64()
+        );
 
         // Create IP pool
         let ip_pool = Arc::new(RwLock::new(IpPool::new(config.network)));
@@ -262,6 +263,36 @@ impl VpnServer {
             remote_id,
             handshake.wg_public_key.to_base64()
         );
+
+        // Validate auth token (required - server must have auth_tokens configured)
+        if let Some(ref valid_tokens) = self.config.auth_tokens {
+            match &handshake.auth_token {
+                Some(client_token) if valid_tokens.contains(client_token) => {
+                    log::debug!("Client {} provided valid auth token", remote_id);
+                }
+                Some(_) => {
+                    log::warn!("Client {} provided invalid auth token", remote_id);
+                    let response = VpnHandshakeResponse::rejected("Invalid authentication token");
+                    write_message(&mut send, &response.encode()?).await?;
+                    let _ = send.finish();
+                    return Err(VpnError::Signaling("Invalid authentication token".into()));
+                }
+                None => {
+                    log::warn!("Client {} missing required auth token", remote_id);
+                    let response = VpnHandshakeResponse::rejected("Authentication token required");
+                    write_message(&mut send, &response.encode()?).await?;
+                    let _ = send.finish();
+                    return Err(VpnError::Signaling("Authentication token required".into()));
+                }
+            }
+        } else {
+            // Server misconfigured - should always have auth_tokens
+            log::error!("Server has no auth tokens configured - rejecting connection");
+            let response = VpnHandshakeResponse::rejected("Server misconfigured");
+            write_message(&mut send, &response.encode()?).await?;
+            let _ = send.finish();
+            return Err(VpnError::Signaling("Server has no auth tokens configured".into()));
+        }
 
         // Check max clients
         let client_count = self.clients.read().await.len();

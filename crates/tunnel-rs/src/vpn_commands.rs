@@ -1,17 +1,20 @@
 //! VPN command handlers.
 //!
 //! Implements CLI handlers for VPN server and client modes.
+//! Uses ephemeral WireGuard keys (auto-generated each session) with
+//! tunnel-auth tokens for access control.
 
 use crate::VpnCommand;
 use anyhow::{Context, Result};
 use ipnet::Ipv4Net;
 use std::net::Ipv4Addr;
-use std::path::Path;
+use std::path::PathBuf;
 use tunnel_common::config::expand_tilde;
-use tunnel_iroh::iroh_mode::endpoint::{create_client_endpoint, create_server_endpoint};
+use tunnel_iroh::auth;
+use tunnel_iroh::iroh_mode::endpoint::{create_client_endpoint, create_server_endpoint, load_secret};
 use tunnel_vpn::config::{VpnClientConfig, VpnServerConfig};
 use tunnel_vpn::signaling::VPN_ALPN;
-use tunnel_vpn::{VpnClient, VpnServer, WgKeyPair};
+use tunnel_vpn::{VpnClient, VpnServer};
 
 /// Run the VPN command.
 pub async fn run_vpn_command(cmd: &VpnCommand) -> Result<()> {
@@ -19,22 +22,22 @@ pub async fn run_vpn_command(cmd: &VpnCommand) -> Result<()> {
         VpnCommand::Server {
             network,
             server_ip,
-            wg_port,
             mtu,
-            private_key_file,
+            secret_file,
             relay_urls,
             dns_server,
-            auth_token,
+            auth_tokens,
+            auth_tokens_file,
         } => {
             run_vpn_server(
                 network,
                 server_ip.as_deref(),
-                *wg_port,
                 *mtu,
-                private_key_file.as_ref().map(|p| expand_tilde(p)),
+                secret_file.as_ref().map(|p| expand_tilde(p)),
                 relay_urls,
                 dns_server.as_deref(),
-                auth_token.as_deref(),
+                auth_tokens,
+                auth_tokens_file.as_ref().map(|p| expand_tilde(p)).as_deref(),
             )
             .await
         }
@@ -42,27 +45,21 @@ pub async fn run_vpn_command(cmd: &VpnCommand) -> Result<()> {
             server_node_id,
             mtu,
             keepalive_secs,
-            private_key_file,
             relay_urls,
             dns_server,
             auth_token,
+            auth_token_file,
         } => {
             run_vpn_client(
                 server_node_id,
                 *mtu,
                 *keepalive_secs,
-                private_key_file.as_ref().map(|p| expand_tilde(p)),
                 relay_urls,
                 dns_server.as_deref(),
                 auth_token.as_deref(),
+                auth_token_file.as_ref().map(|p| expand_tilde(p)).as_deref(),
             )
             .await
-        }
-        VpnCommand::GenerateKey { output, force } => {
-            generate_wg_key(&expand_tilde(output), *force)
-        }
-        VpnCommand::ShowPublicKey { private_key_file } => {
-            show_wg_public_key(&expand_tilde(private_key_file))
         }
     }
 }
@@ -72,12 +69,12 @@ pub async fn run_vpn_command(cmd: &VpnCommand) -> Result<()> {
 async fn run_vpn_server(
     network: &str,
     server_ip: Option<&str>,
-    wg_port: u16,
     mtu: u16,
-    private_key_file: Option<std::path::PathBuf>,
+    secret_file: Option<PathBuf>,
     relay_urls: &[String],
     dns_server: Option<&str>,
-    _auth_token: Option<&str>,
+    auth_tokens: &[String],
+    auth_tokens_file: Option<&std::path::Path>,
 ) -> Result<()> {
     // Parse network CIDR
     let network: Ipv4Net = network
@@ -93,23 +90,32 @@ async fn run_vpn_server(
         Ipv4Addr::from(net_addr + 1)
     };
 
-    // Load or generate WireGuard keypair for iroh identity
-    let secret_key = if let Some(ref path) = private_key_file {
-        let keypair = WgKeyPair::load_from_file_sync(path)
-            .context("Failed to load WireGuard private key")?;
-        // Convert WireGuard key to iroh SecretKey
-        let bytes = keypair.private_key_bytes();
-        Some(iroh::SecretKey::from_bytes(&bytes))
+    // Load and validate auth tokens (required for VPN server)
+    let valid_tokens = auth::load_auth_tokens(auth_tokens, auth_tokens_file)
+        .context("Failed to load authentication tokens")?;
+
+    if valid_tokens.is_empty() {
+        anyhow::bail!(
+            "VPN server requires at least one authentication token.\n\
+             Generate one with: tunnel-rs generate-token\n\
+             Then start server with: tunnel-rs vpn server --auth-tokens <TOKEN>"
+        );
+    }
+
+    log::info!("Loaded {} authentication token(s)", valid_tokens.len());
+
+    // Load secret key for persistent iroh identity (optional)
+    let secret_key = if let Some(ref path) = secret_file {
+        Some(load_secret(path).context("Failed to load secret key")?)
     } else {
         None
     };
 
-    // Create VPN server config
+    // Create VPN server config (WireGuard keys are ephemeral, generated per-client)
     let config = VpnServerConfig {
         network,
-        wg_port,
         mtu,
-        private_key_file,
+        auth_tokens: Some(valid_tokens),
         ..Default::default()
     };
 
@@ -125,7 +131,10 @@ async fn run_vpn_server(
     .context("Failed to create iroh endpoint")?;
 
     log::info!("VPN Server Node ID: {}", endpoint.id());
-    log::info!("Clients connect with: tunnel-rs vpn client --server-node-id {}", endpoint.id());
+    log::info!(
+        "Clients connect with: tunnel-rs vpn client --server-node-id {} --auth-token <TOKEN>",
+        endpoint.id()
+    );
 
     // Create and run VPN server
     let server = VpnServer::new(config)
@@ -144,37 +153,39 @@ async fn run_vpn_client(
     server_node_id: &str,
     mtu: u16,
     keepalive_secs: u16,
-    private_key_file: Option<std::path::PathBuf>,
     relay_urls: &[String],
     dns_server: Option<&str>,
     auth_token: Option<&str>,
+    auth_token_file: Option<&std::path::Path>,
 ) -> Result<()> {
-    // Load or generate WireGuard keypair for iroh identity
-    let secret_key = if let Some(ref path) = private_key_file {
-        let keypair = WgKeyPair::load_from_file_sync(path)
-            .context("Failed to load WireGuard private key")?;
-        let bytes = keypair.private_key_bytes();
-        Some(iroh::SecretKey::from_bytes(&bytes))
+    // Load auth token (from CLI or file)
+    let token = if let Some(token) = auth_token {
+        auth::validate_token(token).context("Invalid authentication token from CLI")?;
+        token.to_string()
+    } else if let Some(path) = auth_token_file {
+        auth::load_auth_token_from_file(path).context("Failed to load authentication token from file")?
     } else {
-        None
+        anyhow::bail!(
+            "VPN client requires an authentication token.\n\
+             Use --auth-token <TOKEN> or --auth-token-file <FILE>"
+        );
     };
 
-    // Create VPN client config
+    // Create VPN client config (WireGuard key is ephemeral, auto-generated)
     let config = VpnClientConfig {
         server_node_id: server_node_id.to_string(),
         mtu,
         keepalive_secs,
-        private_key_file,
-        auth_token: auth_token.map(String::from),
+        auth_token: Some(token),
         ..Default::default()
     };
 
-    // Create iroh endpoint for signaling
+    // Create iroh endpoint for signaling (ephemeral identity)
     let endpoint = create_client_endpoint(
         relay_urls,
         false, // relay_only
         dns_server,
-        secret_key.as_ref(),
+        None, // No persistent secret key - ephemeral
     )
     .await
     .context("Failed to create iroh endpoint")?;
@@ -183,50 +194,11 @@ async fn run_vpn_client(
     log::info!("Connecting to VPN server: {}", server_node_id);
 
     // Create and connect VPN client
-    let client = VpnClient::new(config).map_err(|e| anyhow::anyhow!("Failed to create VPN client: {}", e))?;
+    let client =
+        VpnClient::new(config).map_err(|e| anyhow::anyhow!("Failed to create VPN client: {}", e))?;
 
     client
         .connect(&endpoint)
         .await
         .map_err(|e| anyhow::anyhow!("VPN connection error: {}", e))
-}
-
-/// Generate a new WireGuard private key and save to file.
-fn generate_wg_key(output: &Path, force: bool) -> Result<()> {
-    if output.exists() && !force {
-        anyhow::bail!(
-            "File already exists: {}\nUse --force to overwrite",
-            output.display()
-        );
-    }
-
-    let keypair = WgKeyPair::generate();
-
-    // Save private key (base64 encoded)
-    std::fs::write(output, keypair.private_key_base64())
-        .context("Failed to write private key file")?;
-
-    // Set restrictive permissions on Unix
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(output, std::fs::Permissions::from_mode(0o600))
-            .context("Failed to set key file permissions")?;
-    }
-
-    log::info!("Generated WireGuard key pair");
-    log::info!("Private key saved to: {}", output.display());
-    log::info!("Public key: {}", keypair.public_key_base64());
-
-    Ok(())
-}
-
-/// Show the WireGuard public key derived from a private key file.
-fn show_wg_public_key(private_key_file: &Path) -> Result<()> {
-    let keypair = WgKeyPair::load_from_file_sync(private_key_file)
-        .context("Failed to load private key")?;
-
-    println!("{}", keypair.public_key_base64());
-
-    Ok(())
 }

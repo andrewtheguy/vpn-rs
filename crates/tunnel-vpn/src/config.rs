@@ -3,6 +3,7 @@
 use crate::keys::WgPublicKey;
 use ipnet::Ipv4Net;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 
@@ -48,6 +49,11 @@ pub struct VpnServerConfig {
     /// Enable IP forwarding / NAT for internet access.
     #[serde(default)]
     pub enable_nat: bool,
+
+    /// Valid authentication tokens (clients must provide one to connect).
+    /// Uses tunnel-auth format (i + 16 chars + checksum).
+    #[serde(default)]
+    pub auth_tokens: Option<HashSet<String>>,
 }
 
 impl Default for VpnServerConfig {
@@ -60,6 +66,7 @@ impl Default for VpnServerConfig {
             keepalive_secs: DEFAULT_KEEPALIVE_SECS,
             max_clients: 254, // /24 network
             enable_nat: false,
+            auth_tokens: None,
         }
     }
 }
@@ -70,11 +77,8 @@ pub struct VpnClientConfig {
     /// Server's iroh node ID.
     pub server_node_id: String,
 
-    /// Authentication token (same as tunnel-rs).
+    /// Authentication token (tunnel-auth format).
     pub auth_token: Option<String>,
-
-    /// Path to private key file (optional, generates if not specified).
-    pub private_key_file: Option<PathBuf>,
 
     /// MTU for the TUN device.
     #[serde(default = "default_wg_mtu")]
@@ -99,7 +103,6 @@ impl Default for VpnClientConfig {
         Self {
             server_node_id: String::new(),
             auth_token: None,
-            private_key_file: None,
             mtu: DEFAULT_WG_MTU,
             keepalive_secs: DEFAULT_KEEPALIVE_SECS,
             routes: vec![],

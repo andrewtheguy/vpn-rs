@@ -192,17 +192,13 @@ pub enum VpnCommand {
         #[arg(long)]
         server_ip: Option<String>,
 
-        /// UDP port to bind for WireGuard (default: 51820)
-        #[arg(short, long, default_value = "51820")]
-        wg_port: u16,
-
         /// MTU for VPN packets (default: 1420)
         #[arg(long, default_value = "1420")]
         mtu: u16,
 
-        /// Path to private key file for persistent identity
+        /// Path to secret key file for persistent iroh identity (same EndpointId across restarts)
         #[arg(long)]
-        private_key_file: Option<PathBuf>,
+        secret_file: Option<PathBuf>,
 
         /// Custom relay server URL(s) for failover
         #[arg(long = "relay-url")]
@@ -212,9 +208,13 @@ pub enum VpnCommand {
         #[arg(long)]
         dns_server: Option<String>,
 
-        /// Authentication token (clients must provide this to connect)
-        #[arg(long)]
-        auth_token: Option<String>,
+        /// Authentication tokens (repeatable). Clients must provide one of these to connect.
+        #[arg(long = "auth-tokens", value_name = "TOKEN")]
+        auth_tokens: Vec<String>,
+
+        /// Path to file containing authentication tokens (one per line, # comments allowed).
+        #[arg(long, value_name = "FILE")]
+        auth_tokens_file: Option<PathBuf>,
     },
     /// Run as VPN client (connects to server and establishes tunnel)
     Client {
@@ -230,10 +230,6 @@ pub enum VpnCommand {
         #[arg(long, default_value = "25")]
         keepalive_secs: u16,
 
-        /// Path to private key file for persistent identity
-        #[arg(long)]
-        private_key_file: Option<PathBuf>,
-
         /// Custom relay server URL(s) for failover
         #[arg(long = "relay-url")]
         relay_urls: Vec<String>,
@@ -242,25 +238,13 @@ pub enum VpnCommand {
         #[arg(long)]
         dns_server: Option<String>,
 
-        /// Authentication token (required by server)
+        /// Authentication token to send to server
         #[arg(long)]
         auth_token: Option<String>,
-    },
-    /// Generate a WireGuard private key
-    GenerateKey {
-        /// Path where to save the private key file
-        #[arg(short, long)]
-        output: PathBuf,
 
-        /// Overwrite existing file if it exists
+        /// Path to file containing authentication token
         #[arg(long)]
-        force: bool,
-    },
-    /// Show the WireGuard public key derived from a private key
-    ShowPublicKey {
-        /// Path to the private key file
-        #[arg(short, long)]
-        private_key_file: PathBuf,
+        auth_token_file: Option<PathBuf>,
     },
 }
 
