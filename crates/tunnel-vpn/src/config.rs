@@ -23,9 +23,12 @@ pub const DEFAULT_KEEPALIVE_SECS: u16 = 25;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VpnServerConfig {
     /// VPN network CIDR (e.g., "10.0.0.0/24").
-    /// Server gets .1, clients get .2 onwards.
+    /// Server gets .1 by default, clients get subsequent addresses.
     #[serde(default = "default_vpn_network")]
     pub network: Ipv4Net,
+
+    /// Server's VPN IP address (defaults to first host in network, e.g., .1).
+    pub server_ip: Option<Ipv4Addr>,
 
     /// WireGuard UDP listen port.
     #[serde(default = "default_wg_port")]
@@ -60,6 +63,7 @@ impl Default for VpnServerConfig {
     fn default() -> Self {
         Self {
             network: default_vpn_network(),
+            server_ip: None, // Defaults to first host in network
             wg_port: DEFAULT_WG_PORT,
             mtu: DEFAULT_WG_MTU,
             private_key_file: None,

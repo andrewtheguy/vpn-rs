@@ -83,14 +83,11 @@ async fn run_vpn_server(
         .parse()
         .context("Invalid VPN network CIDR (e.g., 10.0.0.0/24)")?;
 
-    // Parse or calculate server IP
-    let _server_ip: Ipv4Addr = if let Some(ip_str) = server_ip {
-        ip_str.parse().context("Invalid server IP address")?
-    } else {
-        // Default to first host in network (.1)
-        let net_addr: u32 = network.network().into();
-        Ipv4Addr::from(net_addr + 1)
-    };
+    // Parse server IP if provided (otherwise IpPool will use default .1)
+    let server_ip: Option<Ipv4Addr> = server_ip
+        .map(|ip_str| ip_str.parse())
+        .transpose()
+        .context("Invalid server IP address")?;
 
     // Load and validate auth tokens (required for VPN server)
     let valid_tokens = auth::load_auth_tokens(auth_tokens, auth_tokens_file)
@@ -116,6 +113,7 @@ async fn run_vpn_server(
     // Create VPN server config (WireGuard keys are ephemeral, generated per-client)
     let config = VpnServerConfig {
         network,
+        server_ip,
         mtu,
         auth_tokens: Some(valid_tokens),
         ..Default::default()

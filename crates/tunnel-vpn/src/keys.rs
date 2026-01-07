@@ -99,6 +99,16 @@ impl WgKeyPair {
         tokio::fs::write(path, base64_key)
             .await
             .map_err(|e| VpnError::Key(format!("Failed to write key file: {}", e)))?;
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let perms = std::fs::Permissions::from_mode(0o600);
+            tokio::fs::set_permissions(path, perms)
+                .await
+                .map_err(|e| VpnError::Key(format!("Failed to set key file permissions: {}", e)))?;
+        }
+
         Ok(())
     }
 

@@ -62,14 +62,20 @@ struct IpPool {
 }
 
 impl IpPool {
-    /// Create a new IP pool from a network.
-    fn new(network: Ipv4Net) -> Self {
+    /// Create a new IP pool from a network with optional custom server IP.
+    ///
+    /// If `server_ip` is None, defaults to first host in network (e.g., .1).
+    /// Client IPs start from the address after the server IP.
+    fn new(network: Ipv4Net, server_ip: Option<Ipv4Addr>) -> Self {
         let net_addr: u32 = network.network().into();
         let broadcast: u32 = network.broadcast().into();
 
-        // Server gets .1, clients start from .2
-        let server_ip = Ipv4Addr::from(net_addr + 1);
-        let next_ip = net_addr + 2;
+        // Server gets specified IP or defaults to .1
+        let server_ip = server_ip.unwrap_or_else(|| Ipv4Addr::from(net_addr + 1));
+        let server_ip_u32: u32 = server_ip.into();
+
+        // Clients start from the address after server IP
+        let next_ip = server_ip_u32 + 1;
         let max_ip = broadcast - 1; // Exclude broadcast address
 
         Self {
@@ -156,7 +162,7 @@ impl VpnServer {
         );
 
         // Create IP pool
-        let ip_pool = Arc::new(RwLock::new(IpPool::new(config.network)));
+        let ip_pool = Arc::new(RwLock::new(IpPool::new(config.network, config.server_ip)));
 
         Ok(Self {
             config,
@@ -726,7 +732,7 @@ mod tests {
     #[test]
     fn test_ip_pool_allocation() {
         let network: Ipv4Net = "10.0.0.0/24".parse().unwrap();
-        let mut pool = IpPool::new(network);
+        let mut pool = IpPool::new(network, None);
 
         // Server should get .1
         assert_eq!(pool.server_ip(), Ipv4Addr::new(10, 0, 0, 1));
@@ -756,7 +762,7 @@ mod tests {
     fn test_ip_pool_exhaustion() {
         // Use a tiny /30 network (2 usable hosts)
         let network: Ipv4Net = "10.0.0.0/30".parse().unwrap();
-        let mut pool = IpPool::new(network);
+        let mut pool = IpPool::new(network, None);
 
         // Server uses .1, only .2 available for clients
         let id1 = random_endpoint_id();
