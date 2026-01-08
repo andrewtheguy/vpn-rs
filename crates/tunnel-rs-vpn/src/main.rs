@@ -58,6 +58,10 @@ enum Command {
         #[arg(long, value_parser = clap::value_parser!(u16).range(576..=1500))]
         mtu: Option<u16>,
 
+        /// WireGuard keepalive interval in seconds (default: 25, valid range: 10-300)
+        #[arg(long, value_parser = clap::value_parser!(u16).range(10..=300))]
+        keepalive_secs: Option<u16>,
+
         /// Path to secret key file for persistent iroh identity (same EndpointId across restarts)
         #[arg(long)]
         secret_file: Option<PathBuf>,
@@ -199,6 +203,7 @@ async fn main() -> Result<()> {
             network,
             server_ip,
             mtu,
+            keepalive_secs,
             secret_file,
             relay_urls,
             dns_server,
@@ -221,6 +226,7 @@ async fn main() -> Result<()> {
                     network,
                     server_ip,
                     mtu,
+                    keepalive_secs,
                     secret_file.map(|p| expand_tilde(&p)),
                     relay_urls,
                     dns_server,

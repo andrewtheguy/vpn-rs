@@ -1169,6 +1169,7 @@ impl VpnServerConfigBuilder {
         network: Option<String>,
         server_ip: Option<String>,
         mtu: Option<u16>,
+        keepalive_secs: Option<u16>,
         secret_file: Option<PathBuf>,
         relay_urls: Vec<String>,
         dns_server: Option<String>,
@@ -1183,6 +1184,9 @@ impl VpnServerConfigBuilder {
         }
         if mtu.is_some() {
             self.mtu = mtu;
+        }
+        if keepalive_secs.is_some() {
+            self.keepalive_secs = keepalive_secs;
         }
         if secret_file.is_some() {
             self.secret_file = secret_file;
@@ -1220,6 +1224,15 @@ impl VpnServerConfigBuilder {
         let keepalive_secs = self.keepalive_secs.unwrap_or(DEFAULT_VPN_KEEPALIVE_SECS);
         validate_mtu(mtu, "config")?;
         validate_keepalive(keepalive_secs, "config")?;
+
+        // Validate auth_tokens mutual exclusion
+        let has_tokens = self.auth_tokens.as_ref().is_some_and(|t| !t.is_empty());
+        if has_tokens && self.auth_tokens_file.is_some() {
+            anyhow::bail!(
+                "Cannot specify both auth_tokens and auth_tokens_file.\n\
+                 Use --auth-tokens <TOKEN> or --auth-tokens-file <FILE>, not both."
+            );
+        }
 
         Ok(ResolvedVpnServerConfig {
             network,
@@ -1370,6 +1383,14 @@ impl VpnClientConfigBuilder {
                 "At least one route is required.\n\
                  Specify via CLI: --route 0.0.0.0/0 (full tunnel) or --route 10.0.0.0/24 (split tunnel)\n\
                  Or in config: routes = [\"0.0.0.0/0\"]"
+            );
+        }
+
+        // Validate auth_token mutual exclusion
+        if self.auth_token.is_some() && self.auth_token_file.is_some() {
+            anyhow::bail!(
+                "Cannot specify both auth_token and auth_token_file.\n\
+                 Use --auth-token <TOKEN> or --auth-token-file <FILE>, not both."
             );
         }
 
