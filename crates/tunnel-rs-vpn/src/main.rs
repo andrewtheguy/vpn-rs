@@ -261,10 +261,13 @@ async fn run_vpn_server(
         ..Default::default()
     };
 
-    // Create iroh endpoint for signaling
+    // Create iroh endpoint for signaling.
+    // relay_only is hardcoded to false: VPN traffic is high-bandwidth and latency-sensitive,
+    // making relay-only impractical. Direct P2P is strongly preferred; relay is only used
+    // as automatic fallback when direct connection fails.
     let endpoint = create_server_endpoint(
         relay_urls,
-        false, // relay_only
+        false, // relay_only - direct P2P preferred for VPN performance
         secret_key,
         dns_server,
         VPN_ALPN,
@@ -339,12 +342,15 @@ async fn run_vpn_client(
         ..Default::default()
     };
 
-    // Create iroh endpoint for signaling (ephemeral identity)
+    // Create iroh endpoint for signaling (ephemeral identity).
+    // relay_only is hardcoded to false: VPN traffic is high-bandwidth and latency-sensitive,
+    // making relay-only impractical. Direct P2P is strongly preferred; relay is only used
+    // as automatic fallback when direct connection fails.
     let endpoint = create_client_endpoint(
         relay_urls,
-        false, // relay_only
+        false, // relay_only - direct P2P preferred for VPN performance
         dns_server,
-        None, // No persistent secret key - ephemeral
+        None,  // No persistent secret key - ephemeral
     )
     .await
     .context("Failed to create iroh endpoint")?;
