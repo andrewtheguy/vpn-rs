@@ -90,8 +90,8 @@ impl VpnLock {
             return false;
         }
 
-        // Try to acquire lock non-blocking to check
-        let file = match OpenOptions::new().read(true).open(&path) {
+        // Try to acquire lock non-blocking to check (use write mode to match acquire())
+        let file = match OpenOptions::new().write(true).open(&path) {
             Ok(f) => f,
             Err(_) => return false,
         };
