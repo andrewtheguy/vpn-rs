@@ -4,12 +4,13 @@ This document outlines planned features and improvements for tunnel-rs.
 
 ## Current Status
 
-tunnel-rs currently supports three stable operational modes:
+tunnel-rs currently supports four operational modes:
 - **iroh**: Persistent identity with automatic discovery, relay fallback, and receiver-requested sources
+- **vpn**: Native WireGuard-based VPN with automatic IP assignment (Linux/macOS)
 - **nostr**: Full ICE with automated Nostr relay signaling and receiver-requested sources
 - **manual**: Full ICE with manual signaling (single-target)
 
-All modes support TCP and UDP tunneling with end-to-end encryption via QUIC/TLS 1.3.
+Port forwarding modes (iroh, nostr, manual) support TCP and UDP tunneling with end-to-end encryption via QUIC/TLS 1.3. VPN mode provides full network tunneling with WireGuard encryption on top of iroh's QUIC transport.
 
 ---
 
@@ -267,61 +268,72 @@ owner = "node_id_b"  # Redirect to Server B
 
 #### Native VPN Mode
 
-**Status:** Idea
+**Status:** Implemented (Linux/macOS)
 
-Full VPN functionality using IP-over-QUIC, eliminating the need for external VPN solutions like WireGuard.
+Full VPN functionality using WireGuard encryption (via boringtun) transported over iroh's QUIC connection, eliminating the need for external VPN solutions.
 
-**Motivation:**
-Traditional VPNs like WireGuard require static keypair configuration per device. If two devices share the same config, they conflict. tunnel-rs can avoid this by using iroh node IDs as identity - each client is inherently unique.
-
-**Concept:**
-- Client creates TUN device, routes traffic through QUIC tunnel to server
-- Server assigns unique internal IP based on client's iroh node_id
-- Server routes traffic to destination (with NAT/masquerade for internet)
-- No keypairs to manage - just auth token
+**Implementation:**
+- Uses **boringtun** (Cloudflare's userspace WireGuard) for encryption
+- **tun** crate for cross-platform TUN device creation
+- **iroh** for peer discovery, signaling, and NAT traversal
+- Ephemeral WireGuard keys (auto-generated per session, no static config)
 
 **Architecture:**
 ```
-Client (node_id: abc123)                Server
-    │                                      │
-  [tun0: 10.0.0.2] ──QUIC──> [assigns IP based on node_id]
-                                           │
-                              [tun0: 10.0.0.1] ──> Internet/LAN
+Client                                     Server
+┌─────────────────────┐                   ┌─────────────────────┐
+│  Applications       │                   │  Target Network     │
+│        ↓            │                   │        ↑            │
+│  [tun0: 10.0.0.2]   │                   │  [tun0: 10.0.0.1]   │
+│        ↓            │                   │        ↑            │
+│  WireGuard (boringtun)                  │  WireGuard (boringtun)
+│        ↓            │                   │        ↑            │
+│  iroh (signaling)   │ ════════════════► │  iroh (signaling)   │
+└─────────────────────┘   NAT traversal   └─────────────────────┘
 ```
 
-**Proposed CLI:**
+**CLI Usage:**
 ```bash
 # Server: assign IPs from network, self gets .1
-tunnel-rs vpn server --network 10.0.0.0/24
+sudo tunnel-rs vpn server --network 10.0.0.0/24 --auth-tokens <token>
 
 # Client: auto-assigned IP, routes traffic through tunnel
-tunnel-rs vpn client --server-node-id <id> --auth-token <token>
+sudo tunnel-rs vpn client --server-node-id <id> --auth-token <token>
+
+# Split tunneling: route specific networks through VPN
+sudo tunnel-rs vpn client --server-node-id <id> --auth-token <token> \
+  --route 192.168.1.0/24 --route 10.0.0.0/8
 ```
 
-**Implementation Requirements:**
-- TUN device via `tun-rs` crate (cross-platform: Linux, macOS, Windows, iOS, Android)
-- IP assignment protocol (server tracks node_id → IP mapping)
-- Length-prefixed IP packet framing over QUIC (reuse existing helpers)
-- Platform-specific routing setup
-- Privilege handling (CAP_NET_ADMIN on Linux, root on macOS)
-
-**Phases:**
-1. **MVP**: TUN device, IP assignment, basic packet forwarding (Linux)
-2. **Production**: Privilege dropping, reconnection, multi-client, DNS
-3. **Advanced**: Split tunneling, peer-to-peer mesh, mobile support
+**Key Features:**
+- **Ephemeral WireGuard keys**: No static keypair management
+- **Automatic IP assignment**: Server assigns IPs from configurable pool
+- **Split tunneling**: Route specific CIDRs through VPN with `--route`
+- **Single instance lock**: Prevents multiple VPN clients (routing conflicts)
+- **Reusable buffers**: Optimized packet handling (no per-packet allocation)
+- **Atomic connection counting**: Thread-safe client tracking
 
 **Advantages over WireGuard:**
 | Feature | WireGuard | tunnel-rs VPN |
 |---------|-----------|---------------|
-| Identity | Static keypair | iroh node_id (dynamic) |
-| Config conflict | Same key = conflict | Each client unique |
+| Identity | Static keypair | Ephemeral keys (auto-generated) |
+| Config conflict | Same key = conflict | Each session unique |
 | NAT traversal | Manual setup | Built-in via iroh |
 | IP assignment | Static in config | Dynamic from server |
 
-**Complexity:** High
-- Platform-specific TUN handling
-- Routing table manipulation
-- ~2 weeks MVP for Linux, additional time for other platforms
+**Platform Support:**
+| Platform | Status | Notes |
+|----------|--------|-------|
+| Linux | Supported | Requires root or CAP_NET_ADMIN |
+| macOS | Supported | Requires root |
+| Windows | Not supported | TUN device not implemented |
+
+**Future Enhancements:**
+- Configuration file support (like port forwarding modes)
+- DNS server configuration
+- NAT/masquerade for internet access
+- Windows support
+- Connection-level auto-reconnect
 
 ---
 
