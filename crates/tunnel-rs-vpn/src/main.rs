@@ -1,25 +1,146 @@
-//! VPN command handlers.
+//! tunnel-rs-vpn
 //!
-//! Implements CLI handlers for VPN server and client modes.
-//! Uses ephemeral WireGuard keys (auto-generated each session) with
-//! tunnel-auth tokens for access control.
+//! WireGuard-based VPN tunnel via iroh P2P connections.
+//! Uses ephemeral WireGuard keys with tunnel-auth tokens for access control.
 
-use crate::VpnCommand;
+#[cfg(not(unix))]
+compile_error!("tunnel-rs-vpn only supports Linux and macOS");
+
 use anyhow::{Context, Result};
+use clap::{Parser, Subcommand};
 use ipnet::Ipv4Net;
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
+
 use tunnel_common::config::expand_tilde;
 use tunnel_iroh::auth;
 use tunnel_iroh::iroh_mode::endpoint::{create_client_endpoint, create_server_endpoint, load_secret};
+use tunnel_iroh::secret;
 use tunnel_vpn::config::{VpnClientConfig, VpnServerConfig};
 use tunnel_vpn::signaling::VPN_ALPN;
 use tunnel_vpn::{VpnClient, VpnServer};
 
-/// Run the VPN command.
-pub async fn run_vpn_command(cmd: &VpnCommand) -> Result<()> {
-    match cmd {
-        VpnCommand::Server {
+#[derive(Parser)]
+#[command(name = "tunnel-rs-vpn")]
+#[command(version)]
+#[command(about = "WireGuard-based VPN tunnel via iroh P2P")]
+struct Args {
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Run as VPN server (accepts connections and assigns IPs)
+    Server {
+        /// VPN network CIDR (e.g., 10.0.0.0/24)
+        #[arg(short, long, default_value = "10.0.0.0/24")]
+        network: String,
+
+        /// Server's VPN IP address (gateway). Defaults to first IP in network.
+        #[arg(long)]
+        server_ip: Option<String>,
+
+        /// MTU for VPN packets (default: 1420)
+        #[arg(long, default_value = "1420")]
+        mtu: u16,
+
+        /// Path to secret key file for persistent iroh identity (same EndpointId across restarts)
+        #[arg(long)]
+        secret_file: Option<PathBuf>,
+
+        /// Custom relay server URL(s) for failover
+        #[arg(long = "relay-url")]
+        relay_urls: Vec<String>,
+
+        /// Custom DNS server URL for peer discovery
+        #[arg(long)]
+        dns_server: Option<String>,
+
+        /// Authentication tokens (repeatable). Clients must provide one of these to connect.
+        #[arg(long = "auth-tokens", value_name = "TOKEN")]
+        auth_tokens: Vec<String>,
+
+        /// Path to file containing authentication tokens (one per line, # comments allowed).
+        #[arg(long, value_name = "FILE")]
+        auth_tokens_file: Option<PathBuf>,
+    },
+    /// Run as VPN client (connects to server and establishes tunnel)
+    Client {
+        /// EndpointId of the VPN server to connect to
+        #[arg(short = 'n', long)]
+        server_node_id: String,
+
+        /// MTU for VPN packets (default: 1420)
+        #[arg(long, default_value = "1420")]
+        mtu: u16,
+
+        /// WireGuard keepalive interval in seconds (default: 25)
+        #[arg(long, default_value = "25")]
+        keepalive_secs: u16,
+
+        /// Custom relay server URL(s) for failover
+        #[arg(long = "relay-url")]
+        relay_urls: Vec<String>,
+
+        /// Custom DNS server URL for peer discovery
+        #[arg(long)]
+        dns_server: Option<String>,
+
+        /// Authentication token to send to server
+        #[arg(long)]
+        auth_token: Option<String>,
+
+        /// Path to file containing authentication token
+        #[arg(long)]
+        auth_token_file: Option<PathBuf>,
+
+        /// Route specific CIDRs through the VPN (repeatable)
+        /// E.g., --route 192.168.1.0/24 --route 10.0.0.0/8
+        /// If not specified, only VPN network traffic is routed.
+        #[arg(long = "route")]
+        routes: Vec<String>,
+    },
+    /// Generate a new private key for persistent server identity
+    ///
+    /// Creates a secret key file that can be used with --secret-file.
+    /// The server's EndpointId remains constant when using the same key.
+    GenerateServerKey {
+        /// Path where to save the private key file
+        #[arg(short, long)]
+        output: PathBuf,
+
+        /// Overwrite existing file if it exists
+        #[arg(long)]
+        force: bool,
+    },
+    /// Show the server's public EndpointId derived from a private key
+    ///
+    /// Clients use this EndpointId with --server-node-id to connect.
+    ShowServerId {
+        /// Path to the private key file
+        #[arg(short, long)]
+        secret_file: PathBuf,
+    },
+    /// Generate a client authentication token
+    ///
+    /// Tokens are shared with clients for authentication (like API keys).
+    /// Server configures accepted tokens via --auth-tokens or --auth-tokens-file.
+    GenerateToken {
+        /// Number of tokens to generate (default: 1)
+        #[arg(short, long, default_value = "1")]
+        count: usize,
+    },
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+
+    let args = Args::parse();
+
+    match &args.command {
+        Command::Server {
             network,
             server_ip,
             mtu,
@@ -37,11 +158,14 @@ pub async fn run_vpn_command(cmd: &VpnCommand) -> Result<()> {
                 relay_urls,
                 dns_server.as_deref(),
                 auth_tokens,
-                auth_tokens_file.as_ref().map(|p| expand_tilde(p)).as_deref(),
+                auth_tokens_file
+                    .as_ref()
+                    .map(|p| expand_tilde(p))
+                    .as_deref(),
             )
             .await
         }
-        VpnCommand::Client {
+        Command::Client {
             server_node_id,
             mtu,
             keepalive_secs,
@@ -58,10 +182,23 @@ pub async fn run_vpn_command(cmd: &VpnCommand) -> Result<()> {
                 relay_urls,
                 dns_server.as_deref(),
                 auth_token.as_deref(),
-                auth_token_file.as_ref().map(|p| expand_tilde(p)).as_deref(),
+                auth_token_file
+                    .as_ref()
+                    .map(|p| expand_tilde(p))
+                    .as_deref(),
                 routes,
             )
             .await
+        }
+        Command::GenerateServerKey { output, force } => {
+            secret::generate_secret(expand_tilde(output), *force)
+        }
+        Command::ShowServerId { secret_file } => secret::show_id(expand_tilde(secret_file)),
+        Command::GenerateToken { count } => {
+            for _ in 0..*count {
+                println!("{}", auth::generate_token());
+            }
+            Ok(())
         }
     }
 }
@@ -96,8 +233,8 @@ async fn run_vpn_server(
     if valid_tokens.is_empty() {
         anyhow::bail!(
             "VPN server requires at least one authentication token.\n\
-             Generate one with: tunnel-rs generate-token\n\
-             Then start server with: tunnel-rs vpn server --auth-tokens <TOKEN>"
+             Generate one with: tunnel-rs-vpn generate-token\n\
+             Then start server with: tunnel-rs-vpn server --auth-tokens <TOKEN>"
         );
     }
 
@@ -132,7 +269,7 @@ async fn run_vpn_server(
 
     log::info!("VPN Server Node ID: {}", endpoint.id());
     log::info!(
-        "Clients connect with: tunnel-rs vpn client --server-node-id {} --auth-token <TOKEN>",
+        "Clients connect with: tunnel-rs-vpn client --server-node-id {} --auth-token <TOKEN>",
         endpoint.id()
     );
 
@@ -164,7 +301,8 @@ async fn run_vpn_client(
         auth::validate_token(token).context("Invalid authentication token from CLI")?;
         token.to_string()
     } else if let Some(path) = auth_token_file {
-        auth::load_auth_token_from_file(path).context("Failed to load authentication token from file")?
+        auth::load_auth_token_from_file(path)
+            .context("Failed to load authentication token from file")?
     } else {
         anyhow::bail!(
             "VPN client requires an authentication token.\n\
@@ -210,8 +348,8 @@ async fn run_vpn_client(
     log::info!("Connecting to VPN server: {}", server_node_id);
 
     // Create and connect VPN client
-    let client =
-        VpnClient::new(config).map_err(|e| anyhow::anyhow!("Failed to create VPN client: {}", e))?;
+    let client = VpnClient::new(config)
+        .map_err(|e| anyhow::anyhow!("Failed to create VPN client: {}", e))?;
 
     client
         .connect(&endpoint)

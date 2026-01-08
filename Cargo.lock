@@ -5137,13 +5137,11 @@ dependencies = [
  "anyhow",
  "clap",
  "env_logger",
- "ipnet",
  "iroh",
  "log",
  "tokio",
  "tunnel-common",
  "tunnel-iroh",
- "tunnel-vpn",
 ]
 
 [[package]]
@@ -5158,6 +5156,21 @@ dependencies = [
  "tokio",
  "tunnel-common",
  "tunnel-ice",
+]
+
+[[package]]
+name = "tunnel-rs-vpn"
+version = "0.1.46"
+dependencies = [
+ "anyhow",
+ "clap",
+ "env_logger",
+ "ipnet",
+ "log",
+ "tokio",
+ "tunnel-common",
+ "tunnel-iroh",
+ "tunnel-vpn",
 ]
 
 [[package]]

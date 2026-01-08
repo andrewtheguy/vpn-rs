@@ -38,8 +38,9 @@ Tunnel-rs enables you to forward TCP and UDP traffic between machines without re
 tunnel-rs provides multiple modes for establishing tunnels. **Use `iroh` mode** for most use cases — it provides the best NAT traversal with relay fallback, automatic discovery, and client authentication.
 
 Binary layout:
-- `tunnel-rs`: iroh mode + VPN mode
-- `tunnel-rs-ice`: manual and nostr
+- `tunnel-rs`: iroh mode (port forwarding)
+- `tunnel-rs-vpn`: VPN mode (Linux/macOS)
+- `tunnel-rs-ice`: manual and nostr modes
 
 | Mode | NAT Traversal | Discovery | External Dependency | Use Case |
 |------|---------------|-----------|---------------------|----------|
@@ -673,7 +674,7 @@ echo $AUTH_TOKEN
 ### 2. Start VPN Server
 
 ```bash
-sudo tunnel-rs vpn server \
+sudo tunnel-rs-vpn server \
   --network 10.0.0.0/24 \
   --secret-file ./server.key \
   --auth-tokens "$AUTH_TOKEN"
@@ -682,13 +683,13 @@ sudo tunnel-rs vpn server \
 Output:
 ```
 VPN Server Node ID: 2xnbkpbc7izsilvewd7c62w7wnwziacmpfwvhcrya5nt76dqkpga
-Clients connect with: tunnel-rs vpn client --server-node-id <ID> --auth-token <TOKEN>
+Clients connect with: tunnel-rs-vpn client --server-node-id <ID> --auth-token <TOKEN>
 ```
 
 ### 3. Connect VPN Client
 
 ```bash
-sudo tunnel-rs vpn client \
+sudo tunnel-rs-vpn client \
   --server-node-id <SERVER_NODE_ID> \
   --auth-token "$AUTH_TOKEN"
 ```
@@ -714,7 +715,7 @@ ping 10.0.0.1
 
 > **Note:** VPN mode currently does not support configuration files. All options must be passed via CLI.
 
-### vpn server
+### server (tunnel-rs-vpn)
 
 | Option | Default | Description |
 |--------|---------|-------------|
@@ -727,7 +728,7 @@ ping 10.0.0.1
 | `--auth-tokens` | required | Authentication tokens (repeatable) |
 | `--auth-tokens-file` | - | Path to file with tokens (one per line) |
 
-### vpn client
+### client (tunnel-rs-vpn)
 
 | Option | Default | Description |
 |--------|---------|-------------|
@@ -745,7 +746,7 @@ ping 10.0.0.1
 By default, only traffic to the VPN network (e.g., 10.0.0.0/24) is routed through the tunnel. Use `--route` to add additional networks:
 
 ```bash
-sudo tunnel-rs vpn client \
+sudo tunnel-rs-vpn client \
   --server-node-id <ID> \
   --auth-token "$AUTH_TOKEN" \
   --route 192.168.1.0/24 \
