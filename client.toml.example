@@ -23,7 +23,7 @@ server_node_id = "2xnbkpbc7izsilvewd7c62w7wnwziacmpfwvhcrya5nt76dqkpga"
 # Token format: exactly 18 characters (i + 16 body chars + checksum)
 # Generate with: tunnel-rs generate-token
 # NOTE: Use either auth_token OR auth_token_file, not both.
-auth_token = "ikAdvudu_ZxNXhNLCD"
+auth_token = "iXXXXXXXXXXXXXXXXX"  # Replace with real token from generate-token
 
 # Or use a file containing the token
 # NOTE: Use either auth_token OR auth_token_file, not both.

@@ -367,8 +367,8 @@ max_sessions = 100
 # Authentication: clients must provide one of these tokens (18 chars)
 # Generate with: tunnel-rs generate-token
 auth_tokens = [
-    "ikAdvudu_ZxNXhNLCD",
-    "iw3nLKic3oV7zmFJ8v",
+    "iXXXXXXXXXXXXXXXXX",
+    "iYYYYYYYYYYYYYYYYY",
 ]
 # Or use: auth_tokens_file = "/etc/tunnel-rs/auth_tokens.txt"
 
@@ -405,7 +405,7 @@ relay_urls = ["https://relay.example.com"]
 dns_server = "https://dns.example.com/pkarr"
 
 # Authentication token (get from server admin, 18 chars)
-auth_token = "ikAdvudu_ZxNXhNLCD"
+auth_token = "iXXXXXXXXXXXXXXXXX"
 # Or use: auth_token_file = "~/.config/tunnel-rs/token.txt"
 ```
 
@@ -506,10 +506,10 @@ tunnel-rs server \
 **Example `auth_tokens.txt`:**
 ```text
 # Alice's token (generate with: tunnel-rs generate-token)
-ikAdvudu_ZxNXhNLCD
+iXXXXXXXXXXXXXXXXX
 
 # Bob's token
-iw3nLKic3oV7zmFJ8v
+iYYYYYYYYYYYYYYYYY
 ```
 
 ### Configuration File
@@ -521,8 +521,8 @@ In `server.toml`:
 # Inline list (tokens must be exactly 18 characters)
 # Generate with: tunnel-rs generate-token
 auth_tokens = [
-    "ikAdvudu_ZxNXhNLCD",  # Alice
-    "iw3nLKic3oV7zmFJ8v",  # Bob
+    "iXXXXXXXXXXXXXXXXX",  # Alice
+    "iYYYYYYYYYYYYYYYYY",  # Bob
 ]
 
 # Or use a file
@@ -1140,7 +1140,7 @@ Generate authentication tokens for iroh mode:
 ```bash
 # Generate a single token
 tunnel-rs generate-token
-# Output: ikAdvudu_ZxNXhNLCD
+# Output: i<random-16-chars><checksum>
 
 # Generate multiple tokens
 tunnel-rs generate-token -c 5

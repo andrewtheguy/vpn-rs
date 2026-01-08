@@ -54,8 +54,8 @@ max_sessions = 100
 # Authentication tokens (inline list)
 # NOTE: Use either auth_tokens OR auth_tokens_file, not both.
 auth_tokens = [
-    "ikAdvudu_ZxNXhNLCD",  # Alice's token
-    "iw3nLKic3oV7zmFJ8v",  # Bob's token
+    "iXXXXXXXXXXXXXXXXX",  # Replace with real tokens from generate-token
+    # "iYYYYYYYYYYYYYYYYY",  # Add more tokens as needed
 ]
 
 # Or use a file (one token per line, # comments allowed)
