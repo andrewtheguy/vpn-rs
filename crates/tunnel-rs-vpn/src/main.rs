@@ -41,8 +41,8 @@ enum Command {
         #[arg(long)]
         server_ip: Option<String>,
 
-        /// MTU for VPN packets (default: 1420)
-        #[arg(long, default_value = "1420")]
+        /// MTU for VPN packets (default: 1420, valid range: 576-1500)
+        #[arg(long, default_value = "1420", value_parser = clap::value_parser!(u16).range(576..=1500))]
         mtu: u16,
 
         /// Path to secret key file for persistent iroh identity (same EndpointId across restarts)
@@ -71,12 +71,12 @@ enum Command {
         #[arg(short = 'n', long)]
         server_node_id: String,
 
-        /// MTU for VPN packets (default: 1420)
-        #[arg(long, default_value = "1420")]
+        /// MTU for VPN packets (default: 1420, valid range: 576-1500)
+        #[arg(long, default_value = "1420", value_parser = clap::value_parser!(u16).range(576..=1500))]
         mtu: u16,
 
-        /// WireGuard keepalive interval in seconds (default: 25)
-        #[arg(long, default_value = "25")]
+        /// WireGuard keepalive interval in seconds (default: 25, valid range: 10-300)
+        #[arg(long, default_value = "25", value_parser = clap::value_parser!(u16).range(10..=300))]
         keepalive_secs: u16,
 
         /// Custom relay server URL(s) for failover
@@ -158,10 +158,7 @@ async fn main() -> Result<()> {
                 relay_urls,
                 dns_server.as_deref(),
                 auth_tokens,
-                auth_tokens_file
-                    .as_ref()
-                    .map(|p| expand_tilde(p))
-                    .as_deref(),
+                auth_tokens_file.as_ref().map(|p| expand_tilde(p)).as_deref(),
             )
             .await
         }
@@ -182,10 +179,7 @@ async fn main() -> Result<()> {
                 relay_urls,
                 dns_server.as_deref(),
                 auth_token.as_deref(),
-                auth_token_file
-                    .as_ref()
-                    .map(|p| expand_tilde(p))
-                    .as_deref(),
+                auth_token_file.as_ref().map(|p| expand_tilde(p)).as_deref(),
                 routes,
             )
             .await
@@ -225,6 +219,17 @@ async fn run_vpn_server(
         .map(|ip_str| ip_str.parse())
         .transpose()
         .context("Invalid server IP address")?;
+
+    // Validate server IP is within network if provided
+    if let Some(ip) = server_ip {
+        if !network.contains(&ip) {
+            anyhow::bail!(
+                "Server IP {} is not within network CIDR {}",
+                ip,
+                network
+            );
+        }
+    }
 
     // Load and validate auth tokens (required for VPN server)
     let valid_tokens = auth::load_auth_tokens(auth_tokens, auth_tokens_file)

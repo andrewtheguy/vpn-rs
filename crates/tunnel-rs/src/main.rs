@@ -299,7 +299,8 @@ fn resolve_client_iroh_params(
 
     ClientIrohParams {
         server_node_id: server_node_id.clone().or(cfg.server_node_id.clone()),
-        source: normalize_optional_endpoint(source.clone()).or(cfg.request_source.clone()),
+        source: normalize_optional_endpoint(source.clone())
+            .or_else(|| normalize_optional_endpoint(cfg.request_source.clone())),
         target: target.clone().or(cfg.target.clone()),
         relay_urls: if relay_urls.is_empty() {
             cfg.relay_urls.clone().unwrap_or_default()

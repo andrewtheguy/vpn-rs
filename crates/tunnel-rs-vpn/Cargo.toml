@@ -4,10 +4,6 @@ version.workspace = true
 edition = "2021"
 description = "WireGuard-based VPN tunnel via iroh P2P"
 
-[[bin]]
-name = "tunnel-rs-vpn"
-path = "src/main.rs"
-
 [dependencies]
 tunnel-common = { path = "../tunnel-common" }
 tunnel-iroh = { path = "../tunnel-iroh" }
