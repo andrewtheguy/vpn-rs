@@ -228,6 +228,7 @@ impl VpnClient {
         let tunnel_inbound = tunnel.clone();
         let tunnel_timers = tunnel.clone();
         let send_outbound = wg_send.clone();
+        let send_inbound = wg_send.clone();
         let send_timers = wg_send.clone();
 
         // Spawn outbound task (TUN -> WireGuard -> iroh stream)
@@ -309,7 +310,7 @@ impl VpnClient {
                     Ok(PacketResult::WriteToNetwork(data)) => {
                         // Need to send response back through stream atomically (reuse buffer)
                         drop(tunnel);
-                        let mut send = send_timers.lock().await;
+                        let mut send = send_inbound.lock().await;
                         write_buf.clear();
                         write_buf.extend_from_slice(&(data.len() as u32).to_be_bytes());
                         write_buf.extend_from_slice(&data);
@@ -337,7 +338,7 @@ impl VpnClient {
                 for result in results {
                     match result {
                         PacketResult::WriteToNetwork(data) => {
-                            let mut send = wg_send.lock().await;
+                            let mut send = send_timers.lock().await;
                             // Write length-prefixed packet atomically (reuse buffer)
                             write_buf.clear();
                             write_buf.extend_from_slice(&(data.len() as u32).to_be_bytes());
