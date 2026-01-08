@@ -535,6 +535,11 @@ async fn main() -> Result<()> {
                 }
             };
 
+            // Validate token format before connecting (fail fast)
+            auth::validate_token(&auth_token).context(
+                "Invalid auth token format. Generate a valid token with: tunnel-rs generate-token",
+            )?;
+
             validate_socks5_proxy_if_present(&socks5_proxy).await?;
 
             let (relay_urls, _relay_bridges) =
