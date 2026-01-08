@@ -329,6 +329,7 @@ sudo tunnel-rs vpn client --server-node-id <id> --auth-token <token> \
 | Windows | Not supported | TUN device not implemented |
 
 **Future Enhancements:**
+- Configuration file support (like port forwarding modes)
 - DNS server configuration
 - NAT/masquerade for internet access
 - Windows support

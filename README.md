@@ -712,6 +712,8 @@ ping 10.0.0.1
 
 ## CLI Options
 
+> **Note:** VPN mode currently does not support configuration files. All options must be passed via CLI.
+
 ### vpn server
 
 | Option | Default | Description |
