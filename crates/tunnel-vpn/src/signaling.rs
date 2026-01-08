@@ -24,8 +24,6 @@ pub struct VpnHandshake {
     pub version: u16,
     /// Client's WireGuard public key.
     pub wg_public_key: WgPublicKey,
-    /// Client's preferred UDP port for WireGuard (0 = any).
-    pub wg_port: u16,
     /// Authentication token (optional, for token-based auth).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_token: Option<String>,
@@ -37,15 +35,8 @@ impl VpnHandshake {
         Self {
             version: VPN_PROTOCOL_VERSION,
             wg_public_key,
-            wg_port: 0,
             auth_token: None,
         }
-    }
-
-    /// Set the WireGuard port preference.
-    pub fn with_port(mut self, port: u16) -> Self {
-        self.wg_port = port;
-        self
     }
 
     /// Set the authentication token.
@@ -185,16 +176,13 @@ mod tests {
     #[test]
     fn test_handshake_roundtrip() {
         let key = WgPublicKey([1u8; 32]);
-        let handshake = VpnHandshake::new(key.clone())
-            .with_port(51820)
-            .with_auth_token("test-token");
+        let handshake = VpnHandshake::new(key.clone()).with_auth_token("test-token");
 
         let encoded = handshake.encode().unwrap();
         let decoded = VpnHandshake::decode(&encoded).unwrap();
 
         assert_eq!(decoded.version, VPN_PROTOCOL_VERSION);
         assert_eq!(decoded.wg_public_key, key);
-        assert_eq!(decoded.wg_port, 51820);
         assert_eq!(decoded.auth_token, Some("test-token".to_string()));
     }
 

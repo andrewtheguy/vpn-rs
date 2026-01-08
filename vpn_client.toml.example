@@ -14,7 +14,7 @@ mode = "iroh"
 # Server Connection (REQUIRED)
 # ============================================================================
 
-# Server's EndpointId to connect to (required if not specified via CLI)
+# Server's EndpointId to connect to (REQUIRED)
 # Get this from the server operator (shown when server starts, or via show-server-id)
 server_node_id = "2xnbkpbc7izsilvewd7c62w7wnwziacmpfwvhcrya5nt76dqkpga"
 

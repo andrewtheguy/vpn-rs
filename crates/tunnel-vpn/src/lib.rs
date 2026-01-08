@@ -41,5 +41,5 @@ pub use config::VpnConfig;
 pub use error::{VpnError, VpnResult};
 pub use keys::WgKeyPair;
 pub use lock::VpnLock;
-pub use server::{VpnServer, VpnServerBuilder};
+pub use server::VpnServer;
 pub use signaling::{VpnHandshake, VpnHandshakeResponse};

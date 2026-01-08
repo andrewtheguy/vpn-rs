@@ -14,7 +14,7 @@ mode = "iroh"
 # VPN Network Configuration
 # ============================================================================
 
-# VPN network CIDR (required if not specified via CLI --network)
+# VPN network CIDR (REQUIRED)
 # Clients will be assigned IPs from this network
 network = "10.0.0.0/24"
 

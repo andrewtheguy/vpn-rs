@@ -661,61 +661,6 @@ fn extract_dest_ip(packet: &[u8]) -> Option<Ipv4Addr> {
     Some(dest_ip)
 }
 
-/// Builder for VpnServer.
-pub struct VpnServerBuilder {
-    config: VpnServerConfig,
-}
-
-impl VpnServerBuilder {
-    /// Create a new builder with default config.
-    pub fn new() -> Self {
-        Self {
-            config: VpnServerConfig::default(),
-        }
-    }
-
-    /// Set the VPN network.
-    pub fn network(mut self, network: Ipv4Net) -> Self {
-        self.config.network = network;
-        self
-    }
-
-    /// Set the WireGuard port (not used in tunneled mode, but kept for API compatibility).
-    pub fn wg_port(mut self, port: u16) -> Self {
-        self.config.wg_port = port;
-        self
-    }
-
-    /// Set the MTU.
-    pub fn mtu(mut self, mtu: u16) -> Self {
-        self.config.mtu = mtu;
-        self
-    }
-
-    /// Set the max clients.
-    pub fn max_clients(mut self, max: usize) -> Self {
-        self.config.max_clients = max;
-        self
-    }
-
-    /// Set the keepalive interval.
-    pub fn keepalive_secs(mut self, secs: u16) -> Self {
-        self.config.keepalive_secs = secs;
-        self
-    }
-
-    /// Build the server.
-    pub async fn build(self) -> VpnResult<VpnServer> {
-        VpnServer::new(self.config).await
-    }
-}
-
-impl Default for VpnServerBuilder {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -815,10 +815,13 @@ impl VpnServerConfig {
                 );
             }
 
+            // Require network for VPN server
+            let network = iroh.network.as_ref().ok_or_else(|| {
+                anyhow::anyhow!("[iroh] 'network' is required for VPN server configuration.")
+            })?;
+
             // Validate network CIDR and server_ip
-            if let Some(ref network) = iroh.network {
-                validate_vpn_network(network, iroh.server_ip.as_deref(), "iroh")?;
-            }
+            validate_vpn_network(network, iroh.server_ip.as_deref(), "iroh")?;
 
             // Validate MTU and keepalive ranges
             if let Some(mtu) = iroh.mtu {
@@ -881,6 +884,13 @@ impl VpnClientConfig {
             if !iroh.auth_tokens.is_empty() || iroh.auth_tokens_file.is_some() {
                 anyhow::bail!(
                     "[iroh] 'auth_tokens' and 'auth_tokens_file' are server-only fields."
+                );
+            }
+
+            // Require server_node_id for VPN client
+            if iroh.server_node_id.is_none() {
+                anyhow::bail!(
+                    "[iroh] 'server_node_id' is required for VPN client configuration."
                 );
             }
 
@@ -1047,4 +1057,315 @@ pub const DEFAULT_NOSTR_RELAYS: &[&str] = &[
 /// Default public Nostr relays for signaling.
 pub fn default_nostr_relays() -> &'static [&'static str] {
     DEFAULT_NOSTR_RELAYS
+}
+
+// ============================================================================
+// VPN Config Builders
+// ============================================================================
+
+/// Default MTU for VPN packets.
+pub const DEFAULT_VPN_MTU: u16 = 1420;
+
+/// Default WireGuard keepalive interval in seconds.
+pub const DEFAULT_VPN_KEEPALIVE_SECS: u16 = 25;
+
+/// Resolved VPN server configuration (all values finalized).
+#[derive(Debug, Clone)]
+pub struct ResolvedVpnServerConfig {
+    pub network: String,
+    pub server_ip: Option<String>,
+    pub mtu: u16,
+    pub keepalive_secs: u16,
+    pub secret_file: Option<PathBuf>,
+    pub relay_urls: Vec<String>,
+    pub dns_server: Option<String>,
+    pub auth_tokens: Vec<String>,
+    pub auth_tokens_file: Option<PathBuf>,
+}
+
+/// Builder for VPN server configuration with layered overrides.
+///
+/// Usage:
+/// ```ignore
+/// let config = VpnServerConfigBuilder::new()
+///     .apply_defaults()
+///     .apply_config(toml_config.as_ref())
+///     .apply_cli(network, server_ip, mtu, ...)
+///     .build()?;
+/// ```
+#[derive(Default)]
+pub struct VpnServerConfigBuilder {
+    network: Option<String>,
+    server_ip: Option<String>,
+    mtu: Option<u16>,
+    keepalive_secs: Option<u16>,
+    secret_file: Option<PathBuf>,
+    relay_urls: Option<Vec<String>>,
+    dns_server: Option<String>,
+    auth_tokens: Option<Vec<String>>,
+    auth_tokens_file: Option<PathBuf>,
+}
+
+impl VpnServerConfigBuilder {
+    /// Create a new empty builder.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Apply default values (lowest priority).
+    pub fn apply_defaults(mut self) -> Self {
+        self.mtu = Some(DEFAULT_VPN_MTU);
+        self.keepalive_secs = Some(DEFAULT_VPN_KEEPALIVE_SECS);
+        self.relay_urls = Some(vec![]);
+        self.auth_tokens = Some(vec![]);
+        self
+    }
+
+    /// Apply values from TOML config (middle priority).
+    pub fn apply_config(mut self, config: Option<&VpnIrohConfig>) -> Self {
+        if let Some(cfg) = config {
+            if cfg.network.is_some() {
+                self.network = cfg.network.clone();
+            }
+            if cfg.server_ip.is_some() {
+                self.server_ip = cfg.server_ip.clone();
+            }
+            if cfg.mtu.is_some() {
+                self.mtu = cfg.mtu;
+            }
+            if cfg.keepalive_secs.is_some() {
+                self.keepalive_secs = cfg.keepalive_secs;
+            }
+            if cfg.secret_file.is_some() {
+                self.secret_file = cfg.secret_file.clone();
+            }
+            if !cfg.relay_urls.is_empty() {
+                self.relay_urls = Some(cfg.relay_urls.clone());
+            }
+            if cfg.dns_server.is_some() {
+                self.dns_server = cfg.dns_server.clone();
+            }
+            if !cfg.auth_tokens.is_empty() {
+                self.auth_tokens = Some(cfg.auth_tokens.clone());
+            }
+            if cfg.auth_tokens_file.is_some() {
+                self.auth_tokens_file = cfg.auth_tokens_file.clone();
+            }
+        }
+        self
+    }
+
+    /// Apply CLI arguments (highest priority).
+    /// Only non-None/non-empty values override.
+    #[allow(clippy::too_many_arguments)]
+    pub fn apply_cli(
+        mut self,
+        network: Option<String>,
+        server_ip: Option<String>,
+        mtu: Option<u16>,
+        secret_file: Option<PathBuf>,
+        relay_urls: Vec<String>,
+        dns_server: Option<String>,
+        auth_tokens: Vec<String>,
+        auth_tokens_file: Option<PathBuf>,
+    ) -> Self {
+        if network.is_some() {
+            self.network = network;
+        }
+        if server_ip.is_some() {
+            self.server_ip = server_ip;
+        }
+        if mtu.is_some() {
+            self.mtu = mtu;
+        }
+        if secret_file.is_some() {
+            self.secret_file = secret_file;
+        }
+        if !relay_urls.is_empty() {
+            self.relay_urls = Some(relay_urls);
+        }
+        if dns_server.is_some() {
+            self.dns_server = dns_server;
+        }
+        if !auth_tokens.is_empty() {
+            self.auth_tokens = Some(auth_tokens);
+        }
+        if auth_tokens_file.is_some() {
+            self.auth_tokens_file = auth_tokens_file;
+        }
+        self
+    }
+
+    /// Build the final resolved configuration.
+    pub fn build(self) -> Result<ResolvedVpnServerConfig> {
+        let network = self.network.ok_or_else(|| {
+            anyhow::anyhow!(
+                "VPN network CIDR is required.\n\
+                 Specify via CLI: --network <CIDR>\n\
+                 Or in config: network = \"10.0.0.0/24\""
+            )
+        })?;
+
+        // Validate network CIDR format
+        validate_vpn_network(&network, self.server_ip.as_deref(), "config")?;
+
+        // Validate MTU and keepalive ranges
+        let mtu = self.mtu.unwrap_or(DEFAULT_VPN_MTU);
+        let keepalive_secs = self.keepalive_secs.unwrap_or(DEFAULT_VPN_KEEPALIVE_SECS);
+        validate_mtu(mtu, "config")?;
+        validate_keepalive(keepalive_secs, "config")?;
+
+        Ok(ResolvedVpnServerConfig {
+            network,
+            server_ip: self.server_ip,
+            mtu,
+            keepalive_secs,
+            secret_file: self.secret_file,
+            relay_urls: self.relay_urls.unwrap_or_default(),
+            dns_server: self.dns_server,
+            auth_tokens: self.auth_tokens.unwrap_or_default(),
+            auth_tokens_file: self.auth_tokens_file,
+        })
+    }
+}
+
+/// Resolved VPN client configuration (all values finalized).
+#[derive(Debug, Clone)]
+pub struct ResolvedVpnClientConfig {
+    pub server_node_id: String,
+    pub mtu: u16,
+    pub keepalive_secs: u16,
+    pub auth_token: Option<String>,
+    pub auth_token_file: Option<PathBuf>,
+    pub routes: Vec<String>,
+    pub relay_urls: Vec<String>,
+    pub dns_server: Option<String>,
+}
+
+/// Builder for VPN client configuration with layered overrides.
+#[derive(Default)]
+pub struct VpnClientConfigBuilder {
+    server_node_id: Option<String>,
+    mtu: Option<u16>,
+    keepalive_secs: Option<u16>,
+    auth_token: Option<String>,
+    auth_token_file: Option<PathBuf>,
+    routes: Option<Vec<String>>,
+    relay_urls: Option<Vec<String>>,
+    dns_server: Option<String>,
+}
+
+impl VpnClientConfigBuilder {
+    /// Create a new empty builder.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Apply default values (lowest priority).
+    pub fn apply_defaults(mut self) -> Self {
+        self.mtu = Some(DEFAULT_VPN_MTU);
+        self.keepalive_secs = Some(DEFAULT_VPN_KEEPALIVE_SECS);
+        self.routes = Some(vec![]);
+        self.relay_urls = Some(vec![]);
+        self
+    }
+
+    /// Apply values from TOML config (middle priority).
+    pub fn apply_config(mut self, config: Option<&VpnIrohConfig>) -> Self {
+        if let Some(cfg) = config {
+            if cfg.server_node_id.is_some() {
+                self.server_node_id = cfg.server_node_id.clone();
+            }
+            if cfg.mtu.is_some() {
+                self.mtu = cfg.mtu;
+            }
+            if cfg.keepalive_secs.is_some() {
+                self.keepalive_secs = cfg.keepalive_secs;
+            }
+            if cfg.auth_token.is_some() {
+                self.auth_token = cfg.auth_token.clone();
+            }
+            if cfg.auth_token_file.is_some() {
+                self.auth_token_file = cfg.auth_token_file.clone();
+            }
+            if !cfg.routes.is_empty() {
+                self.routes = Some(cfg.routes.clone());
+            }
+            if !cfg.relay_urls.is_empty() {
+                self.relay_urls = Some(cfg.relay_urls.clone());
+            }
+            if cfg.dns_server.is_some() {
+                self.dns_server = cfg.dns_server.clone();
+            }
+        }
+        self
+    }
+
+    /// Apply CLI arguments (highest priority).
+    #[allow(clippy::too_many_arguments)]
+    pub fn apply_cli(
+        mut self,
+        server_node_id: Option<String>,
+        mtu: Option<u16>,
+        keepalive_secs: Option<u16>,
+        auth_token: Option<String>,
+        auth_token_file: Option<PathBuf>,
+        routes: Vec<String>,
+        relay_urls: Vec<String>,
+        dns_server: Option<String>,
+    ) -> Self {
+        if server_node_id.is_some() {
+            self.server_node_id = server_node_id;
+        }
+        if mtu.is_some() {
+            self.mtu = mtu;
+        }
+        if keepalive_secs.is_some() {
+            self.keepalive_secs = keepalive_secs;
+        }
+        if auth_token.is_some() {
+            self.auth_token = auth_token;
+        }
+        if auth_token_file.is_some() {
+            self.auth_token_file = auth_token_file;
+        }
+        if !routes.is_empty() {
+            self.routes = Some(routes);
+        }
+        if !relay_urls.is_empty() {
+            self.relay_urls = Some(relay_urls);
+        }
+        if dns_server.is_some() {
+            self.dns_server = dns_server;
+        }
+        self
+    }
+
+    /// Build the final resolved configuration.
+    pub fn build(self) -> Result<ResolvedVpnClientConfig> {
+        let server_node_id = self.server_node_id.ok_or_else(|| {
+            anyhow::anyhow!(
+                "Server node ID is required.\n\
+                 Specify via CLI: --server-node-id <ID>\n\
+                 Or in config: server_node_id = \"...\""
+            )
+        })?;
+
+        // Validate MTU and keepalive ranges
+        let mtu = self.mtu.unwrap_or(DEFAULT_VPN_MTU);
+        let keepalive_secs = self.keepalive_secs.unwrap_or(DEFAULT_VPN_KEEPALIVE_SECS);
+        validate_mtu(mtu, "config")?;
+        validate_keepalive(keepalive_secs, "config")?;
+
+        Ok(ResolvedVpnClientConfig {
+            server_node_id,
+            mtu,
+            keepalive_secs,
+            auth_token: self.auth_token,
+            auth_token_file: self.auth_token_file,
+            routes: self.routes.unwrap_or_default(),
+            relay_urls: self.relay_urls.unwrap_or_default(),
+            dns_server: self.dns_server,
+        })
+    }
 }
