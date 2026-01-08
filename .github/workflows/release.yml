@@ -58,11 +58,13 @@ jobs:
         run: |
           cargo build --release --target ${{ matrix.target }} -p tunnel-rs
           cargo build --release --target ${{ matrix.target }} -p tunnel-rs-ice
+          cargo build --release --target ${{ matrix.target }} -p tunnel-rs-vpn
 
       - name: Rename Binaries
         run: |
           mv target/${{ matrix.target }}/release/tunnel-rs target/release/tunnel-rs-${{ matrix.suffix }}
           mv target/${{ matrix.target }}/release/tunnel-rs-ice target/release/tunnel-rs-ice-${{ matrix.suffix }}
+          mv target/${{ matrix.target }}/release/tunnel-rs-vpn target/release/tunnel-rs-vpn-${{ matrix.suffix }}
 
       - name: Upload artifact for Docker build
         uses: actions/upload-artifact@v4
@@ -81,6 +83,12 @@ jobs:
         with:
           name: release-ice-${{ matrix.suffix }}
           path: target/release/tunnel-rs-ice-${{ matrix.suffix }}
+
+      - name: Upload release artifact (vpn)
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-vpn-${{ matrix.suffix }}
+          path: target/release/tunnel-rs-vpn-${{ matrix.suffix }}
 
   build-other:
     needs: setup
@@ -109,11 +117,17 @@ jobs:
           cargo build --release --target ${{ matrix.target }} -p tunnel-rs
           cargo build --release --target ${{ matrix.target }} -p tunnel-rs-ice
 
+      - name: Build VPN (Unix only)
+        if: runner.os != 'Windows'
+        run: |
+          cargo build --release --target ${{ matrix.target }} -p tunnel-rs-vpn
+
       - name: Rename Binaries (Unix)
         if: runner.os != 'Windows'
         run: |
           mv target/${{ matrix.target }}/release/${{ matrix.binary }} target/release/tunnel-rs-${{ matrix.suffix }}
           mv target/${{ matrix.target }}/release/tunnel-rs-ice target/release/tunnel-rs-ice-${{ matrix.suffix }}
+          mv target/${{ matrix.target }}/release/tunnel-rs-vpn target/release/tunnel-rs-vpn-${{ matrix.suffix }}
 
       - name: Rename Binaries (Windows)
         if: runner.os == 'Windows'
@@ -134,6 +148,13 @@ jobs:
         with:
           name: release-ice-${{ matrix.suffix }}
           path: target/release/tunnel-rs-ice-${{ matrix.suffix }}
+
+      - name: Upload release artifact (vpn, Unix)
+        if: runner.os != 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-vpn-${{ matrix.suffix }}
+          path: target/release/tunnel-rs-vpn-${{ matrix.suffix }}
 
       - name: Upload release artifact (Windows)
         if: runner.os == 'Windows'

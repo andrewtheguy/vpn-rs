@@ -328,9 +328,10 @@ mod tests {
     #[test]
     fn test_checksum_detects_changes() {
         let token = generate_token();
-        // Change one character in the body
+        // Change the checksum character (last character) to ensure validation fails
         let mut chars: Vec<char> = token.chars().collect();
-        chars[5] = if chars[5] == 'a' { 'b' } else { 'a' };
+        let last_idx = chars.len() - 1;
+        chars[last_idx] = if chars[last_idx] == 'A' { 'B' } else { 'A' };
         let modified: String = chars.into_iter().collect();
         assert!(validate_token(&modified).is_err());
     }
