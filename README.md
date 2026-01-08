@@ -114,10 +114,37 @@ Note: The quick install scripts install the `tunnel-rs` iroh-only binary.
 For ICE modes (`tunnel-rs-ice`), download the `tunnel-rs-ice` binary manually
 from GitHub releases or build from source.
 
+### Quick Install VPN (Linux & macOS)
+
+VPN mode requires root privileges and installs to `/usr/local/bin`:
+
+```bash
+curl -sSL https://andrewtheguy.github.io/tunnel-rs/install-vpn.sh | sudo bash
+```
+
+Install with custom release tag:
+```bash
+curl -sSL https://andrewtheguy.github.io/tunnel-rs/install-vpn.sh | sudo bash -s <RELEASE_TAG>
+```
+
+By default the installer pulls the latest **stable** release. Use `--prerelease` for the newest prerelease:
+
+```bash
+# Latest prerelease
+curl -sSL https://andrewtheguy.github.io/tunnel-rs/install-vpn.sh | sudo bash -s -- --prerelease
+```
+
+> **Note:** VPN mode is not available on Windows.
+
 ### From Source
 
 ```bash
 cargo install --path . -p tunnel-rs
+```
+
+To install the VPN binary (Linux/macOS only, requires root to run):
+```bash
+cargo install --path . -p tunnel-rs-vpn
 ```
 
 To install the ICE binary:
