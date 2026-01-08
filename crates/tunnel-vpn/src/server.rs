@@ -386,7 +386,6 @@ impl VpnServer {
         // Send response (no wg_endpoint needed since we tunnel over iroh)
         let response = VpnHandshakeResponse::accepted(
             self.public_key(),
-            dummy_endpoint, // Not used, but required by protocol
             assigned_ip,
             network,
             server_ip,

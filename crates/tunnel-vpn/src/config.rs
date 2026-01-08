@@ -1,11 +1,9 @@
 //! VPN configuration types.
 
-use crate::keys::WgPublicKey;
 use ipnet::Ipv4Net;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
-use std::net::{Ipv4Addr, SocketAddr};
-use std::path::PathBuf;
+use std::net::Ipv4Addr;
 
 
 /// Default MTU for WireGuard (1500 - 80 bytes overhead).
@@ -27,9 +25,6 @@ pub struct VpnServerConfig {
     /// MTU for the TUN device.
     #[serde(default = "default_wg_mtu")]
     pub mtu: u16,
-
-    /// Path to private key file (optional, generates if not specified).
-    pub private_key_file: Option<PathBuf>,
 
     /// WireGuard keepalive interval in seconds.
     #[serde(default = "default_keepalive")]
@@ -91,23 +86,6 @@ pub enum VpnConfig {
     /// Client configuration.
     #[serde(rename = "client")]
     Client(VpnClientConfig),
-}
-
-/// Peer information exchanged via signaling.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct VpnPeerInfo {
-    /// WireGuard public key.
-    pub wg_public_key: WgPublicKey,
-
-    /// Direct UDP endpoint (if known via ICE/discovery).
-    pub endpoint: Option<SocketAddr>,
-
-    /// Assigned VPN IP address (server → client).
-    pub assigned_ip: Option<Ipv4Addr>,
-
-    /// Allowed IPs for this peer (what traffic to route through tunnel).
-    #[serde(default)]
-    pub allowed_ips: Vec<Ipv4Net>,
 }
 
 // Default value functions for serde

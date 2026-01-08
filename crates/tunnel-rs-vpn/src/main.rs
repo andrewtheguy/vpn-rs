@@ -327,7 +327,6 @@ async fn run_vpn_server(resolved: ResolvedVpnServerConfig) -> Result<()> {
         network,
         server_ip,
         mtu: resolved.mtu,
-        private_key_file: None, // Not used - iroh identity uses secret_file instead
         keepalive_secs: resolved.keepalive_secs,
         max_clients: 254,
         auth_tokens: Some(valid_tokens),
