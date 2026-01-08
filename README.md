@@ -12,7 +12,7 @@ Tunnel-rs enables you to forward TCP and UDP traffic between machines without re
 - **Native VPN mode** — Full WireGuard-based VPN with automatic IP assignment (Linux/macOS)
 - **No publicly accessible IPs or port forwarding required** — Automatic NAT hole punching and stable peer identities eliminate the need for complex firewall rules or dynamic DNS
 - **Cross-platform support** — Works on Linux, macOS, and Windows
-- **End-to-end encryption** via QUIC/TLS 1.3 (tunneling) or WireGuard (VPN mode)
+- **End-to-end encryption** via QUIC/TLS 1.3 (port forwarding) or WireGuard + QUIC (VPN mode)
 - **NAT traversal** with multiple strategies (relay fallback, STUN, full ICE)
 - **Minimal configuration** — Automatic peer discovery using simple, shareable identities
 - **Flexible signaling** — Supports multiple connection methods, from automated discovery to manual exchange
@@ -653,7 +653,7 @@ Client                                     Server
 - Creates a virtual network interface (TUN device)
 - Assigns VPN IP addresses automatically (no keypair management)
 - Routes entire IP subnets, not just individual ports
-- Uses WireGuard encryption (via boringtun) instead of QUIC/TLS
+- Uses WireGuard encryption (via boringtun) on top of iroh's QUIC transport
 
 ## Quick Start
 

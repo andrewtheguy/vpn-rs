@@ -1698,7 +1698,7 @@ graph TB
 | Mode | Multi-Session | Dynamic Source | Encryption | Platform |
 |------|---------------|----------------|------------|----------|
 | `iroh` | **Yes** | **Yes** | QUIC/TLS 1.3 | Linux, macOS, Windows |
-| `vpn` | **Yes** | N/A (full tunnel) | WireGuard | Linux, macOS |
+| `vpn` | **Yes** | N/A (full tunnel) | WireGuard + QUIC | Linux, macOS |
 | `nostr` | **Yes** | **Yes** | QUIC/TLS 1.3 | Linux, macOS, Windows |
 | `manual` | No | **Yes** | QUIC/TLS 1.3 | Linux, macOS, Windows |
 
