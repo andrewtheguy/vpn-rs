@@ -7,6 +7,7 @@ This document provides a comprehensive overview of the tunnel-rs architecture, i
 - [System Overview](#system-overview)
 - [Mode Comparison](#mode-comparison)
 - [iroh Mode](#iroh-mode)
+- [VPN Mode](#vpn-mode)
 - [manual Mode](#manual-mode)
 - [nostr Mode](#nostr-mode)
 - [Configuration System](#configuration-system)
@@ -31,12 +32,14 @@ Binary layout:
 graph TB
     subgraph "tunnel-rs Modes"
         A[iroh]
+        A2[vpn]
         C[manual]
         D2[nostr]
     end
 
     subgraph "Use Cases"
         D[Persistent<br/>Best NAT Traversal]
+        D3[Full Network VPN<br/>WireGuard Encryption]
         F[Manual Signaling<br/>Full ICE]
         F2[Automated Signaling<br/>Static Keys]
     end
@@ -48,14 +51,17 @@ graph TB
     end
 
     A --> D
+    A2 --> D3
     C --> F
     D2 --> F2
 
     A --> G
+    A2 --> G
     C --> I
     D2 --> I2
 
     style A fill:#4CAF50
+    style A2 fill:#2196F3
     style C fill:#FF9800
     style D2 fill:#9C27B0
 ```
@@ -66,7 +72,7 @@ The project is split into separate binaries to isolate dependencies:
 
 | Binary | Modes | Key Modules |
 |--------|-------|-------------|
-| `tunnel-rs` | `iroh` | `iroh_mode`, `auth`, `socks5_bridge` |
+| `tunnel-rs` | `iroh`, `vpn` | `iroh_mode`, `auth`, `socks5_bridge`, `tunnel_vpn` |
 | `tunnel-rs-ice` | `manual`, `nostr` | `custom`, `nostr`, `transport` |
 
 The `test-utils` feature is still available on the iroh crates/binary to enable `--relay-only` for testing.
@@ -402,6 +408,223 @@ graph TB
     style A fill:#FFE0B2
     style L fill:#C8E6C9
     style O fill:#C8E6C9
+```
+
+---
+
+## VPN Mode
+
+VPN mode provides full network tunneling using WireGuard encryption via the boringtun library. Unlike port forwarding modes, VPN mode creates a TUN device and routes IP traffic.
+
+> **Note:** VPN mode is only available on Linux and macOS. It requires root/sudo privileges.
+
+### Architecture Overview
+
+```mermaid
+graph TB
+    subgraph "Client Side"
+        A[Applications]
+        B[TUN Device<br/>tun0: 10.0.0.2]
+        C[WireGuard Tunnel<br/>boringtun]
+        D[iroh Endpoint]
+    end
+
+    subgraph "Transport"
+        E[iroh Connection<br/>NAT Traversal + Relay]
+    end
+
+    subgraph "Server Side"
+        F[iroh Endpoint]
+        G[WireGuard Tunnel<br/>boringtun]
+        H[TUN Device<br/>tun0: 10.0.0.1]
+        I[Target Network<br/>LAN / Internet]
+    end
+
+    A -->|IP packets| B
+    B -->|capture| C
+    C -->|encrypt| D
+    D <-->|iroh QUIC| E
+    E <-->|iroh QUIC| F
+    F -->|decrypt| G
+    G -->|inject| H
+    H -->|forward| I
+
+    style C fill:#4CAF50
+    style G fill:#4CAF50
+    style E fill:#BBDEFB
+```
+
+### Key Components
+
+```mermaid
+graph LR
+    subgraph "tunnel-vpn Crate"
+        A[VpnServer / VpnClient]
+        B[WgTunnel<br/>boringtun wrapper]
+        C[TUN Device<br/>tun crate]
+        D[IP Pool<br/>address management]
+        E[Signaling<br/>key exchange]
+        F[VpnLock<br/>single instance]
+    end
+
+    A --> B
+    A --> C
+    A --> D
+    A --> E
+    A --> F
+
+    style B fill:#C8E6C9
+    style C fill:#FFE0B2
+    style E fill:#BBDEFB
+```
+
+### Connection Flow
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant CI as Client iroh
+    participant SI as Server iroh
+    participant S as Server
+
+    Note over C: User runs vpn client
+    C->>C: Acquire VPN lock
+    C->>C: Generate ephemeral WireGuard keypair
+    C->>CI: Create iroh endpoint
+
+    CI->>SI: Connect via iroh (NAT traversal)
+    SI-->>CI: Connection established
+
+    Note over C,S: VPN Handshake Phase
+    C->>S: VpnHandshake {wg_pubkey, auth_token}
+    S->>S: Validate auth token
+    S->>S: Allocate IP from pool
+    S->>S: Generate ephemeral WireGuard keypair
+    S-->>C: VpnHandshakeResponse {wg_pubkey, assigned_ip, network}
+
+    Note over C,S: TUN Device Setup
+    C->>C: Create TUN device (tun0)
+    C->>C: Assign IP (10.0.0.2)
+    C->>C: Configure routes
+    S->>S: Create TUN device (tun0)
+    S->>S: Assign IP (10.0.0.1)
+
+    Note over C,S: WireGuard Tunnel Active
+    loop Packet Flow
+        C->>C: Application sends packet
+        C->>C: TUN captures packet
+        C->>C: WireGuard encrypts
+        C->>S: Send via iroh
+        S->>S: WireGuard decrypts
+        S->>S: TUN injects packet
+        S->>S: Forward to destination
+    end
+```
+
+### WireGuard Integration
+
+The VPN mode uses **boringtun** (Cloudflare's userspace WireGuard) for encryption:
+
+```mermaid
+graph TB
+    subgraph "WgTunnel Wrapper"
+        A[encapsulate<br/>plaintext → ciphertext]
+        B[decapsulate<br/>ciphertext → plaintext]
+        C[update_timers<br/>keepalive + handshake]
+        D[Reusable Buffer<br/>avoid per-packet alloc]
+    end
+
+    subgraph "boringtun Tunn"
+        E[Noise Protocol<br/>key derivation]
+        F[ChaCha20-Poly1305<br/>AEAD encryption]
+        G[Handshake State<br/>automatic rekey]
+    end
+
+    A --> E
+    B --> E
+    E --> F
+    C --> G
+
+    style F fill:#C8E6C9
+    style D fill:#FFF9C4
+```
+
+**Key Design Decisions:**
+- **Ephemeral keys**: WireGuard keypairs are generated per-session (no static config)
+- **Reusable buffers**: Avoid heap allocation per packet for performance
+- **Atomic connection counting**: Server tracks active clients with `AtomicUsize`
+- **Single instance lock**: File-based lock prevents multiple VPN clients
+
+### IP Pool Management
+
+```mermaid
+graph TB
+    subgraph "IP Pool (Server)"
+        A[Network: 10.0.0.0/24]
+        B[Server IP: 10.0.0.1]
+        C[Available: 10.0.0.2 - 10.0.0.254]
+        D[Allocated Set<br/>tracks in-use IPs]
+    end
+
+    subgraph "Allocation"
+        E[Client connects]
+        F[Find first available IP]
+        G[Mark as allocated]
+        H[Return to client]
+    end
+
+    subgraph "Release"
+        I[Client disconnects]
+        J[Return IP to pool]
+    end
+
+    E --> F
+    F --> C
+    F --> G
+    G --> D
+    G --> H
+
+    I --> J
+    J --> D
+
+    style B fill:#FFE0B2
+    style D fill:#BBDEFB
+```
+
+### Platform-Specific Details
+
+| Platform | TUN Device | Route Configuration | Privileges |
+|----------|------------|---------------------|------------|
+| Linux | `/dev/net/tun` | `ip route add` | CAP_NET_ADMIN or root |
+| macOS | `utunX` | `route add` | root |
+
+### Security Model
+
+```mermaid
+graph TB
+    subgraph "Authentication"
+        A[Auth Token<br/>tunnel-auth format]
+        B[Validate before IP assignment]
+    end
+
+    subgraph "Encryption"
+        C[WireGuard<br/>Noise Protocol]
+        D[ChaCha20-Poly1305]
+        E[Perfect Forward Secrecy]
+    end
+
+    subgraph "Isolation"
+        F[Single Instance Lock<br/>prevents conflicts]
+        G[Ephemeral Keys<br/>no key reuse]
+    end
+
+    A --> B
+    C --> D
+    C --> E
+
+    style D fill:#C8E6C9
+    style E fill:#C8E6C9
+    style F fill:#FFF9C4
 ```
 
 ---
@@ -1472,14 +1695,16 @@ graph TB
 
 ## Mode Capabilities
 
-| Mode | Multi-Session | Dynamic Source | Description |
-|------|---------------|----------------|-------------|
-| `iroh` | **Yes** | **Yes** | Multiple clients, client specifies `--source` |
-| `nostr` | **Yes** | **Yes** | Multiple clients, client specifies `--source` |
-| `manual` | No | **Yes** | Single session, client specifies `--source` |
+| Mode | Multi-Session | Dynamic Source | Encryption | Platform |
+|------|---------------|----------------|------------|----------|
+| `iroh` | **Yes** | **Yes** | QUIC/TLS 1.3 | Linux, macOS, Windows |
+| `vpn` | **Yes** | N/A (full tunnel) | WireGuard | Linux, macOS |
+| `nostr` | **Yes** | **Yes** | QUIC/TLS 1.3 | Linux, macOS, Windows |
+| `manual` | No | **Yes** | QUIC/TLS 1.3 | Linux, macOS, Windows |
 
 **Multi-Session** = Multiple concurrent connections to the same server
 **Dynamic Source** = Client specifies which service to tunnel (via `--source`)
+**VPN Mode** = Full network tunneling with automatic IP assignment (no per-port config)
 
 ---
 

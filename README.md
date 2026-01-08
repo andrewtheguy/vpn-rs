@@ -9,9 +9,10 @@ Tunnel-rs enables you to forward TCP and UDP traffic between machines without re
 
 **Key Features:**
 - **Full TCP and UDP support** — Seamlessly tunnel any TCP or UDP traffic
+- **Native VPN mode** — Full WireGuard-based VPN with automatic IP assignment (Linux/macOS)
 - **No publicly accessible IPs or port forwarding required** — Automatic NAT hole punching and stable peer identities eliminate the need for complex firewall rules or dynamic DNS
 - **Cross-platform support** — Works on Linux, macOS, and Windows
-- **End-to-end encryption** via QUIC/TLS 1.3
+- **End-to-end encryption** via QUIC/TLS 1.3 (tunneling) or WireGuard (VPN mode)
 - **NAT traversal** with multiple strategies (relay fallback, STUN, full ICE)
 - **Minimal configuration** — Automatic peer discovery using simple, shareable identities
 - **Flexible signaling** — Supports multiple connection methods, from automated discovery to manual exchange
@@ -37,14 +38,15 @@ Tunnel-rs enables you to forward TCP and UDP traffic between machines without re
 tunnel-rs provides multiple modes for establishing tunnels. **Use `iroh` mode** for most use cases — it provides the best NAT traversal with relay fallback, automatic discovery, and client authentication.
 
 Binary layout:
-- `tunnel-rs`: iroh-only
+- `tunnel-rs`: iroh mode + VPN mode
 - `tunnel-rs-ice`: manual and nostr
 
-| Mode | NAT Traversal | Discovery | External Dependency |
-|------|---------------|-----------|---------------------|
-| **iroh** (recommended) | Best (relay fallback) | Automatic | iroh relay infrastructure |
-| nostr | STUN only | Automatic (Nostr) | Nostr relays (decentralized) |
-| manual | STUN only | Manual copy-paste | None |
+| Mode | NAT Traversal | Discovery | External Dependency | Use Case |
+|------|---------------|-----------|---------------------|----------|
+| **iroh** (recommended) | Best (relay fallback) | Automatic | iroh relay infrastructure | TCP/UDP port forwarding |
+| **vpn** | Best (relay fallback) | Automatic | iroh relay infrastructure | Full network tunneling (Linux/macOS) |
+| nostr | STUN only | Automatic (Nostr) | Nostr relays (decentralized) | Decentralized port forwarding |
+| manual | STUN only | Manual copy-paste | None | Offline/LAN port forwarding |
 
 > See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for detailed diagrams and technical deep-dives.
 
@@ -623,6 +625,150 @@ tunnel-rs client \
 > **Note:** When using `--socks5-proxy`, all relay URLs must be `.onion` addresses. The proxy is validated as a real Tor proxy at startup. DNS discovery is not used with Tor — the relay handles peer discovery.
 
 See [docs/tor-hidden-service.md](docs/tor-hidden-service.md) for complete setup guide.
+
+---
+
+# VPN Mode (Linux/macOS)
+
+Native WireGuard-based VPN mode for full network tunneling. Unlike port forwarding modes, VPN mode creates a TUN device and routes IP traffic through an encrypted WireGuard tunnel.
+
+> **Note:** VPN mode is only available on Linux and macOS. It requires root/sudo privileges to create TUN devices and configure routes.
+
+## Architecture
+
+```
+Client                                     Server
+┌─────────────────────┐                   ┌─────────────────────┐
+│  Applications       │                   │  Target Network     │
+│        ↓            │                   │        ↑            │
+│  [tun0: 10.0.0.2]   │                   │  [tun0: 10.0.0.1]   │
+│        ↓            │                   │        ↑            │
+│  WireGuard (boringtun)                  │  WireGuard (boringtun)
+│        ↓            │                   │        ↑            │
+│  iroh (signaling)   │ ════════════════► │  iroh (signaling)   │
+└─────────────────────┘   NAT traversal   └─────────────────────┘
+```
+
+**Key Differences from Port Forwarding:**
+- Creates a virtual network interface (TUN device)
+- Assigns VPN IP addresses automatically (no keypair management)
+- Routes entire IP subnets, not just individual ports
+- Uses WireGuard encryption (via boringtun) instead of QUIC/TLS
+
+## Quick Start
+
+### 1. Setup (One-Time)
+
+Generate a server key for persistent identity:
+
+```bash
+# On server machine
+tunnel-rs generate-server-key --output ./server.key
+
+# Create authentication token
+AUTH_TOKEN=$(tunnel-rs generate-token)
+echo $AUTH_TOKEN
+```
+
+### 2. Start VPN Server
+
+```bash
+sudo tunnel-rs vpn server \
+  --network 10.0.0.0/24 \
+  --secret-file ./server.key \
+  --auth-tokens "$AUTH_TOKEN"
+```
+
+Output:
+```
+VPN Server Node ID: 2xnbkpbc7izsilvewd7c62w7wnwziacmpfwvhcrya5nt76dqkpga
+Clients connect with: tunnel-rs vpn client --server-node-id <ID> --auth-token <TOKEN>
+```
+
+### 3. Connect VPN Client
+
+```bash
+sudo tunnel-rs vpn client \
+  --server-node-id <SERVER_NODE_ID> \
+  --auth-token "$AUTH_TOKEN"
+```
+
+The client will:
+1. Connect to the server via iroh (NAT traversal)
+2. Exchange ephemeral WireGuard keys
+3. Receive an assigned IP (e.g., 10.0.0.2)
+4. Create a TUN device and configure routes
+
+### 4. Verify Connection
+
+```bash
+# Check assigned IP
+ip addr show tun0  # Linux
+ifconfig utun9     # macOS
+
+# Ping the server
+ping 10.0.0.1
+```
+
+## CLI Options
+
+### vpn server
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--network`, `-n` | 10.0.0.0/24 | VPN network CIDR. Server gets .1, clients get subsequent IPs |
+| `--server-ip` | First IP in network | Override server's VPN IP address |
+| `--mtu` | 1420 | MTU for VPN packets |
+| `--secret-file` | - | Path to secret key for persistent iroh identity |
+| `--relay-url` | public | Custom relay server URL(s), repeatable |
+| `--dns-server` | public | Custom DNS server URL for peer discovery |
+| `--auth-tokens` | required | Authentication tokens (repeatable) |
+| `--auth-tokens-file` | - | Path to file with tokens (one per line) |
+
+### vpn client
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--server-node-id`, `-n` | required | EndpointId of the VPN server |
+| `--mtu` | 1420 | MTU for VPN packets |
+| `--keepalive-secs` | 25 | WireGuard keepalive interval |
+| `--relay-url` | public | Custom relay server URL(s), repeatable |
+| `--dns-server` | public | Custom DNS server URL for peer discovery |
+| `--auth-token` | required | Authentication token |
+| `--auth-token-file` | - | Path to file containing token |
+| `--route` | - | Additional CIDRs to route through VPN (repeatable) |
+
+## Split Tunneling
+
+By default, only traffic to the VPN network (e.g., 10.0.0.0/24) is routed through the tunnel. Use `--route` to add additional networks:
+
+```bash
+sudo tunnel-rs vpn client \
+  --server-node-id <ID> \
+  --auth-token "$AUTH_TOKEN" \
+  --route 192.168.1.0/24 \
+  --route 172.16.0.0/12
+```
+
+## How It Works
+
+1. **Signaling via iroh**: Client connects to server using iroh for peer discovery and NAT traversal
+2. **WireGuard Key Exchange**: Ephemeral WireGuard keys are generated and exchanged (no manual keypair management)
+3. **IP Assignment**: Server assigns client an IP from the VPN network pool
+4. **TUN Device**: Both sides create TUN devices for packet capture
+5. **Packet Flow**: IP packets are encrypted with WireGuard and tunneled through the iroh connection
+
+**Advantages over traditional WireGuard:**
+| Feature | WireGuard | tunnel-rs VPN |
+|---------|-----------|---------------|
+| Identity | Static keypair per device | Ephemeral keys (auto-generated) |
+| Config conflict | Same keypair = conflict | Each session unique |
+| NAT traversal | Manual endpoint config | Automatic via iroh |
+| IP assignment | Static in config | Dynamic from server |
+
+## Single Instance Lock
+
+Only one VPN client can run at a time per machine. This prevents routing conflicts and TUN device issues. The lock is automatically released when the client exits.
 
 ---
 
