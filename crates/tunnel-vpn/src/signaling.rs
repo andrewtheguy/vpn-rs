@@ -7,7 +7,7 @@ use crate::error::{VpnError, VpnResult};
 use crate::keys::WgPublicKey;
 use ipnet::Ipv4Net;
 use serde::{Deserialize, Serialize};
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::Ipv4Addr;
 
 /// VPN protocol version.
 pub const VPN_PROTOCOL_VERSION: u16 = 1;
@@ -24,8 +24,6 @@ pub struct VpnHandshake {
     pub version: u16,
     /// Client's WireGuard public key.
     pub wg_public_key: WgPublicKey,
-    /// Client's preferred UDP port for WireGuard (0 = any).
-    pub wg_port: u16,
     /// Authentication token (optional, for token-based auth).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_token: Option<String>,
@@ -37,15 +35,8 @@ impl VpnHandshake {
         Self {
             version: VPN_PROTOCOL_VERSION,
             wg_public_key,
-            wg_port: 0,
             auth_token: None,
         }
-    }
-
-    /// Set the WireGuard port preference.
-    pub fn with_port(mut self, port: u16) -> Self {
-        self.wg_port = port;
-        self
     }
 
     /// Set the authentication token.
@@ -77,9 +68,6 @@ pub struct VpnHandshakeResponse {
     /// Server's WireGuard public key (if accepted).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wg_public_key: Option<WgPublicKey>,
-    /// Server's WireGuard endpoint (UDP address for WG traffic).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub wg_endpoint: Option<SocketAddr>,
     /// Assigned VPN IP address for the client.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assigned_ip: Option<Ipv4Addr>,
@@ -98,7 +86,6 @@ impl VpnHandshakeResponse {
     /// Create an accepted response.
     pub fn accepted(
         wg_public_key: WgPublicKey,
-        wg_endpoint: SocketAddr,
         assigned_ip: Ipv4Addr,
         network: Ipv4Net,
         server_ip: Ipv4Addr,
@@ -107,7 +94,6 @@ impl VpnHandshakeResponse {
             version: VPN_PROTOCOL_VERSION,
             accepted: true,
             wg_public_key: Some(wg_public_key),
-            wg_endpoint: Some(wg_endpoint),
             assigned_ip: Some(assigned_ip),
             network: Some(network),
             server_ip: Some(server_ip),
@@ -121,7 +107,6 @@ impl VpnHandshakeResponse {
             version: VPN_PROTOCOL_VERSION,
             accepted: false,
             wg_public_key: None,
-            wg_endpoint: None,
             assigned_ip: None,
             network: None,
             server_ip: None,
@@ -185,16 +170,13 @@ mod tests {
     #[test]
     fn test_handshake_roundtrip() {
         let key = WgPublicKey([1u8; 32]);
-        let handshake = VpnHandshake::new(key.clone())
-            .with_port(51820)
-            .with_auth_token("test-token");
+        let handshake = VpnHandshake::new(key.clone()).with_auth_token("test-token");
 
         let encoded = handshake.encode().unwrap();
         let decoded = VpnHandshake::decode(&encoded).unwrap();
 
         assert_eq!(decoded.version, VPN_PROTOCOL_VERSION);
         assert_eq!(decoded.wg_public_key, key);
-        assert_eq!(decoded.wg_port, 51820);
         assert_eq!(decoded.auth_token, Some("test-token".to_string()));
     }
 
@@ -203,7 +185,6 @@ mod tests {
         let key = WgPublicKey([2u8; 32]);
         let response = VpnHandshakeResponse::accepted(
             key.clone(),
-            "192.168.1.1:51820".parse().unwrap(),
             "10.0.0.2".parse().unwrap(),
             "10.0.0.0/24".parse().unwrap(),
             "10.0.0.1".parse().unwrap(),

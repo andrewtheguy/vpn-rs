@@ -1,0 +1,76 @@
+# tunnel-rs-vpn server configuration example
+#
+# Usage: tunnel-rs-vpn server -c vpn_server.toml
+#        tunnel-rs-vpn server --default-config
+#
+# CLI arguments take precedence over config file values.
+
+# Required: validates config matches CLI command
+role = "vpnserver"
+mode = "iroh"
+
+[iroh]
+# ============================================================================
+# VPN Network Configuration
+# ============================================================================
+
+# VPN network CIDR (REQUIRED)
+# Clients will be assigned IPs from this network
+network = "10.0.0.0/24"
+
+# Server's VPN IP address (optional, defaults to first IP in network)
+# This becomes the gateway for connected clients
+# server_ip = "10.0.0.1"
+
+# ============================================================================
+# Performance Tuning
+# ============================================================================
+
+# MTU for VPN packets (576-1500, default: 1420)
+# Lower values may help with fragmentation issues
+mtu = 1420
+
+# WireGuard keepalive interval in seconds (10-300, default: 25)
+# keepalive_secs = 25
+
+# ============================================================================
+# Server Identity (Optional)
+# ============================================================================
+
+# Path to secret key file for persistent iroh identity
+# Generates same EndpointId across restarts
+# Create with: tunnel-rs-vpn generate-server-key -o ./vpn-server.key
+# secret_file = "./vpn-server.key"
+
+# ============================================================================
+# Authentication (REQUIRED)
+# ============================================================================
+# At least one authentication method is required.
+# Clients must provide one of these tokens to connect.
+#
+# Token format: exactly 18 characters (i + 16 body chars + Luhn mod N checksum)
+# Generate with: tunnel-rs-vpn generate-token
+
+# Inline tokens (for testing; prefer auth_tokens_file in production)
+# NOTE: Use either auth_tokens OR auth_tokens_file, not both.
+auth_tokens = ["iXXXXXXXXXXXXXXXXX"]  # Replace with real token from generate-token
+
+# Or use a file containing tokens (one per line, # comments allowed)
+# NOTE: Use either auth_tokens OR auth_tokens_file, not both.
+# auth_tokens_file = "./vpn-tokens.txt"
+
+# ============================================================================
+# Relay and Discovery (Optional)
+# ============================================================================
+
+# Custom relay server URL(s) for failover
+# Must match client's relay configuration for discovery
+# relay_urls = [
+#     "https://relay1.example.com",
+#     "https://relay2.example.com",
+# ]
+
+# Custom DNS server URL for peer discovery
+# Must match client's dns_server configuration
+# NOTE: URL must include the /pkarr path
+# dns_server = "https://dns.example.com/pkarr"

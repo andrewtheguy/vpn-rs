@@ -386,7 +386,6 @@ impl VpnServer {
         // Send response (no wg_endpoint needed since we tunnel over iroh)
         let response = VpnHandshakeResponse::accepted(
             self.public_key(),
-            dummy_endpoint, // Not used, but required by protocol
             assigned_ip,
             network,
             server_ip,
@@ -659,61 +658,6 @@ fn extract_dest_ip(packet: &[u8]) -> Option<Ipv4Addr> {
     // Destination IP is at bytes 16-19
     let dest_ip = Ipv4Addr::new(packet[16], packet[17], packet[18], packet[19]);
     Some(dest_ip)
-}
-
-/// Builder for VpnServer.
-pub struct VpnServerBuilder {
-    config: VpnServerConfig,
-}
-
-impl VpnServerBuilder {
-    /// Create a new builder with default config.
-    pub fn new() -> Self {
-        Self {
-            config: VpnServerConfig::default(),
-        }
-    }
-
-    /// Set the VPN network.
-    pub fn network(mut self, network: Ipv4Net) -> Self {
-        self.config.network = network;
-        self
-    }
-
-    /// Set the WireGuard port (not used in tunneled mode, but kept for API compatibility).
-    pub fn wg_port(mut self, port: u16) -> Self {
-        self.config.wg_port = port;
-        self
-    }
-
-    /// Set the MTU.
-    pub fn mtu(mut self, mtu: u16) -> Self {
-        self.config.mtu = mtu;
-        self
-    }
-
-    /// Set the max clients.
-    pub fn max_clients(mut self, max: usize) -> Self {
-        self.config.max_clients = max;
-        self
-    }
-
-    /// Set the keepalive interval.
-    pub fn keepalive_secs(mut self, secs: u16) -> Self {
-        self.config.keepalive_secs = secs;
-        self
-    }
-
-    /// Build the server.
-    pub async fn build(self) -> VpnResult<VpnServer> {
-        VpnServer::new(self.config).await
-    }
-}
-
-impl Default for VpnServerBuilder {
-    fn default() -> Self {
-        Self::new()
-    }
 }
 
 #[cfg(test)]
