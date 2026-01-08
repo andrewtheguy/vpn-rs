@@ -1386,6 +1386,12 @@ impl VpnClientConfigBuilder {
             );
         }
 
+        // Validate route CIDR format
+        for route in &routes {
+            validate_cidr(route)
+                .with_context(|| format!("Invalid route CIDR '{}' (e.g., 0.0.0.0/0)", route))?;
+        }
+
         // Validate auth_token mutual exclusion
         if self.auth_token.is_some() && self.auth_token_file.is_some() {
             anyhow::bail!(
