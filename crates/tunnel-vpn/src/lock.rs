@@ -13,7 +13,7 @@ compile_error!("VPN lock is only supported on Linux and macOS");
 use crate::error::{VpnError, VpnResult};
 use fs2::FileExt;
 use std::fs::{File, OpenOptions};
-use std::io::Write;
+use std::io::{Seek, SeekFrom, Write};
 use std::path::PathBuf;
 
 /// Lock file name for VPN client.
@@ -42,11 +42,11 @@ impl VpnLock {
             })?;
         }
 
-        // Open or create the lock file
-        let file = OpenOptions::new()
+        // Open or create the lock file (do not truncate before acquiring lock)
+        let mut file = OpenOptions::new()
             .write(true)
             .create(true)
-            .truncate(true)
+            .truncate(false)
             .open(&path)
             .map_err(|e| VpnError::Config(format!("Failed to open lock file: {}", e)))?;
 
@@ -57,9 +57,13 @@ impl VpnLock {
             )
         })?;
 
-        // Write PID to lock file for debugging
-        let mut file = file;
-        let _ = writeln!(file, "{}", std::process::id());
+        // Now that we hold the lock, truncate and write our PID
+        file.set_len(0)
+            .map_err(|e| VpnError::Config(format!("Failed to truncate lock file: {}", e)))?;
+        file.seek(SeekFrom::Start(0))
+            .map_err(|e| VpnError::Config(format!("Failed to seek lock file: {}", e)))?;
+        writeln!(file, "{}", std::process::id())
+            .map_err(|e| VpnError::Config(format!("Failed to write PID to lock file: {}", e)))?;
 
         log::debug!("Acquired VPN lock: {}", path.display());
 

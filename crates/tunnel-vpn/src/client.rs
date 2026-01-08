@@ -240,13 +240,17 @@ impl VpnClient {
                     Ok(n) if n > 0 => {
                         let packet = &read_buf[..n];
                         let mut tunnel = tunnel_outbound.lock().await;
-                        match tunnel.encapsulate(packet) {
+                        let result = tunnel.encapsulate(packet);
+                        drop(tunnel); // Release tunnel lock before acquiring send lock
+
+                        match result {
                             Ok(PacketResult::WriteToNetwork(data)) => {
-                                let mut send = send_outbound.lock().await;
-                                // Write length-prefixed packet atomically (reuse buffer)
+                                // Copy data into write_buf before acquiring send lock
                                 write_buf.clear();
                                 write_buf.extend_from_slice(&(data.len() as u32).to_be_bytes());
                                 write_buf.extend_from_slice(&data);
+
+                                let mut send = send_outbound.lock().await;
                                 if let Err(e) = send.write_all(&write_buf).await {
                                     log::warn!("Failed to write WG packet: {}", e);
                                     break;
