@@ -12,10 +12,14 @@ use ipnet::Ipv4Net;
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
 
-use tunnel_common::config::expand_tilde;
+use tunnel_common::config::{
+    expand_tilde, load_vpn_client_config, load_vpn_server_config,
+    VpnClientConfig as TomlClientConfig, VpnServerConfig as TomlServerConfig,
+};
 use tunnel_iroh::auth;
 use tunnel_iroh::iroh_mode::endpoint::{create_client_endpoint, create_server_endpoint, load_secret};
 use tunnel_iroh::secret;
+// Runtime config types from tunnel-vpn (different from TOML config types)
 use tunnel_vpn::config::{VpnClientConfig, VpnServerConfig};
 use tunnel_vpn::signaling::VPN_ALPN;
 use tunnel_vpn::{VpnClient, VpnServer};
@@ -33,17 +37,25 @@ struct Args {
 enum Command {
     /// Run as VPN server (accepts connections and assigns IPs)
     Server {
+        /// Config file path
+        #[arg(short = 'c', long)]
+        config: Option<PathBuf>,
+
+        /// Use default config path (~/.config/tunnel-rs/vpn_server.toml)
+        #[arg(long)]
+        default_config: bool,
+
         /// VPN network CIDR (e.g., 10.0.0.0/24)
-        #[arg(short, long, default_value = "10.0.0.0/24")]
-        network: String,
+        #[arg(short, long)]
+        network: Option<String>,
 
         /// Server's VPN IP address (gateway). Defaults to first IP in network.
         #[arg(long)]
         server_ip: Option<String>,
 
         /// MTU for VPN packets (default: 1420, valid range: 576-1500)
-        #[arg(long, default_value = "1420", value_parser = clap::value_parser!(u16).range(576..=1500))]
-        mtu: u16,
+        #[arg(long, value_parser = clap::value_parser!(u16).range(576..=1500))]
+        mtu: Option<u16>,
 
         /// Path to secret key file for persistent iroh identity (same EndpointId across restarts)
         #[arg(long)]
@@ -67,17 +79,25 @@ enum Command {
     },
     /// Run as VPN client (connects to server and establishes tunnel)
     Client {
+        /// Config file path
+        #[arg(short = 'c', long)]
+        config: Option<PathBuf>,
+
+        /// Use default config path (~/.config/tunnel-rs/vpn_client.toml)
+        #[arg(long)]
+        default_config: bool,
+
         /// EndpointId of the VPN server to connect to
         #[arg(short = 'n', long)]
-        server_node_id: String,
+        server_node_id: Option<String>,
 
         /// MTU for VPN packets (default: 1420, valid range: 576-1500)
-        #[arg(long, default_value = "1420", value_parser = clap::value_parser!(u16).range(576..=1500))]
-        mtu: u16,
+        #[arg(long, value_parser = clap::value_parser!(u16).range(576..=1500))]
+        mtu: Option<u16>,
 
         /// WireGuard keepalive interval in seconds (default: 25, valid range: 10-300)
-        #[arg(long, default_value = "25", value_parser = clap::value_parser!(u16).range(10..=300))]
-        keepalive_secs: u16,
+        #[arg(long, value_parser = clap::value_parser!(u16).range(10..=300))]
+        keepalive_secs: Option<u16>,
 
         /// Custom relay server URL(s) for failover
         #[arg(long = "relay-url")]
@@ -133,14 +153,48 @@ enum Command {
     },
 }
 
+/// Resolve VPN server config from CLI and/or config file.
+fn resolve_server_config(
+    config: Option<PathBuf>,
+    default_config: bool,
+) -> Result<(Option<TomlServerConfig>, bool)> {
+    if let Some(path) = config {
+        let cfg = load_vpn_server_config(Some(path.as_path()))?;
+        Ok((Some(cfg), true))
+    } else if default_config {
+        let cfg = load_vpn_server_config(None)?;
+        Ok((Some(cfg), true))
+    } else {
+        Ok((None, false))
+    }
+}
+
+/// Resolve VPN client config from CLI and/or config file.
+fn resolve_client_config(
+    config: Option<PathBuf>,
+    default_config: bool,
+) -> Result<(Option<TomlClientConfig>, bool)> {
+    if let Some(path) = config {
+        let cfg = load_vpn_client_config(Some(path.as_path()))?;
+        Ok((Some(cfg), true))
+    } else if default_config {
+        let cfg = load_vpn_client_config(None)?;
+        Ok((Some(cfg), true))
+    } else {
+        Ok((None, false))
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
     let args = Args::parse();
 
-    match &args.command {
+    match args.command {
         Command::Server {
+            config,
+            default_config,
             network,
             server_ip,
             mtu,
@@ -150,19 +204,58 @@ async fn main() -> Result<()> {
             auth_tokens,
             auth_tokens_file,
         } => {
+            // Load config file if specified
+            let (cfg, from_file) = resolve_server_config(config, default_config)?;
+            if from_file {
+                if let Some(ref c) = cfg {
+                    c.validate()?;
+                }
+            }
+
+            // Get config iroh section
+            let iroh_cfg = cfg.as_ref().and_then(|c| c.iroh());
+
+            // Merge CLI with config (CLI takes precedence)
+            let network = network
+                .or_else(|| iroh_cfg.and_then(|c| c.network.clone()))
+                .unwrap_or_else(|| "10.0.0.0/24".to_string());
+            let server_ip = server_ip.or_else(|| iroh_cfg.and_then(|c| c.server_ip.clone()));
+            let mtu = mtu
+                .or_else(|| iroh_cfg.and_then(|c| c.mtu))
+                .unwrap_or(1420);
+            let secret_file = secret_file
+                .map(|p| expand_tilde(&p))
+                .or_else(|| iroh_cfg.and_then(|c| c.secret_file.as_ref().map(|p| expand_tilde(p))));
+            let relay_urls = if relay_urls.is_empty() {
+                iroh_cfg.map(|c| c.relay_urls.clone()).unwrap_or_default()
+            } else {
+                relay_urls
+            };
+            let dns_server = dns_server.or_else(|| iroh_cfg.and_then(|c| c.dns_server.clone()));
+            let auth_tokens = if auth_tokens.is_empty() {
+                iroh_cfg.map(|c| c.auth_tokens.clone()).unwrap_or_default()
+            } else {
+                auth_tokens
+            };
+            let auth_tokens_file = auth_tokens_file
+                .map(|p| expand_tilde(&p))
+                .or_else(|| iroh_cfg.and_then(|c| c.auth_tokens_file.as_ref().map(|p| expand_tilde(p))));
+
             run_vpn_server(
-                network,
+                &network,
                 server_ip.as_deref(),
-                *mtu,
-                secret_file.as_ref().map(|p| expand_tilde(p)),
-                relay_urls,
+                mtu,
+                secret_file,
+                &relay_urls,
                 dns_server.as_deref(),
-                auth_tokens,
-                auth_tokens_file.as_ref().map(|p| expand_tilde(p)).as_deref(),
+                &auth_tokens,
+                auth_tokens_file.as_deref(),
             )
             .await
         }
         Command::Client {
+            config,
+            default_config,
             server_node_id,
             mtu,
             keepalive_secs,
@@ -172,24 +265,65 @@ async fn main() -> Result<()> {
             auth_token_file,
             routes,
         } => {
+            // Load config file if specified
+            let (cfg, from_file) = resolve_client_config(config, default_config)?;
+            if from_file {
+                if let Some(ref c) = cfg {
+                    c.validate()?;
+                }
+            }
+
+            // Get config iroh section
+            let iroh_cfg = cfg.as_ref().and_then(|c| c.iroh());
+
+            // Merge CLI with config (CLI takes precedence)
+            let server_node_id = server_node_id
+                .or_else(|| iroh_cfg.and_then(|c| c.server_node_id.clone()));
+            let mtu = mtu
+                .or_else(|| iroh_cfg.and_then(|c| c.mtu))
+                .unwrap_or(1420);
+            let keepalive_secs = keepalive_secs
+                .or_else(|| iroh_cfg.and_then(|c| c.keepalive_secs))
+                .unwrap_or(25);
+            let relay_urls = if relay_urls.is_empty() {
+                iroh_cfg.map(|c| c.relay_urls.clone()).unwrap_or_default()
+            } else {
+                relay_urls
+            };
+            let dns_server = dns_server.or_else(|| iroh_cfg.and_then(|c| c.dns_server.clone()));
+            let auth_token = auth_token.or_else(|| iroh_cfg.and_then(|c| c.auth_token.clone()));
+            let auth_token_file = auth_token_file
+                .map(|p| expand_tilde(&p))
+                .or_else(|| iroh_cfg.and_then(|c| c.auth_token_file.as_ref().map(|p| expand_tilde(p))));
+            let routes = if routes.is_empty() {
+                iroh_cfg.map(|c| c.routes.clone()).unwrap_or_default()
+            } else {
+                routes
+            };
+
+            // server_node_id is required
+            let server_node_id = server_node_id.context(
+                "VPN client requires --server-node-id or 'server_node_id' in config file",
+            )?;
+
             run_vpn_client(
-                server_node_id,
-                *mtu,
-                *keepalive_secs,
-                relay_urls,
+                &server_node_id,
+                mtu,
+                keepalive_secs,
+                &relay_urls,
                 dns_server.as_deref(),
                 auth_token.as_deref(),
-                auth_token_file.as_ref().map(|p| expand_tilde(p)).as_deref(),
-                routes,
+                auth_token_file.as_deref(),
+                &routes,
             )
             .await
         }
         Command::GenerateServerKey { output, force } => {
-            secret::generate_secret(expand_tilde(output), *force)
+            secret::generate_secret(expand_tilde(&output), force)
         }
-        Command::ShowServerId { secret_file } => secret::show_id(expand_tilde(secret_file)),
+        Command::ShowServerId { secret_file } => secret::show_id(expand_tilde(&secret_file)),
         Command::GenerateToken { count } => {
-            for _ in 0..*count {
+            for _ in 0..count {
                 println!("{}", auth::generate_token());
             }
             Ok(())

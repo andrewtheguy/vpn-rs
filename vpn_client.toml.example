@@ -1,0 +1,72 @@
+# tunnel-rs-vpn client configuration example
+#
+# Usage: tunnel-rs-vpn client -c vpn_client.toml
+#        tunnel-rs-vpn client --default-config
+#
+# CLI arguments take precedence over config file values.
+
+# Required: validates config matches CLI command
+role = "vpnclient"
+mode = "iroh"
+
+[iroh]
+# ============================================================================
+# Server Connection (REQUIRED)
+# ============================================================================
+
+# Server's EndpointId to connect to (required if not specified via CLI)
+# Get this from the server operator (shown when server starts, or via show-server-id)
+server_node_id = "2xnbkpbc7izsilvewd7c62w7wnwziacmpfwvhcrya5nt76dqkpga"
+
+# ============================================================================
+# Authentication (REQUIRED)
+# ============================================================================
+# Token provided by the server admin for authentication
+# Token format: exactly 18 characters (i + 16 body chars + Luhn mod N checksum)
+# Generate with: tunnel-rs-vpn generate-token
+
+# NOTE: Use either auth_token OR auth_token_file, not both.
+auth_token = "iXXXXXXXXXXXXXXXXX"  # Replace with real token from generate-token
+
+# Or use a file containing the token (one token, no comments)
+# NOTE: Use either auth_token OR auth_token_file, not both.
+# auth_token_file = "~/.config/tunnel-rs/vpn-token.txt"
+
+# ============================================================================
+# Performance Tuning
+# ============================================================================
+
+# MTU for VPN packets (576-1500, default: 1420)
+# Lower values may help with fragmentation issues
+mtu = 1420
+
+# WireGuard keepalive interval in seconds (10-300, default: 25)
+# Lower values keep NAT mappings alive but increase overhead
+keepalive_secs = 25
+
+# ============================================================================
+# Routing (Optional)
+# ============================================================================
+
+# Additional CIDRs to route through the VPN
+# If not specified, only VPN network traffic is routed
+# routes = [
+#     "192.168.1.0/24",
+#     "10.0.0.0/8",
+# ]
+
+# ============================================================================
+# Relay and Discovery (Optional)
+# ============================================================================
+
+# Custom relay server URL(s) for failover
+# Must match server's relay configuration for discovery
+# relay_urls = [
+#     "https://relay1.example.com",
+#     "https://relay2.example.com",
+# ]
+
+# Custom DNS server URL for peer discovery
+# Must match server's dns_server configuration
+# NOTE: URL must include the /pkarr path
+# dns_server = "https://dns.example.com/pkarr"

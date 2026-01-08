@@ -130,11 +130,76 @@ pub struct NostrConfig {
     pub target: Option<String>,
 }
 
+/// VPN-specific iroh configuration (TOML section: `[iroh]` for VPN mode).
+///
+/// VPN mode uses iroh for P2P connectivity with WireGuard encryption.
+///
+/// Some fields are role-specific (enforced by validate()):
+/// - Server-only: `network`, `server_ip`, `secret_file`, `auth_tokens`, `auth_tokens_file`
+/// - Client-only: `server_node_id`, `auth_token`, `auth_token_file`, `routes`
+#[derive(Deserialize, Default, Clone)]
+pub struct VpnIrohConfig {
+    // Server-only fields
+    /// VPN network CIDR (e.g., "10.0.0.0/24") - server only
+    pub network: Option<String>,
+    /// Server's VPN IP address within the network (defaults to first IP) - server only
+    pub server_ip: Option<String>,
+    /// Path to secret key file for persistent server identity - server only
+    pub secret_file: Option<PathBuf>,
+    /// Authentication tokens (server only)
+    #[serde(default)]
+    pub auth_tokens: Vec<String>,
+    /// Path to file containing authentication tokens - server only
+    pub auth_tokens_file: Option<PathBuf>,
+
+    // Client-only fields
+    /// NodeId of the VPN server to connect to - client only
+    pub server_node_id: Option<String>,
+    /// Authentication token to send to server - client only
+    pub auth_token: Option<String>,
+    /// Path to file containing authentication token - client only
+    pub auth_token_file: Option<PathBuf>,
+    /// Additional CIDRs to route through VPN (e.g., ["192.168.1.0/24"]) - client only
+    #[serde(default)]
+    pub routes: Vec<String>,
+
+    // Shared fields
+    /// MTU for VPN packets (576-1500, default: 1420)
+    pub mtu: Option<u16>,
+    /// WireGuard keepalive interval in seconds (10-300, default: 25)
+    pub keepalive_secs: Option<u16>,
+    /// Custom relay server URLs
+    #[serde(default)]
+    pub relay_urls: Vec<String>,
+    /// Custom DNS server URL for peer discovery
+    pub dns_server: Option<String>,
+}
+
+/// VPN server configuration.
+#[derive(Deserialize, Default, Clone)]
+pub struct VpnServerConfig {
+    pub role: Option<Role>,
+    pub mode: Option<Mode>,
+    pub iroh: Option<VpnIrohConfig>,
+}
+
+/// VPN client configuration.
+#[derive(Deserialize, Default, Clone)]
+pub struct VpnClientConfig {
+    pub role: Option<Role>,
+    pub mode: Option<Mode>,
+    pub iroh: Option<VpnIrohConfig>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Role {
     Server,
     Client,
+    #[serde(rename = "vpnserver")]
+    VpnServer,
+    #[serde(rename = "vpnclient")]
+    VpnClient,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -283,6 +348,63 @@ fn validate_allowed_sources(allowed: &AllowedSources) -> Result<()> {
         validate_cidr(cidr).context("Invalid UDP allowed_sources")?;
     }
     Ok(())
+}
+
+/// Validate MTU value is within acceptable range (576-1500).
+fn validate_mtu(mtu: u16, section: &str) -> Result<()> {
+    if !(576..=1500).contains(&mtu) {
+        anyhow::bail!(
+            "[{}] MTU {} is out of range. Valid range: 576-1500",
+            section,
+            mtu
+        );
+    }
+    Ok(())
+}
+
+/// Validate keepalive_secs value is within acceptable range (10-300).
+fn validate_keepalive(keepalive: u16, section: &str) -> Result<()> {
+    if !(10..=300).contains(&keepalive) {
+        anyhow::bail!(
+            "[{}] keepalive_secs {} is out of range. Valid range: 10-300",
+            section,
+            keepalive
+        );
+    }
+    Ok(())
+}
+
+/// Validate IPv4 network CIDR and optional server IP within network.
+fn validate_vpn_network(
+    network: &str,
+    server_ip: Option<&str>,
+    section: &str,
+) -> Result<ipnet::Ipv4Net> {
+    let net: ipnet::Ipv4Net = network.parse().with_context(|| {
+        format!(
+            "[{}] Invalid network CIDR '{}'. Expected format: 10.0.0.0/24",
+            section, network
+        )
+    })?;
+
+    if let Some(server_ip_str) = server_ip {
+        let server_ip: std::net::Ipv4Addr = server_ip_str.parse().with_context(|| {
+            format!(
+                "[{}] Invalid server_ip '{}'. Expected IPv4 address",
+                section, server_ip_str
+            )
+        })?;
+        if !net.contains(&server_ip) {
+            anyhow::bail!(
+                "[{}] server_ip '{}' is not within network '{}'",
+                section,
+                server_ip,
+                network
+            );
+        }
+    }
+
+    Ok(net)
 }
 
 /// Validate that a string is a valid SOCKS5 proxy URL.
@@ -637,6 +759,158 @@ impl ClientConfig {
     }
 }
 
+impl VpnServerConfig {
+    /// Get VPN iroh config section.
+    pub fn iroh(&self) -> Option<&VpnIrohConfig> {
+        self.iroh.as_ref()
+    }
+
+    /// Validate VPN server configuration.
+    ///
+    /// Enforces:
+    /// - Role must be "vpnserver"
+    /// - Mode must be "iroh"
+    /// - Rejects client-only fields (server_node_id, auth_token, routes)
+    /// - Validates network CIDR format
+    /// - Validates server_ip is within network if specified
+    /// - Validates MTU and keepalive ranges
+    pub fn validate(&self) -> Result<()> {
+        let role = self.role.context(
+            "Config file missing required 'role' field. Add: role = \"vpnserver\"",
+        )?;
+        if role != Role::VpnServer {
+            anyhow::bail!(
+                "Config file has wrong role for VPN server. Expected role = \"vpnserver\""
+            );
+        }
+
+        let mode = self.mode.context(
+            "Config file missing required 'mode' field. Add: mode = \"iroh\"",
+        )?;
+        if mode != Mode::Iroh {
+            anyhow::bail!(
+                "Config file has mode = \"{}\", but VPN only supports iroh mode",
+                mode.as_str()
+            );
+        }
+
+        if let Some(ref iroh) = self.iroh {
+            // Reject client-only fields
+            if iroh.server_node_id.is_some() {
+                anyhow::bail!("[iroh] 'server_node_id' is a client-only field.");
+            }
+            if iroh.auth_token.is_some() || iroh.auth_token_file.is_some() {
+                anyhow::bail!(
+                    "[iroh] 'auth_token' and 'auth_token_file' are client-only fields."
+                );
+            }
+            if !iroh.routes.is_empty() {
+                anyhow::bail!("[iroh] 'routes' is a client-only field.");
+            }
+
+            // Validate auth_tokens mutual exclusion
+            if !iroh.auth_tokens.is_empty() && iroh.auth_tokens_file.is_some() {
+                anyhow::bail!(
+                    "[iroh] Use only one of 'auth_tokens' or 'auth_tokens_file'."
+                );
+            }
+
+            // Validate network CIDR and server_ip
+            if let Some(ref network) = iroh.network {
+                validate_vpn_network(network, iroh.server_ip.as_deref(), "iroh")?;
+            }
+
+            // Validate MTU and keepalive ranges
+            if let Some(mtu) = iroh.mtu {
+                validate_mtu(mtu, "iroh")?;
+            }
+            if let Some(keepalive) = iroh.keepalive_secs {
+                validate_keepalive(keepalive, "iroh")?;
+            }
+        }
+
+        Ok(())
+    }
+}
+
+impl VpnClientConfig {
+    /// Get VPN iroh config section.
+    pub fn iroh(&self) -> Option<&VpnIrohConfig> {
+        self.iroh.as_ref()
+    }
+
+    /// Validate VPN client configuration.
+    ///
+    /// Enforces:
+    /// - Role must be "vpnclient"
+    /// - Mode must be "iroh"
+    /// - Rejects server-only fields (network, server_ip, auth_tokens)
+    /// - Validates routes CIDR format
+    /// - Validates MTU and keepalive ranges
+    pub fn validate(&self) -> Result<()> {
+        let role = self.role.context(
+            "Config file missing required 'role' field. Add: role = \"vpnclient\"",
+        )?;
+        if role != Role::VpnClient {
+            anyhow::bail!(
+                "Config file has wrong role for VPN client. Expected role = \"vpnclient\""
+            );
+        }
+
+        let mode = self.mode.context(
+            "Config file missing required 'mode' field. Add: mode = \"iroh\"",
+        )?;
+        if mode != Mode::Iroh {
+            anyhow::bail!(
+                "Config file has mode = \"{}\", but VPN only supports iroh mode",
+                mode.as_str()
+            );
+        }
+
+        if let Some(ref iroh) = self.iroh {
+            // Reject server-only fields
+            if iroh.network.is_some() {
+                anyhow::bail!("[iroh] 'network' is a server-only field.");
+            }
+            if iroh.server_ip.is_some() {
+                anyhow::bail!("[iroh] 'server_ip' is a server-only field.");
+            }
+            if iroh.secret_file.is_some() {
+                anyhow::bail!("[iroh] 'secret_file' is a server-only field.");
+            }
+            if !iroh.auth_tokens.is_empty() || iroh.auth_tokens_file.is_some() {
+                anyhow::bail!(
+                    "[iroh] 'auth_tokens' and 'auth_tokens_file' are server-only fields."
+                );
+            }
+
+            // Validate auth_token mutual exclusion
+            if iroh.auth_token.is_some() && iroh.auth_token_file.is_some() {
+                anyhow::bail!(
+                    "[iroh] Use only one of 'auth_token' or 'auth_token_file'."
+                );
+            }
+
+            // Validate routes CIDR format
+            for route in &iroh.routes {
+                validate_cidr(route).with_context(|| {
+                    format!("[iroh] Invalid route CIDR '{}'", route)
+                })?;
+            }
+
+            // Validate MTU and keepalive ranges
+            if let Some(mtu) = iroh.mtu {
+                validate_mtu(mtu, "iroh")?;
+            }
+            if let Some(keepalive) = iroh.keepalive_secs {
+                validate_keepalive(keepalive, "iroh")?;
+            }
+        }
+
+        Ok(())
+    }
+}
+
 // ============================================================================
 // Path Expansion
 // ============================================================================
@@ -704,6 +978,44 @@ pub fn load_client_config(path: Option<&Path>) -> Result<ClientConfig> {
     let config_path = match path {
         Some(p) => expand_tilde(p),
         None => default_client_config_path().ok_or_else(|| {
+            anyhow::anyhow!("Could not find default config path. Use -c to specify a config file.")
+        })?,
+    };
+    load_config(&config_path)
+}
+
+/// Resolve the default VPN server config path (~/.config/tunnel-rs/vpn_server.toml).
+fn default_vpn_server_config_path() -> Option<PathBuf> {
+    dirs::home_dir().map(|home| home.join(".config").join("tunnel-rs").join("vpn_server.toml"))
+}
+
+/// Resolve the default VPN client config path (~/.config/tunnel-rs/vpn_client.toml).
+fn default_vpn_client_config_path() -> Option<PathBuf> {
+    dirs::home_dir().map(|home| home.join(".config").join("tunnel-rs").join("vpn_client.toml"))
+}
+
+/// Load VPN server configuration from an explicit path, or from default location.
+///
+/// - `path`: Some(path) loads from the specified path (tilde-expanded)
+/// - `path`: None loads from the default path (~/.config/tunnel-rs/vpn_server.toml)
+pub fn load_vpn_server_config(path: Option<&Path>) -> Result<VpnServerConfig> {
+    let config_path = match path {
+        Some(p) => expand_tilde(p),
+        None => default_vpn_server_config_path().ok_or_else(|| {
+            anyhow::anyhow!("Could not find default config path. Use -c to specify a config file.")
+        })?,
+    };
+    load_config(&config_path)
+}
+
+/// Load VPN client configuration from an explicit path, or from default location.
+///
+/// - `path`: Some(path) loads from the specified path (tilde-expanded)
+/// - `path`: None loads from the default path (~/.config/tunnel-rs/vpn_client.toml)
+pub fn load_vpn_client_config(path: Option<&Path>) -> Result<VpnClientConfig> {
+    let config_path = match path {
+        Some(p) => expand_tilde(p),
+        None => default_vpn_client_config_path().ok_or_else(|| {
             anyhow::anyhow!("Could not find default config path. Use -c to specify a config file.")
         })?,
     };
