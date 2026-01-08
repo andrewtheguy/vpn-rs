@@ -447,8 +447,10 @@ Iroh mode requires authentication using pre-shared tokens. Clients must provide 
 **Token Format:**
 - Exactly 18 characters
 - Starts with `i` (for iroh)
-- Ends with a checksum character
+- Ends with a [Luhn mod N](https://en.wikipedia.org/wiki/Luhn_mod_N_algorithm) checksum character
 - Middle 16 characters: `A-Za-z0-9` and `-` `_` `.` (period is valid but rare in generated tokens)
+
+The checksum detects all single-character typos and adjacent transpositions (same algorithm family as credit cards).
 
 Generate tokens with: `tunnel-rs generate-token`
 
@@ -1144,7 +1146,7 @@ tunnel-rs generate-token
 tunnel-rs generate-token -c 5
 ```
 
-Token format: `i` + 16 random chars + checksum = 18 characters total.
+Token format: `i` + 16 random chars + Luhn mod N checksum = 18 characters total.
 
 ## generate-server-key
 

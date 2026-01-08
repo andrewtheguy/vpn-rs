@@ -5,8 +5,14 @@
 //! ## Token Format
 //! - Exactly 18 characters
 //! - Starts with lowercase 'i' (for iroh)
-//! - Ends with a checksum character
+//! - Ends with a Luhn mod N checksum character
 //! - Middle 16 characters: A-Za-z0-9 and - _ . (hyphen, underscore, period)
+//!
+//! ## Checksum Algorithm
+//! Uses [Luhn mod N](https://en.wikipedia.org/wiki/Luhn_mod_N_algorithm), a generalization
+//! of the credit card checksum algorithm. This detects:
+//! - All single-character substitution errors (typos)
+//! - All adjacent transposition errors (swapping two neighboring characters)
 //!
 //! Generate tokens with: `tunnel-rs generate-token`
 
@@ -30,17 +36,66 @@ fn is_valid_token_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.'
 }
 
-/// Calculate checksum character for a token body.
+/// Map a character to its index in VALID_CHARS (0-64).
+#[inline]
+fn char_to_index(c: char) -> usize {
+    VALID_CHARS.iter().position(|&x| x == c as u8).unwrap_or(0)
+}
+
+/// Compute Luhn mod N sum for a string.
+/// Used both for generating and validating checksums.
+fn luhn_sum(s: &str) -> usize {
+    let n = VALID_CHARS.len(); // 65
+    let mut factor = 1;
+    let mut sum = 0;
+
+    // Process characters from right to left
+    for c in s.chars().rev() {
+        let code = char_to_index(c);
+        let mut addend = code * factor;
+
+        // Alternate factor between 1 and 2
+        factor = if factor == 1 { 2 } else { 1 };
+
+        // Sum the "digits" of the product (in base N)
+        addend = (addend / n) + (addend % n);
+        sum += addend;
+    }
+
+    sum % n
+}
+
+/// Calculate checksum character using Luhn mod N algorithm.
 ///
-/// Uses a simple weighted sum algorithm to detect transposition and single-char errors.
+/// This is a generalization of the Luhn algorithm (used in credit cards) for
+/// arbitrary alphabets. It detects:
+/// - All single-character substitution errors
+/// - All adjacent transposition errors (swapping two neighboring characters)
+///
+/// Reference: https://en.wikipedia.org/wiki/Luhn_mod_N_algorithm
 fn calculate_checksum(body: &str) -> char {
-    let sum: u32 = body
-        .chars()
-        .enumerate()
-        .map(|(i, c)| (c as u32) * ((i as u32) + 1))
-        .sum();
-    let index = (sum as usize) % VALID_CHARS.len();
-    VALID_CHARS[index] as char
+    let n = VALID_CHARS.len();
+
+    // Find check character that makes luhn_sum(body + check) == 0
+    // The check char will be processed with factor=1 (rightmost position)
+    // We recompute the sum with factor starting at 2 (since check gets factor=1)
+    let mut factor = 2;
+    let mut sum = 0;
+    for c in body.chars().rev() {
+        let code = char_to_index(c);
+        let mut addend = code * factor;
+        factor = if factor == 2 { 1 } else { 2 };
+        addend = (addend / n) + (addend % n);
+        sum += addend;
+    }
+
+    let check_index = (n - (sum % n)) % n;
+    VALID_CHARS[check_index] as char
+}
+
+/// Verify a string (body + checksum) has valid Luhn mod N checksum.
+fn verify_checksum(full: &str) -> bool {
+    luhn_sum(full) == 0
 }
 
 /// Generate a new authentication token.
@@ -91,19 +146,17 @@ pub fn validate_token(token: &str) -> Result<()> {
         );
     }
 
-    // Check body characters (positions 1-16)
-    let body = &token[1..17];
-    if let Some(invalid_char) = body.chars().find(|c| !is_valid_token_char(*c)) {
+    // Check body characters (positions 1-16) and checksum character
+    let body_and_checksum = &token[1..];
+    if let Some(invalid_char) = body_and_checksum.chars().find(|c| !is_valid_token_char(*c)) {
         anyhow::bail!(
             "Token contains invalid character '{}'. Allowed: A-Za-z0-9 and - _ .",
             invalid_char
         );
     }
 
-    // Verify checksum
-    let expected_checksum = calculate_checksum(body);
-    let actual_checksum = token.chars().last().unwrap();
-    if actual_checksum != expected_checksum {
+    // Verify checksum using Luhn mod N (body + checksum should sum to 0)
+    if !verify_checksum(body_and_checksum) {
         anyhow::bail!("Token checksum is invalid");
     }
 
@@ -326,14 +379,53 @@ mod tests {
     }
 
     #[test]
-    fn test_checksum_detects_changes() {
-        let token = generate_token();
-        // Change the checksum character (last character) to ensure validation fails
-        let mut chars: Vec<char> = token.chars().collect();
-        let last_idx = chars.len() - 1;
-        chars[last_idx] = if chars[last_idx] == 'A' { 'B' } else { 'A' };
-        let modified: String = chars.into_iter().collect();
-        assert!(validate_token(&modified).is_err());
+    fn test_checksum_detects_single_char_substitution() {
+        // Luhn mod N guarantees detection of all single-character substitutions
+        for _ in 0..10 {
+            let token = generate_token();
+            let chars: Vec<char> = token.chars().collect();
+
+            // Try changing each character in the body (positions 1-16)
+            for pos in 1..17 {
+                let mut modified_chars = chars.clone();
+                // Change to a different valid character
+                let original = modified_chars[pos];
+                modified_chars[pos] = if original == 'A' { 'B' } else { 'A' };
+                let modified: String = modified_chars.into_iter().collect();
+                assert!(
+                    validate_token(&modified).is_err(),
+                    "Single-char substitution at position {} should be detected",
+                    pos
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_checksum_detects_adjacent_transposition() {
+        // Luhn mod N guarantees detection of all adjacent transpositions
+        for _ in 0..10 {
+            let token = generate_token();
+            let chars: Vec<char> = token.chars().collect();
+
+            // Try swapping each pair of adjacent characters in the body
+            for pos in 1..16 {
+                // Skip if adjacent chars are the same (transposition would be identical)
+                if chars[pos] == chars[pos + 1] {
+                    continue;
+                }
+
+                let mut modified_chars = chars.clone();
+                modified_chars.swap(pos, pos + 1);
+                let modified: String = modified_chars.into_iter().collect();
+                assert!(
+                    validate_token(&modified).is_err(),
+                    "Adjacent transposition at positions {}-{} should be detected",
+                    pos,
+                    pos + 1
+                );
+            }
+        }
     }
 
     #[test]
