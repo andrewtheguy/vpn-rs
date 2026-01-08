@@ -45,15 +45,16 @@ mtu = 1420
 keepalive_secs = 25
 
 # ============================================================================
-# Routing (Optional)
+# Routing (REQUIRED)
 # ============================================================================
 
-# Additional CIDRs to route through the VPN
-# If not specified, only VPN network traffic is routed
-# routes = [
-#     "192.168.1.0/24",
-#     "10.0.0.0/8",
-# ]
+# CIDRs to route through the VPN (at least one required, like WireGuard AllowedIPs)
+# Examples:
+#   - Full tunnel (all traffic): ["0.0.0.0/0"]
+#   - Split tunnel (specific networks): ["192.168.1.0/24", "10.0.0.0/8"]
+routes = [
+    "0.0.0.0/0",  # Full tunnel - route all traffic through VPN
+]
 
 # ============================================================================
 # Relay and Discovery (Optional)

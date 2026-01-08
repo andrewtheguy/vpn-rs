@@ -901,7 +901,13 @@ impl VpnClientConfig {
                 );
             }
 
-            // Validate routes CIDR format
+            // Validate routes: at least one required, valid CIDR format
+            if iroh.routes.is_empty() {
+                anyhow::bail!(
+                    "[iroh] At least one route is required.\n\
+                     Example: routes = [\"0.0.0.0/0\"] for full tunnel"
+                );
+            }
             for route in &iroh.routes {
                 validate_cidr(route).with_context(|| {
                     format!("[iroh] Invalid route CIDR '{}'", route)
@@ -1357,13 +1363,23 @@ impl VpnClientConfigBuilder {
         validate_mtu(mtu, "config")?;
         validate_keepalive(keepalive_secs, "config")?;
 
+        // Require at least one route (like WireGuard AllowedIPs)
+        let routes = self.routes.unwrap_or_default();
+        if routes.is_empty() {
+            anyhow::bail!(
+                "At least one route is required.\n\
+                 Specify via CLI: --route 0.0.0.0/0 (full tunnel) or --route 10.0.0.0/24 (split tunnel)\n\
+                 Or in config: routes = [\"0.0.0.0/0\"]"
+            );
+        }
+
         Ok(ResolvedVpnClientConfig {
             server_node_id,
             mtu,
             keepalive_secs,
             auth_token: self.auth_token,
             auth_token_file: self.auth_token_file,
-            routes: self.routes.unwrap_or_default(),
+            routes,
             relay_urls: self.relay_urls.unwrap_or_default(),
             dns_server: self.dns_server,
         })

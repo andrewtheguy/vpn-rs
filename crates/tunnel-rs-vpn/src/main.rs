@@ -116,9 +116,9 @@ enum Command {
         #[arg(long)]
         auth_token_file: Option<PathBuf>,
 
-        /// Route specific CIDRs through the VPN (repeatable)
-        /// E.g., --route 192.168.1.0/24 --route 10.0.0.0/8
-        /// If not specified, only VPN network traffic is routed.
+        /// Route CIDRs through the VPN (at least one required, repeatable)
+        /// Full tunnel: --route 0.0.0.0/0
+        /// Split tunnel: --route 192.168.1.0/24 --route 10.0.0.0/8
         #[arg(long = "route")]
         routes: Vec<String>,
     },
@@ -387,11 +387,9 @@ async fn run_vpn_client(resolved: ResolvedVpnClientConfig) -> Result<()> {
         .collect::<Result<Vec<_>, _>>()
         .context("Invalid route CIDR (e.g., 192.168.1.0/24)")?;
 
-    if !parsed_routes.is_empty() {
-        log::info!("Will add {} route(s) through VPN", parsed_routes.len());
-        for route in &parsed_routes {
-            log::info!("  Route: {}", route);
-        }
+    log::info!("Routing {} CIDR(s) through VPN:", parsed_routes.len());
+    for route in &parsed_routes {
+        log::info!("  {}", route);
     }
 
     // Create VPN client config (WireGuard key is ephemeral, auto-generated)

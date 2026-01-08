@@ -58,8 +58,7 @@ pub struct VpnClientConfig {
     pub keepalive_secs: u16,
 
     /// Routes to send through the VPN (CIDRs).
-    /// Empty = route all traffic (full tunnel).
-    #[serde(default)]
+    /// At least one route is required (e.g., 0.0.0.0/0 for full tunnel).
     pub routes: Vec<Ipv4Net>,
 }
 
