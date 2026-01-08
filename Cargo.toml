@@ -7,7 +7,8 @@ members = [
     "crates/tunnel-vpn",
     "crates/tunnel-rs",
     "crates/tunnel-rs-ice",
+    "crates/tunnel-rs-vpn",
 ]
 
 [workspace.package]
-version = "0.1.46"
+version = "0.1.47"

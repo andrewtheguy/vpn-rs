@@ -1,6 +1,7 @@
-//! tunnel-rs (iroh-only)
+//! tunnel-rs
 //!
 //! Forwards TCP or UDP traffic through iroh P2P connections.
+//! For VPN mode, use the separate tunnel-rs-vpn binary.
 
 use ::iroh::SecretKey;
 use anyhow::{Context, Result};
@@ -14,9 +15,6 @@ use tunnel_iroh::iroh_mode::endpoint::{
     load_secret, load_secret_from_string, secret_to_endpoint_id,
 };
 use tunnel_iroh::{auth, iroh_mode, secret, socks5_bridge};
-
-#[cfg(unix)]
-mod vpn_commands;
 
 #[derive(Parser)]
 #[command(name = "tunnel-rs")]
@@ -172,86 +170,6 @@ enum Command {
         #[arg(short, long, default_value = "1")]
         count: usize,
     },
-    /// VPN mode - WireGuard-based full VPN functionality (Unix only)
-    #[cfg(unix)]
-    #[command(subcommand)]
-    Vpn(VpnCommand),
-}
-
-/// VPN subcommands for WireGuard-based VPN mode.
-#[cfg(unix)]
-#[derive(Subcommand)]
-pub enum VpnCommand {
-    /// Run as VPN server (accepts connections and assigns IPs)
-    Server {
-        /// VPN network CIDR (e.g., 10.0.0.0/24)
-        #[arg(short, long, default_value = "10.0.0.0/24")]
-        network: String,
-
-        /// Server's VPN IP address (gateway). Defaults to first IP in network.
-        #[arg(long)]
-        server_ip: Option<String>,
-
-        /// MTU for VPN packets (default: 1420)
-        #[arg(long, default_value = "1420")]
-        mtu: u16,
-
-        /// Path to secret key file for persistent iroh identity (same EndpointId across restarts)
-        #[arg(long)]
-        secret_file: Option<PathBuf>,
-
-        /// Custom relay server URL(s) for failover
-        #[arg(long = "relay-url")]
-        relay_urls: Vec<String>,
-
-        /// Custom DNS server URL for peer discovery
-        #[arg(long)]
-        dns_server: Option<String>,
-
-        /// Authentication tokens (repeatable). Clients must provide one of these to connect.
-        #[arg(long = "auth-tokens", value_name = "TOKEN")]
-        auth_tokens: Vec<String>,
-
-        /// Path to file containing authentication tokens (one per line, # comments allowed).
-        #[arg(long, value_name = "FILE")]
-        auth_tokens_file: Option<PathBuf>,
-    },
-    /// Run as VPN client (connects to server and establishes tunnel)
-    Client {
-        /// EndpointId of the VPN server to connect to
-        #[arg(short = 'n', long)]
-        server_node_id: String,
-
-        /// MTU for VPN packets (default: 1420)
-        #[arg(long, default_value = "1420")]
-        mtu: u16,
-
-        /// WireGuard keepalive interval in seconds (default: 25)
-        #[arg(long, default_value = "25")]
-        keepalive_secs: u16,
-
-        /// Custom relay server URL(s) for failover
-        #[arg(long = "relay-url")]
-        relay_urls: Vec<String>,
-
-        /// Custom DNS server URL for peer discovery
-        #[arg(long)]
-        dns_server: Option<String>,
-
-        /// Authentication token to send to server
-        #[arg(long)]
-        auth_token: Option<String>,
-
-        /// Path to file containing authentication token
-        #[arg(long)]
-        auth_token_file: Option<PathBuf>,
-
-        /// Route specific CIDRs through the VPN (repeatable)
-        /// E.g., --route 192.168.1.0/24 --route 10.0.0.0/8
-        /// If not specified, only VPN network traffic is routed.
-        #[arg(long = "route")]
-        routes: Vec<String>,
-    },
 }
 
 fn normalize_optional_endpoint(value: Option<String>) -> Option<String> {
@@ -381,7 +299,8 @@ fn resolve_client_iroh_params(
 
     ClientIrohParams {
         server_node_id: server_node_id.clone().or(cfg.server_node_id.clone()),
-        source: normalize_optional_endpoint(source.clone()).or(cfg.request_source.clone()),
+        source: normalize_optional_endpoint(source.clone())
+            .or_else(|| normalize_optional_endpoint(cfg.request_source.clone())),
         target: target.clone().or(cfg.target.clone()),
         relay_urls: if relay_urls.is_empty() {
             cfg.relay_urls.clone().unwrap_or_default()
@@ -642,7 +561,5 @@ async fn main() -> Result<()> {
             }
             Ok(())
         }
-        #[cfg(unix)]
-        Command::Vpn(vpn_cmd) => vpn_commands::run_vpn_command(vpn_cmd).await,
     }
 }

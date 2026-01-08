@@ -23,8 +23,9 @@ This document provides a comprehensive overview of the tunnel-rs architecture, i
 tunnel-rs is a P2P TCP/UDP port forwarding tool that supports multiple distinct operational modes, each optimized for different use cases and network environments.
 
 Binary layout:
-- `tunnel-rs`: iroh-only
-- `tunnel-rs-ice`: manual and nostr
+- `tunnel-rs`: iroh mode (port forwarding)
+- `tunnel-rs-vpn`: VPN mode (Linux/macOS)
+- `tunnel-rs-ice`: manual and nostr modes
 
 > **Design Goal:** The project's primary goal is to provide a convenient way to connect to different networks for development or homelab purposes without the hassle and security risk of opening a port. It is **not** meant for production setups or designed to be performant at scale.
 
@@ -72,7 +73,8 @@ The project is split into separate binaries to isolate dependencies:
 
 | Binary | Modes | Key Modules |
 |--------|-------|-------------|
-| `tunnel-rs` | `iroh`, `vpn` | `iroh_mode`, `auth`, `socks5_bridge`, `tunnel_vpn` |
+| `tunnel-rs` | `iroh` | `iroh_mode`, `auth`, `socks5_bridge` |
+| `tunnel-rs-vpn` | `vpn` | `tunnel_vpn`, `auth` |
 | `tunnel-rs-ice` | `manual`, `nostr` | `custom`, `nostr`, `transport` |
 
 The `test-utils` feature is still available on the iroh crates/binary to enable `--relay-only` for testing.

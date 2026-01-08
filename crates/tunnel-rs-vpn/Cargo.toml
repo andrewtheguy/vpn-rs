@@ -1,0 +1,16 @@
+[package]
+name = "tunnel-rs-vpn"
+version.workspace = true
+edition = "2021"
+description = "WireGuard-based VPN tunnel via iroh P2P"
+
+[dependencies]
+tunnel-common = { path = "../tunnel-common" }
+tunnel-iroh = { path = "../tunnel-iroh" }
+tunnel-vpn = { path = "../tunnel-vpn" }
+tokio = { version = "1", features = ["full"] }
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
+log = "0.4"
+env_logger = "0.11"
+ipnet = "2"
