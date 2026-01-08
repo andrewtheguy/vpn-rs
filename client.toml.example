@@ -33,12 +33,12 @@ auth_token = "iXXXXXXXXXXXXXXXXX"  # Replace with real token from generate-token
 # NOTE: Use either auth_token OR auth_token_file, not both.
 # auth_token_file = "~/.config/tunnel-rs/token.txt"
 
-# Source address to request from server (REQUIRED for iroh mode)
+# Source address to request from server (required if not specified via CLI --source)
 # Must be in server's allowed_sources list (--allowed-tcp or --allowed-udp)
-request_source = "tcp://127.0.0.1:22"
+# request_source = "tcp://127.0.0.1:22"
 
-# Local address to listen on (REQUIRED for iroh mode)
-target = "127.0.0.1:2222"
+# Local address to listen on (required if not specified via CLI --target)
+# target = "127.0.0.1:2222"
 
 # Custom relay server URL(s) for failover
 # Must match the server's relay configuration

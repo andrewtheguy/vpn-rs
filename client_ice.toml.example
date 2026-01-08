@@ -14,10 +14,10 @@ mode = "manual"  # or "nostr"
 
 [manual]
 # Client-initiated mode: request source from server, listen locally
-# Source address to request from server (REQUIRED)
-request_source = "tcp://127.0.0.1:22"
-# Local address to listen on (REQUIRED)
-target = "127.0.0.1:2222"
+# Source address to request from server (required if not specified via CLI --source)
+# request_source = "tcp://127.0.0.1:22"
+# Local address to listen on (required if not specified via CLI --target)
+# target = "127.0.0.1:2222"
 # Set to [] to disable STUN entirely
 stun_servers = [
     "stun.l.google.com:19302",
@@ -52,10 +52,10 @@ stun_servers = [
 #     "stun.services.mozilla.com:3478",
 # ]
 #
-# Source address to request from server (REQUIRED for nostr mode)
+# Source address to request from server (required if not specified via CLI --source)
 # Must be in server's allowed_sources list (--allowed-tcp or --allowed-udp)
 # Can also use 'source' as an alias
 # request_source = "tcp://127.0.0.1:22"
 #
-# Local address to listen on (REQUIRED for nostr mode)
+# Local address to listen on (required if not specified via CLI --target)
 # target = "127.0.0.1:2222"
