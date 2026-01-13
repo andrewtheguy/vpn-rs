@@ -193,7 +193,7 @@ fn is_route_exists_error(stderr: &str) -> bool {
     lower.contains("file exists") || lower.contains("eexist")
 }
 
-/// Handle the output of a route command (add/delete).
+/// Handle the output of a route add command.
 ///
 /// - On success: logs info message
 /// - On failure with "route exists": logs warning, returns Ok (idempotent)
@@ -209,17 +209,18 @@ fn handle_route_add_output(
     }
 
     let stderr = String::from_utf8_lossy(&output.stderr);
+    let stderr_trimmed = stderr.trim();
     if is_route_exists_error(&stderr) {
         log::warn!(
             "Route {} already exists (treating as success): {}",
             route,
-            stderr.trim()
+            stderr_trimmed
         );
         Ok(())
     } else {
         Err(VpnError::TunDevice(format!(
             "Failed to add route {}: {}",
-            route, stderr
+            route, stderr_trimmed
         )))
     }
 }
