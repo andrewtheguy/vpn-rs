@@ -56,10 +56,19 @@ impl TunConfig {
     }
 
     /// Add IPv6 configuration for dual-stack.
-    pub fn with_ipv6(mut self, address6: Ipv6Addr, prefix_len6: u8) -> Self {
+    ///
+    /// # Errors
+    /// Returns an error if `prefix_len6` is greater than 128.
+    pub fn with_ipv6(mut self, address6: Ipv6Addr, prefix_len6: u8) -> VpnResult<Self> {
+        if prefix_len6 > 128 {
+            return Err(VpnError::Config(format!(
+                "Invalid IPv6 prefix length {}: must be 0-128",
+                prefix_len6
+            )));
+        }
         self.address6 = Some(address6);
         self.prefix_len6 = Some(prefix_len6);
-        self
+        Ok(self)
     }
 }
 
@@ -507,6 +516,17 @@ fn configure_tun_ipv6(tun_name: &str, addr: Ipv6Addr, prefix_len: u8) -> VpnResu
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
+        let stderr_lower = stderr.to_lowercase();
+        // Treat "address already exists" as idempotent success
+        if stderr_lower.contains("file exists") || stderr_lower.contains("eexist") {
+            log::warn!(
+                "IPv6 address {}/{} already exists on {} (treating as success)",
+                addr,
+                prefix_len,
+                tun_name
+            );
+            return Ok(());
+        }
         return Err(VpnError::TunDevice(format!(
             "IPv6 configuration failed: {}",
             stderr.trim()

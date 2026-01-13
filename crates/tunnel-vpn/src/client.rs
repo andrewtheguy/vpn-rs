@@ -266,7 +266,7 @@ impl VpnClient {
         // Add IPv6 configuration if server provided it
         if let Some(assigned_ip6) = server_info.assigned_ip6 {
             // Use /128 prefix for the client's IPv6 address
-            tun_config = tun_config.with_ipv6(assigned_ip6, 128);
+            tun_config = tun_config.with_ipv6(assigned_ip6, 128)?;
         }
 
         TunDevice::create(tun_config)
