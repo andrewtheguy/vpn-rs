@@ -275,15 +275,15 @@ async fn main() -> Result<()> {
 
             // Convert mutually exclusive flags to Option<bool>
             // --auto-reconnect => Some(true), --no-auto-reconnect => Some(false), neither => None
-            debug_assert!(
+            assert!(
                 !(auto_reconnect && no_auto_reconnect),
-                "auto_reconnect and no_auto_reconnect must not both be set"
+                "both --auto-reconnect and --no-auto-reconnect were set (clap conflicts_with should prevent this)"
             );
             let auto_reconnect_opt = match (auto_reconnect, no_auto_reconnect) {
                 (true, false) => Some(true),   // --auto-reconnect: enable reconnect
                 (false, true) => Some(false),  // --no-auto-reconnect: disable reconnect
                 (false, false) => None,        // neither: use config/default
-                (true, true) => unreachable!("clap conflicts_with prevents both flags"),
+                (true, true) => unreachable!(), // guarded by assert above
             };
 
             // Build resolved config: defaults -> config file -> CLI
