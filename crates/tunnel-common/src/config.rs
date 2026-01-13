@@ -156,6 +156,10 @@ pub struct VpnServerIrohConfig {
     pub network: Option<String>,
     /// Server's VPN IP address within the network (defaults to first IP)
     pub server_ip: Option<String>,
+    /// IPv6 VPN network CIDR (e.g., "fd00::/64"). Optional for dual-stack.
+    pub network6: Option<String>,
+    /// Server's IPv6 VPN address within the network (defaults to first IP)
+    pub server_ip6: Option<String>,
     /// Path to secret key file for persistent server identity
     pub secret_file: Option<PathBuf>,
     /// Authentication tokens.
@@ -179,11 +183,16 @@ pub struct VpnClientIrohConfig {
     pub auth_token: Option<String>,
     /// Path to file containing authentication token
     pub auth_token_file: Option<PathBuf>,
-    /// CIDRs to route through VPN (e.g., ["192.168.1.0/24", "0.0.0.0/0"]).
+    /// IPv4 CIDRs to route through VPN (e.g., ["192.168.1.0/24", "0.0.0.0/0"]).
     /// - `None`: not specified (use defaults or CLI)
     /// - `Some([])`: explicitly cleared (validation will fail - routes required)
     /// - `Some([...])`: route CIDRs
     pub routes: Option<Vec<String>>,
+    /// IPv6 CIDRs to route through VPN (e.g., ["::/0", "fd00::/64"]).
+    /// - `None`: not specified (use defaults or CLI)
+    /// - `Some([])`: explicitly cleared (no IPv6 routes)
+    /// - `Some([...])`: route CIDRs
+    pub routes6: Option<Vec<String>>,
     /// Enable auto-reconnect on connection loss.
     /// - `None`: not specified (use defaults or CLI)
     /// - `Some(true)`: enable reconnect (default behavior)
@@ -421,6 +430,39 @@ fn validate_vpn_network(
                 section,
                 server_ip,
                 network
+            );
+        }
+    }
+
+    Ok(net)
+}
+
+/// Validate IPv6 network CIDR and optional server IP within network.
+fn validate_vpn_network6(
+    network6: &str,
+    server_ip6: Option<&str>,
+    section: &str,
+) -> Result<ipnet::Ipv6Net> {
+    let net: ipnet::Ipv6Net = network6.parse().with_context(|| {
+        format!(
+            "[{}] Invalid network6 CIDR '{}'. Expected format: fd00::/64",
+            section, network6
+        )
+    })?;
+
+    if let Some(server_ip6_str) = server_ip6 {
+        let server_ip6: std::net::Ipv6Addr = server_ip6_str.parse().with_context(|| {
+            format!(
+                "[{}] Invalid server_ip6 '{}'. Expected IPv6 address",
+                section, server_ip6_str
+            )
+        })?;
+        if !net.contains(&server_ip6) {
+            anyhow::bail!(
+                "[{}] server_ip6 '{}' is not within network6 '{}'",
+                section,
+                server_ip6,
+                network6
             );
         }
     }
@@ -834,6 +876,11 @@ impl VpnServerConfig {
             // Validate network CIDR and server_ip
             validate_vpn_network(network, iroh.server_ip.as_deref(), "iroh")?;
 
+            // Validate IPv6 network CIDR and server_ip6 (optional)
+            if let Some(ref network6) = iroh.network6 {
+                validate_vpn_network6(network6, iroh.server_ip6.as_deref(), "iroh")?;
+            }
+
             // Validate MTU and keepalive ranges
             if let Some(mtu) = iroh.shared.mtu {
                 validate_mtu(mtu, "iroh")?;
@@ -895,7 +942,7 @@ impl VpnClientConfig {
                 );
             }
 
-            // Validate routes: at least one required, valid CIDR format
+            // Validate routes: at least one IPv4 route required, valid CIDR format
             if let Some(ref routes) = iroh.routes {
                 if routes.is_empty() {
                     anyhow::bail!(
@@ -906,6 +953,15 @@ impl VpnClientConfig {
                 for route in routes {
                     validate_cidr(route).with_context(|| {
                         format!("[iroh] Invalid route CIDR '{}'", route)
+                    })?;
+                }
+            }
+
+            // Validate routes6: valid IPv6 CIDR format (optional)
+            if let Some(ref routes6) = iroh.routes6 {
+                for route6 in routes6 {
+                    validate_cidr(route6).with_context(|| {
+                        format!("[iroh] Invalid route6 CIDR '{}'", route6)
                     })?;
                 }
             }
@@ -1076,6 +1132,8 @@ pub const DEFAULT_VPN_KEEPALIVE_SECS: u16 = 25;
 pub struct ResolvedVpnServerConfig {
     pub network: String,
     pub server_ip: Option<String>,
+    pub network6: Option<String>,
+    pub server_ip6: Option<String>,
     pub mtu: u16,
     pub keepalive_secs: u16,
     pub secret_file: Option<PathBuf>,
@@ -1101,15 +1159,17 @@ pub struct ResolvedVpnServerConfig {
 ///         .apply_defaults()
 ///         .apply_config(Some(&toml_config))
 ///         .apply_cli(
-///             None,
-///             Some("10.0.0.1".to_string()),
-///             Some(1400),
-///             None,
-///             None,
-///             vec![],
-///             None,
-///             vec!["token-1".to_string()],
-///             None,
+///             None,                             // network
+///             Some("10.0.0.1".to_string()),     // server_ip
+///             None,                             // network6
+///             None,                             // server_ip6
+///             Some(1400),                       // mtu
+///             None,                             // keepalive_secs
+///             None,                             // secret_file
+///             vec![],                           // relay_urls
+///             None,                             // dns_server
+///             vec!["token-1".to_string()],      // auth_tokens
+///             None,                             // auth_tokens_file
 ///         )
 ///         .build()?;
 ///
@@ -1121,6 +1181,8 @@ pub struct ResolvedVpnServerConfig {
 pub struct VpnServerConfigBuilder {
     network: Option<String>,
     server_ip: Option<String>,
+    network6: Option<String>,
+    server_ip6: Option<String>,
     mtu: Option<u16>,
     keepalive_secs: Option<u16>,
     secret_file: Option<PathBuf>,
@@ -1159,6 +1221,13 @@ impl VpnServerConfigBuilder {
             if cfg.server_ip.is_some() {
                 self.server_ip = cfg.server_ip.clone();
             }
+            // IPv6 fields (optional)
+            if cfg.network6.is_some() {
+                self.network6 = cfg.network6.clone();
+            }
+            if cfg.server_ip6.is_some() {
+                self.server_ip6 = cfg.server_ip6.clone();
+            }
             if cfg.shared.mtu.is_some() {
                 self.mtu = cfg.shared.mtu;
             }
@@ -1193,6 +1262,8 @@ impl VpnServerConfigBuilder {
         mut self,
         network: Option<String>,
         server_ip: Option<String>,
+        network6: Option<String>,
+        server_ip6: Option<String>,
         mtu: Option<u16>,
         keepalive_secs: Option<u16>,
         secret_file: Option<PathBuf>,
@@ -1206,6 +1277,13 @@ impl VpnServerConfigBuilder {
         }
         if server_ip.is_some() {
             self.server_ip = server_ip;
+        }
+        // IPv6 fields (optional)
+        if network6.is_some() {
+            self.network6 = network6;
+        }
+        if server_ip6.is_some() {
+            self.server_ip6 = server_ip6;
         }
         if mtu.is_some() {
             self.mtu = mtu;
@@ -1244,6 +1322,11 @@ impl VpnServerConfigBuilder {
         // Validate network CIDR format
         validate_vpn_network(&network, self.server_ip.as_deref(), "config")?;
 
+        // Validate IPv6 network CIDR format (optional)
+        if let Some(ref network6) = self.network6 {
+            validate_vpn_network6(network6, self.server_ip6.as_deref(), "config")?;
+        }
+
         // Validate MTU and keepalive ranges
         let mtu = self.mtu.unwrap_or(DEFAULT_VPN_MTU);
         let keepalive_secs = self.keepalive_secs.unwrap_or(DEFAULT_VPN_KEEPALIVE_SECS);
@@ -1262,6 +1345,8 @@ impl VpnServerConfigBuilder {
         Ok(ResolvedVpnServerConfig {
             network,
             server_ip: self.server_ip,
+            network6: self.network6,
+            server_ip6: self.server_ip6,
             mtu,
             keepalive_secs,
             secret_file: self.secret_file,
@@ -1282,6 +1367,7 @@ pub struct ResolvedVpnClientConfig {
     pub auth_token: Option<String>,
     pub auth_token_file: Option<PathBuf>,
     pub routes: Vec<String>,
+    pub routes6: Vec<String>,
     pub relay_urls: Vec<String>,
     pub dns_server: Option<String>,
     pub auto_reconnect: bool,
@@ -1297,6 +1383,7 @@ pub struct VpnClientConfigBuilder {
     auth_token: Option<String>,
     auth_token_file: Option<PathBuf>,
     routes: Option<Vec<String>>,
+    routes6: Option<Vec<String>>,
     relay_urls: Option<Vec<String>>,
     dns_server: Option<String>,
     auto_reconnect: Option<bool>,
@@ -1314,6 +1401,7 @@ impl VpnClientConfigBuilder {
         self.mtu = Some(DEFAULT_VPN_MTU);
         self.keepalive_secs = Some(DEFAULT_VPN_KEEPALIVE_SECS);
         self.routes = Some(vec![]);
+        self.routes6 = Some(vec![]);
         self.relay_urls = Some(vec![]);
         // auto_reconnect defaults to None (resolved to true in build())
         // max_reconnect_attempts defaults to None (unlimited)
@@ -1346,6 +1434,10 @@ impl VpnClientConfigBuilder {
             // routes: None = not set, Some([]) = explicitly empty (will fail validation)
             if cfg.routes.is_some() {
                 self.routes = cfg.routes.clone();
+            }
+            // routes6: None = not set, Some([]) = explicitly empty (no IPv6 routes)
+            if cfg.routes6.is_some() {
+                self.routes6 = cfg.routes6.clone();
             }
             // relay_urls: None = not set, Some([]) = explicitly empty
             if cfg.shared.relay_urls.is_some() {
@@ -1380,6 +1472,7 @@ impl VpnClientConfigBuilder {
         auth_token: Option<String>,
         auth_token_file: Option<PathBuf>,
         routes: Vec<String>,
+        routes6: Vec<String>,
         relay_urls: Vec<String>,
         dns_server: Option<String>,
         auto_reconnect: Option<bool>,
@@ -1402,6 +1495,9 @@ impl VpnClientConfigBuilder {
         }
         if !routes.is_empty() {
             self.routes = Some(routes);
+        }
+        if !routes6.is_empty() {
+            self.routes6 = Some(routes6);
         }
         if !relay_urls.is_empty() {
             self.relay_urls = Some(relay_urls);
@@ -1451,6 +1547,13 @@ impl VpnClientConfigBuilder {
                 .with_context(|| format!("Invalid route CIDR '{}' (e.g., 0.0.0.0/0)", route))?;
         }
 
+        // Validate routes6 CIDR format (optional)
+        let routes6 = self.routes6.unwrap_or_default();
+        for route6 in &routes6 {
+            validate_cidr(route6)
+                .with_context(|| format!("Invalid route6 CIDR '{}' (e.g., ::/0)", route6))?;
+        }
+
         // Validate auth_token mutual exclusion
         if self.auth_token.is_some() && self.auth_token_file.is_some() {
             anyhow::bail!(
@@ -1466,6 +1569,7 @@ impl VpnClientConfigBuilder {
             auth_token: self.auth_token,
             auth_token_file: self.auth_token_file,
             routes,
+            routes6,
             relay_urls: self.relay_urls.unwrap_or_default(),
             dns_server: self.dns_server,
             auto_reconnect: self.auto_reconnect.unwrap_or(true),

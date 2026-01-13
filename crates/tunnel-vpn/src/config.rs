@@ -1,9 +1,9 @@
 //! VPN configuration types.
 
-use ipnet::Ipv4Net;
+use ipnet::{Ipv4Net, Ipv6Net};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, Ipv6Addr};
 
 
 /// Default MTU for WireGuard (1500 - 80 bytes overhead).
@@ -19,8 +19,17 @@ pub struct VpnServerConfig {
     /// Server gets .1 by default, clients get subsequent addresses.
     pub network: Ipv4Net,
 
+    /// IPv6 VPN network CIDR (e.g., "fd00::/64"). Optional for dual-stack.
+    /// Server gets ::1 by default, clients get subsequent addresses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network6: Option<Ipv6Net>,
+
     /// Server's VPN IP address (defaults to first host in network, e.g., .1).
     pub server_ip: Option<Ipv4Addr>,
+
+    /// Server's IPv6 VPN address (defaults to first host in network6, e.g., ::1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_ip6: Option<Ipv6Addr>,
 
     /// MTU for the TUN device.
     #[serde(default = "default_wg_mtu")]
@@ -57,9 +66,13 @@ pub struct VpnClientConfig {
     #[serde(default = "default_keepalive")]
     pub keepalive_secs: u16,
 
-    /// Routes to send through the VPN (CIDRs).
+    /// IPv4 routes to send through the VPN (CIDRs).
     /// At least one route is required (e.g., 0.0.0.0/0 for full tunnel).
     pub routes: Vec<Ipv4Net>,
+
+    /// IPv6 routes to send through the VPN (CIDRs). Optional for dual-stack.
+    #[serde(default)]
+    pub routes6: Vec<Ipv6Net>,
 }
 
 impl Default for VpnClientConfig {
@@ -70,6 +83,7 @@ impl Default for VpnClientConfig {
             mtu: DEFAULT_WG_MTU,
             keepalive_secs: DEFAULT_KEEPALIVE_SECS,
             routes: vec![],
+            routes6: vec![],
         }
     }
 }

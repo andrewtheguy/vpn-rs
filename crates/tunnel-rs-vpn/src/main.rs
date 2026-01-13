@@ -8,8 +8,8 @@ compile_error!("tunnel-rs-vpn only supports Linux and macOS");
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use ipnet::Ipv4Net;
-use std::net::Ipv4Addr;
+use ipnet::{Ipv4Net, Ipv6Net};
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::num::NonZeroU32;
 use std::path::PathBuf;
 
@@ -54,6 +54,14 @@ enum Command {
         /// Server's VPN IP address (gateway). Defaults to first IP in network.
         #[arg(long)]
         server_ip: Option<String>,
+
+        /// IPv6 VPN network CIDR (e.g., fd00::/64). Optional for dual-stack.
+        #[arg(long)]
+        network6: Option<String>,
+
+        /// Server's IPv6 VPN address (gateway). Defaults to first IP in network6.
+        #[arg(long)]
+        server_ip6: Option<String>,
 
         /// MTU for VPN packets (default: 1420, valid range: 576-1500)
         #[arg(long, value_parser = clap::value_parser!(u16).range(576..=1500))]
@@ -121,11 +129,17 @@ enum Command {
         #[arg(long)]
         auth_token_file: Option<PathBuf>,
 
-        /// Route CIDRs through the VPN (at least one required, repeatable)
+        /// IPv4 route CIDRs through the VPN (at least one required, repeatable)
         /// Full tunnel: --route 0.0.0.0/0
         /// Split tunnel: --route 192.168.1.0/24 --route 10.0.0.0/8
         #[arg(long = "route")]
         routes: Vec<String>,
+
+        /// IPv6 route CIDRs through the VPN (optional, repeatable)
+        /// Full tunnel: --route6 ::/0
+        /// Split tunnel: --route6 fd00::/64
+        #[arg(long = "route6")]
+        routes6: Vec<String>,
 
         /// Enable auto-reconnect (override config's auto_reconnect = false)
         #[arg(long, conflicts_with = "no_auto_reconnect")]
@@ -215,6 +229,8 @@ async fn main() -> Result<()> {
             default_config,
             network,
             server_ip,
+            network6,
+            server_ip6,
             mtu,
             keepalive_secs,
             secret_file,
@@ -238,6 +254,8 @@ async fn main() -> Result<()> {
                 .apply_cli(
                     network,
                     server_ip,
+                    network6,
+                    server_ip6,
                     mtu,
                     keepalive_secs,
                     secret_file.map(|p| expand_tilde(&p)),
@@ -261,6 +279,7 @@ async fn main() -> Result<()> {
             auth_token,
             auth_token_file,
             routes,
+            routes6,
             auto_reconnect,
             no_auto_reconnect,
             max_reconnect_attempts,
@@ -297,6 +316,7 @@ async fn main() -> Result<()> {
                     auth_token,
                     auth_token_file.map(|p| expand_tilde(&p)),
                     routes,
+                    routes6,
                     relay_urls,
                     dns_server,
                     auto_reconnect_opt,
@@ -335,6 +355,22 @@ async fn run_vpn_server(resolved: ResolvedVpnServerConfig) -> Result<()> {
         .transpose()
         .context("Invalid server IP address")?;
 
+    // Parse IPv6 network CIDR (optional, for dual-stack)
+    let network6: Option<Ipv6Net> = resolved
+        .network6
+        .as_ref()
+        .map(|n| n.parse())
+        .transpose()
+        .context("Invalid IPv6 VPN network CIDR")?;
+
+    // Parse server IPv6 if provided
+    let server_ip6: Option<Ipv6Addr> = resolved
+        .server_ip6
+        .as_ref()
+        .map(|ip_str| ip_str.parse())
+        .transpose()
+        .context("Invalid server IPv6 address")?;
+
     // Load and validate auth tokens (required for VPN server)
     let valid_tokens = auth::load_auth_tokens(
         &resolved.auth_tokens,
@@ -362,7 +398,9 @@ async fn run_vpn_server(resolved: ResolvedVpnServerConfig) -> Result<()> {
     // Create VPN server config (WireGuard keys are ephemeral, generated per-client)
     let config = VpnServerConfig {
         network,
+        network6,
         server_ip,
+        server_ip6,
         mtu: resolved.mtu,
         keepalive_secs: resolved.keepalive_secs,
         max_clients: 254,
@@ -416,7 +454,7 @@ async fn run_vpn_client(resolved: ResolvedVpnClientConfig) -> Result<()> {
         );
     };
 
-    // Parse routes
+    // Parse IPv4 routes
     let parsed_routes: Vec<Ipv4Net> = resolved
         .routes
         .iter()
@@ -424,9 +462,23 @@ async fn run_vpn_client(resolved: ResolvedVpnClientConfig) -> Result<()> {
         .collect::<Result<Vec<_>, _>>()
         .context("Invalid route CIDR (e.g., 192.168.1.0/24)")?;
 
-    log::info!("Routing {} CIDR(s) through VPN:", parsed_routes.len());
+    // Parse IPv6 routes (optional)
+    let parsed_routes6: Vec<Ipv6Net> = resolved
+        .routes6
+        .iter()
+        .map(|r| r.parse::<Ipv6Net>())
+        .collect::<Result<Vec<_>, _>>()
+        .context("Invalid route6 CIDR (e.g., ::/0 or fd00::/64)")?;
+
+    log::info!("Routing {} IPv4 CIDR(s) through VPN:", parsed_routes.len());
     for route in &parsed_routes {
         log::info!("  {}", route);
+    }
+    if !parsed_routes6.is_empty() {
+        log::info!("Routing {} IPv6 CIDR(s) through VPN:", parsed_routes6.len());
+        for route6 in &parsed_routes6 {
+            log::info!("  {}", route6);
+        }
     }
 
     // Create VPN client config (WireGuard key is ephemeral, auto-generated)
@@ -436,6 +488,7 @@ async fn run_vpn_client(resolved: ResolvedVpnClientConfig) -> Result<()> {
         keepalive_secs: resolved.keepalive_secs,
         auth_token: Some(token),
         routes: parsed_routes,
+        routes6: parsed_routes6,
     };
 
     // Create iroh endpoint for signaling (ephemeral identity).

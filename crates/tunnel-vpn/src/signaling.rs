@@ -5,9 +5,9 @@
 
 use crate::error::{VpnError, VpnResult};
 use crate::keys::WgPublicKey;
-use ipnet::Ipv4Net;
+use ipnet::{Ipv4Net, Ipv6Net};
 use serde::{Deserialize, Serialize};
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, Ipv6Addr};
 
 /// VPN protocol version.
 pub const VPN_PROTOCOL_VERSION: u16 = 1;
@@ -68,7 +68,7 @@ pub struct VpnHandshakeResponse {
     /// Server's WireGuard public key (if accepted).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wg_public_key: Option<WgPublicKey>,
-    /// Assigned VPN IP address for the client.
+    /// Assigned VPN IP address for the client (IPv4).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assigned_ip: Option<Ipv4Addr>,
     /// VPN network CIDR (e.g., 10.0.0.0/24).
@@ -77,13 +77,22 @@ pub struct VpnHandshakeResponse {
     /// Server's VPN IP (gateway).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server_ip: Option<Ipv4Addr>,
+    /// Assigned IPv6 VPN address for the client (optional, for dual-stack).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assigned_ip6: Option<Ipv6Addr>,
+    /// IPv6 VPN network CIDR (e.g., fd00::/64).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network6: Option<Ipv6Net>,
+    /// Server's IPv6 VPN address (gateway).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_ip6: Option<Ipv6Addr>,
     /// Rejection reason (if not accepted).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reject_reason: Option<String>,
 }
 
 impl VpnHandshakeResponse {
-    /// Create an accepted response.
+    /// Create an accepted response (IPv4 only).
     pub fn accepted(
         wg_public_key: WgPublicKey,
         assigned_ip: Ipv4Addr,
@@ -97,6 +106,33 @@ impl VpnHandshakeResponse {
             assigned_ip: Some(assigned_ip),
             network: Some(network),
             server_ip: Some(server_ip),
+            assigned_ip6: None,
+            network6: None,
+            server_ip6: None,
+            reject_reason: None,
+        }
+    }
+
+    /// Create an accepted response with dual-stack (IPv4 + IPv6).
+    pub fn accepted_dual_stack(
+        wg_public_key: WgPublicKey,
+        assigned_ip: Ipv4Addr,
+        network: Ipv4Net,
+        server_ip: Ipv4Addr,
+        assigned_ip6: Ipv6Addr,
+        network6: Ipv6Net,
+        server_ip6: Ipv6Addr,
+    ) -> Self {
+        Self {
+            version: VPN_PROTOCOL_VERSION,
+            accepted: true,
+            wg_public_key: Some(wg_public_key),
+            assigned_ip: Some(assigned_ip),
+            network: Some(network),
+            server_ip: Some(server_ip),
+            assigned_ip6: Some(assigned_ip6),
+            network6: Some(network6),
+            server_ip6: Some(server_ip6),
             reject_reason: None,
         }
     }
@@ -110,6 +146,9 @@ impl VpnHandshakeResponse {
             assigned_ip: None,
             network: None,
             server_ip: None,
+            assigned_ip6: None,
+            network6: None,
+            server_ip6: None,
             reject_reason: Some(reason.into()),
         }
     }
