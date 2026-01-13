@@ -446,9 +446,16 @@ impl VpnServer {
 
         log::info!("Client {} disconnected", remote_id);
 
-        // Cleanup
+        // Cleanup - must check ownership before removing to avoid race with reconnecting client
         clients.write().await.remove(&remote_id);
-        ip_to_endpoint.write().await.remove(&assigned_ip);
+        {
+            // Only remove IP mapping if it still belongs to this client
+            // (a reconnecting client may have already claimed this IP)
+            let mut ip_map = ip_to_endpoint.write().await;
+            if ip_map.get(&assigned_ip) == Some(&remote_id) {
+                ip_map.remove(&assigned_ip);
+            }
+        }
         ip_pool.write().await.release(&remote_id);
 
         result
