@@ -315,14 +315,35 @@ impl VpnServer {
         let netmask = pool.network().netmask();
         drop(pool);
 
-        let tun_config = TunConfig::new(server_ip, netmask, server_ip).with_mtu(self.config.mtu);
+        let mut tun_config =
+            TunConfig::new(server_ip, netmask, server_ip).with_mtu(self.config.mtu);
+
+        // Configure IPv6 if dual-stack is enabled
+        let server_ip6 = if let Some(ref ip6_pool) = self.ip6_pool {
+            let pool6 = ip6_pool.read().await;
+            let server_ip6 = pool6.server_ip();
+            let prefix_len6 = pool6.network().prefix_len();
+            tun_config = tun_config.with_ipv6(server_ip6, prefix_len6)?;
+            Some(server_ip6)
+        } else {
+            None
+        };
 
         let device = TunDevice::create(tun_config)?;
-        log::info!(
-            "Created TUN device: {} with IP {}",
-            device.name(),
-            server_ip
-        );
+        if let Some(ip6) = server_ip6 {
+            log::info!(
+                "Created TUN device: {} with IP {} and IPv6 {}",
+                device.name(),
+                server_ip,
+                ip6
+            );
+        } else {
+            log::info!(
+                "Created TUN device: {} with IP {}",
+                device.name(),
+                server_ip
+            );
+        }
         self.tun_device = Some(device);
         Ok(())
     }
