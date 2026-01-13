@@ -183,7 +183,52 @@ impl TunWriter {
     }
 }
 
+/// Check if an error message indicates that a route already exists.
+///
+/// Handles various error formats across platforms and locales:
+/// - Linux iproute2: "RTNETLINK answers: File exists"
+/// - macOS route: "route: writing to routing socket: File exists"
+fn is_route_exists_error(stderr: &str) -> bool {
+    let lower = stderr.to_lowercase();
+    lower.contains("file exists") || lower.contains("eexist")
+}
+
+/// Handle the output of a route add command.
+///
+/// - On success: logs info message
+/// - On failure with "route exists": logs warning, returns Ok (idempotent)
+/// - On other failure: returns error
+fn handle_route_add_output(
+    output: std::process::Output,
+    route: &Ipv4Net,
+    tun_name: &str,
+) -> VpnResult<()> {
+    if output.status.success() {
+        log::info!("Added route {} via {}", route, tun_name);
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stderr_trimmed = stderr.trim();
+    if is_route_exists_error(&stderr) {
+        log::warn!(
+            "Route {} already exists (treating as success): {}",
+            route,
+            stderr_trimmed
+        );
+        Ok(())
+    } else {
+        Err(VpnError::TunDevice(format!(
+            "Failed to add route {}: {}",
+            route, stderr_trimmed
+        )))
+    }
+}
+
 /// Add a route through the VPN TUN interface.
+///
+/// If the route already exists, this is treated as idempotent success
+/// (logs a warning and continues).
 ///
 /// # Platform Support
 /// - macOS: Uses `route add -net <cidr> -interface <tun_device>`
@@ -205,14 +250,7 @@ pub async fn add_route(tun_name: &str, route: &Ipv4Net) -> VpnResult<()> {
             .await
             .map_err(|e| VpnError::TunDevice(format!("Failed to execute route command: {}", e)))?;
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(VpnError::TunDevice(format!(
-                "Failed to add route {}: {}",
-                route, stderr
-            )));
-        }
-        log::info!("Added route {} via {}", route, tun_name);
+        handle_route_add_output(output, route, tun_name)
     }
 
     #[cfg(target_os = "linux")]
@@ -223,25 +261,16 @@ pub async fn add_route(tun_name: &str, route: &Ipv4Net) -> VpnResult<()> {
             .await
             .map_err(|e| VpnError::TunDevice(format!("Failed to execute ip route command: {}", e)))?;
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(VpnError::TunDevice(format!(
-                "Failed to add route {}: {}",
-                route, stderr
-            )));
-        }
-        log::info!("Added route {} via {}", route, tun_name);
+        handle_route_add_output(output, route, tun_name)
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         let _ = (tun_name, route);
-        return Err(VpnError::TunDevice(
+        Err(VpnError::TunDevice(
             "Route management not supported on this platform".into(),
-        ));
+        ))
     }
-
-    Ok(())
 }
 
 /// Add multiple routes through the VPN TUN interface.
@@ -267,9 +296,23 @@ pub async fn add_routes(tun_name: &str, routes: &[Ipv4Net]) -> VpnResult<RouteGu
     Ok(RouteGuard::new(tun_name.to_string(), added))
 }
 
+/// Handle the output of a route remove command (best-effort).
+///
+/// - On success: logs info message
+/// - On failure: logs warning (best-effort, doesn't return error)
+fn handle_route_remove_output(output: std::process::Output, route: &Ipv4Net, tun_name: &str) {
+    if output.status.success() {
+        log::info!("Removed route {} via {}", route, tun_name);
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        log::warn!("Failed to remove route {}: {}", route, stderr.trim());
+    }
+}
+
 /// Remove a route from the system (async version).
 ///
 /// This is called during cleanup to remove routes added by add_route.
+/// Best-effort: command failures are logged as warnings but don't return errors.
 pub async fn remove_route(tun_name: &str, route: &Ipv4Net) -> VpnResult<()> {
     #[cfg(target_os = "macos")]
     {
@@ -287,12 +330,7 @@ pub async fn remove_route(tun_name: &str, route: &Ipv4Net) -> VpnResult<()> {
             .await
             .map_err(|e| VpnError::TunDevice(format!("Failed to execute route command: {}", e)))?;
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            log::warn!("Failed to remove route {}: {}", route, stderr);
-        } else {
-            log::info!("Removed route {} via {}", route, tun_name);
-        }
+        handle_route_remove_output(output, route, tun_name);
     }
 
     #[cfg(target_os = "linux")]
@@ -303,12 +341,7 @@ pub async fn remove_route(tun_name: &str, route: &Ipv4Net) -> VpnResult<()> {
             .await
             .map_err(|e| VpnError::TunDevice(format!("Failed to execute ip route command: {}", e)))?;
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            log::warn!("Failed to remove route {}: {}", route, stderr);
-        } else {
-            log::info!("Removed route {} via {}", route, tun_name);
-        }
+        handle_route_remove_output(output, route, tun_name);
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]

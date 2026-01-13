@@ -12,6 +12,7 @@
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
+use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 
 // ============================================================================
@@ -130,49 +131,69 @@ pub struct NostrConfig {
     pub target: Option<String>,
 }
 
-/// VPN-specific iroh configuration (TOML section: `[iroh]` for VPN mode).
-///
-/// VPN mode uses iroh for P2P connectivity with WireGuard encryption.
-///
-/// Some fields are role-specific (enforced by validate()):
-/// - Server-only: `network`, `server_ip`, `secret_file`, `auth_tokens`, `auth_tokens_file`
-/// - Client-only: `server_node_id`, `auth_token`, `auth_token_file`, `routes`
+/// Shared VPN iroh configuration fields (used by both server and client).
 #[derive(Deserialize, Default, Clone)]
-pub struct VpnIrohConfig {
-    // Server-only fields
-    /// VPN network CIDR (e.g., "10.0.0.0/24") - server only
-    pub network: Option<String>,
-    /// Server's VPN IP address within the network (defaults to first IP) - server only
-    pub server_ip: Option<String>,
-    /// Path to secret key file for persistent server identity - server only
-    pub secret_file: Option<PathBuf>,
-    /// Authentication tokens (server only)
-    #[serde(default)]
-    pub auth_tokens: Vec<String>,
-    /// Path to file containing authentication tokens - server only
-    pub auth_tokens_file: Option<PathBuf>,
-
-    // Client-only fields
-    /// NodeId of the VPN server to connect to - client only
-    pub server_node_id: Option<String>,
-    /// Authentication token to send to server - client only
-    pub auth_token: Option<String>,
-    /// Path to file containing authentication token - client only
-    pub auth_token_file: Option<PathBuf>,
-    /// Additional CIDRs to route through VPN (e.g., ["192.168.1.0/24"]) - client only
-    #[serde(default)]
-    pub routes: Vec<String>,
-
-    // Shared fields
+pub struct VpnIrohSharedConfig {
     /// MTU for VPN packets (576-1500, default: 1420)
     pub mtu: Option<u16>,
     /// WireGuard keepalive interval in seconds (10-300, default: 25)
     pub keepalive_secs: Option<u16>,
-    /// Custom relay server URLs
-    #[serde(default)]
-    pub relay_urls: Vec<String>,
+    /// Custom relay server URLs.
+    /// - `None`: not specified (use defaults or CLI)
+    /// - `Some([])`: explicitly cleared (override defaults)
+    /// - `Some([...])`: custom relay URLs
+    pub relay_urls: Option<Vec<String>>,
     /// Custom DNS server URL for peer discovery
     pub dns_server: Option<String>,
+}
+
+/// VPN server iroh configuration (TOML section: `[iroh]` in vpn_server.toml).
+///
+/// VPN mode uses iroh for P2P connectivity with WireGuard encryption.
+#[derive(Deserialize, Default, Clone)]
+pub struct VpnServerIrohConfig {
+    /// VPN network CIDR (e.g., "10.0.0.0/24")
+    pub network: Option<String>,
+    /// Server's VPN IP address within the network (defaults to first IP)
+    pub server_ip: Option<String>,
+    /// Path to secret key file for persistent server identity
+    pub secret_file: Option<PathBuf>,
+    /// Authentication tokens.
+    /// - `None`: not specified (use defaults or CLI)
+    /// - `Some([])`: explicitly cleared (no auth required)
+    /// - `Some([...])`: required tokens
+    pub auth_tokens: Option<Vec<String>>,
+    /// Path to file containing authentication tokens
+    pub auth_tokens_file: Option<PathBuf>,
+    /// Shared configuration fields
+    #[serde(flatten)]
+    pub shared: VpnIrohSharedConfig,
+}
+
+/// VPN client iroh configuration (TOML section: `[iroh]` in vpn_client.toml).
+#[derive(Deserialize, Default, Clone)]
+pub struct VpnClientIrohConfig {
+    /// NodeId of the VPN server to connect to
+    pub server_node_id: Option<String>,
+    /// Authentication token to send to server
+    pub auth_token: Option<String>,
+    /// Path to file containing authentication token
+    pub auth_token_file: Option<PathBuf>,
+    /// CIDRs to route through VPN (e.g., ["192.168.1.0/24", "0.0.0.0/0"]).
+    /// - `None`: not specified (use defaults or CLI)
+    /// - `Some([])`: explicitly cleared (validation will fail - routes required)
+    /// - `Some([...])`: route CIDRs
+    pub routes: Option<Vec<String>>,
+    /// Enable auto-reconnect on connection loss.
+    /// - `None`: not specified (use defaults or CLI)
+    /// - `Some(true)`: enable reconnect (default behavior)
+    /// - `Some(false)`: disable reconnect (exit on first disconnection)
+    pub auto_reconnect: Option<bool>,
+    /// Maximum reconnect attempts (None = unlimited)
+    pub max_reconnect_attempts: Option<NonZeroU32>,
+    /// Shared configuration fields
+    #[serde(flatten)]
+    pub shared: VpnIrohSharedConfig,
 }
 
 /// VPN server configuration.
@@ -180,7 +201,7 @@ pub struct VpnIrohConfig {
 pub struct VpnServerConfig {
     pub role: Option<Role>,
     pub mode: Option<Mode>,
-    pub iroh: Option<VpnIrohConfig>,
+    pub iroh: Option<VpnServerIrohConfig>,
 }
 
 /// VPN client configuration.
@@ -188,7 +209,7 @@ pub struct VpnServerConfig {
 pub struct VpnClientConfig {
     pub role: Option<Role>,
     pub mode: Option<Mode>,
-    pub iroh: Option<VpnIrohConfig>,
+    pub iroh: Option<VpnClientIrohConfig>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -761,7 +782,7 @@ impl ClientConfig {
 
 impl VpnServerConfig {
     /// Get VPN iroh config section.
-    pub fn iroh(&self) -> Option<&VpnIrohConfig> {
+    pub fn iroh(&self) -> Option<&VpnServerIrohConfig> {
         self.iroh.as_ref()
     }
 
@@ -770,7 +791,6 @@ impl VpnServerConfig {
     /// Enforces:
     /// - Role must be "vpnserver"
     /// - Mode must be "iroh"
-    /// - Rejects client-only fields (server_node_id, auth_token, routes)
     /// - Validates network CIDR format
     /// - Validates server_ip is within network if specified
     /// - Validates MTU and keepalive ranges
@@ -795,21 +815,12 @@ impl VpnServerConfig {
         }
 
         if let Some(ref iroh) = self.iroh {
-            // Reject client-only fields
-            if iroh.server_node_id.is_some() {
-                anyhow::bail!("[iroh] 'server_node_id' is a client-only field.");
-            }
-            if iroh.auth_token.is_some() || iroh.auth_token_file.is_some() {
-                anyhow::bail!(
-                    "[iroh] 'auth_token' and 'auth_token_file' are client-only fields."
-                );
-            }
-            if !iroh.routes.is_empty() {
-                anyhow::bail!("[iroh] 'routes' is a client-only field.");
-            }
-
             // Validate auth_tokens mutual exclusion
-            if !iroh.auth_tokens.is_empty() && iroh.auth_tokens_file.is_some() {
+            let has_inline_tokens = iroh
+                .auth_tokens
+                .as_ref()
+                .is_some_and(|t| !t.is_empty());
+            if has_inline_tokens && iroh.auth_tokens_file.is_some() {
                 anyhow::bail!(
                     "[iroh] Use only one of 'auth_tokens' or 'auth_tokens_file'."
                 );
@@ -824,10 +835,10 @@ impl VpnServerConfig {
             validate_vpn_network(network, iroh.server_ip.as_deref(), "iroh")?;
 
             // Validate MTU and keepalive ranges
-            if let Some(mtu) = iroh.mtu {
+            if let Some(mtu) = iroh.shared.mtu {
                 validate_mtu(mtu, "iroh")?;
             }
-            if let Some(keepalive) = iroh.keepalive_secs {
+            if let Some(keepalive) = iroh.shared.keepalive_secs {
                 validate_keepalive(keepalive, "iroh")?;
             }
         }
@@ -838,7 +849,7 @@ impl VpnServerConfig {
 
 impl VpnClientConfig {
     /// Get VPN iroh config section.
-    pub fn iroh(&self) -> Option<&VpnIrohConfig> {
+    pub fn iroh(&self) -> Option<&VpnClientIrohConfig> {
         self.iroh.as_ref()
     }
 
@@ -847,7 +858,6 @@ impl VpnClientConfig {
     /// Enforces:
     /// - Role must be "vpnclient"
     /// - Mode must be "iroh"
-    /// - Rejects server-only fields (network, server_ip, auth_tokens)
     /// - Validates routes CIDR format
     /// - Validates MTU and keepalive ranges
     pub fn validate(&self) -> Result<()> {
@@ -871,22 +881,6 @@ impl VpnClientConfig {
         }
 
         if let Some(ref iroh) = self.iroh {
-            // Reject server-only fields
-            if iroh.network.is_some() {
-                anyhow::bail!("[iroh] 'network' is a server-only field.");
-            }
-            if iroh.server_ip.is_some() {
-                anyhow::bail!("[iroh] 'server_ip' is a server-only field.");
-            }
-            if iroh.secret_file.is_some() {
-                anyhow::bail!("[iroh] 'secret_file' is a server-only field.");
-            }
-            if !iroh.auth_tokens.is_empty() || iroh.auth_tokens_file.is_some() {
-                anyhow::bail!(
-                    "[iroh] 'auth_tokens' and 'auth_tokens_file' are server-only fields."
-                );
-            }
-
             // Require server_node_id for VPN client
             if iroh.server_node_id.is_none() {
                 anyhow::bail!(
@@ -902,23 +896,25 @@ impl VpnClientConfig {
             }
 
             // Validate routes: at least one required, valid CIDR format
-            if iroh.routes.is_empty() {
-                anyhow::bail!(
-                    "[iroh] At least one route is required.\n\
-                     Example: routes = [\"0.0.0.0/0\"] for full tunnel"
-                );
-            }
-            for route in &iroh.routes {
-                validate_cidr(route).with_context(|| {
-                    format!("[iroh] Invalid route CIDR '{}'", route)
-                })?;
+            if let Some(ref routes) = iroh.routes {
+                if routes.is_empty() {
+                    anyhow::bail!(
+                        "[iroh] At least one route is required.\n\
+                         Example: routes = [\"0.0.0.0/0\"] for full tunnel"
+                    );
+                }
+                for route in routes {
+                    validate_cidr(route).with_context(|| {
+                        format!("[iroh] Invalid route CIDR '{}'", route)
+                    })?;
+                }
             }
 
             // Validate MTU and keepalive ranges
-            if let Some(mtu) = iroh.mtu {
+            if let Some(mtu) = iroh.shared.mtu {
                 validate_mtu(mtu, "iroh")?;
             }
-            if let Some(keepalive) = iroh.keepalive_secs {
+            if let Some(keepalive) = iroh.shared.keepalive_secs {
                 validate_keepalive(keepalive, "iroh")?;
             }
         }
@@ -1128,7 +1124,12 @@ impl VpnServerConfigBuilder {
     }
 
     /// Apply values from TOML config (middle priority).
-    pub fn apply_config(mut self, config: Option<&VpnIrohConfig>) -> Self {
+    ///
+    /// For `Option<Vec<T>>` fields:
+    /// - `None` in config: don't override (use defaults/CLI)
+    /// - `Some([])` in config: explicitly set to empty (override defaults)
+    /// - `Some([...])` in config: set to these values
+    pub fn apply_config(mut self, config: Option<&VpnServerIrohConfig>) -> Self {
         if let Some(cfg) = config {
             if cfg.network.is_some() {
                 self.network = cfg.network.clone();
@@ -1136,23 +1137,25 @@ impl VpnServerConfigBuilder {
             if cfg.server_ip.is_some() {
                 self.server_ip = cfg.server_ip.clone();
             }
-            if cfg.mtu.is_some() {
-                self.mtu = cfg.mtu;
+            if cfg.shared.mtu.is_some() {
+                self.mtu = cfg.shared.mtu;
             }
-            if cfg.keepalive_secs.is_some() {
-                self.keepalive_secs = cfg.keepalive_secs;
+            if cfg.shared.keepalive_secs.is_some() {
+                self.keepalive_secs = cfg.shared.keepalive_secs;
             }
             if cfg.secret_file.is_some() {
                 self.secret_file = cfg.secret_file.clone();
             }
-            if !cfg.relay_urls.is_empty() {
-                self.relay_urls = Some(cfg.relay_urls.clone());
+            // relay_urls: None = not set, Some([]) = explicitly empty
+            if cfg.shared.relay_urls.is_some() {
+                self.relay_urls = cfg.shared.relay_urls.clone();
             }
-            if cfg.dns_server.is_some() {
-                self.dns_server = cfg.dns_server.clone();
+            if cfg.shared.dns_server.is_some() {
+                self.dns_server = cfg.shared.dns_server.clone();
             }
-            if !cfg.auth_tokens.is_empty() {
-                self.auth_tokens = Some(cfg.auth_tokens.clone());
+            // auth_tokens: None = not set, Some([]) = explicitly no auth
+            if cfg.auth_tokens.is_some() {
+                self.auth_tokens = cfg.auth_tokens.clone();
             }
             if cfg.auth_tokens_file.is_some() {
                 self.auth_tokens_file = cfg.auth_tokens_file.clone();
@@ -1259,6 +1262,8 @@ pub struct ResolvedVpnClientConfig {
     pub routes: Vec<String>,
     pub relay_urls: Vec<String>,
     pub dns_server: Option<String>,
+    pub auto_reconnect: bool,
+    pub max_reconnect_attempts: Option<NonZeroU32>,
 }
 
 /// Builder for VPN client configuration with layered overrides.
@@ -1272,6 +1277,8 @@ pub struct VpnClientConfigBuilder {
     routes: Option<Vec<String>>,
     relay_urls: Option<Vec<String>>,
     dns_server: Option<String>,
+    auto_reconnect: Option<bool>,
+    max_reconnect_attempts: Option<NonZeroU32>,
 }
 
 impl VpnClientConfigBuilder {
@@ -1286,20 +1293,27 @@ impl VpnClientConfigBuilder {
         self.keepalive_secs = Some(DEFAULT_VPN_KEEPALIVE_SECS);
         self.routes = Some(vec![]);
         self.relay_urls = Some(vec![]);
+        // auto_reconnect defaults to None (resolved to true in build())
+        // max_reconnect_attempts defaults to None (unlimited)
         self
     }
 
     /// Apply values from TOML config (middle priority).
-    pub fn apply_config(mut self, config: Option<&VpnIrohConfig>) -> Self {
+    ///
+    /// For `Option<Vec<T>>` fields:
+    /// - `None` in config: don't override (use defaults/CLI)
+    /// - `Some([])` in config: explicitly set to empty (override defaults)
+    /// - `Some([...])` in config: set to these values
+    pub fn apply_config(mut self, config: Option<&VpnClientIrohConfig>) -> Self {
         if let Some(cfg) = config {
             if cfg.server_node_id.is_some() {
                 self.server_node_id = cfg.server_node_id.clone();
             }
-            if cfg.mtu.is_some() {
-                self.mtu = cfg.mtu;
+            if cfg.shared.mtu.is_some() {
+                self.mtu = cfg.shared.mtu;
             }
-            if cfg.keepalive_secs.is_some() {
-                self.keepalive_secs = cfg.keepalive_secs;
+            if cfg.shared.keepalive_secs.is_some() {
+                self.keepalive_secs = cfg.shared.keepalive_secs;
             }
             if cfg.auth_token.is_some() {
                 self.auth_token = cfg.auth_token.clone();
@@ -1307,20 +1321,34 @@ impl VpnClientConfigBuilder {
             if cfg.auth_token_file.is_some() {
                 self.auth_token_file = cfg.auth_token_file.clone();
             }
-            if !cfg.routes.is_empty() {
-                self.routes = Some(cfg.routes.clone());
+            // routes: None = not set, Some([]) = explicitly empty (will fail validation)
+            if cfg.routes.is_some() {
+                self.routes = cfg.routes.clone();
             }
-            if !cfg.relay_urls.is_empty() {
-                self.relay_urls = Some(cfg.relay_urls.clone());
+            // relay_urls: None = not set, Some([]) = explicitly empty
+            if cfg.shared.relay_urls.is_some() {
+                self.relay_urls = cfg.shared.relay_urls.clone();
             }
-            if cfg.dns_server.is_some() {
-                self.dns_server = cfg.dns_server.clone();
+            if cfg.shared.dns_server.is_some() {
+                self.dns_server = cfg.shared.dns_server.clone();
+            }
+            // auto_reconnect: None = not set, Some(true/false) = explicit value
+            if cfg.auto_reconnect.is_some() {
+                self.auto_reconnect = cfg.auto_reconnect;
+            }
+            if cfg.max_reconnect_attempts.is_some() {
+                self.max_reconnect_attempts = cfg.max_reconnect_attempts;
             }
         }
         self
     }
 
     /// Apply CLI arguments (highest priority).
+    ///
+    /// For `auto_reconnect`:
+    /// - `None`: CLI flag not specified (use config/default)
+    /// - `Some(true)`: `--auto-reconnect` specified
+    /// - `Some(false)`: `--no-auto-reconnect` specified (overrides config's true)
     #[allow(clippy::too_many_arguments)]
     pub fn apply_cli(
         mut self,
@@ -1332,6 +1360,8 @@ impl VpnClientConfigBuilder {
         routes: Vec<String>,
         relay_urls: Vec<String>,
         dns_server: Option<String>,
+        auto_reconnect: Option<bool>,
+        max_reconnect_attempts: Option<NonZeroU32>,
     ) -> Self {
         if server_node_id.is_some() {
             self.server_node_id = server_node_id;
@@ -1356,6 +1386,13 @@ impl VpnClientConfigBuilder {
         }
         if dns_server.is_some() {
             self.dns_server = dns_server;
+        }
+        // auto_reconnect: None = not specified, Some(bool) = explicit override
+        if auto_reconnect.is_some() {
+            self.auto_reconnect = auto_reconnect;
+        }
+        if max_reconnect_attempts.is_some() {
+            self.max_reconnect_attempts = max_reconnect_attempts;
         }
         self
     }
@@ -1409,6 +1446,8 @@ impl VpnClientConfigBuilder {
             routes,
             relay_urls: self.relay_urls.unwrap_or_default(),
             dns_server: self.dns_server,
+            auto_reconnect: self.auto_reconnect.unwrap_or(true),
+            max_reconnect_attempts: self.max_reconnect_attempts,
         })
     }
 }

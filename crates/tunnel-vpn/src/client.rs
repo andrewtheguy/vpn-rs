@@ -18,8 +18,11 @@ use crate::tunnel::{PacketResult, WgTunnel, WgTunnelBuilder};
 use ipnet::Ipv4Net;
 use iroh::endpoint::{RecvStream, SendStream};
 use iroh::{Endpoint, EndpointId};
+use rand::Rng;
 use std::net::{Ipv4Addr, SocketAddr};
+use std::num::NonZeroU32;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::Mutex;
 
 /// Maximum WireGuard packet size (MTU + overhead).
@@ -166,7 +169,7 @@ impl VpnClient {
             let reason = response
                 .reject_reason
                 .unwrap_or_else(|| "Unknown".to_string());
-            return Err(VpnError::Signaling(format!("Server rejected: {}", reason)));
+            return Err(VpnError::AuthenticationFailed(reason));
         }
 
         // Extract server info
@@ -232,7 +235,7 @@ impl VpnClient {
         let send_timers = wg_send.clone();
 
         // Spawn outbound task (TUN -> WireGuard -> iroh stream)
-        let outbound_handle = tokio::spawn(async move {
+        let mut outbound_handle = tokio::spawn(async move {
             let mut read_buf = vec![0u8; buffer_size];
             let mut write_buf = Vec::with_capacity(4 + MAX_WG_PACKET_SIZE);
             loop {
@@ -272,7 +275,7 @@ impl VpnClient {
         });
 
         // Spawn inbound task (iroh stream -> WireGuard -> TUN)
-        let inbound_handle = tokio::spawn(async move {
+        let mut inbound_handle = tokio::spawn(async move {
             let mut len_buf = [0u8; 4];
             let mut data_buf = vec![0u8; MAX_WG_PACKET_SIZE];
             let mut write_buf = Vec::with_capacity(4 + MAX_WG_PACKET_SIZE);
@@ -331,10 +334,10 @@ impl VpnClient {
         });
 
         // Spawn timer task
-        let timer_handle = tokio::spawn(async move {
+        let mut timer_handle = tokio::spawn(async move {
             let mut write_buf = Vec::with_capacity(4 + MAX_WG_PACKET_SIZE);
             loop {
-                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                tokio::time::sleep(Duration::from_millis(100)).await;
                 let mut tunnel = tunnel_timers.lock().await;
                 let results = tunnel.update_timers();
                 drop(tunnel);
@@ -360,20 +363,138 @@ impl VpnClient {
             }
         });
 
-        // Wait for any task to complete (or error)
-        tokio::select! {
-            _ = outbound_handle => {
-                log::info!("Outbound task ended");
+        // Wait for any task to complete (or error), then clean up all tasks
+        let (first_task, first_result, remaining) = tokio::select! {
+            result = &mut outbound_handle => {
+                ("outbound", result, vec![("inbound", inbound_handle), ("timer", timer_handle)])
             }
-            _ = inbound_handle => {
-                log::info!("Inbound task ended");
+            result = &mut inbound_handle => {
+                ("inbound", result, vec![("outbound", outbound_handle), ("timer", timer_handle)])
             }
-            _ = timer_handle => {
-                log::info!("Timer task ended");
+            result = &mut timer_handle => {
+                ("timer", result, vec![("outbound", outbound_handle), ("inbound", inbound_handle)])
+            }
+        };
+
+        // Abort remaining tasks to ensure they stop
+        for (_, handle) in &remaining {
+            handle.abort();
+        }
+
+        // Await all remaining handles to ensure cleanup (aborted tasks return Cancelled)
+        let mut all_results = vec![(first_task, first_result)];
+        for (name, handle) in remaining {
+            all_results.push((name, handle.await));
+        }
+
+        // Build comprehensive reason from all task results
+        let mut reasons = Vec::new();
+        for (name, result) in &all_results {
+            match result {
+                Ok(()) => {
+                    // Task completed normally (broke out of loop)
+                    reasons.push(format!("{} task ended", name));
+                }
+                Err(e) if e.is_cancelled() => {
+                    // Expected for aborted tasks, don't include in reason
+                }
+                Err(e) if e.is_panic() => {
+                    reasons.push(format!("{} task panicked: {}", name, e));
+                }
+                Err(e) => {
+                    reasons.push(format!("{} task failed: {}", name, e));
+                }
             }
         }
 
-        Ok(())
+        let reason = if reasons.is_empty() {
+            "all tasks cancelled".to_string()
+        } else {
+            reasons.join("; ")
+        };
+        log::debug!("VPN loop ended: {}", reason);
+
+        // Any task ending means connection is lost
+        Err(VpnError::ConnectionLost(reason))
+    }
+
+    /// Connect to the VPN server with automatic reconnection on failure.
+    ///
+    /// This method wraps `connect()` with a reconnection loop that handles
+    /// transient failures using exponential backoff (1s → 2s → 4s → ... → 60s max).
+    ///
+    /// # Arguments
+    /// * `endpoint` - The iroh endpoint to use for connections
+    /// * `max_attempts` - Maximum total connection attempts (None = unlimited).
+    ///   This counts all attempts including the initial one:
+    ///   - `Some(1)` = try once, exit on any failure (no retries)
+    ///   - `Some(3)` = try up to 3 times total (initial + 2 retries)
+    ///   - `None` = retry indefinitely on recoverable errors
+    ///
+    /// # Error Handling
+    /// Only recoverable errors (see [`VpnError::is_recoverable`]) trigger retries:
+    /// - `ConnectionLost`, `Network`, `Signaling` → retry with backoff
+    /// - `AuthenticationFailed`, `Config`, `TunDevice`, etc. → exit immediately
+    ///
+    /// This prevents infinite retry loops on permanent failures like invalid tokens.
+    pub async fn run_with_reconnect(
+        &self,
+        endpoint: &Endpoint,
+        max_attempts: Option<NonZeroU32>,
+    ) -> VpnResult<()> {
+        let mut attempt = 0u32;
+
+        loop {
+            attempt = attempt.saturating_add(1);
+
+            if attempt == 1 {
+                log::info!("Connecting to VPN server...");
+            } else {
+                log::info!("VPN reconnection attempt #{}", attempt);
+            }
+
+            match self.connect(endpoint).await {
+                Ok(()) => {
+                    // Graceful exit (shouldn't normally happen)
+                    log::info!("VPN connection ended gracefully");
+                    return Ok(());
+                }
+                Err(e) if e.is_recoverable() => {
+                    // Reset attempt counter if this was a ConnectionLost (tunnel ran successfully)
+                    if matches!(e, VpnError::ConnectionLost(_)) {
+                        attempt = 0;
+                    }
+
+                    // Check max attempts (None = unlimited)
+                    if let Some(max) = max_attempts {
+                        if attempt >= max.get() {
+                            log::error!("Max reconnection attempts ({}) exceeded", max);
+                            return Err(VpnError::MaxReconnectAttemptsExceeded(max));
+                        }
+                    }
+
+                    // Calculate backoff delay
+                    let delay = calculate_backoff(attempt);
+                    log::warn!(
+                        "Connection lost ({}), reconnecting in {:.1}s{}",
+                        e,
+                        delay.as_secs_f64(),
+                        if let Some(max) = max_attempts {
+                            format!(" (attempt {}/{})", attempt, max)
+                        } else {
+                            String::new()
+                        }
+                    );
+
+                    tokio::time::sleep(delay).await;
+                }
+                Err(e) => {
+                    // Fatal error - don't retry
+                    log::error!("Fatal VPN error (not retrying): {}", e);
+                    return Err(e);
+                }
+            }
+        }
     }
 }
 
@@ -414,5 +535,102 @@ impl VpnClientBuilder {
     /// Build the client.
     pub fn build(self) -> VpnResult<VpnClient> {
         VpnClient::new(self.config)
+    }
+}
+
+/// Backoff constants for reconnection delay calculation.
+const BACKOFF_BASE_MS: u64 = 1000; // 1 second
+const BACKOFF_MAX_MS: u64 = 60000; // 60 seconds
+const BACKOFF_JITTER_MS: u64 = 500;
+
+/// Calculate exponential backoff delay with jitter.
+///
+/// Uses exponential backoff: `base * 2^(attempt-1)`, capped at max.
+/// Adds random jitter (0-500ms) to prevent thundering herd.
+/// The cap is applied after adding jitter to ensure the total never exceeds MAX_MS.
+fn calculate_backoff(attempt: u32) -> Duration {
+    calculate_backoff_with_rng(attempt, &mut rand::thread_rng())
+}
+
+/// Calculate exponential backoff delay with a custom RNG.
+///
+/// This is the testable version that accepts an RNG parameter.
+/// Production code should use `calculate_backoff()` which uses `thread_rng()`.
+///
+/// # Arguments
+/// * `attempt` - Current attempt number (1-based)
+/// * `rng` - Random number generator for jitter
+fn calculate_backoff_with_rng(attempt: u32, rng: &mut impl Rng) -> Duration {
+    // Exponential backoff: 1s, 2s, 4s, 8s, 16s, 32s, 60s, 60s, ...
+    let multiplier = 2_u64.saturating_pow(attempt.saturating_sub(1));
+    let base_delay_ms = BACKOFF_BASE_MS.saturating_mul(multiplier);
+
+    // Add jitter to prevent thundering herd (unbiased via gen_range)
+    let jitter_ms = rng.gen_range(0..BACKOFF_JITTER_MS);
+
+    // Cap total delay (base + jitter) to MAX_MS
+    let total_ms = base_delay_ms.saturating_add(jitter_ms).min(BACKOFF_MAX_MS);
+
+    Duration::from_millis(total_ms)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rand::SeedableRng;
+    use rand_chacha::ChaCha8Rng;
+
+    #[test]
+    fn test_backoff_exponential_growth() {
+        // Use seeded RNG for deterministic tests
+        let mut rng = ChaCha8Rng::seed_from_u64(12345);
+
+        // Attempt 1: base = 1000ms
+        let d1 = calculate_backoff_with_rng(1, &mut rng);
+        assert!(d1.as_millis() >= 1000 && d1.as_millis() < 1500);
+
+        // Attempt 2: base = 2000ms
+        let d2 = calculate_backoff_with_rng(2, &mut rng);
+        assert!(d2.as_millis() >= 2000 && d2.as_millis() < 2500);
+
+        // Attempt 3: base = 4000ms
+        let d3 = calculate_backoff_with_rng(3, &mut rng);
+        assert!(d3.as_millis() >= 4000 && d3.as_millis() < 4500);
+
+        // Attempt 6: base = 32000ms
+        let d6 = calculate_backoff_with_rng(6, &mut rng);
+        assert!(d6.as_millis() >= 32000 && d6.as_millis() < 32500);
+    }
+
+    #[test]
+    fn test_backoff_capped_at_max() {
+        let mut rng = ChaCha8Rng::seed_from_u64(12345);
+
+        // Attempt 7+: base = 64000ms, but capped to 60000ms
+        let d7 = calculate_backoff_with_rng(7, &mut rng);
+        assert!(d7.as_millis() <= BACKOFF_MAX_MS as u128);
+
+        // Very high attempt still capped
+        let d100 = calculate_backoff_with_rng(100, &mut rng);
+        assert!(d100.as_millis() <= BACKOFF_MAX_MS as u128);
+    }
+
+    #[test]
+    fn test_backoff_jitter_within_range() {
+        // Run multiple times with same seed to verify jitter is applied
+        for seed in 0..10 {
+            let mut rng = ChaCha8Rng::seed_from_u64(seed);
+            let d = calculate_backoff_with_rng(1, &mut rng);
+            // Base is 1000ms, jitter is 0-499ms
+            assert!(d.as_millis() >= 1000 && d.as_millis() < 1500);
+        }
+    }
+
+    #[test]
+    fn test_backoff_attempt_zero_treated_as_one() {
+        let mut rng = ChaCha8Rng::seed_from_u64(12345);
+        // Attempt 0 uses saturating_sub(1) = 0, so multiplier = 2^0 = 1
+        let d0 = calculate_backoff_with_rng(0, &mut rng);
+        assert!(d0.as_millis() >= 1000 && d0.as_millis() < 1500);
     }
 }

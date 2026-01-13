@@ -10,6 +10,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use ipnet::Ipv4Net;
 use std::net::Ipv4Addr;
+use std::num::NonZeroU32;
 use std::path::PathBuf;
 
 use tunnel_common::config::{
@@ -125,6 +126,18 @@ enum Command {
         /// Split tunnel: --route 192.168.1.0/24 --route 10.0.0.0/8
         #[arg(long = "route")]
         routes: Vec<String>,
+
+        /// Enable auto-reconnect (override config's auto_reconnect = false)
+        #[arg(long, conflicts_with = "no_auto_reconnect")]
+        auto_reconnect: bool,
+
+        /// Disable auto-reconnect (exit on first disconnection)
+        #[arg(long, conflicts_with = "auto_reconnect")]
+        no_auto_reconnect: bool,
+
+        /// Maximum reconnect attempts (unlimited if not specified)
+        #[arg(long, conflicts_with = "no_auto_reconnect")]
+        max_reconnect_attempts: Option<NonZeroU32>,
     },
     /// Generate a new private key for persistent server identity
     ///
@@ -248,6 +261,9 @@ async fn main() -> Result<()> {
             auth_token,
             auth_token_file,
             routes,
+            auto_reconnect,
+            no_auto_reconnect,
+            max_reconnect_attempts,
         } => {
             // Load config file if specified
             let (cfg, from_file) = resolve_client_config(config, default_config)?;
@@ -256,6 +272,19 @@ async fn main() -> Result<()> {
                     c.validate()?;
                 }
             }
+
+            // Convert mutually exclusive flags to Option<bool>
+            // --auto-reconnect => Some(true), --no-auto-reconnect => Some(false), neither => None
+            assert!(
+                !(auto_reconnect && no_auto_reconnect),
+                "both --auto-reconnect and --no-auto-reconnect were set (clap conflicts_with should prevent this)"
+            );
+            let auto_reconnect_opt = match (auto_reconnect, no_auto_reconnect) {
+                (true, false) => Some(true),   // --auto-reconnect: enable reconnect
+                (false, true) => Some(false),  // --no-auto-reconnect: disable reconnect
+                (false, false) => None,        // neither: use config/default
+                (true, true) => unreachable!(), // guarded by assert above
+            };
 
             // Build resolved config: defaults -> config file -> CLI
             let resolved = VpnClientConfigBuilder::new()
@@ -270,6 +299,8 @@ async fn main() -> Result<()> {
                     routes,
                     relay_urls,
                     dns_server,
+                    auto_reconnect_opt,
+                    max_reconnect_attempts,
                 )
                 .build()?;
 
@@ -421,14 +452,22 @@ async fn run_vpn_client(resolved: ResolvedVpnClientConfig) -> Result<()> {
     .context("Failed to create iroh endpoint")?;
 
     log::info!("VPN Client Node ID: {}", endpoint.id());
-    log::info!("Connecting to VPN server: {}", resolved.server_node_id);
 
-    // Create and connect VPN client
+    // Create VPN client
     let client = VpnClient::new(config)
         .map_err(|e| anyhow::anyhow!("Failed to create VPN client: {}", e))?;
 
-    client
-        .connect(&endpoint)
-        .await
-        .map_err(|e| anyhow::anyhow!("VPN connection error: {}", e))
+    // Connect with or without auto-reconnect
+    if resolved.auto_reconnect {
+        client
+            .run_with_reconnect(&endpoint, resolved.max_reconnect_attempts)
+            .await
+            .map_err(|e| anyhow::anyhow!("VPN connection error: {}", e))
+    } else {
+        log::info!("Auto-reconnect disabled, single connection attempt");
+        client
+            .connect(&endpoint)
+            .await
+            .map_err(|e| anyhow::anyhow!("VPN connection error: {}", e))
+    }
 }
