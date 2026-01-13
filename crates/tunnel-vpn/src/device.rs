@@ -211,12 +211,12 @@ impl TunWriter {
     }
 }
 
-/// Check if an error message indicates that a route already exists.
+/// Check if an error message indicates that a resource already exists.
 ///
-/// Handles various error formats across platforms and locales:
+/// Used for idempotent route/address operations. Handles various error formats:
 /// - Linux iproute2: "RTNETLINK answers: File exists"
 /// - macOS route: "route: writing to routing socket: File exists"
-fn is_route_exists_error(stderr: &str) -> bool {
+fn is_already_exists_error(stderr: &str) -> bool {
     let lower = stderr.to_lowercase();
     lower.contains("file exists") || lower.contains("eexist")
 }
@@ -238,7 +238,7 @@ fn handle_route_add_output(
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     let stderr_trimmed = stderr.trim();
-    if is_route_exists_error(&stderr) {
+    if is_already_exists_error(&stderr) {
         log::warn!(
             "Route {} already exists (treating as success): {}",
             route,
@@ -544,12 +544,6 @@ fn configure_tun_ipv6(_tun_name: &str, _addr: Ipv6Addr, _prefix_len: u8) -> VpnR
     ))
 }
 
-/// Check if an error message indicates that a route already exists (IPv6 version).
-fn is_route6_exists_error(stderr: &str) -> bool {
-    let lower = stderr.to_lowercase();
-    lower.contains("file exists") || lower.contains("eexist")
-}
-
 /// Handle the output of an IPv6 route add command.
 fn handle_route6_add_output(
     output: std::process::Output,
@@ -563,7 +557,7 @@ fn handle_route6_add_output(
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     let stderr_trimmed = stderr.trim();
-    if is_route6_exists_error(&stderr) {
+    if is_already_exists_error(&stderr) {
         log::warn!(
             "IPv6 route {} already exists (treating as success): {}",
             route,
