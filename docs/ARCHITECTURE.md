@@ -638,39 +638,82 @@ VPN mode includes automatic reconnection when the WireGuard tunnel fails. This h
 - `auto_reconnect = false`: Exit on first disconnection
 - `max_reconnect_attempts`: Limit total attempts (unlimited if not set)
 
+**Health Monitoring Layers:**
+
+The VPN client uses two complementary health monitoring mechanisms:
+
+1. **Application-Level Heartbeat** (fast detection, ~30s)
+   - Client sends ping every 10 seconds
+   - Server responds with pong immediately
+   - Client triggers reconnection if no pong received within 30 seconds
+   - Detects: server restart, IP changes, network partitions, NAT timeout, relay issues
+
+2. **WireGuard-Level Timers** (backup, ~90s)
+   - Keepalives every 25 seconds (configurable)
+   - Rekey handshake every 120 seconds
+   - Session expiration after 90 seconds of failed handshakes
+   - Detects: WireGuard-specific issues, key mismatch
+
 ```mermaid
 graph TB
-    subgraph "Connection Health Monitoring"
+    subgraph "Application Heartbeat (Fast)"
+        H1[Heartbeat Ping<br/>10s interval]
+        H2[Heartbeat Pong<br/>server response]
+        H3[Timeout Check<br/>30s threshold]
+    end
+
+    subgraph "WireGuard Timers (Backup)"
         A[WireGuard Timers<br/>100ms interval]
         B[Keepalive Packets<br/>default 25s]
         C[Rekey Handshake<br/>every 120s]
     end
 
     subgraph "Failure Detection"
-        D[Rekey Timeout<br/>5s per attempt]
+        D[Heartbeat Timeout<br/>30s]
         E[Session Expiration<br/>90s of failures]
         F[Connection Lost<br/>trigger reconnect]
     end
 
     subgraph "Recovery"
         G[Exponential Backoff<br/>1s → 60s max]
-        H[Reconnect Attempt]
+        HH[Reconnect Attempt]
         I[Re-establish Tunnel]
     end
 
+    H1 --> H2
+    H2 --> H3
+    H3 -->|no pong| D
+    D --> F
+
     A --> B
     A --> C
-    C --> D
-    D -->|repeated failures| E
+    C -->|failures| E
     E --> F
     F --> G
-    G --> H
-    H --> I
+    G --> HH
+    HH --> I
 
+    style D fill:#FFE0B2
     style E fill:#FFCCBC
     style F fill:#FFF9C4
     style I fill:#C8E6C9
 ```
+
+**Application-Level Heartbeat Protocol:**
+
+The data channel uses a message type prefix to distinguish heartbeat from WireGuard packets:
+
+```
+Message format:
+  [1 byte: type] [payload...]
+
+Types:
+  0x00 = WireGuard packet (followed by 4-byte length + encrypted data)
+  0x01 = Heartbeat ping (no payload)
+  0x02 = Heartbeat pong (no payload)
+```
+
+This allows fast failure detection (~30 seconds) for common issues like server restarts or network changes, without waiting for WireGuard's 90-second session expiration.
 
 **WireGuard Session Expiration:**
 

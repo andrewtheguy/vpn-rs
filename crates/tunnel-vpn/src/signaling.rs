@@ -163,6 +163,40 @@ pub async fn read_message<R: tokio::io::AsyncReadExt + Unpin>(
 /// Maximum handshake message size (16 KB).
 pub const MAX_HANDSHAKE_SIZE: usize = 16 * 1024;
 
+/// Message types for the VPN data channel.
+///
+/// The data channel uses a simple framing protocol:
+/// - First byte: message type
+/// - For WireGuard packets: 4-byte big-endian length + packet data
+/// - For heartbeat: no additional payload
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum DataMessageType {
+    /// WireGuard encrypted packet (followed by length-prefixed data).
+    WireGuard = 0x00,
+    /// Heartbeat ping (client -> server).
+    HeartbeatPing = 0x01,
+    /// Heartbeat pong (server -> client).
+    HeartbeatPong = 0x02,
+}
+
+impl DataMessageType {
+    /// Convert from byte value.
+    pub fn from_byte(b: u8) -> Option<Self> {
+        match b {
+            0x00 => Some(Self::WireGuard),
+            0x01 => Some(Self::HeartbeatPing),
+            0x02 => Some(Self::HeartbeatPong),
+            _ => None,
+        }
+    }
+
+    /// Convert to byte value.
+    pub fn as_byte(self) -> u8 {
+        self as u8
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

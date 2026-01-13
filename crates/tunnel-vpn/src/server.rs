@@ -12,7 +12,8 @@ use crate::device::{TunConfig, TunDevice, TunWriter};
 use crate::error::{VpnError, VpnResult};
 use crate::keys::{WgKeyPair, WgPublicKey};
 use crate::signaling::{
-    read_message, write_message, VpnHandshake, VpnHandshakeResponse, MAX_HANDSHAKE_SIZE,
+    read_message, write_message, DataMessageType, VpnHandshake, VpnHandshakeResponse,
+    MAX_HANDSHAKE_SIZE,
 };
 use crate::tunnel::{PacketResult, WgTunnel, WgTunnelBuilder};
 use boringtun::x25519::PublicKey;
@@ -464,17 +465,57 @@ impl VpnServer {
         let tunnel_inbound = tunnel.clone();
         let tunnel_timers = tunnel.clone();
         let send_inbound = wg_send.clone();
+        let send_heartbeat = wg_send.clone();
 
         // Spawn inbound task (iroh stream -> WireGuard -> TUN)
         let inbound_handle = tokio::spawn(async move {
+            let mut type_buf = [0u8; 1];
             let mut len_buf = [0u8; 4];
             let mut data_buf = vec![0u8; MAX_WG_PACKET_SIZE];
             loop {
-                // Read length prefix
-                match wg_recv.read_exact(&mut len_buf).await {
+                // Read message type
+                match wg_recv.read_exact(&mut type_buf).await {
                     Ok(()) => {}
                     Err(e) => {
                         log::debug!("Client {} stream closed: {}", assigned_ip, e);
+                        break;
+                    }
+                }
+
+                let msg_type = match DataMessageType::from_byte(type_buf[0]) {
+                    Some(t) => t,
+                    None => {
+                        log::warn!("Unknown message type from {}: 0x{:02x}", assigned_ip, type_buf[0]);
+                        continue;
+                    }
+                };
+
+                match msg_type {
+                    DataMessageType::HeartbeatPing => {
+                        // Respond with pong
+                        log::trace!("Heartbeat ping from {}", assigned_ip);
+                        let mut send = send_heartbeat.lock().await;
+                        if let Err(e) = send.write_all(&[DataMessageType::HeartbeatPong.as_byte()]).await {
+                            log::warn!("Failed to send heartbeat pong to {}: {}", assigned_ip, e);
+                            break;
+                        }
+                        continue;
+                    }
+                    DataMessageType::HeartbeatPong => {
+                        // Server shouldn't receive pongs, ignore
+                        log::trace!("Unexpected heartbeat pong from {}", assigned_ip);
+                        continue;
+                    }
+                    DataMessageType::WireGuard => {
+                        // Continue to read WireGuard packet below
+                    }
+                }
+
+                // Read length prefix for WireGuard packet
+                match wg_recv.read_exact(&mut len_buf).await {
+                    Ok(()) => {}
+                    Err(e) => {
+                        log::debug!("Failed to read WG packet length from {}: {}", assigned_ip, e);
                         break;
                     }
                 }
@@ -509,7 +550,9 @@ impl VpnServer {
                         // Send WireGuard response back to client atomically
                         drop(tunnel);
                         let mut send = send_inbound.lock().await;
-                        let mut buf = Vec::with_capacity(4 + data.len());
+                        // Message format: type byte + length + data
+                        let mut buf = Vec::with_capacity(1 + 4 + data.len());
+                        buf.push(DataMessageType::WireGuard.as_byte());
                         buf.extend_from_slice(&(data.len() as u32).to_be_bytes());
                         buf.extend_from_slice(&data);
                         if let Err(e) = send.write_all(&buf).await {
@@ -536,8 +579,9 @@ impl VpnServer {
                     match result {
                         PacketResult::WriteToNetwork(data) => {
                             let mut send = wg_send.lock().await;
-                            // Write length-prefixed packet atomically
-                            let mut buf = Vec::with_capacity(4 + data.len());
+                            // Message format: type byte + length + data
+                            let mut buf = Vec::with_capacity(1 + 4 + data.len());
+                            buf.push(DataMessageType::WireGuard.as_byte());
                             buf.extend_from_slice(&(data.len() as u32).to_be_bytes());
                             buf.extend_from_slice(&data);
                             if let Err(e) = send.write_all(&buf).await {
@@ -621,8 +665,10 @@ impl VpnServer {
             match tunnel.encapsulate(packet) {
                 Ok(PacketResult::WriteToNetwork(data)) => {
                     // Send encrypted packet to client via iroh stream atomically
+                    // Message format: type byte + length + data
                     let mut send = client.send_stream.lock().await;
-                    let mut buf = Vec::with_capacity(4 + data.len());
+                    let mut buf = Vec::with_capacity(1 + 4 + data.len());
+                    buf.push(DataMessageType::WireGuard.as_byte());
                     buf.extend_from_slice(&(data.len() as u32).to_be_bytes());
                     buf.extend_from_slice(&data);
                     if let Err(e) = send.write_all(&buf).await {
