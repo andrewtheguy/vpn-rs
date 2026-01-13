@@ -184,9 +184,11 @@ pub struct VpnClientIrohConfig {
     /// - `Some([])`: explicitly cleared (validation will fail - routes required)
     /// - `Some([...])`: route CIDRs
     pub routes: Option<Vec<String>>,
-    /// Disable auto-reconnect on connection loss
-    #[serde(default)]
-    pub no_reconnect: bool,
+    /// Disable auto-reconnect on connection loss.
+    /// - `None`: not specified (use defaults or CLI)
+    /// - `Some(true)`: disable reconnect
+    /// - `Some(false)`: enable reconnect (can override config's true)
+    pub no_reconnect: Option<bool>,
     /// Maximum reconnect attempts (None = unlimited)
     pub max_reconnect_attempts: Option<NonZeroU32>,
     /// Shared configuration fields
@@ -1291,7 +1293,7 @@ impl VpnClientConfigBuilder {
         self.keepalive_secs = Some(DEFAULT_VPN_KEEPALIVE_SECS);
         self.routes = Some(vec![]);
         self.relay_urls = Some(vec![]);
-        self.no_reconnect = Some(false);
+        // no_reconnect defaults to None (resolved to false in build())
         // max_reconnect_attempts defaults to None (unlimited)
         self
     }
@@ -1330,8 +1332,9 @@ impl VpnClientConfigBuilder {
             if cfg.shared.dns_server.is_some() {
                 self.dns_server = cfg.shared.dns_server.clone();
             }
-            if cfg.no_reconnect {
-                self.no_reconnect = Some(true);
+            // no_reconnect: None = not set, Some(true/false) = explicit value
+            if cfg.no_reconnect.is_some() {
+                self.no_reconnect = cfg.no_reconnect;
             }
             if cfg.max_reconnect_attempts.is_some() {
                 self.max_reconnect_attempts = cfg.max_reconnect_attempts;
@@ -1341,6 +1344,11 @@ impl VpnClientConfigBuilder {
     }
 
     /// Apply CLI arguments (highest priority).
+    ///
+    /// For `no_reconnect`:
+    /// - `None`: CLI flag not specified (use config/default)
+    /// - `Some(true)`: `--no-reconnect` specified
+    /// - `Some(false)`: `--reconnect` specified (overrides config's true)
     #[allow(clippy::too_many_arguments)]
     pub fn apply_cli(
         mut self,
@@ -1352,7 +1360,7 @@ impl VpnClientConfigBuilder {
         routes: Vec<String>,
         relay_urls: Vec<String>,
         dns_server: Option<String>,
-        no_reconnect: bool,
+        no_reconnect: Option<bool>,
         max_reconnect_attempts: Option<NonZeroU32>,
     ) -> Self {
         if server_node_id.is_some() {
@@ -1379,8 +1387,9 @@ impl VpnClientConfigBuilder {
         if dns_server.is_some() {
             self.dns_server = dns_server;
         }
-        if no_reconnect {
-            self.no_reconnect = Some(true);
+        // no_reconnect: None = not specified, Some(bool) = explicit override
+        if no_reconnect.is_some() {
+            self.no_reconnect = no_reconnect;
         }
         if max_reconnect_attempts.is_some() {
             self.max_reconnect_attempts = max_reconnect_attempts;

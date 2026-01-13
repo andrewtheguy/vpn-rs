@@ -127,8 +127,12 @@ enum Command {
         #[arg(long = "route")]
         routes: Vec<String>,
 
+        /// Enable auto-reconnect (override config's no_reconnect = true)
+        #[arg(long, conflicts_with = "no_reconnect")]
+        reconnect: bool,
+
         /// Disable auto-reconnect (exit on first disconnection)
-        #[arg(long)]
+        #[arg(long, conflicts_with = "reconnect")]
         no_reconnect: bool,
 
         /// Maximum reconnect attempts (omit for unlimited)
@@ -257,6 +261,7 @@ async fn main() -> Result<()> {
             auth_token,
             auth_token_file,
             routes,
+            reconnect,
             no_reconnect,
             max_reconnect_attempts,
         } => {
@@ -267,6 +272,15 @@ async fn main() -> Result<()> {
                     c.validate()?;
                 }
             }
+
+            // Convert mutually exclusive flags to Option<bool>
+            // --reconnect => Some(false), --no-reconnect => Some(true), neither => None
+            let no_reconnect_opt = match (reconnect, no_reconnect) {
+                (true, false) => Some(false),  // --reconnect: enable reconnect
+                (false, true) => Some(true),   // --no-reconnect: disable reconnect
+                (false, false) => None,        // neither: use config/default
+                (true, true) => unreachable!(), // clap prevents this
+            };
 
             // Build resolved config: defaults -> config file -> CLI
             let resolved = VpnClientConfigBuilder::new()
@@ -281,7 +295,7 @@ async fn main() -> Result<()> {
                     routes,
                     relay_urls,
                     dns_server,
-                    no_reconnect,
+                    no_reconnect_opt,
                     max_reconnect_attempts,
                 )
                 .build()?;
