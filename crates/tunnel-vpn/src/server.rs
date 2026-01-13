@@ -491,8 +491,14 @@ impl VpnServer {
         // Allocate IPv6 for client (optional, if server has IPv6 configured)
         let assigned_ip6 = if let Some(ref ip6_pool) = self.ip6_pool {
             let mut pool = ip6_pool.write().await;
-            pool.allocate(remote_id)
-            // IPv6 allocation failure is not fatal - client just won't have IPv6
+            match pool.allocate(remote_id) {
+                Some(ip) => Some(ip),
+                None => {
+                    // IPv6 allocation failure is not fatal - client just won't have IPv6
+                    log::warn!("IPv6 pool exhausted for client {}", remote_id);
+                    None
+                }
+            }
         } else {
             None
         };
@@ -620,13 +626,14 @@ impl VpnServer {
 
         // Cleanup - use session_id to detect stale cleanup from rapid reconnection.
         // Only remove entries if they still belong to this specific connection, and
-        // ensure that clients and IP mappings are updated atomically with respect
-        // to each other to avoid races with rapid reconnects.
+        // ensure that clients, IPv4 mappings, and IPv6 mappings are updated atomically
+        // with respect to each other to avoid races with rapid reconnects.
         let mut endpoint_to_release = None;
         let mut release_ipv6 = false;
         {
             let mut clients_map = clients.write().await;
             let mut ip_map = ip_to_endpoint.write().await;
+            let mut ip6_map = ip6_to_endpoint.write().await;
 
             let removed_client = clients_map.remove(&remote_id);
             let removed_ip = ip_map.remove(&assigned_ip);
@@ -638,6 +645,14 @@ impl VpnServer {
                         // Both belong to this session; remember endpoint for IP release
                         endpoint_to_release = Some(endpoint_id);
                         release_ipv6 = client_state.assigned_ip6.is_some();
+                        // Clean up IPv6 mapping if applicable (inside same critical section)
+                        if let Some(ip6) = assigned_ip6 {
+                            if let Some((_, ip6_session_id)) = ip6_map.get(&ip6) {
+                                if *ip6_session_id == session_id {
+                                    ip6_map.remove(&ip6);
+                                }
+                            }
+                        }
                         // Keep both entries removed
                     } else {
                         // One or both entries belong to a different session; restore both
@@ -659,16 +674,6 @@ impl VpnServer {
                 }
                 // Neither entry existed; nothing to do
                 (None, None) => {}
-            }
-        }
-
-        // Clean up IPv6 mapping if applicable
-        if let Some(ip6) = assigned_ip6 {
-            let mut ip6_map = ip6_to_endpoint.write().await;
-            if let Some((_, ip6_session_id)) = ip6_map.get(&ip6) {
-                if *ip6_session_id == session_id {
-                    ip6_map.remove(&ip6);
-                }
             }
         }
 
