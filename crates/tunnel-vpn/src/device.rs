@@ -183,7 +183,20 @@ impl TunWriter {
     }
 }
 
+/// Check if an error message indicates that a route already exists.
+///
+/// Handles various error formats across platforms and locales:
+/// - Linux iproute2: "RTNETLINK answers: File exists"
+/// - macOS route: "route: writing to routing socket: File exists"
+fn is_route_exists_error(stderr: &str) -> bool {
+    let lower = stderr.to_lowercase();
+    lower.contains("file exists") || lower.contains("eexist")
+}
+
 /// Add a route through the VPN TUN interface.
+///
+/// If the route already exists, this is treated as idempotent success
+/// (logs a warning and continues).
 ///
 /// # Platform Support
 /// - macOS: Uses `route add -net <cidr> -interface <tun_device>`
@@ -207,12 +220,21 @@ pub async fn add_route(tun_name: &str, route: &Ipv4Net) -> VpnResult<()> {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(VpnError::TunDevice(format!(
-                "Failed to add route {}: {}",
-                route, stderr
-            )));
+            if is_route_exists_error(&stderr) {
+                log::warn!(
+                    "Route {} already exists (treating as success): {}",
+                    route,
+                    stderr.trim()
+                );
+            } else {
+                return Err(VpnError::TunDevice(format!(
+                    "Failed to add route {}: {}",
+                    route, stderr
+                )));
+            }
+        } else {
+            log::info!("Added route {} via {}", route, tun_name);
         }
-        log::info!("Added route {} via {}", route, tun_name);
     }
 
     #[cfg(target_os = "linux")]
@@ -225,21 +247,21 @@ pub async fn add_route(tun_name: &str, route: &Ipv4Net) -> VpnResult<()> {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            // Provide helpful message for common "route exists" error
-            if stderr.contains("File exists") {
+            if is_route_exists_error(&stderr) {
+                log::warn!(
+                    "Route {} already exists (treating as success): {}",
+                    route,
+                    stderr.trim()
+                );
+            } else {
                 return Err(VpnError::TunDevice(format!(
-                    "Route {} already exists. This may be the VPN network itself \
-                     (automatically routed) or a conflicting route. \
-                     Remove --route {} or delete the existing route first.",
-                    route, route
+                    "Failed to add route {}: {}",
+                    route, stderr
                 )));
             }
-            return Err(VpnError::TunDevice(format!(
-                "Failed to add route {}: {}",
-                route, stderr
-            )));
+        } else {
+            log::info!("Added route {} via {}", route, tun_name);
         }
-        log::info!("Added route {} via {}", route, tun_name);
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
