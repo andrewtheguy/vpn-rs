@@ -727,13 +727,14 @@ Data channel message framing:
     [0x02]
 ```
 
-**Implementation locations:**
-- Type enum: `DataMessageType` in `signaling.rs:174-181`
-- Client send (outbound): `client.rs:268-271` - prepends type + length
-- Client receive (inbound): `client.rs:304-338` - reads type, dispatches
-- Client heartbeat sender: `client.rs:450-453` - sends single ping byte
-- Server receive: `server.rs:477-512` - reads type, responds to pings
-- Server send: `server.rs:554-557` - prepends type + length
+**Implementation locations** (search by symbol name; line numbers may shift):
+- Type enum: `DataMessageType` in `signaling.rs`
+- Packet framing: `frame_wireguard_packet()` in `signaling.rs`
+- Client send (outbound): TUN reader task in `client.rs` - calls `frame_wireguard_packet()`
+- Client receive (inbound): inbound reader task in `client.rs` - reads type byte, dispatches via `DataMessageType::from_byte()`
+- Client heartbeat sender: heartbeat task in `client.rs` - sends `HeartbeatPing` byte
+- Server receive: inbound reader task in `server.rs` - reads type byte, responds to pings with `HeartbeatPong`
+- Server send: TUN reader and timer tasks in `server.rs` - call `frame_wireguard_packet()`
 
 **Compatibility note:** This framing was added with the heartbeat feature. Older clients/servers that expect raw length-prefixed WireGuard packets (without the type byte) are incompatible.
 
