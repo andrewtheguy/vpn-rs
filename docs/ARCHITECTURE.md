@@ -650,9 +650,20 @@ The VPN client uses two complementary health monitoring mechanisms:
 
 2. **WireGuard-Level Timers** (backup, ~90s)
    - Keepalives every 25 seconds (configurable)
-   - Rekey handshake every 120 seconds
-   - Session expiration after 90 seconds of failed handshakes
+   - Rekey handshake attempted every 120 seconds
+   - Session expiration after 90 seconds of continuous handshake failures
    - Detects: WireGuard-specific issues, key mismatch
+
+**Timing Clarification:**
+- Rekey handshakes occur every 120 seconds during normal operation
+- If a rekey handshake fails, WireGuard retries with exponential backoff
+- After 90 seconds of continuous handshake failures (not 90 seconds after a single failure), the session expires
+- This means the tunnel tolerates temporary disruptions but gives up after prolonged failures
+
+**Interaction Between Layers:**
+- WireGuard keepalives (25s) and application heartbeat timeout (30s) are intentionally close
+- If WireGuard keepalives succeed but application heartbeats fail, this indicates an issue with the QUIC data channel itself (not WireGuard state)
+- The application heartbeat typically detects failures faster because it runs at the transport layer, before WireGuard encryption/decryption
 
 ```mermaid
 graph TB
@@ -669,8 +680,8 @@ graph TB
     end
 
     subgraph "Failure Detection"
-        D[Heartbeat Timeout<br/>30s]
-        E[Session Expiration<br/>90s of failures]
+        D[Heartbeat Timeout<br/>30s no pong]
+        E[Session Expiration<br/>90s continuous failures]
         F[Connection Lost<br/>trigger reconnect]
     end
 
@@ -701,17 +712,30 @@ graph TB
 
 **Application-Level Heartbeat Protocol:**
 
-The data channel uses a message type prefix to distinguish heartbeat from WireGuard packets:
+Heartbeats and WireGuard packets are multiplexed on the same bidirectional QUIC stream (the "data stream" opened after handshake). All messages are prefixed with a 1-byte type discriminator defined in `DataMessageType` (`crates/tunnel-vpn/src/signaling.rs:174`):
 
 ```
-Message format:
-  [1 byte: type] [payload...]
+Data channel message framing:
 
-Types:
-  0x00 = WireGuard packet (followed by 4-byte length + encrypted data)
-  0x01 = Heartbeat ping (no payload)
-  0x02 = Heartbeat pong (no payload)
+  WireGuard packet (type 0x00):
+    [0x00] [4 bytes: length BE u32] [N bytes: encrypted WG packet]
+
+  Heartbeat ping (type 0x01):
+    [0x01]
+
+  Heartbeat pong (type 0x02):
+    [0x02]
 ```
+
+**Implementation locations:**
+- Type enum: `DataMessageType` in `signaling.rs:174-181`
+- Client send (outbound): `client.rs:268-271` - prepends type + length
+- Client receive (inbound): `client.rs:304-338` - reads type, dispatches
+- Client heartbeat sender: `client.rs:450-453` - sends single ping byte
+- Server receive: `server.rs:477-512` - reads type, responds to pings
+- Server send: `server.rs:554-557` - prepends type + length
+
+**Compatibility note:** This framing was added with the heartbeat feature. Older clients/servers that expect raw length-prefixed WireGuard packets (without the type byte) are incompatible.
 
 This allows fast failure detection (~30 seconds) for common issues like server restarts or network changes, without waiting for WireGuard's 90-second session expiration.
 

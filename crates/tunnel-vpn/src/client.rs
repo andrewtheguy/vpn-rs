@@ -312,9 +312,10 @@ impl VpnClient {
                 let msg_type = match DataMessageType::from_byte(type_buf[0]) {
                     Some(t) => t,
                     None => {
-                        log::warn!("Unknown message type: 0x{:02x}", type_buf[0]);
-                        drop(recv);
-                        continue;
+                        // Unknown message type - cannot determine framing, must disconnect
+                        // to avoid stream desynchronization
+                        log::error!("Unknown message type: 0x{:02x}, disconnecting", type_buf[0]);
+                        break;
                     }
                 };
 

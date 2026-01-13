@@ -485,8 +485,8 @@ impl VpnServer {
                 let msg_type = match DataMessageType::from_byte(type_buf[0]) {
                     Some(t) => t,
                     None => {
-                        log::warn!("Unknown message type from {}: 0x{:02x}", assigned_ip, type_buf[0]);
-                        continue;
+                        log::error!("Unknown message type from {}: 0x{:02x}, closing connection", assigned_ip, type_buf[0]);
+                        break;
                     }
                 };
 

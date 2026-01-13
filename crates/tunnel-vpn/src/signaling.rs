@@ -197,6 +197,32 @@ impl DataMessageType {
     }
 }
 
+/// Error returned when converting an invalid byte to `DataMessageType`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InvalidMessageType(pub u8);
+
+impl std::fmt::Display for InvalidMessageType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "invalid message type: 0x{:02x}", self.0)
+    }
+}
+
+impl std::error::Error for InvalidMessageType {}
+
+impl TryFrom<u8> for DataMessageType {
+    type Error = InvalidMessageType;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        Self::from_byte(value).ok_or(InvalidMessageType(value))
+    }
+}
+
+impl From<DataMessageType> for u8 {
+    fn from(value: DataMessageType) -> Self {
+        value.as_byte()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -241,5 +267,51 @@ mod tests {
 
         assert!(!decoded.accepted);
         assert_eq!(decoded.reject_reason, Some("Server full".to_string()));
+    }
+
+    #[test]
+    fn test_data_message_type_roundtrip() {
+        // Test all valid message types: byte -> DataMessageType -> byte
+        for (byte, expected_type) in [
+            (0x00, DataMessageType::WireGuard),
+            (0x01, DataMessageType::HeartbeatPing),
+            (0x02, DataMessageType::HeartbeatPong),
+        ] {
+            // from_byte roundtrip
+            let msg_type = DataMessageType::from_byte(byte).unwrap();
+            assert_eq!(msg_type, expected_type);
+            assert_eq!(msg_type.as_byte(), byte);
+
+            // TryFrom/From trait roundtrip
+            let msg_type: DataMessageType = byte.try_into().unwrap();
+            assert_eq!(msg_type, expected_type);
+            let back: u8 = msg_type.into();
+            assert_eq!(back, byte);
+        }
+    }
+
+    #[test]
+    fn test_data_message_type_invalid_bytes() {
+        // Test that invalid bytes return None from from_byte
+        for invalid in [0x03, 0x04, 0x10, 0x80, 0xFF] {
+            assert!(
+                DataMessageType::from_byte(invalid).is_none(),
+                "from_byte(0x{:02x}) should return None",
+                invalid
+            );
+        }
+    }
+
+    #[test]
+    fn test_data_message_type_try_from_invalid() {
+        // Test that TryFrom returns InvalidMessageType error for invalid bytes
+        for invalid in [0x03, 0x04, 0x10, 0x80, 0xFF] {
+            let result: Result<DataMessageType, _> = invalid.try_into();
+            assert!(result.is_err(), "TryFrom(0x{:02x}) should fail", invalid);
+
+            let err = result.unwrap_err();
+            assert_eq!(err, InvalidMessageType(invalid));
+            assert!(err.to_string().contains(&format!("0x{:02x}", invalid)));
+        }
     }
 }
