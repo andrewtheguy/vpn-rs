@@ -225,10 +225,44 @@ fn is_already_exists_error(stderr: &str) -> bool {
 // Generic Route Trait and Implementations
 // ============================================================================
 
-/// Trait for route types (IPv4/IPv6) that can be added/removed from the system.
+/// Abstraction over concrete route types (IPv4/IPv6) that can be
+/// programmatically added to and removed from the system routing table.
 ///
-/// This trait abstracts the differences between IPv4 and IPv6 route handling,
-/// allowing shared logic for add/remove operations, rollback, and cleanup.
+/// This trait is implemented by types that represent a single route entry
+/// (for example, an IPv4 or IPv6 network/prefix). Implementations are
+/// responsible for translating a route into the appropriate platform‑specific
+/// command‑line arguments used by this module when configuring the TUN
+/// interface.
+///
+/// # Design
+///
+/// `Route` is used by generic helper functions to:
+///
+/// - Add and remove routes for both IPv4 and IPv6 in a uniform way.
+/// - Perform idempotent setup and rollback/cleanup when bringing interfaces
+///   up or down.
+/// - Produce human‑readable log messages via the [`Display`] bound.
+///
+/// The [`Copy`] bound is intentional: routes are small, value‑type
+/// descriptors that are frequently passed by value, stored in collections
+/// for potential rollback, and cloned when constructing error messages.
+/// Requiring `Copy` keeps this ergonomic and ensures that implementations
+/// remain lightweight (e.g., wrappers around `Ipv4Net`/`Ipv6Net` or similar
+/// address/prefix types) rather than owning heap‑allocated state.
+///
+/// # When to implement
+///
+/// Implement this trait if you introduce a new route representation that
+/// should participate in the shared add/remove/rollback logic in this
+/// module—for example, to support an additional IP family or a different
+/// way of encoding networks. Implementors must:
+///
+/// - Be cheap to copy (`Copy` + `Clone` semantics).
+/// - Provide platform‑specific argument builders for macOS (`route` /
+///   `networksetup`) and Linux (`ip route`).
+///
+/// Most consumers should not need to implement `Route` directly; instead they
+/// use the existing concrete route types provided by this crate.
 pub trait Route: std::fmt::Display + Copy {
     /// Label for log messages (e.g., "route" or "IPv6 route").
     const LABEL: &'static str;

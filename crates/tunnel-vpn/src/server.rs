@@ -169,8 +169,8 @@ impl Ip6Pool {
         let next_ip = server_ip_u128 + 1;
 
         // Calculate max_ip based on prefix length
-        let host_bits = 128 - network.prefix_len();
-        let max_ip = if host_bits >= 128 {
+        let host_bits: u32 = 128 - u32::from(network.prefix_len());
+        let max_ip = if host_bits > 127 {
             u128::MAX
         } else {
             net_addr + ((1u128 << host_bits) - 1) - 1 // Exclude last address
@@ -614,7 +614,7 @@ impl VpnServer {
             .await
             .insert(assigned_ip, (remote_id, session_id));
 
-        // Register IPv6 mapping if allocated
+
         if let Some(ip6) = assigned_ip6 {
             self.ip6_to_endpoint
                 .write()
