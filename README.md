@@ -7,16 +7,24 @@ Tunnel-rs enables you to forward TCP and UDP traffic between machines without re
 > [!IMPORTANT]
 > **Project Goal:** This tool provides a convenient way to connect to different networks for **development or homelab purposes** without the hassle and security risk of opening a port. It is **not** meant for production setups or designed to be performant at scale.
 
-**Key Features:**
+**Port Forwarding Features:**
 - **Full TCP and UDP support** — Seamlessly tunnel any TCP or UDP traffic
-- **Native VPN mode** — Full WireGuard-based VPN with automatic IP assignment (Linux/macOS)
-- **No publicly accessible IPs or port forwarding required** — Automatic NAT hole punching and stable peer identities eliminate the need for complex firewall rules or dynamic DNS
-- **Cross-platform support** — Works on Linux, macOS, and Windows
-- **End-to-end encryption** via QUIC/TLS 1.3 (port forwarding) or WireGuard + QUIC (VPN mode)
+- **Cross-platform** — Works on Linux, macOS, and Windows
+- **No root required** — Runs as unprivileged user
+- **End-to-end encryption** via QUIC/TLS 1.3
 - **NAT traversal** with multiple strategies (relay fallback, STUN, full ICE)
+- **Flexible signaling** — Automated discovery (iroh), decentralized (Nostr), or manual exchange
+- **Offline/LAN support** — manual mode works without internet
+
+**VPN Mode Features (Linux/macOS only):**
+- **Full network tunneling** — Route entire subnets, not just individual ports
+- **WireGuard encryption** — Industry-standard VPN protocol via boringtun
+- **Automatic IP assignment** — No manual keypair or IP management
+- **Split tunneling** — Route only specific networks through the VPN
+
+**Common Features:**
+- **No publicly accessible IPs or port forwarding required** — Automatic NAT hole punching
 - **Minimal configuration** — Automatic peer discovery using simple, shareable identities
-- **Flexible signaling** — Supports multiple connection methods, from automated discovery to manual exchange
-- **Offline/LAN support** — manual mode works without internet for local network tunneling
 - **High performance** — Optimized for low latency using QUIC stream multiplexing
 
 **Common Use Cases:**
@@ -33,21 +41,41 @@ Tunnel-rs enables you to forward TCP and UDP traffic between machines without re
 - **Homelab Networking** — Connecting distributed homelab nodes or accessing local services remotely without complex VPN setups or public IP requirements
 - **Cross-platform Tunneling** for both TCP and UDP workflows (including Windows endpoints)
 
+## Which Should I Use?
+
+| Need | Recommended |
+|------|-------------|
+| Forward a specific port (SSH, HTTP, database) | Port Forwarding (iroh mode) |
+| Access UDP services (WireGuard, DNS, game servers) | Port Forwarding (iroh mode) |
+| Route all traffic through tunnel | VPN Mode |
+| Access an entire remote subnet | VPN Mode |
+| Windows support needed | Port Forwarding |
+| No root/admin privileges available | Port Forwarding |
+| Decentralized signaling (no iroh dependency) | Port Forwarding (nostr mode) |
+| Offline/LAN-only operation | Port Forwarding (manual mode) |
+
 ## Overview
 
 tunnel-rs provides multiple modes for establishing tunnels. **Use `iroh` mode** for most use cases — it provides the best NAT traversal with relay fallback, automatic discovery, and client authentication.
 
-Binary layout:
-- `tunnel-rs`: iroh mode (port forwarding)
-- `tunnel-rs-vpn`: VPN mode (Linux/macOS)
-- `tunnel-rs-ice`: manual and nostr modes
+**Binary layout:**
+- `tunnel-rs`: Port forwarding with iroh mode
+- `tunnel-rs-ice`: Port forwarding with manual and nostr modes
+- `tunnel-rs-vpn`: VPN mode (Linux/macOS only)
 
-| Mode | NAT Traversal | Discovery | External Dependency | Use Case |
-|------|---------------|-----------|---------------------|----------|
-| **iroh** (recommended) | Best (relay fallback) | Automatic | iroh relay infrastructure | TCP/UDP port forwarding |
-| **vpn** | Best (relay fallback) | Automatic | iroh relay infrastructure | Full network tunneling (Linux/macOS) |
-| nostr | STUN only | Automatic (Nostr) | Nostr relays (decentralized) | Decentralized port forwarding |
-| manual | STUN only | Manual copy-paste | None | Offline/LAN port forwarding |
+### Port Forwarding Modes
+
+| Mode | NAT Traversal | Discovery | External Dependency |
+|------|---------------|-----------|---------------------|
+| **iroh** (recommended) | Best (relay fallback) | Automatic | iroh relay infrastructure |
+| nostr | STUN only | Automatic (Nostr) | Nostr relays (decentralized) |
+| manual | STUN only | Manual copy-paste | None |
+
+### VPN Mode
+
+| Mode | NAT Traversal | Discovery | Platform | External Dependency |
+|------|---------------|-----------|----------|---------------------|
+| **vpn** | Best (relay fallback) | Automatic | Linux/macOS only | iroh relay infrastructure |
 
 > See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for detailed diagrams and technical deep-dives.
 
@@ -66,90 +94,88 @@ Choose an alternative mode only if you have specific requirements:
 
 ## Installation
 
-GitHub releases include both `tunnel-rs` (iroh-only) and `tunnel-rs-ice` binaries. You only need the binary in your PATH; no runtime dependencies or package managers are required.
+You only need the binary in your PATH; no runtime dependencies or package managers are required.
 
-### Quick Install (Linux & macOS, iroh only)
+### Port Forwarding (`tunnel-rs`, `tunnel-rs-ice`)
 
+**Linux & macOS:**
 ```bash
 curl -sSL https://andrewtheguy.github.io/tunnel-rs/install.sh | bash
 ```
 
-Install with custom release tag:
-```bash
-curl -sSL https://andrewtheguy.github.io/tunnel-rs/install.sh | bash -s <RELEASE_TAG>
-```
-
-By default the installer pulls the latest **stable** release. Use `--prerelease` for the newest prerelease, or pass an explicit tag to pin to a specific build. Examples:
-
-```bash
-# Latest prerelease
-curl -sSL https://andrewtheguy.github.io/tunnel-rs/install.sh | bash -s -- --prerelease
-
-# Pin to a specific tag
-curl -sSL https://andrewtheguy.github.io/tunnel-rs/install.sh | bash -s 20251210172710
-```
-
-### Quick Install (Windows, iroh only)
-
+**Windows:**
 ```powershell
 irm https://andrewtheguy.github.io/tunnel-rs/install.ps1 | iex
 ```
 
+<details>
+<summary>Advanced installation options</summary>
+
 Install with custom release tag:
-```powershell
+```bash
+# Linux/macOS
+curl -sSL https://andrewtheguy.github.io/tunnel-rs/install.sh | bash -s <RELEASE_TAG>
+
+# Windows
 irm https://andrewtheguy.github.io/tunnel-rs/install.ps1 | iex -Args <RELEASE_TAG>
 ```
 
-By default the PowerShell installer pulls the latest **stable** release. Use `-PreRelease` for the newest prerelease, or pass an explicit tag to pin to a specific build. Examples:
+By default the installer pulls the latest **stable** release. Use `--prerelease` for the newest prerelease, or pass an explicit tag to pin to a specific build:
+
+```bash
+# Linux/macOS - latest prerelease
+curl -sSL https://andrewtheguy.github.io/tunnel-rs/install.sh | bash -s -- --prerelease
+
+# Linux/macOS - pin to specific tag
+curl -sSL https://andrewtheguy.github.io/tunnel-rs/install.sh | bash -s 20251210172710
+```
 
 ```powershell
-# Latest prerelease
+# Windows - latest prerelease
 irm https://andrewtheguy.github.io/tunnel-rs/install.ps1 | iex -Args -PreRelease
 
-# Pin to a specific tag
+# Windows - pin to specific tag
 irm https://andrewtheguy.github.io/tunnel-rs/install.ps1 | iex -Args 20251210172710
 ```
 
-Note: The quick install scripts install the `tunnel-rs` iroh-only binary.
-For ICE modes (`tunnel-rs-ice`), download the `tunnel-rs-ice` binary manually
-from GitHub releases or build from source.
+</details>
 
-### Quick Install VPN (Linux & macOS)
+> **Note:** The quick install scripts install `tunnel-rs` (iroh mode only). For nostr/manual modes, download `tunnel-rs-ice` from [GitHub releases](https://github.com/andrewtheguy/tunnel-rs/releases) or build from source.
 
-VPN mode requires root privileges and installs to `/usr/local/bin`:
+### VPN Mode (`tunnel-rs-vpn`)
+
+> **Linux/macOS only.** VPN mode requires root privileges and is not available on Windows.
 
 ```bash
 curl -sSL https://andrewtheguy.github.io/tunnel-rs/install-vpn.sh | sudo bash
 ```
+
+<details>
+<summary>Advanced installation options</summary>
 
 Install with custom release tag:
 ```bash
 curl -sSL https://andrewtheguy.github.io/tunnel-rs/install-vpn.sh | sudo bash -s <RELEASE_TAG>
 ```
 
-By default the installer pulls the latest **stable** release. Use `--prerelease` for the newest prerelease:
-
+Latest prerelease:
 ```bash
-# Latest prerelease
 curl -sSL https://andrewtheguy.github.io/tunnel-rs/install-vpn.sh | sudo bash -s -- --prerelease
 ```
 
-> **Note:** VPN mode is not available on Windows.
+</details>
 
 ### From Source
 
 ```bash
+# Port forwarding (iroh mode)
 cargo install --path . -p tunnel-rs
-```
 
-To install the VPN binary (Linux/macOS only, requires root to run):
-```bash
-cargo install --path . -p tunnel-rs-vpn
-```
-
-To install the ICE binary:
-```bash
+# Port forwarding (nostr/manual modes)
 cargo install --path . -p tunnel-rs-ice
+
+# VPN mode (Linux/macOS only, requires root to run)
+cargo install --path . -p tunnel-rs-vpn
 ```
 
 ### Feature Flags
@@ -173,7 +199,11 @@ Access services running in Docker or Kubernetes remotely — without opening por
 
 ---
 
-# iroh Mode (Recommended)
+# Port Forwarding
+
+Forward specific TCP/UDP ports between machines. Cross-platform (Linux, macOS, Windows), no root required.
+
+## iroh Mode (Recommended)
 
 Uses iroh's P2P network for automatic peer discovery and NAT traversal with relay fallback. Best for containerized environments and persistent tunnels.
 
@@ -658,7 +688,309 @@ See [docs/tor-hidden-service.md](docs/tor-hidden-service.md) for complete setup 
 
 ---
 
-# VPN Mode (Linux/macOS)
+## Alternative: manual Mode
+
+> Use this mode for: (1) complete independence from third-party services (disable STUN), or (2) offline/LAN-only operation when no internet is available. For most use cases, [iroh mode](#iroh-mode-recommended) is recommended.
+
+Uses full ICE (Interactive Connectivity Establishment) with str0m + quinn QUIC. Signaling is done via manual copy-paste.
+
+> **Summary:** Manual copy-paste signaling, full ICE NAT traversal via STUN, no relay fallback. See [Architecture: manual Mode](docs/ARCHITECTURE.md#manual-mode) for detailed diagrams.
+
+### Architecture
+
+```
++-----------------+        +-----------------+                    +-----------------+        +-----------------+
+| SSH Client      |  TCP   | client          |  ICE/QUIC          | server          |  TCP   | SSH Server      |
+|                 |<------>| (local:2222)    |<===================|                 |<------>| (local:22)      |
+|                 |        |                 |  (copy-paste)      |                 |        |                 |
++-----------------+        +-----------------+                    +-----------------+        +-----------------+
+     Client Side                                                        Server Side
+```
+
+### Quick Start
+
+1. **Client** starts first and outputs an offer:
+   ```bash
+   tunnel-rs-ice client manual --source tcp://127.0.0.1:22 --target 127.0.0.1:2222
+   ```
+
+   Copy the `-----BEGIN TUNNEL-RS MANUAL OFFER-----` block.
+
+2. **Server** validates the source request and outputs an answer:
+   ```bash
+   tunnel-rs-ice server manual --allowed-tcp 127.0.0.0/8
+   ```
+
+   Paste the offer, then copy the `-----BEGIN TUNNEL-RS MANUAL ANSWER-----` block.
+
+3. **Client** receives the answer:
+
+   Paste the answer into the client terminal.
+
+4. **Connect**:
+   ```bash
+   ssh -p 2222 user@127.0.0.1
+   ```
+
+### UDP Tunnel (e.g., WireGuard)
+
+```bash
+# Client (starts first)
+tunnel-rs-ice client manual --source udp://127.0.0.1:51820 --target 0.0.0.0:51820
+
+# Server (validates and responds)
+tunnel-rs-ice server manual --allowed-udp 127.0.0.0/8
+```
+
+### CLI Options
+
+#### server manual
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--allowed-tcp` | none | Allowed TCP networks in CIDR notation (repeatable) |
+| `--allowed-udp` | none | Allowed UDP networks in CIDR notation (repeatable) |
+| `--stun-server` | public | STUN server(s), repeatable |
+| `--no-stun` | false | Disable STUN (no external infrastructure, CLI only) |
+
+#### client manual
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--source`, `-s` | required | Source to request from server (e.g., tcp://127.0.0.1:22) |
+| `--target`, `-t` | required | Local address to listen on (e.g., 127.0.0.1:2222) |
+| `--stun-server` | public | STUN server(s), repeatable |
+| `--no-stun` | false | Disable STUN (no external infrastructure, CLI only) |
+
+Note: Config file options (`-c`, `--default-config`) are at the `server`/`client` command level. See [Configuration Files](#configuration-files) above.
+
+### Connection Types
+
+After ICE negotiation, the connection type is displayed:
+
+```
+ICE connection established!
+   Connection: Direct (Host)
+   Local: 10.0.0.5:54321 -> Remote: 10.0.0.10:12345
+```
+
+| Type | Description |
+|------|-------------|
+| Direct (Host) | Both peers on same network |
+| NAT Traversal (Server Reflexive) | Peers behind NAT, using STUN |
+
+### Notes
+
+- Full ICE improves NAT traversal, but without TURN/relay servers symmetric NATs can still fail
+- Signaling payloads include a version number; mismatches are rejected
+
+---
+
+## Alternative: nostr Mode
+
+> Use this mode if you want decentralized signaling without depending on iroh infrastructure. For most use cases, [iroh mode](#iroh-mode-recommended) is recommended.
+
+Uses full ICE with Nostr-based signaling. Instead of manual copy-paste, ICE offers/answers are exchanged automatically via Nostr relays using static keypairs (like WireGuard).
+
+> **Summary:** Automated signaling via Nostr relays, static WireGuard-like keys, full ICE NAT traversal, no relay fallback. See [Architecture: nostr Mode](docs/ARCHITECTURE.md#nostr-mode) for detailed diagrams.
+
+**Key Features:**
+- **Static keys** — Persistent identity using nsec/npub keypairs (like WireGuard)
+- **Automated signaling** — No copy-paste required; offers/answers exchanged via Nostr relays
+- **Full ICE** — Same NAT traversal as manual mode (str0m + quinn)
+- **Deterministic pairing** — Transfer ID derived from both pubkeys; no coordination needed
+
+### Architecture
+
+```
++-----------------+        +-----------------+        +---------------+        +-----------------+        +-----------------+
+| SSH Client      |  TCP   | receiver        |  ICE   |   Nostr       |  ICE   | sender          |  TCP   | SSH Server      |
+|                 |<------>| (local:2222)    |<======>|   Relays      |<======>|                 |<------>| (local:22)      |
+|                 |        |                 |  QUIC  | (signaling)   |  QUIC  |                 |        |                 |
++-----------------+        +-----------------+        +---------------+        +-----------------+        +-----------------+
+     Client Side                                                                     Server Side
+```
+
+### Quick Start
+
+#### 1. Generate Keypairs (One-Time Setup)
+
+Each peer needs their own keypair:
+
+```bash
+# On server machine
+tunnel-rs-ice generate-nostr-key --output ./server.nsec
+# Output (stdout): npub1server...
+
+# On client machine
+tunnel-rs-ice generate-nostr-key --output ./client.nsec
+# Output (stdout): npub1client...
+```
+
+Exchange public keys (npub) between peers.
+
+#### 2. Start Tunnel
+
+**Server** (on server with SSH — waits for client connections):
+```bash
+tunnel-rs-ice server nostr \
+  --allowed-tcp 127.0.0.0/8 \
+  --nsec-file ./server.nsec \
+  --peer-npub npub1client...
+```
+
+**Client** (on client — initiates connection):
+```bash
+tunnel-rs-ice client nostr \
+  --source tcp://127.0.0.1:22 \
+  --target 127.0.0.1:2222 \
+  --nsec-file ./client.nsec \
+  --peer-npub npub1server...
+```
+
+#### 3. Connect
+
+```bash
+ssh -p 2222 user@127.0.0.1
+```
+
+### UDP Tunnel (e.g., WireGuard)
+
+```bash
+# Server (allows UDP traffic to localhost)
+tunnel-rs-ice server nostr \
+  --allowed-udp 127.0.0.0/8 \
+  --nsec-file ./server.nsec \
+  --peer-npub npub1client...
+
+# Client (requests WireGuard tunnel)
+tunnel-rs-ice client nostr \
+  --source udp://127.0.0.1:51820 \
+  --target udp://0.0.0.0:51820 \
+  --nsec-file ./client.nsec \
+  --peer-npub npub1server...
+```
+
+### CLI Options
+
+#### server nostr
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--allowed-tcp` | - | Allowed TCP networks in CIDR (repeatable, e.g., `127.0.0.0/8`) |
+| `--allowed-udp` | - | Allowed UDP networks in CIDR (repeatable, e.g., `10.0.0.0/8`) |
+| `--nsec` | - | Your Nostr private key (nsec or hex format) |
+| `--nsec-file` | - | Path to file containing your Nostr private key |
+| `--peer-npub` | required | Peer's Nostr public key (npub or hex format) |
+| `--relay` | public relays | Nostr relay URL(s), repeatable |
+| `--stun-server` | public | STUN server(s), repeatable |
+| `--no-stun` | false | Disable STUN |
+| `--max-sessions` | 10 | Maximum concurrent sessions (0 = unlimited) |
+
+#### client nostr
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--source`, `-s` | required | Source address to request from server |
+| `--target`, `-t` | required | Local address to listen on |
+| `--nsec` | - | Your Nostr private key (nsec or hex format) |
+| `--nsec-file` | - | Path to file containing your Nostr private key |
+| `--peer-npub` | required | Peer's Nostr public key (npub or hex format) |
+| `--relay` | public relays | Nostr relay URL(s), repeatable |
+| `--stun-server` | public | STUN server(s), repeatable |
+| `--no-stun` | false | Disable STUN |
+
+### Configuration File
+
+```toml
+# Server config
+role = "server"
+mode = "nostr"
+
+[nostr]
+nsec_file = "./server.nsec"
+peer_npub = "npub1..."
+relays = ["wss://relay.damus.io", "wss://nos.lol"]
+stun_servers = ["stun.l.google.com:19302"]
+max_sessions = 10
+
+[nostr.allowed_sources]
+tcp = ["127.0.0.0/8", "10.0.0.0/8"]
+```
+
+### Default Nostr Relays
+
+When no relays are specified, these public relays are used:
+- `wss://nos.lol`
+- `wss://relay.nostr.net`
+- `wss://relay.primal.net`
+- `wss://relay.snort.social`
+
+### Notes
+
+- Keys are static like WireGuard — generate once, use repeatedly
+- Transfer ID is derived from SHA256 of sorted pubkeys — both peers compute the same ID
+- Signaling uses Nostr event kind 24242 with tags for transfer ID and peer pubkey
+- Full ICE provides reliable NAT traversal (same as custom mode)
+- **Client-first protocol:** The client initiates the connection by publishing a request first; server waits for a request before publishing its offer
+
+> [!WARNING]
+> **Containerized Environments:** nostr mode uses full ICE but without relay fallback. If both peers are behind restrictive NATs (common in Docker, Kubernetes, or cloud VMs), ICE connectivity may fail. For containerized deployments, consider using `iroh` mode which includes automatic relay fallback.
+
+---
+
+## Mode Capabilities
+
+| Mode | Multi-Session | Dynamic Source | Description |
+|------|---------------|----------------|-------------|
+| `iroh` | **Yes** | **Yes** | Multiple clients, client chooses source |
+| `nostr` | **Yes** | **Yes** | Multiple clients, client chooses source |
+| `manual` | No | **Yes** | Single session, client chooses source |
+
+**Multi-Session** = Multiple concurrent connections to the same sender
+**Dynamic Source** = Client specifies which service to tunnel (like SSH `-L`)
+
+### iroh (Multi-Session + Dynamic Source)
+
+Server whitelists networks; clients choose which service to tunnel:
+
+```bash
+# Server: whitelist networks, clients choose destination
+tunnel-rs server --allowed-tcp 127.0.0.0/8 --max-sessions 100 --auth-tokens "$AUTH_TOKEN"
+
+# Client 1: tunnel to SSH
+tunnel-rs client --server-node-id <ID> --source tcp://127.0.0.1:22 --target 127.0.0.1:2222 --auth-token "$AUTH_TOKEN"
+
+# Client 2: tunnel to web server (same server!)
+tunnel-rs client --server-node-id <ID> --source tcp://127.0.0.1:80 --target 127.0.0.1:8080 --auth-token "$AUTH_TOKEN"
+```
+
+### nostr (Multi-Session + Dynamic Source)
+
+Server whitelists networks; clients choose which service to tunnel:
+
+```bash
+# Server: whitelist networks, clients choose destination
+tunnel-rs-ice server nostr --allowed-tcp 127.0.0.0/8 --nsec-file ./server.nsec --peer-npub <NPUB> --max-sessions 5
+
+# Client 1: tunnel to SSH
+tunnel-rs-ice client nostr --source tcp://127.0.0.1:22 --target 127.0.0.1:2222 ...
+
+# Client 2: tunnel to web server (same server!)
+tunnel-rs-ice client nostr --source tcp://127.0.0.1:80 --target 127.0.0.1:8080 ...
+```
+
+### Single-Session Mode (manual)
+
+For `manual`, use separate instances for each tunnel:
+- Different instances per tunnel
+- Or use `iroh` or `nostr` mode for multi-session support
+
+---
+
+# VPN Mode
+
+Full network tunneling with WireGuard encryption. Linux/macOS only, requires root.
 
 Native WireGuard-based VPN mode for full network tunneling. Unlike port forwarding modes, VPN mode creates a TUN device and routes IP traffic through an encrypted WireGuard tunnel.
 
@@ -801,306 +1133,6 @@ sudo tunnel-rs-vpn client \
 ## Single Instance Lock
 
 Only one VPN client can run at a time per machine. This prevents routing conflicts and TUN device issues. The lock is automatically released when the client exits.
-
----
-
-# Alternative: manual Mode
-
-> Use this mode for: (1) complete independence from third-party services (disable STUN), or (2) offline/LAN-only operation when no internet is available. For most use cases, [iroh mode](#iroh-mode-recommended) is recommended.
-
-Uses full ICE (Interactive Connectivity Establishment) with str0m + quinn QUIC. Signaling is done via manual copy-paste.
-
-> **Summary:** Manual copy-paste signaling, full ICE NAT traversal via STUN, no relay fallback. See [Architecture: manual Mode](docs/ARCHITECTURE.md#manual-mode) for detailed diagrams.
-
-## Architecture
-
-```
-+-----------------+        +-----------------+                    +-----------------+        +-----------------+
-| SSH Client      |  TCP   | client          |  ICE/QUIC          | server          |  TCP   | SSH Server      |
-|                 |<------>| (local:2222)    |<===================|                 |<------>| (local:22)      |
-|                 |        |                 |  (copy-paste)      |                 |        |                 |
-+-----------------+        +-----------------+                    +-----------------+        +-----------------+
-     Client Side                                                        Server Side
-```
-
-## Quick Start
-
-1. **Client** starts first and outputs an offer:
-   ```bash
-   tunnel-rs-ice client manual --source tcp://127.0.0.1:22 --target 127.0.0.1:2222
-   ```
-
-   Copy the `-----BEGIN TUNNEL-RS MANUAL OFFER-----` block.
-
-2. **Server** validates the source request and outputs an answer:
-   ```bash
-   tunnel-rs-ice server manual --allowed-tcp 127.0.0.0/8
-   ```
-
-   Paste the offer, then copy the `-----BEGIN TUNNEL-RS MANUAL ANSWER-----` block.
-
-3. **Client** receives the answer:
-
-   Paste the answer into the client terminal.
-
-4. **Connect**:
-   ```bash
-   ssh -p 2222 user@127.0.0.1
-   ```
-
-## UDP Tunnel (e.g., WireGuard)
-
-```bash
-# Client (starts first)
-tunnel-rs-ice client manual --source udp://127.0.0.1:51820 --target 0.0.0.0:51820
-
-# Server (validates and responds)
-tunnel-rs-ice server manual --allowed-udp 127.0.0.0/8
-```
-
-## CLI Options
-
-### server manual
-
-| Option | Default | Description |
-|--------|---------|-------------|
-| `--allowed-tcp` | none | Allowed TCP networks in CIDR notation (repeatable) |
-| `--allowed-udp` | none | Allowed UDP networks in CIDR notation (repeatable) |
-| `--stun-server` | public | STUN server(s), repeatable |
-| `--no-stun` | false | Disable STUN (no external infrastructure, CLI only) |
-
-### client manual
-
-| Option | Default | Description |
-|--------|---------|-------------|
-| `--source`, `-s` | required | Source to request from server (e.g., tcp://127.0.0.1:22) |
-| `--target`, `-t` | required | Local address to listen on (e.g., 127.0.0.1:2222) |
-| `--stun-server` | public | STUN server(s), repeatable |
-| `--no-stun` | false | Disable STUN (no external infrastructure, CLI only) |
-
-Note: Config file options (`-c`, `--default-config`) are at the `server`/`client` command level. See [Configuration Files](#configuration-files) above.
-
-## Connection Types
-
-After ICE negotiation, the connection type is displayed:
-
-```
-ICE connection established!
-   Connection: Direct (Host)
-   Local: 10.0.0.5:54321 -> Remote: 10.0.0.10:12345
-```
-
-| Type | Description |
-|------|-------------|
-| Direct (Host) | Both peers on same network |
-| NAT Traversal (Server Reflexive) | Peers behind NAT, using STUN |
-
-## Notes
-
-- Full ICE improves NAT traversal, but without TURN/relay servers symmetric NATs can still fail
-- Signaling payloads include a version number; mismatches are rejected
-
----
-
-# Alternative: nostr Mode
-
-> Use this mode if you want decentralized signaling without depending on iroh infrastructure. For most use cases, [iroh mode](#iroh-mode-recommended) is recommended.
-
-Uses full ICE with Nostr-based signaling. Instead of manual copy-paste, ICE offers/answers are exchanged automatically via Nostr relays using static keypairs (like WireGuard).
-
-> **Summary:** Automated signaling via Nostr relays, static WireGuard-like keys, full ICE NAT traversal, no relay fallback. See [Architecture: nostr Mode](docs/ARCHITECTURE.md#nostr-mode) for detailed diagrams.
-
-**Key Features:**
-- **Static keys** — Persistent identity using nsec/npub keypairs (like WireGuard)
-- **Automated signaling** — No copy-paste required; offers/answers exchanged via Nostr relays
-- **Full ICE** — Same NAT traversal as manual mode (str0m + quinn)
-- **Deterministic pairing** — Transfer ID derived from both pubkeys; no coordination needed
-
-## Architecture
-
-```
-+-----------------+        +-----------------+        +---------------+        +-----------------+        +-----------------+
-| SSH Client      |  TCP   | receiver        |  ICE   |   Nostr       |  ICE   | sender          |  TCP   | SSH Server      |
-|                 |<------>| (local:2222)    |<======>|   Relays      |<======>|                 |<------>| (local:22)      |
-|                 |        |                 |  QUIC  | (signaling)   |  QUIC  |                 |        |                 |
-+-----------------+        +-----------------+        +---------------+        +-----------------+        +-----------------+
-     Client Side                                                                     Server Side
-```
-
-## Quick Start
-
-### 1. Generate Keypairs (One-Time Setup)
-
-Each peer needs their own keypair:
-
-```bash
-# On server machine
-tunnel-rs-ice generate-nostr-key --output ./server.nsec
-# Output (stdout): npub1server...
-
-# On client machine
-tunnel-rs-ice generate-nostr-key --output ./client.nsec
-# Output (stdout): npub1client...
-```
-
-Exchange public keys (npub) between peers.
-
-### 2. Start Tunnel
-
-**Server** (on server with SSH — waits for client connections):
-```bash
-tunnel-rs-ice server nostr \
-  --allowed-tcp 127.0.0.0/8 \
-  --nsec-file ./server.nsec \
-  --peer-npub npub1client...
-```
-
-**Client** (on client — initiates connection):
-```bash
-tunnel-rs-ice client nostr \
-  --source tcp://127.0.0.1:22 \
-  --target 127.0.0.1:2222 \
-  --nsec-file ./client.nsec \
-  --peer-npub npub1server...
-```
-
-### 3. Connect
-
-```bash
-ssh -p 2222 user@127.0.0.1
-```
-
-## UDP Tunnel (e.g., WireGuard)
-
-```bash
-# Server (allows UDP traffic to localhost)
-tunnel-rs-ice server nostr \
-  --allowed-udp 127.0.0.0/8 \
-  --nsec-file ./server.nsec \
-  --peer-npub npub1client...
-
-# Client (requests WireGuard tunnel)
-tunnel-rs-ice client nostr \
-  --source udp://127.0.0.1:51820 \
-  --target udp://0.0.0.0:51820 \
-  --nsec-file ./client.nsec \
-  --peer-npub npub1server...
-```
-
-## CLI Options
-
-### server nostr
-
-| Option | Default | Description |
-|--------|---------|-------------|
-| `--allowed-tcp` | - | Allowed TCP networks in CIDR (repeatable, e.g., `127.0.0.0/8`) |
-| `--allowed-udp` | - | Allowed UDP networks in CIDR (repeatable, e.g., `10.0.0.0/8`) |
-| `--nsec` | - | Your Nostr private key (nsec or hex format) |
-| `--nsec-file` | - | Path to file containing your Nostr private key |
-| `--peer-npub` | required | Peer's Nostr public key (npub or hex format) |
-| `--relay` | public relays | Nostr relay URL(s), repeatable |
-| `--stun-server` | public | STUN server(s), repeatable |
-| `--no-stun` | false | Disable STUN |
-| `--max-sessions` | 10 | Maximum concurrent sessions (0 = unlimited) |
-
-### client nostr
-
-| Option | Default | Description |
-|--------|---------|-------------|
-| `--source`, `-s` | required | Source address to request from server |
-| `--target`, `-t` | required | Local address to listen on |
-| `--nsec` | - | Your Nostr private key (nsec or hex format) |
-| `--nsec-file` | - | Path to file containing your Nostr private key |
-| `--peer-npub` | required | Peer's Nostr public key (npub or hex format) |
-| `--relay` | public relays | Nostr relay URL(s), repeatable |
-| `--stun-server` | public | STUN server(s), repeatable |
-| `--no-stun` | false | Disable STUN |
-
-## Configuration File
-
-```toml
-# Server config
-role = "server"
-mode = "nostr"
-
-[nostr]
-nsec_file = "./server.nsec"
-peer_npub = "npub1..."
-relays = ["wss://relay.damus.io", "wss://nos.lol"]
-stun_servers = ["stun.l.google.com:19302"]
-max_sessions = 10
-
-[nostr.allowed_sources]
-tcp = ["127.0.0.0/8", "10.0.0.0/8"]
-```
-
-## Default Nostr Relays
-
-When no relays are specified, these public relays are used:
-- `wss://nos.lol`
-- `wss://relay.nostr.net`
-- `wss://relay.primal.net`
-- `wss://relay.snort.social`
-
-## Notes
-
-- Keys are static like WireGuard — generate once, use repeatedly
-- Transfer ID is derived from SHA256 of sorted pubkeys — both peers compute the same ID
-- Signaling uses Nostr event kind 24242 with tags for transfer ID and peer pubkey
-- Full ICE provides reliable NAT traversal (same as custom mode)
-- **Client-first protocol:** The client initiates the connection by publishing a request first; server waits for a request before publishing its offer
-
-> [!WARNING]
-> **Containerized Environments:** nostr mode uses full ICE but without relay fallback. If both peers are behind restrictive NATs (common in Docker, Kubernetes, or cloud VMs), ICE connectivity may fail. For containerized deployments, consider using `iroh` mode which includes automatic relay fallback.
-
-## Mode Capabilities
-
-| Mode | Multi-Session | Dynamic Source | Description |
-|------|---------------|----------------|-------------|
-| `iroh` | **Yes** | **Yes** | Multiple clients, client chooses source |
-| `nostr` | **Yes** | **Yes** | Multiple clients, client chooses source |
-| `manual` | No | **Yes** | Single session, client chooses source |
-
-**Multi-Session** = Multiple concurrent connections to the same sender
-**Dynamic Source** = Client specifies which service to tunnel (like SSH `-L`)
-
-### iroh (Multi-Session + Dynamic Source)
-
-Server whitelists networks; clients choose which service to tunnel:
-
-```bash
-# Server: whitelist networks, clients choose destination
-tunnel-rs server --allowed-tcp 127.0.0.0/8 --max-sessions 100 --auth-tokens "$AUTH_TOKEN"
-
-# Client 1: tunnel to SSH
-tunnel-rs client --server-node-id <ID> --source tcp://127.0.0.1:22 --target 127.0.0.1:2222 --auth-token "$AUTH_TOKEN"
-
-# Client 2: tunnel to web server (same server!)
-tunnel-rs client --server-node-id <ID> --source tcp://127.0.0.1:80 --target 127.0.0.1:8080 --auth-token "$AUTH_TOKEN"
-```
-
-### nostr (Multi-Session + Dynamic Source)
-
-Server whitelists networks; clients choose which service to tunnel:
-
-```bash
-# Server: whitelist networks, clients choose destination
-tunnel-rs-ice server nostr --allowed-tcp 127.0.0.0/8 --nsec-file ./server.nsec --peer-npub <NPUB> --max-sessions 5
-
-# Client 1: tunnel to SSH
-tunnel-rs-ice client nostr --source tcp://127.0.0.1:22 --target 127.0.0.1:2222 ...
-
-# Client 2: tunnel to web server (same server!)
-tunnel-rs-ice client nostr --source tcp://127.0.0.1:80 --target 127.0.0.1:8080 ...
-```
-
-### Single-Session Mode (manual)
-
-For `manual`, use separate instances for each tunnel:
-- Different instances per tunnel
-- Or use `iroh` or `nostr` mode for multi-session support
-
----
 
 ---
 
