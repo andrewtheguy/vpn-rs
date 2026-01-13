@@ -108,6 +108,8 @@ curl -sSL https://andrewtheguy.github.io/tunnel-rs/install.sh | bash
 irm https://andrewtheguy.github.io/tunnel-rs/install.ps1 | iex
 ```
 
+> **Note:** The quick install scripts install `tunnel-rs` (iroh mode only). For nostr/manual modes, download `tunnel-rs-ice` from [GitHub releases](https://github.com/andrewtheguy/tunnel-rs/releases) or build from source.
+
 <details>
 <summary>Advanced installation options</summary>
 
@@ -139,8 +141,6 @@ irm https://andrewtheguy.github.io/tunnel-rs/install.ps1 | iex -Args 20251210172
 ```
 
 </details>
-
-> **Note:** The quick install scripts install `tunnel-rs` (iroh mode only). For nostr/manual modes, download `tunnel-rs-ice` from [GitHub releases](https://github.com/andrewtheguy/tunnel-rs/releases) or build from source.
 
 ### VPN Mode (`tunnel-rs-vpn`)
 
