@@ -60,13 +60,13 @@ routes = [
 # Reconnection Behavior (Optional)
 # ============================================================================
 
-# Disable auto-reconnect on connection loss (default: false)
-# When false, client will automatically reconnect if the server restarts
-# or the connection is lost. When true, client exits on first disconnection.
-# no_reconnect = false
+# Enable auto-reconnect on connection loss (default: true)
+# When true, client will automatically reconnect if the server restarts
+# or the connection is lost. When false, client exits on first disconnection.
+# auto_reconnect = true
 
 # Maximum reconnect attempts (omit or comment out for unlimited)
-# Only applies when no_reconnect = false
+# Only applies when auto_reconnect = true
 # Must be a positive integer (1 or greater)
 # max_reconnect_attempts = 5
 

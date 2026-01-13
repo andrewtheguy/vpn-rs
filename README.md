@@ -1102,7 +1102,8 @@ ping 10.0.0.1
 | `--auth-token` | required | Authentication token |
 | `--auth-token-file` | - | Path to file containing token |
 | `--route` | - | Additional CIDRs to route through VPN (repeatable) |
-| `--no-reconnect` | false | Disable auto-reconnect (exit on first disconnection) |
+| `--auto-reconnect` | true | Enable auto-reconnect on connection loss |
+| `--no-auto-reconnect` | - | Disable auto-reconnect (exit on first disconnection) |
 | `--max-reconnect-attempts` | unlimited | Maximum reconnect attempts (unlimited if not specified) |
 
 ## Split Tunneling

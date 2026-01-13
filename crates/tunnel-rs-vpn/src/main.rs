@@ -127,16 +127,16 @@ enum Command {
         #[arg(long = "route")]
         routes: Vec<String>,
 
-        /// Enable auto-reconnect (override config's no_reconnect = true)
-        #[arg(long, conflicts_with = "no_reconnect")]
-        reconnect: bool,
+        /// Enable auto-reconnect (override config's auto_reconnect = false)
+        #[arg(long, conflicts_with = "no_auto_reconnect")]
+        auto_reconnect: bool,
 
         /// Disable auto-reconnect (exit on first disconnection)
-        #[arg(long, conflicts_with = "reconnect")]
-        no_reconnect: bool,
+        #[arg(long, conflicts_with = "auto_reconnect")]
+        no_auto_reconnect: bool,
 
-        /// Maximum reconnect attempts (omit for unlimited)
-        #[arg(long, conflicts_with = "no_reconnect")]
+        /// Maximum reconnect attempts (unlimited if not specified)
+        #[arg(long, conflicts_with = "no_auto_reconnect")]
         max_reconnect_attempts: Option<NonZeroU32>,
     },
     /// Generate a new private key for persistent server identity
@@ -261,8 +261,8 @@ async fn main() -> Result<()> {
             auth_token,
             auth_token_file,
             routes,
-            reconnect,
-            no_reconnect,
+            auto_reconnect,
+            no_auto_reconnect,
             max_reconnect_attempts,
         } => {
             // Load config file if specified
@@ -274,14 +274,14 @@ async fn main() -> Result<()> {
             }
 
             // Convert mutually exclusive flags to Option<bool>
-            // --reconnect => Some(false), --no-reconnect => Some(true), neither => None
+            // --auto-reconnect => Some(true), --no-auto-reconnect => Some(false), neither => None
             debug_assert!(
-                !(reconnect && no_reconnect),
-                "reconnect and no_reconnect must not both be set"
+                !(auto_reconnect && no_auto_reconnect),
+                "auto_reconnect and no_auto_reconnect must not both be set"
             );
-            let no_reconnect_opt = match (reconnect, no_reconnect) {
-                (true, false) => Some(false),  // --reconnect: enable reconnect
-                (false, true) => Some(true),   // --no-reconnect: disable reconnect
+            let auto_reconnect_opt = match (auto_reconnect, no_auto_reconnect) {
+                (true, false) => Some(true),   // --auto-reconnect: enable reconnect
+                (false, true) => Some(false),  // --no-auto-reconnect: disable reconnect
                 (false, false) => None,        // neither: use config/default
                 (true, true) => unreachable!("clap conflicts_with prevents both flags"),
             };
@@ -299,7 +299,7 @@ async fn main() -> Result<()> {
                     routes,
                     relay_urls,
                     dns_server,
-                    no_reconnect_opt,
+                    auto_reconnect_opt,
                     max_reconnect_attempts,
                 )
                 .build()?;
@@ -458,15 +458,15 @@ async fn run_vpn_client(resolved: ResolvedVpnClientConfig) -> Result<()> {
         .map_err(|e| anyhow::anyhow!("Failed to create VPN client: {}", e))?;
 
     // Connect with or without auto-reconnect
-    if resolved.no_reconnect {
-        log::info!("Auto-reconnect disabled, single connection attempt");
+    if resolved.auto_reconnect {
         client
-            .connect(&endpoint)
+            .run_with_reconnect(&endpoint, resolved.max_reconnect_attempts)
             .await
             .map_err(|e| anyhow::anyhow!("VPN connection error: {}", e))
     } else {
+        log::info!("Auto-reconnect disabled, single connection attempt");
         client
-            .run_with_reconnect(&endpoint, resolved.max_reconnect_attempts)
+            .connect(&endpoint)
             .await
             .map_err(|e| anyhow::anyhow!("VPN connection error: {}", e))
     }
