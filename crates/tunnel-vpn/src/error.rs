@@ -5,6 +5,7 @@ use thiserror::Error;
 
 /// VPN-specific errors.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum VpnError {
     /// TUN device creation failed.
     #[error("TUN device error: {0}")]
