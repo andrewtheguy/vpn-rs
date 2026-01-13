@@ -222,9 +222,22 @@ impl VpnClient {
         })?;
 
         // Extract IPv6 info (optional, for dual-stack)
-        let assigned_ip6 = response.assigned_ip6;
-        let network6 = response.network6;
-        let server_ip6 = response.server_ip6;
+        // All three must be present together or all absent for consistency
+        let (assigned_ip6, network6, server_ip6) = match (
+            response.assigned_ip6,
+            response.network6,
+            response.server_ip6,
+        ) {
+            (Some(ip), Some(net), Some(gw)) => (Some(ip), Some(net), Some(gw)),
+            (None, None, None) => (None, None, None),
+            _ => {
+                return Err(VpnError::Signaling(
+                    "Server response has incomplete IPv6 configuration: \
+                     assigned_ip6, network6, and server_ip6 must all be present or all absent"
+                        .into(),
+                ));
+            }
+        };
 
         // Close handshake stream (best-effort, handshake already completed)
         if let Err(e) = send.finish() {

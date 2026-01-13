@@ -894,6 +894,10 @@ impl VpnServerConfig {
             validate_vpn_network(network, iroh.server_ip.as_deref(), "iroh")?;
 
             // Validate IPv6 network CIDR and server_ip6 (optional)
+            // Ensure server_ip6 is not orphaned without network6
+            if iroh.server_ip6.is_some() && iroh.network6.is_none() {
+                anyhow::bail!("[iroh] 'server_ip6' requires 'network6' to be set.");
+            }
             if let Some(ref network6) = iroh.network6 {
                 validate_vpn_network6(network6, iroh.server_ip6.as_deref(), "iroh")?;
             }
