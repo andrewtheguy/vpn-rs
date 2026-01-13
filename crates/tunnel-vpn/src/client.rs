@@ -7,7 +7,7 @@
 //! NAT traversal automatically.
 
 use crate::config::VpnClientConfig;
-use crate::device::{add_routes, RouteGuard, TunConfig, TunDevice};
+use crate::device::{add_routes, add_routes6, Route6Guard, RouteGuard, TunConfig, TunDevice};
 use crate::error::{VpnError, VpnResult};
 use crate::keys::{WgKeyPair, WgPublicKey};
 use crate::lock::VpnLock;
@@ -16,11 +16,11 @@ use crate::signaling::{
     MAX_HANDSHAKE_SIZE, VPN_ALPN,
 };
 use crate::tunnel::{PacketResult, WgTunnel, WgTunnelBuilder};
-use ipnet::Ipv4Net;
+use ipnet::{Ipv4Net, Ipv6Net};
 use iroh::endpoint::{RecvStream, SendStream};
 use iroh::{Endpoint, EndpointId};
 use rand::Rng;
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::num::NonZeroU32;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -47,15 +47,22 @@ pub struct VpnClient {
 }
 
 /// Information received from the VPN server after successful handshake.
+#[non_exhaustive]
 pub struct ServerInfo {
     /// Server's WireGuard public key.
     pub wg_public_key: WgPublicKey,
-    /// Assigned VPN IP for this client.
+    /// Assigned VPN IP for this client (IPv4).
     pub assigned_ip: Ipv4Addr,
-    /// VPN network CIDR.
+    /// VPN network CIDR (IPv4).
     pub network: Ipv4Net,
-    /// Server's VPN IP (gateway).
+    /// Server's VPN IP (gateway, IPv4).
     pub server_ip: Ipv4Addr,
+    /// Assigned IPv6 VPN address for this client (optional, for dual-stack).
+    pub assigned_ip6: Option<Ipv6Addr>,
+    /// IPv6 VPN network CIDR (optional, for dual-stack).
+    pub network6: Option<Ipv6Net>,
+    /// Server's IPv6 VPN address (gateway, optional).
+    pub server_ip6: Option<Ipv6Addr>,
 }
 
 impl VpnClient {
@@ -113,16 +120,34 @@ impl VpnClient {
         log::info!("  Assigned IP: {}", server_info.assigned_ip);
         log::info!("  Network: {}", server_info.network);
         log::info!("  Gateway: {}", server_info.server_ip);
+        if let Some(ip6) = server_info.assigned_ip6 {
+            log::info!("  Assigned IPv6: {}", ip6);
+        }
+        if let Some(net6) = server_info.network6 {
+            log::info!("  Network6: {}", net6);
+        }
+        if let Some(gw6) = server_info.server_ip6 {
+            log::info!("  Gateway6: {}", gw6);
+        }
 
         // Create TUN device
         let tun_device = self.create_tun_device(&server_info)?;
 
-        // Add custom routes through the VPN (guard ensures cleanup on drop)
+        // Add custom IPv4 routes through the VPN (guard ensures cleanup on drop)
         let _route_guard: Option<RouteGuard> = if !self.config.routes.is_empty() {
             Some(add_routes(tun_device.name(), &self.config.routes).await?)
         } else {
             None
         };
+
+        // Add custom IPv6 routes through the VPN (guard ensures cleanup on drop)
+        // Only add IPv6 routes if server provided IPv6 and client has routes6 configured
+        let _route6_guard: Option<Route6Guard> =
+            if server_info.assigned_ip6.is_some() && !self.config.routes6.is_empty() {
+                Some(add_routes6(tun_device.name(), &self.config.routes6).await?)
+            } else {
+                None
+            };
 
         // Open data stream for WireGuard packets
         let (wg_send, wg_recv) = connection.open_bi().await.map_err(|e| {
@@ -146,6 +171,9 @@ impl VpnClient {
         log::info!("VPN tunnel established!");
         log::info!("  TUN device: {}", tun_device.name());
         log::info!("  Client IP: {}", server_info.assigned_ip);
+        if let Some(ip6) = server_info.assigned_ip6 {
+            log::info!("  Client IPv6: {}", ip6);
+        }
 
         // Run the VPN packet loop (tunneled over iroh)
         self.run_vpn_loop(tun_device, tunnel, wg_send, wg_recv).await
@@ -180,7 +208,7 @@ impl VpnClient {
             return Err(VpnError::AuthenticationFailed(reason));
         }
 
-        // Extract server info
+        // Extract server info (IPv4 required)
         let wg_public_key = response.wg_public_key.ok_or_else(|| {
             VpnError::Signaling("Server response missing WG public key".into())
         })?;
@@ -194,6 +222,24 @@ impl VpnClient {
             VpnError::Signaling("Server response missing server IP".into())
         })?;
 
+        // Extract IPv6 info (optional, for dual-stack)
+        // All three must be present together or all absent for consistency
+        let (assigned_ip6, network6, server_ip6) = match (
+            response.assigned_ip6,
+            response.network6,
+            response.server_ip6,
+        ) {
+            (Some(ip), Some(net), Some(gw)) => (Some(ip), Some(net), Some(gw)),
+            (None, None, None) => (None, None, None),
+            _ => {
+                return Err(VpnError::Config(
+                    "Server response has incomplete IPv6 configuration: \
+                     assigned_ip6, network6, and server_ip6 must all be present or all absent"
+                        .into(),
+                ));
+            }
+        };
+
         // Close handshake stream (best-effort, handshake already completed)
         if let Err(e) = send.finish() {
             log::debug!("Failed to finish handshake stream: {}", e);
@@ -203,17 +249,27 @@ impl VpnClient {
             assigned_ip,
             network,
             server_ip,
+            assigned_ip6,
+            network6,
+            server_ip6,
         })
     }
 
     /// Create and configure the TUN device.
     fn create_tun_device(&self, server_info: &ServerInfo) -> VpnResult<TunDevice> {
-        let tun_config = TunConfig::new(
+        let mut tun_config = TunConfig::new(
             server_info.assigned_ip,
             server_info.network.netmask(),
             server_info.server_ip,
         )
         .with_mtu(self.config.mtu);
+
+        // Add IPv6 configuration if server provided it
+        if let (Some(assigned_ip6), Some(network6)) =
+            (server_info.assigned_ip6, server_info.network6)
+        {
+            tun_config = tun_config.with_ipv6(assigned_ip6, network6.prefix_len())?;
+        }
 
         TunDevice::create(tun_config)
     }

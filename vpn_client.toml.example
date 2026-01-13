@@ -57,6 +57,21 @@ routes = [
 ]
 
 # ============================================================================
+# IPv6 Routing (Optional)
+# ============================================================================
+# IPv6 routes are only used if the server provides IPv6 configuration.
+# If the server has network6 configured, you can route IPv6 traffic through
+# the VPN tunnel.
+
+# IPv6 CIDRs to route through the VPN
+# Examples:
+#   - Full tunnel (all IPv6): ["::/0"]
+#   - Split tunnel (specific networks): ["2001:db8::/32", "fd00::/8"]
+# routes6 = [
+#     "::/0",  # Full tunnel - route all IPv6 traffic through VPN
+# ]
+
+# ============================================================================
 # Reconnection Behavior (Optional)
 # ============================================================================
 
