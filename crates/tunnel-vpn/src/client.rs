@@ -233,7 +233,7 @@ impl VpnClient {
         let send_timers = wg_send.clone();
 
         // Spawn outbound task (TUN -> WireGuard -> iroh stream)
-        let outbound_handle = tokio::spawn(async move {
+        let mut outbound_handle = tokio::spawn(async move {
             let mut read_buf = vec![0u8; buffer_size];
             let mut write_buf = Vec::with_capacity(4 + MAX_WG_PACKET_SIZE);
             loop {
@@ -273,7 +273,7 @@ impl VpnClient {
         });
 
         // Spawn inbound task (iroh stream -> WireGuard -> TUN)
-        let inbound_handle = tokio::spawn(async move {
+        let mut inbound_handle = tokio::spawn(async move {
             let mut len_buf = [0u8; 4];
             let mut data_buf = vec![0u8; MAX_WG_PACKET_SIZE];
             let mut write_buf = Vec::with_capacity(4 + MAX_WG_PACKET_SIZE);
@@ -332,7 +332,7 @@ impl VpnClient {
         });
 
         // Spawn timer task
-        let timer_handle = tokio::spawn(async move {
+        let mut timer_handle = tokio::spawn(async move {
             let mut write_buf = Vec::with_capacity(4 + MAX_WG_PACKET_SIZE);
             loop {
                 tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
@@ -361,21 +361,59 @@ impl VpnClient {
             }
         });
 
-        // Wait for any task to complete (or error)
-        let reason = tokio::select! {
-            _ = outbound_handle => {
-                "outbound task ended (TUN read failed or stream write failed)"
+        // Wait for any task to complete (or error), then clean up all tasks
+        let (first_task, first_result, remaining) = tokio::select! {
+            result = &mut outbound_handle => {
+                ("outbound", result, vec![("inbound", inbound_handle), ("timer", timer_handle)])
             }
-            _ = inbound_handle => {
-                "inbound task ended (stream read failed)"
+            result = &mut inbound_handle => {
+                ("inbound", result, vec![("outbound", outbound_handle), ("timer", timer_handle)])
             }
-            _ = timer_handle => {
-                "timer task ended"
+            result = &mut timer_handle => {
+                ("timer", result, vec![("outbound", outbound_handle), ("inbound", inbound_handle)])
             }
         };
 
+        // Abort remaining tasks to ensure they stop
+        for (_, handle) in &remaining {
+            handle.abort();
+        }
+
+        // Await all remaining handles to ensure cleanup (aborted tasks return Cancelled)
+        let mut all_results = vec![(first_task, first_result)];
+        for (name, handle) in remaining {
+            all_results.push((name, handle.await));
+        }
+
+        // Build comprehensive reason from all task results
+        let mut reasons = Vec::new();
+        for (name, result) in &all_results {
+            match result {
+                Ok(()) => {
+                    // Task completed normally (broke out of loop)
+                    reasons.push(format!("{} task ended", name));
+                }
+                Err(e) if e.is_cancelled() => {
+                    // Expected for aborted tasks, don't include in reason
+                }
+                Err(e) if e.is_panic() => {
+                    reasons.push(format!("{} task panicked: {}", name, e));
+                }
+                Err(e) => {
+                    reasons.push(format!("{} task failed: {}", name, e));
+                }
+            }
+        }
+
+        let reason = if reasons.is_empty() {
+            "all tasks cancelled".to_string()
+        } else {
+            reasons.join("; ")
+        };
+        log::debug!("VPN loop ended: {}", reason);
+
         // Any task ending means connection is lost
-        Err(VpnError::ConnectionLost(reason.to_string()))
+        Err(VpnError::ConnectionLost(reason))
     }
 
     /// Connect to the VPN server with automatic reconnection on failure.
