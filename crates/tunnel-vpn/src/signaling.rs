@@ -333,4 +333,23 @@ mod tests {
             assert!(err.to_string().contains(&format!("0x{:02x}", invalid)));
         }
     }
+
+    #[test]
+    fn test_frame_wireguard_packet() {
+        let payload = b"hello wireguard";
+        let buf = frame_wireguard_packet(payload).unwrap();
+
+        // Total length: 1 (type) + 4 (length) + payload
+        assert_eq!(buf.len(), 1 + 4 + payload.len());
+
+        // First byte is message type
+        assert_eq!(buf[0], DataMessageType::WireGuard.as_byte());
+
+        // Next 4 bytes are big-endian length
+        let len_bytes = (payload.len() as u32).to_be_bytes();
+        assert_eq!(&buf[1..5], &len_bytes);
+
+        // Trailing bytes are the payload
+        assert_eq!(&buf[5..], payload);
+    }
 }
