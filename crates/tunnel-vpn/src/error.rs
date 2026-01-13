@@ -1,5 +1,6 @@
 //! Error types for the VPN module.
 
+use std::num::NonZeroU32;
 use thiserror::Error;
 
 /// VPN-specific errors.
@@ -43,7 +44,7 @@ pub enum VpnError {
 
     /// Maximum reconnection attempts exceeded.
     #[error("Max reconnection attempts ({0}) exceeded")]
-    MaxReconnectAttemptsExceeded(u32),
+    MaxReconnectAttemptsExceeded(NonZeroU32),
 }
 
 impl VpnError {

@@ -12,6 +12,7 @@
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
+use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 
 // ============================================================================
@@ -180,8 +181,8 @@ pub struct VpnClientIrohConfig {
     /// Disable auto-reconnect on connection loss
     #[serde(default)]
     pub no_reconnect: bool,
-    /// Maximum reconnect attempts (0 = unlimited)
-    pub max_reconnect_attempts: Option<u32>,
+    /// Maximum reconnect attempts (None = unlimited)
+    pub max_reconnect_attempts: Option<NonZeroU32>,
     /// Shared configuration fields
     #[serde(flatten)]
     pub shared: VpnIrohSharedConfig,
@@ -1241,7 +1242,7 @@ pub struct ResolvedVpnClientConfig {
     pub relay_urls: Vec<String>,
     pub dns_server: Option<String>,
     pub no_reconnect: bool,
-    pub max_reconnect_attempts: u32,
+    pub max_reconnect_attempts: Option<NonZeroU32>,
 }
 
 /// Builder for VPN client configuration with layered overrides.
@@ -1256,7 +1257,7 @@ pub struct VpnClientConfigBuilder {
     relay_urls: Option<Vec<String>>,
     dns_server: Option<String>,
     no_reconnect: Option<bool>,
-    max_reconnect_attempts: Option<u32>,
+    max_reconnect_attempts: Option<NonZeroU32>,
 }
 
 impl VpnClientConfigBuilder {
@@ -1272,7 +1273,7 @@ impl VpnClientConfigBuilder {
         self.routes = Some(vec![]);
         self.relay_urls = Some(vec![]);
         self.no_reconnect = Some(false);
-        self.max_reconnect_attempts = Some(0); // 0 = unlimited
+        // max_reconnect_attempts defaults to None (unlimited)
         self
     }
 
@@ -1326,7 +1327,7 @@ impl VpnClientConfigBuilder {
         relay_urls: Vec<String>,
         dns_server: Option<String>,
         no_reconnect: bool,
-        max_reconnect_attempts: Option<u32>,
+        max_reconnect_attempts: Option<NonZeroU32>,
     ) -> Self {
         if server_node_id.is_some() {
             self.server_node_id = server_node_id;
@@ -1411,7 +1412,7 @@ impl VpnClientConfigBuilder {
             relay_urls: self.relay_urls.unwrap_or_default(),
             dns_server: self.dns_server,
             no_reconnect: self.no_reconnect.unwrap_or(false),
-            max_reconnect_attempts: self.max_reconnect_attempts.unwrap_or(0),
+            max_reconnect_attempts: self.max_reconnect_attempts,
         })
     }
 }

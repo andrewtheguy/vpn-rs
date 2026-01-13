@@ -20,6 +20,7 @@ use iroh::endpoint::{RecvStream, SendStream};
 use iroh::{Endpoint, EndpointId};
 use rand::Rng;
 use std::net::{Ipv4Addr, SocketAddr};
+use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
@@ -424,11 +425,11 @@ impl VpnClient {
     ///
     /// # Arguments
     /// * `endpoint` - The iroh endpoint to use for connections
-    /// * `max_attempts` - Maximum reconnection attempts (0 = unlimited)
+    /// * `max_attempts` - Maximum reconnection attempts (None = unlimited)
     pub async fn run_with_reconnect(
         &self,
         endpoint: &Endpoint,
-        max_attempts: u32,
+        max_attempts: Option<NonZeroU32>,
     ) -> VpnResult<()> {
         let mut attempt = 0u32;
 
@@ -448,13 +449,12 @@ impl VpnClient {
                     return Ok(());
                 }
                 Err(e) if e.is_recoverable() => {
-                    // Check max attempts (0 = unlimited)
-                    if max_attempts > 0 && attempt >= max_attempts {
-                        log::error!(
-                            "Max reconnection attempts ({}) exceeded",
-                            max_attempts
-                        );
-                        return Err(VpnError::MaxReconnectAttemptsExceeded(max_attempts));
+                    // Check max attempts (None = unlimited)
+                    if let Some(max) = max_attempts {
+                        if attempt >= max.get() {
+                            log::error!("Max reconnection attempts ({}) exceeded", max);
+                            return Err(VpnError::MaxReconnectAttemptsExceeded(max));
+                        }
                     }
 
                     // Calculate backoff delay
@@ -463,8 +463,8 @@ impl VpnClient {
                         "Connection lost ({}), reconnecting in {:.1}s{}",
                         e,
                         delay.as_secs_f64(),
-                        if max_attempts > 0 {
-                            format!(" (attempt {}/{})", attempt, max_attempts)
+                        if let Some(max) = max_attempts {
+                            format!(" (attempt {}/{})", attempt, max)
                         } else {
                             String::new()
                         }

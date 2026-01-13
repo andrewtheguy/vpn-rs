@@ -65,9 +65,10 @@ routes = [
 # or the connection is lost. When true, client exits on first disconnection.
 # no_reconnect = false
 
-# Maximum reconnect attempts (0 = unlimited, default: 0)
+# Maximum reconnect attempts (omit or comment out for unlimited)
 # Only applies when no_reconnect = false
-# max_reconnect_attempts = 0
+# Must be a positive integer (1 or greater)
+# max_reconnect_attempts = 5
 
 # ============================================================================
 # Relay and Discovery (Optional)

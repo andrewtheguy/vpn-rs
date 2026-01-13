@@ -10,6 +10,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use ipnet::Ipv4Net;
 use std::net::Ipv4Addr;
+use std::num::NonZeroU32;
 use std::path::PathBuf;
 
 use tunnel_common::config::{
@@ -130,9 +131,9 @@ enum Command {
         #[arg(long)]
         no_reconnect: bool,
 
-        /// Maximum reconnect attempts (0 = unlimited, default: 0)
-        #[arg(long, default_value = "0")]
-        max_reconnect_attempts: u32,
+        /// Maximum reconnect attempts (omit for unlimited)
+        #[arg(long)]
+        max_reconnect_attempts: Option<NonZeroU32>,
     },
     /// Generate a new private key for persistent server identity
     ///
@@ -281,11 +282,7 @@ async fn main() -> Result<()> {
                     relay_urls,
                     dns_server,
                     no_reconnect,
-                    if max_reconnect_attempts > 0 {
-                        Some(max_reconnect_attempts)
-                    } else {
-                        None
-                    },
+                    max_reconnect_attempts,
                 )
                 .build()?;
 
