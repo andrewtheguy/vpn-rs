@@ -578,8 +578,8 @@ graph TB
     subgraph "IPv6 Pool (Optional)"
         A6[Network: fd00::/64]
         B6[Server IP: fd00::1]
-        C6[Available: fd00::2 - ...]
-        D6[Allocated Set<br/>one /128 per client]
+        C6[Available: fd00::2 onwards]
+        D6[Allocated Set<br/>one IPv6 per client]
     end
 
     subgraph "Allocation"
@@ -615,7 +615,7 @@ graph TB
     style D6 fill:#BBDEFB
 ```
 
-When `network6` is configured, each client receives both an IPv4 and IPv6 address. The IPv6 pool works identically to the IPv4 pool, with each client getting a single /128 address.
+When `network6` is configured, each client receives both an IPv4 and IPv6 address. The IPv6 pool works identically to the IPv4 pool, with each client getting a single /128 address. Unlike IPv4, a /64 network provides an effectively unlimited address space (~18 quintillion addresses), so pool exhaustion is not a practical concern for IPv6.
 
 ### Platform-Specific Details
 
