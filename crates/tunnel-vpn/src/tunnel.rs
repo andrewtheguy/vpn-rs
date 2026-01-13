@@ -168,7 +168,11 @@ impl WgTunnel {
                     break;
                 }
                 TunnResult::Err(e) => {
-                    results.push(PacketResult::Error(format!("Timer error: {:?}", e)));
+                    // ConnectionExpired means handshake failed for 90 seconds
+                    results.push(PacketResult::Error(format!(
+                        "WireGuard session expired (handshake failed): {:?}",
+                        e
+                    )));
                     break;
                 }
             }

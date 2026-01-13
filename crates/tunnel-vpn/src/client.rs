@@ -336,7 +336,7 @@ impl VpnClient {
         // Spawn timer task
         let mut timer_handle = tokio::spawn(async move {
             let mut write_buf = Vec::with_capacity(4 + MAX_WG_PACKET_SIZE);
-            loop {
+            'timer_loop: loop {
                 tokio::time::sleep(Duration::from_millis(100)).await;
                 let mut tunnel = tunnel_timers.lock().await;
                 let results = tunnel.update_timers();
@@ -355,7 +355,10 @@ impl VpnClient {
                             }
                         }
                         PacketResult::Error(e) => {
-                            log::warn!("Timer error: {}", e);
+                            // Timer errors indicate WireGuard tunnel failure (e.g., ConnectionExpired
+                            // after 90 seconds of failed handshakes). Exit to trigger reconnection.
+                            log::error!("WireGuard tunnel error: {}", e);
+                            break 'timer_loop;
                         }
                         _ => {}
                     }
