@@ -629,6 +629,96 @@ graph TB
     style F fill:#FFF9C4
 ```
 
+### Auto-Reconnect and Connection Health
+
+VPN mode includes automatic reconnection when the WireGuard tunnel fails. This handles scenarios like server restarts, network changes, or WireGuard session expiration.
+
+**Configuration:**
+- `auto_reconnect = true` (default): Automatically reconnect on connection loss
+- `auto_reconnect = false`: Exit on first disconnection
+- `max_reconnect_attempts`: Limit total attempts (unlimited if not set)
+
+```mermaid
+graph TB
+    subgraph "Connection Health Monitoring"
+        A[WireGuard Timers<br/>100ms interval]
+        B[Keepalive Packets<br/>default 25s]
+        C[Rekey Handshake<br/>every 120s]
+    end
+
+    subgraph "Failure Detection"
+        D[Rekey Timeout<br/>5s per attempt]
+        E[Session Expiration<br/>90s of failures]
+        F[Connection Lost<br/>trigger reconnect]
+    end
+
+    subgraph "Recovery"
+        G[Exponential Backoff<br/>1s → 60s max]
+        H[Reconnect Attempt]
+        I[Re-establish Tunnel]
+    end
+
+    A --> B
+    A --> C
+    C --> D
+    D -->|repeated failures| E
+    E --> F
+    F --> G
+    G --> H
+    H --> I
+
+    style E fill:#FFCCBC
+    style F fill:#FFF9C4
+    style I fill:#C8E6C9
+```
+
+**WireGuard Session Expiration:**
+
+The boringtun library manages WireGuard handshake state. When rekey fails:
+1. `REKEY_TIMEOUT` warning logged every 5 seconds
+2. After 90 seconds of failures, `ConnectionExpired` error returned
+3. Timer task detects error and exits VPN loop
+4. `run_with_reconnect` handles reconnection with backoff
+
+```mermaid
+sequenceDiagram
+    participant T as Timer Task
+    participant WG as WireGuard (boringtun)
+    participant VPN as VPN Loop
+    participant RC as Reconnect Logic
+
+    loop Every 100ms
+        T->>WG: update_timers()
+        WG-->>T: PacketResult::WriteToNetwork (handshake init)
+    end
+
+    Note over WG: Handshake responses not received
+    WG->>WG: Log REKEY_TIMEOUT (5s)
+    WG->>WG: Retry handshake
+
+    Note over WG: After 90s of failures
+    WG-->>T: PacketResult::Error (ConnectionExpired)
+    T->>T: Log error, exit loop
+
+    T-->>VPN: Task ended
+    VPN-->>RC: VpnError::ConnectionLost
+
+    alt auto_reconnect = true
+        RC->>RC: Calculate backoff delay
+        RC->>RC: Wait (1s, 2s, 4s... up to 60s)
+        RC->>VPN: Reconnect
+    else auto_reconnect = false
+        RC->>RC: Exit with error
+    end
+```
+
+**Reconnection Backoff:**
+- Base delay: 1 second
+- Exponential growth: 1s → 2s → 4s → 8s → 16s → 32s → 60s
+- Maximum delay: 60 seconds
+- Jitter: 0-500ms added to prevent thundering herd
+- Counter reset: Resets to 0 after successful tunnel operation
+
 ---
 
 ## manual Mode
