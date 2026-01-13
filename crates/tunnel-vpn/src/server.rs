@@ -593,7 +593,13 @@ impl VpnServer {
                     Ok(PacketResult::WriteToNetwork(data)) => {
                         // Send WireGuard response back to client atomically
                         drop(tunnel);
-                        let buf = frame_wireguard_packet(&data);
+                        let buf = match frame_wireguard_packet(&data) {
+                            Ok(b) => b,
+                            Err(e) => {
+                                log::warn!("Failed to frame packet for {}: {}", assigned_ip, e);
+                                continue;
+                            }
+                        };
                         let mut send = send_inbound.lock().await;
                         if let Err(e) = send.write_all(&buf).await {
                             log::warn!("Failed to send response to {}: {}", assigned_ip, e);
@@ -618,7 +624,13 @@ impl VpnServer {
                 for result in results {
                     match result {
                         PacketResult::WriteToNetwork(data) => {
-                            let buf = frame_wireguard_packet(&data);
+                            let buf = match frame_wireguard_packet(&data) {
+                                Ok(b) => b,
+                                Err(e) => {
+                                    log::warn!("Failed to frame timer packet: {}", e);
+                                    continue;
+                                }
+                            };
                             let mut send = wg_send.lock().await;
                             if let Err(e) = send.write_all(&buf).await {
                                 log::warn!("Failed to send timer packet: {}", e);
@@ -701,7 +713,13 @@ impl VpnServer {
             match tunnel.encapsulate(packet) {
                 Ok(PacketResult::WriteToNetwork(data)) => {
                     // Send encrypted packet to client via iroh stream atomically
-                    let buf = frame_wireguard_packet(&data);
+                    let buf = match frame_wireguard_packet(&data) {
+                        Ok(b) => b,
+                        Err(e) => {
+                            log::warn!("Failed to frame packet for {}: {}", dest_ip, e);
+                            continue;
+                        }
+                    };
                     let mut send = client.send_stream.lock().await;
                     if let Err(e) = send.write_all(&buf).await {
                         log::warn!("Failed to send to client {}: {}", dest_ip, e);

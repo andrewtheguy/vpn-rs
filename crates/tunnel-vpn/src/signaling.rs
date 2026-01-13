@@ -229,13 +229,17 @@ impl From<DataMessageType> for u8 {
 ///
 /// This is the standard framing for WireGuard packets on the multiplexed data stream.
 /// The returned buffer can be passed directly to `write_all()`.
+///
+/// Returns an error if the packet exceeds `u32::MAX` bytes (matching `write_message` behavior).
 #[inline]
-pub fn frame_wireguard_packet(data: &[u8]) -> Vec<u8> {
+pub fn frame_wireguard_packet(data: &[u8]) -> VpnResult<Vec<u8>> {
+    let len = u32::try_from(data.len())
+        .map_err(|_| VpnError::Signaling(format!("Packet too large: {} bytes", data.len())))?;
     let mut buf = Vec::with_capacity(1 + 4 + data.len());
     buf.push(DataMessageType::WireGuard.as_byte());
-    buf.extend_from_slice(&(data.len() as u32).to_be_bytes());
+    buf.extend_from_slice(&len.to_be_bytes());
     buf.extend_from_slice(data);
-    buf
+    Ok(buf)
 }
 
 #[cfg(test)]
