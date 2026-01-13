@@ -468,7 +468,14 @@ impl Drop for RouteGuard {
 #[cfg(target_os = "macos")]
 fn configure_tun_ipv6(tun_name: &str, addr: Ipv6Addr, prefix_len: u8) -> VpnResult<()> {
     let output = std::process::Command::new("ifconfig")
-        .args([tun_name, "inet6", &format!("{}/{}", addr, prefix_len)])
+        .args([
+            tun_name,
+            "inet6",
+            "add",
+            &addr.to_string(),
+            "prefixlen",
+            &prefix_len.to_string(),
+        ])
         .output()
         .map_err(|e| VpnError::TunDevice(format!("Failed to configure IPv6: {}", e)))?;
 

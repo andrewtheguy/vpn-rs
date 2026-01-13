@@ -306,6 +306,23 @@ fn validate_cidr(cidr: &str) -> Result<()> {
     Ok(())
 }
 
+/// Validate that a string is a valid IPv6-only CIDR network.
+fn validate_ipv6_cidr(cidr: &str) -> Result<()> {
+    let net = cidr.parse::<ipnet::IpNet>().with_context(|| {
+        format!(
+            "Invalid CIDR network '{}'. Expected IPv6 format: fd00::/64 or ::/0",
+            cidr
+        )
+    })?;
+    match net {
+        ipnet::IpNet::V6(_) => Ok(()),
+        ipnet::IpNet::V4(_) => anyhow::bail!(
+            "CIDR '{}' is IPv4, but IPv6 is required. Expected format: fd00::/64 or ::/0",
+            cidr
+        ),
+    }
+}
+
 /// Validate that a string is a valid tcp:// or udp:// URL with host and port.
 fn validate_tcp_udp_url(value: &str, field_name: &str) -> Result<()> {
     let url = url::Url::parse(value).with_context(|| {
@@ -960,8 +977,8 @@ impl VpnClientConfig {
             // Validate routes6: valid IPv6 CIDR format (optional)
             if let Some(ref routes6) = iroh.routes6 {
                 for route6 in routes6 {
-                    validate_cidr(route6).with_context(|| {
-                        format!("[iroh] Invalid route6 CIDR '{}'", route6)
+                    validate_ipv6_cidr(route6).with_context(|| {
+                        format!("[iroh] Invalid route6 CIDR '{}' (must be IPv6, e.g., ::/0)", route6)
                     })?;
                 }
             }
@@ -1547,11 +1564,11 @@ impl VpnClientConfigBuilder {
                 .with_context(|| format!("Invalid route CIDR '{}' (e.g., 0.0.0.0/0)", route))?;
         }
 
-        // Validate routes6 CIDR format (optional)
+        // Validate routes6 CIDR format (optional, must be IPv6)
         let routes6 = self.routes6.unwrap_or_default();
         for route6 in &routes6 {
-            validate_cidr(route6)
-                .with_context(|| format!("Invalid route6 CIDR '{}' (e.g., ::/0)", route6))?;
+            validate_ipv6_cidr(route6)
+                .with_context(|| format!("Invalid route6 CIDR '{}' (must be IPv6, e.g., ::/0)", route6))?;
         }
 
         // Validate auth_token mutual exclusion
