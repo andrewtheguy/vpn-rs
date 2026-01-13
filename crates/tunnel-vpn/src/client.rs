@@ -533,25 +533,99 @@ impl VpnClientBuilder {
     }
 }
 
+/// Backoff constants for reconnection delay calculation.
+const BACKOFF_BASE_MS: u64 = 1000; // 1 second
+const BACKOFF_MAX_MS: u64 = 60000; // 60 seconds
+const BACKOFF_JITTER_MS: u64 = 500;
+
 /// Calculate exponential backoff delay with jitter.
 ///
 /// Uses exponential backoff: `base * 2^(attempt-1)`, capped at max.
 /// Adds random jitter (0-500ms) to prevent thundering herd.
 /// The cap is applied after adding jitter to ensure the total never exceeds MAX_MS.
 fn calculate_backoff(attempt: u32) -> Duration {
-    const BASE_MS: u64 = 1000; // 1 second
-    const MAX_MS: u64 = 60000; // 60 seconds
-    const JITTER_MS: u64 = 500;
+    calculate_backoff_with_rng(attempt, &mut rand::thread_rng())
+}
 
+/// Calculate exponential backoff delay with a custom RNG.
+///
+/// This is the testable version that accepts an RNG parameter.
+/// Production code should use `calculate_backoff()` which uses `thread_rng()`.
+///
+/// # Arguments
+/// * `attempt` - Current attempt number (1-based)
+/// * `rng` - Random number generator for jitter
+fn calculate_backoff_with_rng(attempt: u32, rng: &mut impl Rng) -> Duration {
     // Exponential backoff: 1s, 2s, 4s, 8s, 16s, 32s, 60s, 60s, ...
     let multiplier = 2_u64.saturating_pow(attempt.saturating_sub(1));
-    let base_delay_ms = BASE_MS.saturating_mul(multiplier);
+    let base_delay_ms = BACKOFF_BASE_MS.saturating_mul(multiplier);
 
     // Add jitter to prevent thundering herd (unbiased via gen_range)
-    let jitter_ms = rand::thread_rng().gen_range(0..JITTER_MS);
+    let jitter_ms = rng.gen_range(0..BACKOFF_JITTER_MS);
 
     // Cap total delay (base + jitter) to MAX_MS
-    let total_ms = base_delay_ms.saturating_add(jitter_ms).min(MAX_MS);
+    let total_ms = base_delay_ms.saturating_add(jitter_ms).min(BACKOFF_MAX_MS);
 
     Duration::from_millis(total_ms)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rand::SeedableRng;
+    use rand_chacha::ChaCha8Rng;
+
+    #[test]
+    fn test_backoff_exponential_growth() {
+        // Use seeded RNG for deterministic tests
+        let mut rng = ChaCha8Rng::seed_from_u64(12345);
+
+        // Attempt 1: base = 1000ms
+        let d1 = calculate_backoff_with_rng(1, &mut rng);
+        assert!(d1.as_millis() >= 1000 && d1.as_millis() < 1500);
+
+        // Attempt 2: base = 2000ms
+        let d2 = calculate_backoff_with_rng(2, &mut rng);
+        assert!(d2.as_millis() >= 2000 && d2.as_millis() < 2500);
+
+        // Attempt 3: base = 4000ms
+        let d3 = calculate_backoff_with_rng(3, &mut rng);
+        assert!(d3.as_millis() >= 4000 && d3.as_millis() < 4500);
+
+        // Attempt 6: base = 32000ms
+        let d6 = calculate_backoff_with_rng(6, &mut rng);
+        assert!(d6.as_millis() >= 32000 && d6.as_millis() < 32500);
+    }
+
+    #[test]
+    fn test_backoff_capped_at_max() {
+        let mut rng = ChaCha8Rng::seed_from_u64(12345);
+
+        // Attempt 7+: base = 64000ms, but capped to 60000ms
+        let d7 = calculate_backoff_with_rng(7, &mut rng);
+        assert!(d7.as_millis() <= BACKOFF_MAX_MS as u128);
+
+        // Very high attempt still capped
+        let d100 = calculate_backoff_with_rng(100, &mut rng);
+        assert!(d100.as_millis() <= BACKOFF_MAX_MS as u128);
+    }
+
+    #[test]
+    fn test_backoff_jitter_within_range() {
+        // Run multiple times with same seed to verify jitter is applied
+        for seed in 0..10 {
+            let mut rng = ChaCha8Rng::seed_from_u64(seed);
+            let d = calculate_backoff_with_rng(1, &mut rng);
+            // Base is 1000ms, jitter is 0-499ms
+            assert!(d.as_millis() >= 1000 && d.as_millis() < 1500);
+        }
+    }
+
+    #[test]
+    fn test_backoff_attempt_zero_treated_as_one() {
+        let mut rng = ChaCha8Rng::seed_from_u64(12345);
+        // Attempt 0 uses saturating_sub(1) = 0, so multiplier = 2^0 = 1
+        let d0 = calculate_backoff_with_rng(0, &mut rng);
+        assert!(d0.as_millis() >= 1000 && d0.as_millis() < 1500);
+    }
 }

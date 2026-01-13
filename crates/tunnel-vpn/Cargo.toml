@@ -49,3 +49,7 @@ futures = "0.3"
 
 # File locking (safe wrapper around flock/LockFile)
 fs2 = "0.4"
+
+[dev-dependencies]
+# Deterministic RNG for testing
+rand_chacha = "0.3"
