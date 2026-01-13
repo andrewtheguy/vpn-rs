@@ -1083,6 +1083,7 @@ ping 10.0.0.1
 | `--network`, `-n` | 10.0.0.0/24 | VPN network CIDR. Server gets .1, clients get subsequent IPs |
 | `--server-ip` | First IP in network | Override server's VPN IP address |
 | `--mtu` | 1420 | MTU for VPN packets |
+| `--keepalive-secs` | 25 | WireGuard keepalive interval |
 | `--secret-file` | - | Path to secret key for persistent iroh identity |
 | `--relay-url` | public | Custom relay server URL(s), repeatable |
 | `--dns-server` | public | Custom DNS server URL for peer discovery |
@@ -1101,6 +1102,8 @@ ping 10.0.0.1
 | `--auth-token` | required | Authentication token |
 | `--auth-token-file` | - | Path to file containing token |
 | `--route` | - | Additional CIDRs to route through VPN (repeatable) |
+| `--no-reconnect` | false | Disable auto-reconnect (exit on first disconnection) |
+| `--max-reconnect-attempts` | 0 | Maximum reconnect attempts (0 = unlimited) |
 
 ## Split Tunneling
 
