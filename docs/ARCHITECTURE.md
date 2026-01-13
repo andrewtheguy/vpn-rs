@@ -426,7 +426,7 @@ VPN mode provides full network tunneling using WireGuard encryption via the bori
 graph TB
     subgraph "Client Side"
         A[Applications]
-        B[TUN Device<br/>tun0: 10.0.0.2]
+        B[TUN Device<br/>tun0: 10.0.0.2<br/>fd00::2]
         C[WireGuard Tunnel<br/>boringtun]
         D[iroh Endpoint]
     end
@@ -438,7 +438,7 @@ graph TB
     subgraph "Server Side"
         F[iroh Endpoint]
         G[WireGuard Tunnel<br/>boringtun]
-        H[TUN Device<br/>tun0: 10.0.0.1]
+        H[TUN Device<br/>tun0: 10.0.0.1<br/>fd00::1]
         I[Target Network<br/>LAN / Internet]
     end
 
@@ -455,6 +455,13 @@ graph TB
     style G fill:#4CAF50
     style E fill:#BBDEFB
 ```
+
+**IPv6 Dual-Stack Support:**
+
+VPN mode supports optional IPv6 alongside IPv4. When `network6` is configured on the server, clients receive both an IPv4 address and an IPv6 address. This enables:
+- Native IPv6 connectivity through the VPN tunnel
+- Dual-stack applications (IPv4 and IPv6 simultaneously)
+- Backwards compatibility (IPv4-only configs continue to work)
 
 ### Key Components
 
@@ -561,37 +568,54 @@ graph TB
 
 ```mermaid
 graph TB
-    subgraph "IP Pool (Server)"
+    subgraph "IPv4 Pool (Server)"
         A[Network: 10.0.0.0/24]
         B[Server IP: 10.0.0.1]
         C[Available: 10.0.0.2 - 10.0.0.254]
         D[Allocated Set<br/>tracks in-use IPs]
     end
 
+    subgraph "IPv6 Pool (Optional)"
+        A6[Network: fd00::/64]
+        B6[Server IP: fd00::1]
+        C6[Available: fd00::2 - ...]
+        D6[Allocated Set<br/>one /128 per client]
+    end
+
     subgraph "Allocation"
         E[Client connects]
-        F[Find first available IP]
+        F[Find first available IPv4]
+        F6[Find first available IPv6]
         G[Mark as allocated]
         H[Return to client]
     end
 
     subgraph "Release"
         I[Client disconnects]
-        J[Return IP to pool]
+        J[Return IPs to pools]
     end
 
     E --> F
+    E -.->|if IPv6 enabled| F6
     F --> C
+    F6 --> C6
     F --> G
+    F6 --> G
     G --> D
+    G -.-> D6
     G --> H
 
     I --> J
     J --> D
+    J -.-> D6
 
     style B fill:#FFE0B2
+    style B6 fill:#FFE0B2
     style D fill:#BBDEFB
+    style D6 fill:#BBDEFB
 ```
+
+When `network6` is configured, each client receives both an IPv4 and IPv6 address. The IPv6 pool works identically to the IPv4 pool, with each client getting a single /128 address.
 
 ### Platform-Specific Details
 

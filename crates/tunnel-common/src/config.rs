@@ -318,11 +318,14 @@ fn validate_ipv6_cidr(cidr: &str) -> Result<()> {
 }
 
 /// Generate context message for invalid route6 CIDR errors.
-fn route6_context(route: &str) -> String {
-    format!(
-        "Invalid route6 CIDR '{}' (must be IPv6, e.g., ::/0)",
-        route
-    )
+///
+/// If `section` is provided, prefixes the message with `[section]`.
+fn route6_context(route: &str, section: Option<&str>) -> String {
+    let msg = format!("Invalid route6 CIDR '{}' (must be IPv6, e.g., ::/0)", route);
+    match section {
+        Some(s) => format!("[{}] {}", s, msg),
+        None => msg,
+    }
 }
 
 /// Validate that a string is a valid tcp:// or udp:// URL with host and port.
@@ -984,7 +987,7 @@ impl VpnClientConfig {
             if let Some(ref routes6) = iroh.routes6 {
                 for route6 in routes6 {
                     validate_ipv6_cidr(route6)
-                        .with_context(|| format!("[iroh] {}", route6_context(route6)))?;
+                        .with_context(|| route6_context(route6, Some("iroh")))?;
                 }
             }
 
@@ -1580,7 +1583,7 @@ impl VpnClientConfigBuilder {
         // Validate routes6 CIDR format (optional, must be IPv6)
         let routes6 = self.routes6.unwrap_or_default();
         for route6 in &routes6 {
-            validate_ipv6_cidr(route6).with_context(|| route6_context(route6))?;
+            validate_ipv6_cidr(route6).with_context(|| route6_context(route6, Some("config")))?;
         }
 
         // Validate auth_token mutual exclusion

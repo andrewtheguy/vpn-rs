@@ -23,6 +23,20 @@ network = "10.0.0.0/24"
 # server_ip = "10.0.0.1"
 
 # ============================================================================
+# IPv6 Dual-Stack (Optional)
+# ============================================================================
+# Enable IPv6 alongside IPv4. When configured, clients receive both an IPv4
+# and an IPv6 address. IPv6 is optional - IPv4-only configs continue to work.
+
+# IPv6 VPN network CIDR (optional, enables dual-stack)
+# Clients will be assigned IPs from this network (one /128 per client)
+# network6 = "fd00::/64"
+
+# Server's IPv6 VPN address (optional, defaults to first IP in network6)
+# This becomes the IPv6 gateway for connected clients
+# server_ip6 = "fd00::1"
+
+# ============================================================================
 # Performance Tuning
 # ============================================================================
 
