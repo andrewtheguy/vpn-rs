@@ -18,6 +18,7 @@ use crate::tunnel::{PacketResult, WgTunnel, WgTunnelBuilder};
 use ipnet::Ipv4Net;
 use iroh::endpoint::{RecvStream, SendStream};
 use iroh::{Endpoint, EndpointId};
+use rand::Rng;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
@@ -525,6 +526,7 @@ impl VpnClientBuilder {
 ///
 /// Uses exponential backoff: `base * 2^(attempt-1)`, capped at max.
 /// Adds random jitter (0-500ms) to prevent thundering herd.
+/// The cap is applied after adding jitter to ensure the total never exceeds MAX_MS.
 fn calculate_backoff(attempt: u32) -> Duration {
     const BASE_MS: u64 = 1000; // 1 second
     const MAX_MS: u64 = 60000; // 60 seconds
@@ -532,10 +534,13 @@ fn calculate_backoff(attempt: u32) -> Duration {
 
     // Exponential backoff: 1s, 2s, 4s, 8s, 16s, 32s, 60s, 60s, ...
     let multiplier = 2_u64.saturating_pow(attempt.saturating_sub(1));
-    let delay_ms = BASE_MS.saturating_mul(multiplier).min(MAX_MS);
+    let base_delay_ms = BASE_MS.saturating_mul(multiplier);
 
-    // Add jitter to prevent thundering herd
-    let jitter_ms = rand::random::<u64>() % JITTER_MS;
+    // Add jitter to prevent thundering herd (unbiased via gen_range)
+    let jitter_ms = rand::thread_rng().gen_range(0..JITTER_MS);
 
-    Duration::from_millis(delay_ms + jitter_ms)
+    // Cap total delay (base + jitter) to MAX_MS
+    let total_ms = base_delay_ms.saturating_add(jitter_ms).min(MAX_MS);
+
+    Duration::from_millis(total_ms)
 }
