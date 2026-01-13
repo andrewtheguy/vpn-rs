@@ -12,7 +12,8 @@ use crate::device::{TunConfig, TunDevice, TunWriter};
 use crate::error::{VpnError, VpnResult};
 use crate::keys::{WgKeyPair, WgPublicKey};
 use crate::signaling::{
-    read_message, write_message, VpnHandshake, VpnHandshakeResponse, MAX_HANDSHAKE_SIZE,
+    frame_wireguard_packet, read_message, write_message, DataMessageType, VpnHandshake,
+    VpnHandshakeResponse, MAX_HANDSHAKE_SIZE,
 };
 use crate::tunnel::{PacketResult, WgTunnel, WgTunnelBuilder};
 use boringtun::x25519::PublicKey;
@@ -21,7 +22,7 @@ use iroh::endpoint::SendStream;
 use iroh::{Endpoint, EndpointId};
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
 
@@ -30,6 +31,9 @@ const MAX_WG_PACKET_SIZE: usize = 65536;
 
 /// State for a connected VPN client.
 struct ClientState {
+    /// Unique session ID for this connection.
+    /// Used to detect stale cleanup operations when a client reconnects quickly.
+    session_id: u64,
     /// Client's assigned VPN IP.
     #[allow(dead_code)]
     assigned_ip: Ipv4Addr,
@@ -140,12 +144,15 @@ pub struct VpnServer {
     ip_pool: Arc<RwLock<IpPool>>,
     /// Connected clients (by endpoint ID).
     clients: Arc<RwLock<HashMap<EndpointId, ClientState>>>,
-    /// Reverse lookup: IP address -> endpoint ID.
-    ip_to_endpoint: Arc<RwLock<HashMap<Ipv4Addr, EndpointId>>>,
+    /// Reverse lookup: IP address -> (endpoint ID, session ID).
+    /// Session ID is used to detect stale cleanup operations.
+    ip_to_endpoint: Arc<RwLock<HashMap<Ipv4Addr, (EndpointId, u64)>>>,
     /// TUN device for VPN traffic.
     tun_device: Option<TunDevice>,
     /// Atomic counter for active connections (prevents race in max_clients check).
     active_connections: AtomicUsize,
+    /// Session ID counter for unique connection identification.
+    next_session_id: AtomicU64,
 }
 
 impl VpnServer {
@@ -172,6 +179,7 @@ impl VpnServer {
             ip_to_endpoint: Arc::new(RwLock::new(HashMap::new())),
             tun_device: None,
             active_connections: AtomicUsize::new(0),
+            next_session_id: AtomicU64::new(1),
         })
     }
 
@@ -412,8 +420,13 @@ impl VpnServer {
 
         let wg_send = Arc::new(Mutex::new(wg_send));
 
+        // Generate unique session ID for this connection
+        // Used to detect stale cleanup when same client reconnects quickly
+        let session_id = self.next_session_id.fetch_add(1, Ordering::Relaxed);
+
         // Store client state (including send stream for TUN handler to use)
         let client_state = ClientState {
+            session_id,
             assigned_ip,
             wg_public_key: peer_public_key,
             endpoint_id: remote_id,
@@ -422,7 +435,10 @@ impl VpnServer {
         };
 
         self.clients.write().await.insert(remote_id, client_state);
-        self.ip_to_endpoint.write().await.insert(assigned_ip, remote_id);
+        self.ip_to_endpoint
+            .write()
+            .await
+            .insert(assigned_ip, (remote_id, session_id));
 
         // Handle client data
         let clients = self.clients.clone();
@@ -445,10 +461,51 @@ impl VpnServer {
 
         log::info!("Client {} disconnected", remote_id);
 
-        // Cleanup
-        clients.write().await.remove(&remote_id);
-        ip_to_endpoint.write().await.remove(&assigned_ip);
-        ip_pool.write().await.release(&remote_id);
+        // Cleanup - use session_id to detect stale cleanup from rapid reconnection.
+        // Only remove entries if they still belong to this specific connection, and
+        // ensure that clients and IP mappings are updated atomically with respect
+        // to each other to avoid races with rapid reconnects.
+        let mut endpoint_to_release = None;
+        {
+            let mut clients_map = clients.write().await;
+            let mut ip_map = ip_to_endpoint.write().await;
+
+            let removed_client = clients_map.remove(&remote_id);
+            let removed_ip = ip_map.remove(&assigned_ip);
+
+            match (removed_client, removed_ip) {
+                // Both entries existed; only keep them removed if both session_ids match
+                (Some(client_state), Some((endpoint_id, ip_session_id))) => {
+                    if client_state.session_id == session_id && ip_session_id == session_id {
+                        // Both belong to this session; remember endpoint for IP release
+                        endpoint_to_release = Some(endpoint_id);
+                        // Keep both entries removed
+                    } else {
+                        // One or both entries belong to a different session; restore both
+                        clients_map.insert(remote_id, client_state);
+                        ip_map.insert(assigned_ip, (endpoint_id, ip_session_id));
+                    }
+                }
+                // Only client entry existed
+                (Some(client_state), None) => {
+                    if client_state.session_id != session_id {
+                        // Belongs to a different session; restore it
+                        clients_map.insert(remote_id, client_state);
+                    }
+                    // If session_id matches, it's safe to drop this stale client entry
+                }
+                // Only IP entry existed; restore it to avoid corrupting a different session
+                (None, Some((endpoint_id, ip_session_id))) => {
+                    ip_map.insert(assigned_ip, (endpoint_id, ip_session_id));
+                }
+                // Neither entry existed; nothing to do
+                (None, None) => {}
+            }
+        }
+
+        if let Some(endpoint_id) = endpoint_to_release {
+            ip_pool.write().await.release(&endpoint_id);
+        }
 
         result
     }
@@ -464,17 +521,58 @@ impl VpnServer {
         let tunnel_inbound = tunnel.clone();
         let tunnel_timers = tunnel.clone();
         let send_inbound = wg_send.clone();
+        let send_heartbeat = wg_send.clone();
 
         // Spawn inbound task (iroh stream -> WireGuard -> TUN)
         let inbound_handle = tokio::spawn(async move {
+            let mut type_buf = [0u8; 1];
             let mut len_buf = [0u8; 4];
             let mut data_buf = vec![0u8; MAX_WG_PACKET_SIZE];
+            let mut write_buf = Vec::with_capacity(1 + 4 + MAX_WG_PACKET_SIZE);
             loop {
-                // Read length prefix
-                match wg_recv.read_exact(&mut len_buf).await {
+                // Read message type
+                match wg_recv.read_exact(&mut type_buf).await {
                     Ok(()) => {}
                     Err(e) => {
                         log::debug!("Client {} stream closed: {}", assigned_ip, e);
+                        break;
+                    }
+                }
+
+                let msg_type = match DataMessageType::from_byte(type_buf[0]) {
+                    Some(t) => t,
+                    None => {
+                        log::error!("Unknown message type from {}: 0x{:02x}, closing connection", assigned_ip, type_buf[0]);
+                        break;
+                    }
+                };
+
+                match msg_type {
+                    DataMessageType::HeartbeatPing => {
+                        // Respond with pong
+                        log::trace!("Heartbeat ping from {}", assigned_ip);
+                        let mut send = send_heartbeat.lock().await;
+                        if let Err(e) = send.write_all(&[DataMessageType::HeartbeatPong.as_byte()]).await {
+                            log::warn!("Failed to send heartbeat pong to {}: {}", assigned_ip, e);
+                            break;
+                        }
+                        continue;
+                    }
+                    DataMessageType::HeartbeatPong => {
+                        // Server shouldn't receive pongs, ignore
+                        log::trace!("Unexpected heartbeat pong from {}", assigned_ip);
+                        continue;
+                    }
+                    DataMessageType::WireGuard => {
+                        // Continue to read WireGuard packet below
+                    }
+                }
+
+                // Read length prefix for WireGuard packet
+                match wg_recv.read_exact(&mut len_buf).await {
+                    Ok(()) => {}
+                    Err(e) => {
+                        log::debug!("Failed to read WG packet length from {}: {}", assigned_ip, e);
                         break;
                     }
                 }
@@ -508,11 +606,12 @@ impl VpnServer {
                     Ok(PacketResult::WriteToNetwork(data)) => {
                         // Send WireGuard response back to client atomically
                         drop(tunnel);
+                        if let Err(e) = frame_wireguard_packet(&mut write_buf, &data) {
+                            log::warn!("Failed to frame packet for {}: {}", assigned_ip, e);
+                            continue;
+                        }
                         let mut send = send_inbound.lock().await;
-                        let mut buf = Vec::with_capacity(4 + data.len());
-                        buf.extend_from_slice(&(data.len() as u32).to_be_bytes());
-                        buf.extend_from_slice(&data);
-                        if let Err(e) = send.write_all(&buf).await {
+                        if let Err(e) = send.write_all(&write_buf).await {
                             log::warn!("Failed to send response to {}: {}", assigned_ip, e);
                         }
                     }
@@ -526,6 +625,7 @@ impl VpnServer {
 
         // Spawn timer task for WireGuard keepalives
         let timer_handle = tokio::spawn(async move {
+            let mut write_buf = Vec::with_capacity(1 + 4 + MAX_WG_PACKET_SIZE);
             loop {
                 tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
                 let mut tunnel = tunnel_timers.lock().await;
@@ -535,12 +635,12 @@ impl VpnServer {
                 for result in results {
                     match result {
                         PacketResult::WriteToNetwork(data) => {
+                            if let Err(e) = frame_wireguard_packet(&mut write_buf, &data) {
+                                log::warn!("Failed to frame timer packet: {}", e);
+                                continue;
+                            }
                             let mut send = wg_send.lock().await;
-                            // Write length-prefixed packet atomically
-                            let mut buf = Vec::with_capacity(4 + data.len());
-                            buf.extend_from_slice(&(data.len() as u32).to_be_bytes());
-                            buf.extend_from_slice(&data);
-                            if let Err(e) = send.write_all(&buf).await {
+                            if let Err(e) = send.write_all(&write_buf).await {
                                 log::warn!("Failed to send timer packet: {}", e);
                                 return;
                             }
@@ -569,6 +669,7 @@ impl VpnServer {
 
         let buffer_size = tun_reader.buffer_size();
         let mut buf = vec![0u8; buffer_size];
+        let mut write_buf = Vec::with_capacity(1 + 4 + buffer_size);
 
         loop {
             // Read packet from TUN device
@@ -595,7 +696,7 @@ impl VpnServer {
             // Look up which client owns this destination IP
             let endpoint_id = {
                 let ip_map = self.ip_to_endpoint.read().await;
-                ip_map.get(&dest_ip).copied()
+                ip_map.get(&dest_ip).map(|&(id, _)| id)
             };
 
             let endpoint_id = match endpoint_id {
@@ -621,11 +722,12 @@ impl VpnServer {
             match tunnel.encapsulate(packet) {
                 Ok(PacketResult::WriteToNetwork(data)) => {
                     // Send encrypted packet to client via iroh stream atomically
+                    if let Err(e) = frame_wireguard_packet(&mut write_buf, &data) {
+                        log::warn!("Failed to frame packet for {}: {}", dest_ip, e);
+                        continue;
+                    }
                     let mut send = client.send_stream.lock().await;
-                    let mut buf = Vec::with_capacity(4 + data.len());
-                    buf.extend_from_slice(&(data.len() as u32).to_be_bytes());
-                    buf.extend_from_slice(&data);
-                    if let Err(e) = send.write_all(&buf).await {
+                    if let Err(e) = send.write_all(&write_buf).await {
                         log::warn!("Failed to send to client {}: {}", dest_ip, e);
                         continue;
                     }

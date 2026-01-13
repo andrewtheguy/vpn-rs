@@ -1088,12 +1088,34 @@ pub struct ResolvedVpnServerConfig {
 /// Builder for VPN server configuration with layered overrides.
 ///
 /// Usage:
-/// ```ignore
-/// let config = VpnServerConfigBuilder::new()
-///     .apply_defaults()
-///     .apply_config(toml_config.as_ref())
-///     .apply_cli(network, server_ip, mtu, ...)
-///     .build()?;
+/// ```rust
+/// use tunnel_common::config::{VpnServerConfigBuilder, VpnServerIrohConfig};
+///
+/// fn main() -> anyhow::Result<()> {
+///     let toml_config = VpnServerIrohConfig {
+///         network: Some("10.0.0.0/24".to_string()),
+///         ..Default::default()
+///     };
+///
+///     let config = VpnServerConfigBuilder::new()
+///         .apply_defaults()
+///         .apply_config(Some(&toml_config))
+///         .apply_cli(
+///             None,
+///             Some("10.0.0.1".to_string()),
+///             Some(1400),
+///             None,
+///             None,
+///             vec![],
+///             None,
+///             vec!["token-1".to_string()],
+///             None,
+///         )
+///         .build()?;
+///
+///     assert_eq!(config.network, "10.0.0.0/24");
+///     Ok(())
+/// }
 /// ```
 #[derive(Default)]
 pub struct VpnServerConfigBuilder {

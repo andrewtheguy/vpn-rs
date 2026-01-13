@@ -12,7 +12,8 @@ use crate::error::{VpnError, VpnResult};
 use crate::keys::{WgKeyPair, WgPublicKey};
 use crate::lock::VpnLock;
 use crate::signaling::{
-    read_message, write_message, VpnHandshake, VpnHandshakeResponse, MAX_HANDSHAKE_SIZE, VPN_ALPN,
+    read_message, write_message, DataMessageType, VpnHandshake, VpnHandshakeResponse,
+    MAX_HANDSHAKE_SIZE, VPN_ALPN,
 };
 use crate::tunnel::{PacketResult, WgTunnel, WgTunnelBuilder};
 use ipnet::Ipv4Net;
@@ -21,12 +22,19 @@ use iroh::{Endpoint, EndpointId};
 use rand::Rng;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::num::NonZeroU32;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 
 /// Maximum WireGuard packet size (MTU + overhead).
 const MAX_WG_PACKET_SIZE: usize = 65536;
+
+/// Heartbeat ping interval (how often client sends ping).
+const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
+
+/// Heartbeat timeout (max time to wait for pong before triggering reconnection).
+const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// VPN client instance.
 pub struct VpnClient {
@@ -234,10 +242,16 @@ impl VpnClient {
         let send_inbound = wg_send.clone();
         let send_timers = wg_send.clone();
 
+        // Track last heartbeat pong received (as millis since start_time for atomic access)
+        let start_time = Instant::now();
+        let last_pong = Arc::new(AtomicU64::new(start_time.elapsed().as_millis() as u64));
+        let last_pong_inbound = last_pong.clone();
+        let last_pong_heartbeat = last_pong.clone();
+
         // Spawn outbound task (TUN -> WireGuard -> iroh stream)
         let mut outbound_handle = tokio::spawn(async move {
             let mut read_buf = vec![0u8; buffer_size];
-            let mut write_buf = Vec::with_capacity(4 + MAX_WG_PACKET_SIZE);
+            let mut write_buf = Vec::with_capacity(1 + 4 + MAX_WG_PACKET_SIZE);
             loop {
                 match tun_reader.read(&mut read_buf).await {
                     Ok(n) if n > 0 => {
@@ -248,8 +262,9 @@ impl VpnClient {
 
                         match result {
                             Ok(PacketResult::WriteToNetwork(data)) => {
-                                // Copy data into write_buf before acquiring send lock
+                                // Message format: type byte + length + data
                                 write_buf.clear();
+                                write_buf.push(DataMessageType::WireGuard.as_byte());
                                 write_buf.extend_from_slice(&(data.len() as u32).to_be_bytes());
                                 write_buf.extend_from_slice(&data);
 
@@ -275,13 +290,54 @@ impl VpnClient {
         });
 
         // Spawn inbound task (iroh stream -> WireGuard -> TUN)
+        let inbound_start_time = start_time;
         let mut inbound_handle = tokio::spawn(async move {
+            let mut type_buf = [0u8; 1];
             let mut len_buf = [0u8; 4];
             let mut data_buf = vec![0u8; MAX_WG_PACKET_SIZE];
-            let mut write_buf = Vec::with_capacity(4 + MAX_WG_PACKET_SIZE);
+            let mut write_buf = Vec::with_capacity(1 + 4 + MAX_WG_PACKET_SIZE);
             loop {
                 let mut recv = wg_recv.lock().await;
-                // Read length prefix
+                // Read message type
+                match recv.read_exact(&mut type_buf).await {
+                    Ok(()) => {}
+                    Err(e) => {
+                        log::error!("Failed to read message type: {}", e);
+                        break;
+                    }
+                }
+
+                let msg_type = match DataMessageType::from_byte(type_buf[0]) {
+                    Some(t) => t,
+                    None => {
+                        // Unknown message type - cannot determine framing, must disconnect
+                        // to avoid stream desynchronization
+                        log::error!("Unknown message type: 0x{:02x}, disconnecting", type_buf[0]);
+                        break;
+                    }
+                };
+
+                match msg_type {
+                    DataMessageType::HeartbeatPong => {
+                        // Update last pong time
+                        drop(recv);
+                        let now = inbound_start_time.elapsed().as_millis() as u64;
+                        last_pong_inbound.store(now, Ordering::Relaxed);
+                        log::trace!("Heartbeat pong received");
+                        continue;
+                    }
+                    DataMessageType::HeartbeatPing => {
+                        // Client shouldn't receive pings, ignore
+                        drop(recv);
+                        log::trace!("Unexpected heartbeat ping received");
+                        continue;
+                    }
+                    DataMessageType::WireGuard => {
+                        // Continue to read WireGuard packet below
+                    }
+                }
+
+                // Read length prefix for WireGuard packet
                 match recv.read_exact(&mut len_buf).await {
                     Ok(()) => {}
                     Err(e) => {
@@ -315,10 +371,12 @@ impl VpnClient {
                         }
                     }
                     Ok(PacketResult::WriteToNetwork(data)) => {
-                        // Need to send response back through stream atomically (reuse buffer)
+                        // Need to send response back through stream atomically
+                        // Message format: type byte + length + data
                         drop(tunnel);
                         let mut send = send_inbound.lock().await;
                         write_buf.clear();
+                        write_buf.push(DataMessageType::WireGuard.as_byte());
                         write_buf.extend_from_slice(&(data.len() as u32).to_be_bytes());
                         write_buf.extend_from_slice(&data);
                         if let Err(e) = send.write_all(&write_buf).await {
@@ -335,7 +393,7 @@ impl VpnClient {
 
         // Spawn timer task
         let mut timer_handle = tokio::spawn(async move {
-            let mut write_buf = Vec::with_capacity(4 + MAX_WG_PACKET_SIZE);
+            let mut write_buf = Vec::with_capacity(1 + 4 + MAX_WG_PACKET_SIZE);
             'timer_loop: loop {
                 tokio::time::sleep(Duration::from_millis(100)).await;
                 let mut tunnel = tunnel_timers.lock().await;
@@ -346,8 +404,9 @@ impl VpnClient {
                     match result {
                         PacketResult::WriteToNetwork(data) => {
                             let mut send = send_timers.lock().await;
-                            // Write length-prefixed packet atomically (reuse buffer)
+                            // Message format: type byte + length + data
                             write_buf.clear();
+                            write_buf.push(DataMessageType::WireGuard.as_byte());
                             write_buf.extend_from_slice(&(data.len() as u32).to_be_bytes());
                             write_buf.extend_from_slice(&data);
                             if let Err(e) = send.write_all(&write_buf).await {
@@ -366,16 +425,53 @@ impl VpnClient {
             }
         });
 
+        // Spawn heartbeat task (sends pings, checks for timeout)
+        let send_heartbeat = wg_send.clone();
+        let mut heartbeat_handle = tokio::spawn(async move {
+            let heartbeat_start = start_time;
+            loop {
+                tokio::time::sleep(HEARTBEAT_INTERVAL).await;
+
+                // Check if we've received a pong recently
+                let now_ms = heartbeat_start.elapsed().as_millis() as u64;
+                let last_pong_ms = last_pong_heartbeat.load(Ordering::Relaxed);
+                let elapsed_ms = now_ms.saturating_sub(last_pong_ms);
+
+                if elapsed_ms > HEARTBEAT_TIMEOUT.as_millis() as u64 {
+                    log::error!(
+                        "Heartbeat timeout: no pong received for {:.1}s (threshold: {:.1}s)",
+                        elapsed_ms as f64 / 1000.0,
+                        HEARTBEAT_TIMEOUT.as_secs_f64()
+                    );
+                    break;
+                }
+
+                // Send ping
+                let mut send = send_heartbeat.lock().await;
+                if let Err(e) = send
+                    .write_all(&[DataMessageType::HeartbeatPing.as_byte()])
+                    .await
+                {
+                    log::warn!("Failed to send heartbeat ping: {}", e);
+                    break;
+                }
+                log::trace!("Heartbeat ping sent");
+            }
+        });
+
         // Wait for any task to complete (or error), then clean up all tasks
         let (first_task, first_result, remaining) = tokio::select! {
             result = &mut outbound_handle => {
-                ("outbound", result, vec![("inbound", inbound_handle), ("timer", timer_handle)])
+                ("outbound", result, vec![("inbound", inbound_handle), ("timer", timer_handle), ("heartbeat", heartbeat_handle)])
             }
             result = &mut inbound_handle => {
-                ("inbound", result, vec![("outbound", outbound_handle), ("timer", timer_handle)])
+                ("inbound", result, vec![("outbound", outbound_handle), ("timer", timer_handle), ("heartbeat", heartbeat_handle)])
             }
             result = &mut timer_handle => {
-                ("timer", result, vec![("outbound", outbound_handle), ("inbound", inbound_handle)])
+                ("timer", result, vec![("outbound", outbound_handle), ("inbound", inbound_handle), ("heartbeat", heartbeat_handle)])
+            }
+            result = &mut heartbeat_handle => {
+                ("heartbeat", result, vec![("outbound", outbound_handle), ("inbound", inbound_handle), ("timer", timer_handle)])
             }
         };
 

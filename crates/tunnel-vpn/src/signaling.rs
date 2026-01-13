@@ -163,6 +163,90 @@ pub async fn read_message<R: tokio::io::AsyncReadExt + Unpin>(
 /// Maximum handshake message size (16 KB).
 pub const MAX_HANDSHAKE_SIZE: usize = 16 * 1024;
 
+/// Message types for the VPN data channel.
+///
+/// The data channel uses a simple framing protocol:
+/// - First byte: message type
+/// - For WireGuard packets: 4-byte big-endian length + packet data
+/// - For heartbeat: no additional payload
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum DataMessageType {
+    /// WireGuard encrypted packet (followed by length-prefixed data).
+    WireGuard = 0x00,
+    /// Heartbeat ping (client -> server).
+    HeartbeatPing = 0x01,
+    /// Heartbeat pong (server -> client).
+    HeartbeatPong = 0x02,
+}
+
+impl DataMessageType {
+    /// Convert from byte value.
+    pub fn from_byte(b: u8) -> Option<Self> {
+        match b {
+            0x00 => Some(Self::WireGuard),
+            0x01 => Some(Self::HeartbeatPing),
+            0x02 => Some(Self::HeartbeatPong),
+            _ => None,
+        }
+    }
+
+    /// Convert to byte value.
+    pub fn as_byte(self) -> u8 {
+        self as u8
+    }
+}
+
+/// Error returned when converting an invalid byte to `DataMessageType`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InvalidMessageType(pub u8);
+
+impl std::fmt::Display for InvalidMessageType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "invalid message type: 0x{:02x}", self.0)
+    }
+}
+
+impl std::error::Error for InvalidMessageType {}
+
+impl TryFrom<u8> for DataMessageType {
+    type Error = InvalidMessageType;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        Self::from_byte(value).ok_or(InvalidMessageType(value))
+    }
+}
+
+impl From<DataMessageType> for u8 {
+    fn from(value: DataMessageType) -> Self {
+        value.as_byte()
+    }
+}
+
+/// Frame a WireGuard packet for transmission on the data channel.
+///
+/// Builds a buffer with the format: `[type: 0x00] [length: 4 bytes BE] [data: N bytes]`
+///
+/// This is the standard framing for WireGuard packets on the multiplexed data stream.
+/// The buffer is cleared and filled with the framed packet, then can be passed to `write_all()`.
+///
+/// # Arguments
+/// * `buf` - Reusable buffer to write into (cleared and resized as needed)
+/// * `data` - The WireGuard packet payload to frame
+///
+/// Returns an error if the packet exceeds `u32::MAX` bytes (matching `write_message` behavior).
+#[inline]
+pub fn frame_wireguard_packet(buf: &mut Vec<u8>, data: &[u8]) -> VpnResult<()> {
+    let len = u32::try_from(data.len())
+        .map_err(|_| VpnError::Signaling(format!("Packet too large: {} bytes", data.len())))?;
+    buf.clear();
+    buf.reserve(1 + 4 + data.len());
+    buf.push(DataMessageType::WireGuard.as_byte());
+    buf.extend_from_slice(&len.to_be_bytes());
+    buf.extend_from_slice(data);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -207,5 +291,71 @@ mod tests {
 
         assert!(!decoded.accepted);
         assert_eq!(decoded.reject_reason, Some("Server full".to_string()));
+    }
+
+    #[test]
+    fn test_data_message_type_roundtrip() {
+        // Test all valid message types: byte -> DataMessageType -> byte
+        for (byte, expected_type) in [
+            (0x00, DataMessageType::WireGuard),
+            (0x01, DataMessageType::HeartbeatPing),
+            (0x02, DataMessageType::HeartbeatPong),
+        ] {
+            // from_byte roundtrip
+            let msg_type = DataMessageType::from_byte(byte).unwrap();
+            assert_eq!(msg_type, expected_type);
+            assert_eq!(msg_type.as_byte(), byte);
+
+            // TryFrom/From trait roundtrip
+            let msg_type: DataMessageType = byte.try_into().unwrap();
+            assert_eq!(msg_type, expected_type);
+            let back: u8 = msg_type.into();
+            assert_eq!(back, byte);
+        }
+    }
+
+    #[test]
+    fn test_data_message_type_invalid_bytes() {
+        // Test that invalid bytes return None from from_byte
+        for invalid in [0x03, 0x04, 0x10, 0x80, 0xFF] {
+            assert!(
+                DataMessageType::from_byte(invalid).is_none(),
+                "from_byte(0x{:02x}) should return None",
+                invalid
+            );
+        }
+    }
+
+    #[test]
+    fn test_data_message_type_try_from_invalid() {
+        // Test that TryFrom returns InvalidMessageType error for invalid bytes
+        for invalid in [0x03, 0x04, 0x10, 0x80, 0xFF] {
+            let result: Result<DataMessageType, _> = invalid.try_into();
+            assert!(result.is_err(), "TryFrom(0x{:02x}) should fail", invalid);
+
+            let err = result.unwrap_err();
+            assert_eq!(err, InvalidMessageType(invalid));
+            assert!(err.to_string().contains(&format!("0x{:02x}", invalid)));
+        }
+    }
+
+    #[test]
+    fn test_frame_wireguard_packet() {
+        let payload = b"hello wireguard";
+        let mut buf = Vec::new();
+        frame_wireguard_packet(&mut buf, payload).unwrap();
+
+        // Total length: 1 (type) + 4 (length) + payload
+        assert_eq!(buf.len(), 1 + 4 + payload.len());
+
+        // First byte is message type
+        assert_eq!(buf[0], DataMessageType::WireGuard.as_byte());
+
+        // Next 4 bytes are big-endian length
+        let len_bytes = (payload.len() as u32).to_be_bytes();
+        assert_eq!(&buf[1..5], &len_bytes);
+
+        // Trailing bytes are the payload
+        assert_eq!(&buf[5..], payload);
     }
 }

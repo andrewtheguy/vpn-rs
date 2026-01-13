@@ -638,39 +638,107 @@ VPN mode includes automatic reconnection when the WireGuard tunnel fails. This h
 - `auto_reconnect = false`: Exit on first disconnection
 - `max_reconnect_attempts`: Limit total attempts (unlimited if not set)
 
+**Health Monitoring Layers:**
+
+The VPN client uses two complementary health monitoring mechanisms:
+
+1. **Application-Level Heartbeat** (fast detection, ~30s)
+   - Client sends ping every 10 seconds
+   - Server responds with pong immediately
+   - Client triggers reconnection if no pong received within 30 seconds
+   - Detects: server restart, IP changes, network partitions, NAT timeout, relay issues
+
+2. **WireGuard-Level Timers** (backup, ~90s)
+   - Keepalives every 25 seconds (configurable)
+   - Rekey handshake attempted every 120 seconds
+   - Session expiration after 90 seconds of continuous handshake failures
+   - Detects: WireGuard-specific issues, key mismatch
+
+**Timing Clarification:**
+- Rekey handshakes occur every 120 seconds during normal operation
+- If a rekey handshake fails, WireGuard retries with exponential backoff
+- After 90 seconds of continuous handshake failures (not 90 seconds after a single failure), the session expires
+- This means the tunnel tolerates temporary disruptions but gives up after prolonged failures
+
+**Interaction Between Layers:**
+- WireGuard keepalives (25s) and application heartbeat timeout (30s) are intentionally close
+- If WireGuard keepalives succeed but application heartbeats fail, this indicates an issue with the QUIC data channel itself (not WireGuard state)
+- The application heartbeat typically detects failures faster because its timeout (30s without a pong) is shorter than WireGuard's session expiration window (~90s of continuous handshake failures).
+- Both heartbeat and WireGuard traffic use the same underlying iroh QUIC connection and traverse it in the same way.
 ```mermaid
 graph TB
-    subgraph "Connection Health Monitoring"
+    subgraph "Application Heartbeat (Fast)"
+        H1[Heartbeat Ping<br/>10s interval]
+        H2[Heartbeat Pong<br/>server response]
+        H3[Timeout Check<br/>30s threshold]
+    end
+
+    subgraph "WireGuard Timers (Backup)"
         A[WireGuard Timers<br/>100ms interval]
         B[Keepalive Packets<br/>default 25s]
         C[Rekey Handshake<br/>every 120s]
     end
 
     subgraph "Failure Detection"
-        D[Rekey Timeout<br/>5s per attempt]
-        E[Session Expiration<br/>90s of failures]
+        D[Heartbeat Timeout<br/>30s no pong]
+        E[Session Expiration<br/>90s continuous failures]
         F[Connection Lost<br/>trigger reconnect]
     end
 
     subgraph "Recovery"
         G[Exponential Backoff<br/>1s → 60s max]
-        H[Reconnect Attempt]
+        HH[Reconnect Attempt]
         I[Re-establish Tunnel]
     end
 
+    H1 --> H2
+    H2 --> H3
+    H3 -->|no pong| D
+    D --> F
+
     A --> B
     A --> C
-    C --> D
-    D -->|repeated failures| E
+    C -->|failures| E
     E --> F
     F --> G
-    G --> H
-    H --> I
+    G --> HH
+    HH --> I
 
+    style D fill:#FFE0B2
     style E fill:#FFCCBC
     style F fill:#FFF9C4
     style I fill:#C8E6C9
 ```
+
+**Application-Level Heartbeat Protocol:**
+
+Heartbeats and WireGuard packets are multiplexed on the same bidirectional QUIC stream (the "data stream" opened after handshake). All messages are prefixed with a 1-byte type discriminator defined in `DataMessageType` (`crates/tunnel-vpn/src/signaling.rs:174`):
+
+```
+Data channel message framing:
+
+  WireGuard packet (type 0x00):
+    [0x00] [4 bytes: length BE u32] [N bytes: encrypted WG packet]
+
+  Heartbeat ping (type 0x01):
+    [0x01]
+
+  Heartbeat pong (type 0x02):
+    [0x02]
+```
+
+**Implementation locations** (search by symbol name; line numbers may shift):
+- Type enum: `DataMessageType` in `signaling.rs`
+- Packet framing: `frame_wireguard_packet()` in `signaling.rs`
+- Client send (outbound): TUN reader task in `client.rs` - calls `frame_wireguard_packet()`
+- Client receive (inbound): inbound reader task in `client.rs` - reads type byte, dispatches via `DataMessageType::from_byte()`
+- Client heartbeat sender: heartbeat task in `client.rs` - sends `HeartbeatPing` byte
+- Server receive: inbound reader task in `server.rs` - reads type byte, responds to pings with `HeartbeatPong`
+- Server send: TUN reader and timer tasks in `server.rs` - call `frame_wireguard_packet()`
+
+**Compatibility note:** This framing was added with the heartbeat feature. Older clients/servers that expect raw length-prefixed WireGuard packets (without the type byte) are incompatible.
+
+This allows fast failure detection (~30 seconds) for common issues like server restarts or network changes, without waiting for WireGuard's 90-second session expiration.
 
 **WireGuard Session Expiration:**
 
