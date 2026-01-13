@@ -663,7 +663,7 @@ The VPN client uses two complementary health monitoring mechanisms:
 **Interaction Between Layers:**
 - WireGuard keepalives (25s) and application heartbeat timeout (30s) are intentionally close
 - If WireGuard keepalives succeed but application heartbeats fail, this indicates an issue with the QUIC data channel itself (not WireGuard state)
-- The application heartbeat typically detects failures faster because it monitors the QUIC transport layer directly, while WireGuard timers monitor tunnel state after packets have traversed the QUIC layer (both heartbeat and WireGuard traffic use the same iroh QUIC connection)
+- The application heartbeat typically detects failures faster because its timeout (30s without a pong) is shorter than WireGuard's session expiration window (~90s of continuous handshake failures); both heartbeat and WireGuard traffic use the same underlying iroh QUIC connection and traverse it in the same way
 
 ```mermaid
 graph TB

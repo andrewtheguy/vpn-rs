@@ -461,31 +461,50 @@ impl VpnServer {
 
         log::info!("Client {} disconnected", remote_id);
 
-        // Cleanup - use session_id to detect stale cleanup from rapid reconnection
-        // Only remove entries if they still belong to this specific connection
+        // Cleanup - use session_id to detect stale cleanup from rapid reconnection.
+        // Only remove entries if they still belong to this specific connection, and
+        // ensure that clients and IP mappings are updated atomically with respect
+        // to each other to avoid races with rapid reconnects.
+        let mut endpoint_to_release = None;
         {
             let mut clients_map = clients.write().await;
-            // Atomically remove and check session_id to avoid TOCTOU race
-            if let Some(state) = clients_map.remove(&remote_id) {
-                // If this entry does not belong to our session, put it back
-                if state.session_id != session_id {
-                    clients_map.insert(remote_id, state);
+            let mut ip_map = ip_to_endpoint.write().await;
+
+            let removed_client = clients_map.remove(&remote_id);
+            let removed_ip = ip_map.remove(&assigned_ip);
+
+            match (removed_client, removed_ip) {
+                // Both entries existed; only keep them removed if both session_ids match
+                (Some(client_state), Some((endpoint_id, ip_session_id))) => {
+                    if client_state.session_id == session_id && ip_session_id == session_id {
+                        // Both belong to this session; remember endpoint for IP release
+                        endpoint_to_release = Some(endpoint_id);
+                        // Keep both entries removed
+                    } else {
+                        // One or both entries belong to a different session; restore both
+                        clients_map.insert(remote_id, client_state);
+                        ip_map.insert(assigned_ip, (endpoint_id, ip_session_id));
+                    }
                 }
+                // Only client entry existed
+                (Some(client_state), None) => {
+                    if client_state.session_id != session_id {
+                        // Belongs to a different session; restore it
+                        clients_map.insert(remote_id, client_state);
+                    }
+                    // If session_id matches, it's safe to drop this stale client entry
+                }
+                // Only IP entry existed; restore it to avoid corrupting a different session
+                (None, Some((endpoint_id, ip_session_id))) => {
+                    ip_map.insert(assigned_ip, (endpoint_id, ip_session_id));
+                }
+                // Neither entry existed; nothing to do
+                (None, None) => {}
             }
         }
-        {
-            // Atomically remove and check session_id to avoid TOCTOU race.
-            // If session matches, release the IP; otherwise put the entry back.
-            let mut ip_map = ip_to_endpoint.write().await;
-            if let Some((removed_endpoint_id, removed_session_id)) = ip_map.remove(&assigned_ip) {
-                if removed_session_id == session_id {
-                    // Session matches - release using the exact endpoint_id from the map
-                    ip_pool.write().await.release(&removed_endpoint_id);
-                } else {
-                    // Entry belongs to a different session, put it back
-                    ip_map.insert(assigned_ip, (removed_endpoint_id, removed_session_id));
-                }
-            }
+
+        if let Some(endpoint_id) = endpoint_to_release {
+            ip_pool.write().await.release(&endpoint_id);
         }
 
         result
@@ -509,6 +528,7 @@ impl VpnServer {
             let mut type_buf = [0u8; 1];
             let mut len_buf = [0u8; 4];
             let mut data_buf = vec![0u8; MAX_WG_PACKET_SIZE];
+            let mut write_buf = Vec::with_capacity(1 + 4 + MAX_WG_PACKET_SIZE);
             loop {
                 // Read message type
                 match wg_recv.read_exact(&mut type_buf).await {
@@ -586,15 +606,12 @@ impl VpnServer {
                     Ok(PacketResult::WriteToNetwork(data)) => {
                         // Send WireGuard response back to client atomically
                         drop(tunnel);
-                        let buf = match frame_wireguard_packet(&data) {
-                            Ok(b) => b,
-                            Err(e) => {
-                                log::warn!("Failed to frame packet for {}: {}", assigned_ip, e);
-                                continue;
-                            }
-                        };
+                        if let Err(e) = frame_wireguard_packet(&mut write_buf, &data) {
+                            log::warn!("Failed to frame packet for {}: {}", assigned_ip, e);
+                            continue;
+                        }
                         let mut send = send_inbound.lock().await;
-                        if let Err(e) = send.write_all(&buf).await {
+                        if let Err(e) = send.write_all(&write_buf).await {
                             log::warn!("Failed to send response to {}: {}", assigned_ip, e);
                         }
                     }
@@ -608,6 +625,7 @@ impl VpnServer {
 
         // Spawn timer task for WireGuard keepalives
         let timer_handle = tokio::spawn(async move {
+            let mut write_buf = Vec::with_capacity(1 + 4 + MAX_WG_PACKET_SIZE);
             loop {
                 tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
                 let mut tunnel = tunnel_timers.lock().await;
@@ -617,15 +635,12 @@ impl VpnServer {
                 for result in results {
                     match result {
                         PacketResult::WriteToNetwork(data) => {
-                            let buf = match frame_wireguard_packet(&data) {
-                                Ok(b) => b,
-                                Err(e) => {
-                                    log::warn!("Failed to frame timer packet: {}", e);
-                                    continue;
-                                }
-                            };
+                            if let Err(e) = frame_wireguard_packet(&mut write_buf, &data) {
+                                log::warn!("Failed to frame timer packet: {}", e);
+                                continue;
+                            }
                             let mut send = wg_send.lock().await;
-                            if let Err(e) = send.write_all(&buf).await {
+                            if let Err(e) = send.write_all(&write_buf).await {
                                 log::warn!("Failed to send timer packet: {}", e);
                                 return;
                             }
@@ -654,6 +669,7 @@ impl VpnServer {
 
         let buffer_size = tun_reader.buffer_size();
         let mut buf = vec![0u8; buffer_size];
+        let mut write_buf = Vec::with_capacity(1 + 4 + buffer_size);
 
         loop {
             // Read packet from TUN device
@@ -706,15 +722,12 @@ impl VpnServer {
             match tunnel.encapsulate(packet) {
                 Ok(PacketResult::WriteToNetwork(data)) => {
                     // Send encrypted packet to client via iroh stream atomically
-                    let buf = match frame_wireguard_packet(&data) {
-                        Ok(b) => b,
-                        Err(e) => {
-                            log::warn!("Failed to frame packet for {}: {}", dest_ip, e);
-                            continue;
-                        }
-                    };
+                    if let Err(e) = frame_wireguard_packet(&mut write_buf, &data) {
+                        log::warn!("Failed to frame packet for {}: {}", dest_ip, e);
+                        continue;
+                    }
                     let mut send = client.send_stream.lock().await;
-                    if let Err(e) = send.write_all(&buf).await {
+                    if let Err(e) = send.write_all(&write_buf).await {
                         log::warn!("Failed to send to client {}: {}", dest_ip, e);
                         continue;
                     }

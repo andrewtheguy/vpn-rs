@@ -243,10 +243,10 @@ impl VpnClient {
         let send_timers = wg_send.clone();
 
         // Track last heartbeat pong received (as millis since start_time for atomic access)
-        let last_pong = Arc::new(AtomicU64::new(0));
+        let start_time = Instant::now();
+        let last_pong = Arc::new(AtomicU64::new(start_time.elapsed().as_millis() as u64));
         let last_pong_inbound = last_pong.clone();
         let last_pong_heartbeat = last_pong.clone();
-        let start_time = Instant::now();
 
         // Spawn outbound task (TUN -> WireGuard -> iroh stream)
         let mut outbound_handle = tokio::spawn(async move {

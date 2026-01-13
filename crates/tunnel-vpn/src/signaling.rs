@@ -228,18 +228,23 @@ impl From<DataMessageType> for u8 {
 /// Builds a buffer with the format: `[type: 0x00] [length: 4 bytes BE] [data: N bytes]`
 ///
 /// This is the standard framing for WireGuard packets on the multiplexed data stream.
-/// The returned buffer can be passed directly to `write_all()`.
+/// The buffer is cleared and filled with the framed packet, then can be passed to `write_all()`.
+///
+/// # Arguments
+/// * `buf` - Reusable buffer to write into (cleared and resized as needed)
+/// * `data` - The WireGuard packet payload to frame
 ///
 /// Returns an error if the packet exceeds `u32::MAX` bytes (matching `write_message` behavior).
 #[inline]
-pub fn frame_wireguard_packet(data: &[u8]) -> VpnResult<Vec<u8>> {
+pub fn frame_wireguard_packet(buf: &mut Vec<u8>, data: &[u8]) -> VpnResult<()> {
     let len = u32::try_from(data.len())
         .map_err(|_| VpnError::Signaling(format!("Packet too large: {} bytes", data.len())))?;
-    let mut buf = Vec::with_capacity(1 + 4 + data.len());
+    buf.clear();
+    buf.reserve(1 + 4 + data.len());
     buf.push(DataMessageType::WireGuard.as_byte());
     buf.extend_from_slice(&len.to_be_bytes());
     buf.extend_from_slice(data);
-    Ok(buf)
+    Ok(())
 }
 
 #[cfg(test)]
@@ -337,7 +342,8 @@ mod tests {
     #[test]
     fn test_frame_wireguard_packet() {
         let payload = b"hello wireguard";
-        let buf = frame_wireguard_packet(payload).unwrap();
+        let mut buf = Vec::new();
+        frame_wireguard_packet(&mut buf, payload).unwrap();
 
         // Total length: 1 (type) + 4 (length) + payload
         assert_eq!(buf.len(), 1 + 4 + payload.len());
