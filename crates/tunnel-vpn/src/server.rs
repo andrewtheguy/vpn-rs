@@ -465,24 +465,25 @@ impl VpnServer {
         // Only remove entries if they still belong to this specific connection
         {
             let mut clients_map = clients.write().await;
-            if clients_map
-                .get(&remote_id)
-                .is_some_and(|c| c.session_id == session_id)
-            {
-                clients_map.remove(&remote_id);
+            // Atomically remove and check session_id to avoid TOCTOU race
+            if let Some(state) = clients_map.remove(&remote_id) {
+                // If this entry does not belong to our session, put it back
+                if state.session_id != session_id {
+                    clients_map.insert(remote_id, state);
+                }
             }
         }
         {
-            // Atomically check session_id, remove from ip_to_endpoint, and release from pool.
-            // This avoids TOCTOU bugs by capturing the endpoint_id from the actual removal.
+            // Atomically remove and check session_id to avoid TOCTOU race.
+            // If session matches, release the IP; otherwise put the entry back.
             let mut ip_map = ip_to_endpoint.write().await;
-            let should_remove = ip_map
-                .get(&assigned_ip)
-                .is_some_and(|&(_, sid)| sid == session_id);
-            if should_remove {
-                if let Some((removed_endpoint_id, _)) = ip_map.remove(&assigned_ip) {
-                    // Release using the exact endpoint_id that was in the map
+            if let Some((removed_endpoint_id, removed_session_id)) = ip_map.remove(&assigned_ip) {
+                if removed_session_id == session_id {
+                    // Session matches - release using the exact endpoint_id from the map
                     ip_pool.write().await.release(&removed_endpoint_id);
+                } else {
+                    // Entry belongs to a different session, put it back
+                    ip_map.insert(assigned_ip, (removed_endpoint_id, removed_session_id));
                 }
             }
         }
