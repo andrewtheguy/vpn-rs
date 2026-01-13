@@ -138,9 +138,11 @@ pub struct VpnIrohSharedConfig {
     pub mtu: Option<u16>,
     /// WireGuard keepalive interval in seconds (10-300, default: 25)
     pub keepalive_secs: Option<u16>,
-    /// Custom relay server URLs
-    #[serde(default)]
-    pub relay_urls: Vec<String>,
+    /// Custom relay server URLs.
+    /// - `None`: not specified (use defaults or CLI)
+    /// - `Some([])`: explicitly cleared (override defaults)
+    /// - `Some([...])`: custom relay URLs
+    pub relay_urls: Option<Vec<String>>,
     /// Custom DNS server URL for peer discovery
     pub dns_server: Option<String>,
 }
@@ -156,9 +158,11 @@ pub struct VpnServerIrohConfig {
     pub server_ip: Option<String>,
     /// Path to secret key file for persistent server identity
     pub secret_file: Option<PathBuf>,
-    /// Authentication tokens
-    #[serde(default)]
-    pub auth_tokens: Vec<String>,
+    /// Authentication tokens.
+    /// - `None`: not specified (use defaults or CLI)
+    /// - `Some([])`: explicitly cleared (no auth required)
+    /// - `Some([...])`: required tokens
+    pub auth_tokens: Option<Vec<String>>,
     /// Path to file containing authentication tokens
     pub auth_tokens_file: Option<PathBuf>,
     /// Shared configuration fields
@@ -175,9 +179,11 @@ pub struct VpnClientIrohConfig {
     pub auth_token: Option<String>,
     /// Path to file containing authentication token
     pub auth_token_file: Option<PathBuf>,
-    /// CIDRs to route through VPN (e.g., ["192.168.1.0/24", "0.0.0.0/0"])
-    #[serde(default)]
-    pub routes: Vec<String>,
+    /// CIDRs to route through VPN (e.g., ["192.168.1.0/24", "0.0.0.0/0"]).
+    /// - `None`: not specified (use defaults or CLI)
+    /// - `Some([])`: explicitly cleared (validation will fail - routes required)
+    /// - `Some([...])`: route CIDRs
+    pub routes: Option<Vec<String>>,
     /// Disable auto-reconnect on connection loss
     #[serde(default)]
     pub no_reconnect: bool,
@@ -808,7 +814,11 @@ impl VpnServerConfig {
 
         if let Some(ref iroh) = self.iroh {
             // Validate auth_tokens mutual exclusion
-            if !iroh.auth_tokens.is_empty() && iroh.auth_tokens_file.is_some() {
+            let has_inline_tokens = iroh
+                .auth_tokens
+                .as_ref()
+                .is_some_and(|t| !t.is_empty());
+            if has_inline_tokens && iroh.auth_tokens_file.is_some() {
                 anyhow::bail!(
                     "[iroh] Use only one of 'auth_tokens' or 'auth_tokens_file'."
                 );
@@ -884,16 +894,18 @@ impl VpnClientConfig {
             }
 
             // Validate routes: at least one required, valid CIDR format
-            if iroh.routes.is_empty() {
-                anyhow::bail!(
-                    "[iroh] At least one route is required.\n\
-                     Example: routes = [\"0.0.0.0/0\"] for full tunnel"
-                );
-            }
-            for route in &iroh.routes {
-                validate_cidr(route).with_context(|| {
-                    format!("[iroh] Invalid route CIDR '{}'", route)
-                })?;
+            if let Some(ref routes) = iroh.routes {
+                if routes.is_empty() {
+                    anyhow::bail!(
+                        "[iroh] At least one route is required.\n\
+                         Example: routes = [\"0.0.0.0/0\"] for full tunnel"
+                    );
+                }
+                for route in routes {
+                    validate_cidr(route).with_context(|| {
+                        format!("[iroh] Invalid route CIDR '{}'", route)
+                    })?;
+                }
             }
 
             // Validate MTU and keepalive ranges
@@ -1110,6 +1122,11 @@ impl VpnServerConfigBuilder {
     }
 
     /// Apply values from TOML config (middle priority).
+    ///
+    /// For `Option<Vec<T>>` fields:
+    /// - `None` in config: don't override (use defaults/CLI)
+    /// - `Some([])` in config: explicitly set to empty (override defaults)
+    /// - `Some([...])` in config: set to these values
     pub fn apply_config(mut self, config: Option<&VpnServerIrohConfig>) -> Self {
         if let Some(cfg) = config {
             if cfg.network.is_some() {
@@ -1127,14 +1144,16 @@ impl VpnServerConfigBuilder {
             if cfg.secret_file.is_some() {
                 self.secret_file = cfg.secret_file.clone();
             }
-            if !cfg.shared.relay_urls.is_empty() {
-                self.relay_urls = Some(cfg.shared.relay_urls.clone());
+            // relay_urls: None = not set, Some([]) = explicitly empty
+            if cfg.shared.relay_urls.is_some() {
+                self.relay_urls = cfg.shared.relay_urls.clone();
             }
             if cfg.shared.dns_server.is_some() {
                 self.dns_server = cfg.shared.dns_server.clone();
             }
-            if !cfg.auth_tokens.is_empty() {
-                self.auth_tokens = Some(cfg.auth_tokens.clone());
+            // auth_tokens: None = not set, Some([]) = explicitly no auth
+            if cfg.auth_tokens.is_some() {
+                self.auth_tokens = cfg.auth_tokens.clone();
             }
             if cfg.auth_tokens_file.is_some() {
                 self.auth_tokens_file = cfg.auth_tokens_file.clone();
@@ -1278,6 +1297,11 @@ impl VpnClientConfigBuilder {
     }
 
     /// Apply values from TOML config (middle priority).
+    ///
+    /// For `Option<Vec<T>>` fields:
+    /// - `None` in config: don't override (use defaults/CLI)
+    /// - `Some([])` in config: explicitly set to empty (override defaults)
+    /// - `Some([...])` in config: set to these values
     pub fn apply_config(mut self, config: Option<&VpnClientIrohConfig>) -> Self {
         if let Some(cfg) = config {
             if cfg.server_node_id.is_some() {
@@ -1295,11 +1319,13 @@ impl VpnClientConfigBuilder {
             if cfg.auth_token_file.is_some() {
                 self.auth_token_file = cfg.auth_token_file.clone();
             }
-            if !cfg.routes.is_empty() {
-                self.routes = Some(cfg.routes.clone());
+            // routes: None = not set, Some([]) = explicitly empty (will fail validation)
+            if cfg.routes.is_some() {
+                self.routes = cfg.routes.clone();
             }
-            if !cfg.shared.relay_urls.is_empty() {
-                self.relay_urls = Some(cfg.shared.relay_urls.clone());
+            // relay_urls: None = not set, Some([]) = explicitly empty
+            if cfg.shared.relay_urls.is_some() {
+                self.relay_urls = cfg.shared.relay_urls.clone();
             }
             if cfg.shared.dns_server.is_some() {
                 self.dns_server = cfg.shared.dns_server.clone();
