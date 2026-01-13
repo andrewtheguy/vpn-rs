@@ -242,10 +242,8 @@ impl VpnClient {
         let send_inbound = wg_send.clone();
         let send_timers = wg_send.clone();
 
-        // Track last heartbeat pong received (as epoch millis for atomic access)
-        let last_pong = Arc::new(AtomicU64::new(
-            Instant::now().elapsed().as_millis() as u64,
-        ));
+        // Track last heartbeat pong received (as millis since start_time for atomic access)
+        let last_pong = Arc::new(AtomicU64::new(0));
         let last_pong_inbound = last_pong.clone();
         let last_pong_heartbeat = last_pong.clone();
         let start_time = Instant::now();

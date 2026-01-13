@@ -223,6 +223,21 @@ impl From<DataMessageType> for u8 {
     }
 }
 
+/// Frame a WireGuard packet for transmission on the data channel.
+///
+/// Builds a buffer with the format: `[type: 0x00] [length: 4 bytes BE] [data: N bytes]`
+///
+/// This is the standard framing for WireGuard packets on the multiplexed data stream.
+/// The returned buffer can be passed directly to `write_all()`.
+#[inline]
+pub fn frame_wireguard_packet(data: &[u8]) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(1 + 4 + data.len());
+    buf.push(DataMessageType::WireGuard.as_byte());
+    buf.extend_from_slice(&(data.len() as u32).to_be_bytes());
+    buf.extend_from_slice(data);
+    buf
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

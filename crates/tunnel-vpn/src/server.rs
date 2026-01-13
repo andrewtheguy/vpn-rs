@@ -12,8 +12,8 @@ use crate::device::{TunConfig, TunDevice, TunWriter};
 use crate::error::{VpnError, VpnResult};
 use crate::keys::{WgKeyPair, WgPublicKey};
 use crate::signaling::{
-    read_message, write_message, DataMessageType, VpnHandshake, VpnHandshakeResponse,
-    MAX_HANDSHAKE_SIZE,
+    frame_wireguard_packet, read_message, write_message, DataMessageType, VpnHandshake,
+    VpnHandshakeResponse, MAX_HANDSHAKE_SIZE,
 };
 use crate::tunnel::{PacketResult, WgTunnel, WgTunnelBuilder};
 use boringtun::x25519::PublicKey;
@@ -549,12 +549,8 @@ impl VpnServer {
                     Ok(PacketResult::WriteToNetwork(data)) => {
                         // Send WireGuard response back to client atomically
                         drop(tunnel);
+                        let buf = frame_wireguard_packet(&data);
                         let mut send = send_inbound.lock().await;
-                        // Message format: type byte + length + data
-                        let mut buf = Vec::with_capacity(1 + 4 + data.len());
-                        buf.push(DataMessageType::WireGuard.as_byte());
-                        buf.extend_from_slice(&(data.len() as u32).to_be_bytes());
-                        buf.extend_from_slice(&data);
                         if let Err(e) = send.write_all(&buf).await {
                             log::warn!("Failed to send response to {}: {}", assigned_ip, e);
                         }
@@ -578,12 +574,8 @@ impl VpnServer {
                 for result in results {
                     match result {
                         PacketResult::WriteToNetwork(data) => {
+                            let buf = frame_wireguard_packet(&data);
                             let mut send = wg_send.lock().await;
-                            // Message format: type byte + length + data
-                            let mut buf = Vec::with_capacity(1 + 4 + data.len());
-                            buf.push(DataMessageType::WireGuard.as_byte());
-                            buf.extend_from_slice(&(data.len() as u32).to_be_bytes());
-                            buf.extend_from_slice(&data);
                             if let Err(e) = send.write_all(&buf).await {
                                 log::warn!("Failed to send timer packet: {}", e);
                                 return;
@@ -665,12 +657,8 @@ impl VpnServer {
             match tunnel.encapsulate(packet) {
                 Ok(PacketResult::WriteToNetwork(data)) => {
                     // Send encrypted packet to client via iroh stream atomically
-                    // Message format: type byte + length + data
+                    let buf = frame_wireguard_packet(&data);
                     let mut send = client.send_stream.lock().await;
-                    let mut buf = Vec::with_capacity(1 + 4 + data.len());
-                    buf.push(DataMessageType::WireGuard.as_byte());
-                    buf.extend_from_slice(&(data.len() as u32).to_be_bytes());
-                    buf.extend_from_slice(&data);
                     if let Err(e) = send.write_all(&buf).await {
                         log::warn!("Failed to send to client {}: {}", dest_ip, e);
                         continue;
