@@ -22,7 +22,7 @@ use iroh::endpoint::SendStream;
 use iroh::{Endpoint, EndpointId};
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
 
@@ -31,6 +31,9 @@ const MAX_WG_PACKET_SIZE: usize = 65536;
 
 /// State for a connected VPN client.
 struct ClientState {
+    /// Unique session ID for this connection.
+    /// Used to detect stale cleanup operations when a client reconnects quickly.
+    session_id: u64,
     /// Client's assigned VPN IP.
     #[allow(dead_code)]
     assigned_ip: Ipv4Addr,
@@ -141,12 +144,15 @@ pub struct VpnServer {
     ip_pool: Arc<RwLock<IpPool>>,
     /// Connected clients (by endpoint ID).
     clients: Arc<RwLock<HashMap<EndpointId, ClientState>>>,
-    /// Reverse lookup: IP address -> endpoint ID.
-    ip_to_endpoint: Arc<RwLock<HashMap<Ipv4Addr, EndpointId>>>,
+    /// Reverse lookup: IP address -> (endpoint ID, session ID).
+    /// Session ID is used to detect stale cleanup operations.
+    ip_to_endpoint: Arc<RwLock<HashMap<Ipv4Addr, (EndpointId, u64)>>>,
     /// TUN device for VPN traffic.
     tun_device: Option<TunDevice>,
     /// Atomic counter for active connections (prevents race in max_clients check).
     active_connections: AtomicUsize,
+    /// Session ID counter for unique connection identification.
+    next_session_id: AtomicU64,
 }
 
 impl VpnServer {
@@ -173,6 +179,7 @@ impl VpnServer {
             ip_to_endpoint: Arc::new(RwLock::new(HashMap::new())),
             tun_device: None,
             active_connections: AtomicUsize::new(0),
+            next_session_id: AtomicU64::new(1),
         })
     }
 
@@ -413,8 +420,13 @@ impl VpnServer {
 
         let wg_send = Arc::new(Mutex::new(wg_send));
 
+        // Generate unique session ID for this connection
+        // Used to detect stale cleanup when same client reconnects quickly
+        let session_id = self.next_session_id.fetch_add(1, Ordering::Relaxed);
+
         // Store client state (including send stream for TUN handler to use)
         let client_state = ClientState {
+            session_id,
             assigned_ip,
             wg_public_key: peer_public_key,
             endpoint_id: remote_id,
@@ -423,7 +435,10 @@ impl VpnServer {
         };
 
         self.clients.write().await.insert(remote_id, client_state);
-        self.ip_to_endpoint.write().await.insert(assigned_ip, remote_id);
+        self.ip_to_endpoint
+            .write()
+            .await
+            .insert(assigned_ip, (remote_id, session_id));
 
         // Handle client data
         let clients = self.clients.clone();
@@ -446,17 +461,39 @@ impl VpnServer {
 
         log::info!("Client {} disconnected", remote_id);
 
-        // Cleanup - must check ownership before removing to avoid race with reconnecting client
-        clients.write().await.remove(&remote_id);
+        // Cleanup - use session_id to detect stale cleanup from rapid reconnection
+        // Only remove entries if they still belong to this specific connection
         {
-            // Only remove IP mapping if it still belongs to this client
-            // (a reconnecting client may have already claimed this IP)
+            let mut clients_map = clients.write().await;
+            if clients_map
+                .get(&remote_id)
+                .is_some_and(|c| c.session_id == session_id)
+            {
+                clients_map.remove(&remote_id);
+            }
+        }
+        {
             let mut ip_map = ip_to_endpoint.write().await;
-            if ip_map.get(&assigned_ip) == Some(&remote_id) {
+            if ip_map
+                .get(&assigned_ip)
+                .is_some_and(|&(_, sid)| sid == session_id)
+            {
                 ip_map.remove(&assigned_ip);
             }
         }
-        ip_pool.write().await.release(&remote_id);
+        {
+            // Only release IP if we successfully removed the client
+            // (checked via ip_to_endpoint since it's session-aware)
+            let ip_removed = !ip_to_endpoint.read().await.contains_key(&assigned_ip)
+                || ip_to_endpoint
+                    .read()
+                    .await
+                    .get(&assigned_ip)
+                    .is_none_or(|&(_, sid)| sid != session_id);
+            if ip_removed {
+                ip_pool.write().await.release(&remote_id);
+            }
+        }
 
         result
     }
@@ -638,7 +675,7 @@ impl VpnServer {
             // Look up which client owns this destination IP
             let endpoint_id = {
                 let ip_map = self.ip_to_endpoint.read().await;
-                ip_map.get(&dest_ip).copied()
+                ip_map.get(&dest_ip).map(|&(id, _)| id)
             };
 
             let endpoint_id = match endpoint_id {
