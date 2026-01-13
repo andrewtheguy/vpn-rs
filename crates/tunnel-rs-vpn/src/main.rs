@@ -275,11 +275,15 @@ async fn main() -> Result<()> {
 
             // Convert mutually exclusive flags to Option<bool>
             // --reconnect => Some(false), --no-reconnect => Some(true), neither => None
+            debug_assert!(
+                !(reconnect && no_reconnect),
+                "reconnect and no_reconnect must not both be set"
+            );
             let no_reconnect_opt = match (reconnect, no_reconnect) {
                 (true, false) => Some(false),  // --reconnect: enable reconnect
                 (false, true) => Some(true),   // --no-reconnect: disable reconnect
                 (false, false) => None,        // neither: use config/default
-                (true, true) => unreachable!(), // clap prevents this
+                (true, true) => unreachable!("clap conflicts_with prevents both flags"),
             };
 
             // Build resolved config: defaults -> config file -> CLI

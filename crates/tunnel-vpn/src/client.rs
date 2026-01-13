@@ -460,6 +460,11 @@ impl VpnClient {
                     return Ok(());
                 }
                 Err(e) if e.is_recoverable() => {
+                    // Reset attempt counter if this was a ConnectionLost (tunnel ran successfully)
+                    if matches!(e, VpnError::ConnectionLost(_)) {
+                        attempt = 0;
+                    }
+
                     // Check max attempts (None = unlimited)
                     if let Some(max) = max_attempts {
                         if attempt >= max.get() {

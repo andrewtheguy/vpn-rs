@@ -296,9 +296,23 @@ pub async fn add_routes(tun_name: &str, routes: &[Ipv4Net]) -> VpnResult<RouteGu
     Ok(RouteGuard::new(tun_name.to_string(), added))
 }
 
+/// Handle the output of a route remove command (best-effort).
+///
+/// - On success: logs info message
+/// - On failure: logs warning (best-effort, doesn't return error)
+fn handle_route_remove_output(output: std::process::Output, route: &Ipv4Net, tun_name: &str) {
+    if output.status.success() {
+        log::info!("Removed route {} via {}", route, tun_name);
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        log::warn!("Failed to remove route {}: {}", route, stderr.trim());
+    }
+}
+
 /// Remove a route from the system (async version).
 ///
 /// This is called during cleanup to remove routes added by add_route.
+/// Best-effort: command failures are logged as warnings but don't return errors.
 pub async fn remove_route(tun_name: &str, route: &Ipv4Net) -> VpnResult<()> {
     #[cfg(target_os = "macos")]
     {
@@ -316,12 +330,7 @@ pub async fn remove_route(tun_name: &str, route: &Ipv4Net) -> VpnResult<()> {
             .await
             .map_err(|e| VpnError::TunDevice(format!("Failed to execute route command: {}", e)))?;
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            log::warn!("Failed to remove route {}: {}", route, stderr);
-        } else {
-            log::info!("Removed route {} via {}", route, tun_name);
-        }
+        handle_route_remove_output(output, route, tun_name);
     }
 
     #[cfg(target_os = "linux")]
@@ -332,12 +341,7 @@ pub async fn remove_route(tun_name: &str, route: &Ipv4Net) -> VpnResult<()> {
             .await
             .map_err(|e| VpnError::TunDevice(format!("Failed to execute ip route command: {}", e)))?;
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            log::warn!("Failed to remove route {}: {}", route, stderr);
-        } else {
-            log::info!("Removed route {} via {}", route, tun_name);
-        }
+        handle_route_remove_output(output, route, tun_name);
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]

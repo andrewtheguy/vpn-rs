@@ -73,7 +73,10 @@ fn luhn_sum(s: &str) -> usize {
 /// This is a generalization of the Luhn algorithm (used in credit cards) for
 /// arbitrary alphabets. It detects:
 /// - All single-character substitution errors
-/// - All adjacent transposition errors (swapping two neighboring characters)
+/// - Most adjacent transposition errors (swapping two neighboring characters)
+///
+/// Note: With alphabet size 65, one pair ('A' and '.') cannot be detected when
+/// swapped adjacently due to mathematical properties of the algorithm.
 ///
 /// Reference: https://en.wikipedia.org/wiki/Luhn_mod_N_algorithm
 fn calculate_checksum(body: &str) -> char {
