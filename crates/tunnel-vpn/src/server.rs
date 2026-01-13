@@ -473,25 +473,17 @@ impl VpnServer {
             }
         }
         {
+            // Atomically check session_id, remove from ip_to_endpoint, and release from pool.
+            // This avoids TOCTOU bugs by capturing the endpoint_id from the actual removal.
             let mut ip_map = ip_to_endpoint.write().await;
-            if ip_map
+            let should_remove = ip_map
                 .get(&assigned_ip)
-                .is_some_and(|&(_, sid)| sid == session_id)
-            {
-                ip_map.remove(&assigned_ip);
-            }
-        }
-        {
-            // Only release IP if we successfully removed the client
-            // (checked via ip_to_endpoint since it's session-aware)
-            let ip_removed = !ip_to_endpoint.read().await.contains_key(&assigned_ip)
-                || ip_to_endpoint
-                    .read()
-                    .await
-                    .get(&assigned_ip)
-                    .is_none_or(|&(_, sid)| sid != session_id);
-            if ip_removed {
-                ip_pool.write().await.release(&remote_id);
+                .is_some_and(|&(_, sid)| sid == session_id);
+            if should_remove {
+                if let Some((removed_endpoint_id, _)) = ip_map.remove(&assigned_ip) {
+                    // Release using the exact endpoint_id that was in the map
+                    ip_pool.write().await.release(&removed_endpoint_id);
+                }
             }
         }
 
