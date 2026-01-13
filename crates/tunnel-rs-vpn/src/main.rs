@@ -125,6 +125,14 @@ enum Command {
         /// Split tunnel: --route 192.168.1.0/24 --route 10.0.0.0/8
         #[arg(long = "route")]
         routes: Vec<String>,
+
+        /// Disable auto-reconnect (exit on first disconnection)
+        #[arg(long)]
+        no_reconnect: bool,
+
+        /// Maximum reconnect attempts (0 = unlimited, default: 0)
+        #[arg(long, default_value = "0")]
+        max_reconnect_attempts: u32,
     },
     /// Generate a new private key for persistent server identity
     ///
@@ -248,6 +256,8 @@ async fn main() -> Result<()> {
             auth_token,
             auth_token_file,
             routes,
+            no_reconnect,
+            max_reconnect_attempts,
         } => {
             // Load config file if specified
             let (cfg, from_file) = resolve_client_config(config, default_config)?;
@@ -270,6 +280,12 @@ async fn main() -> Result<()> {
                     routes,
                     relay_urls,
                     dns_server,
+                    no_reconnect,
+                    if max_reconnect_attempts > 0 {
+                        Some(max_reconnect_attempts)
+                    } else {
+                        None
+                    },
                 )
                 .build()?;
 
@@ -421,14 +437,22 @@ async fn run_vpn_client(resolved: ResolvedVpnClientConfig) -> Result<()> {
     .context("Failed to create iroh endpoint")?;
 
     log::info!("VPN Client Node ID: {}", endpoint.id());
-    log::info!("Connecting to VPN server: {}", resolved.server_node_id);
 
-    // Create and connect VPN client
+    // Create VPN client
     let client = VpnClient::new(config)
         .map_err(|e| anyhow::anyhow!("Failed to create VPN client: {}", e))?;
 
-    client
-        .connect(&endpoint)
-        .await
-        .map_err(|e| anyhow::anyhow!("VPN connection error: {}", e))
+    // Connect with or without auto-reconnect
+    if resolved.no_reconnect {
+        log::info!("Auto-reconnect disabled, single connection attempt");
+        client
+            .connect(&endpoint)
+            .await
+            .map_err(|e| anyhow::anyhow!("VPN connection error: {}", e))
+    } else {
+        client
+            .run_with_reconnect(&endpoint, resolved.max_reconnect_attempts)
+            .await
+            .map_err(|e| anyhow::anyhow!("VPN connection error: {}", e))
+    }
 }

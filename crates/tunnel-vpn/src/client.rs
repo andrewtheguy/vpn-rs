@@ -20,6 +20,7 @@ use iroh::endpoint::{RecvStream, SendStream};
 use iroh::{Endpoint, EndpointId};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::Mutex;
 
 /// Maximum WireGuard packet size (MTU + overhead).
@@ -361,19 +362,84 @@ impl VpnClient {
         });
 
         // Wait for any task to complete (or error)
-        tokio::select! {
+        let reason = tokio::select! {
             _ = outbound_handle => {
-                log::info!("Outbound task ended");
+                "outbound task ended (TUN read failed or stream write failed)"
             }
             _ = inbound_handle => {
-                log::info!("Inbound task ended");
+                "inbound task ended (stream read failed)"
             }
             _ = timer_handle => {
-                log::info!("Timer task ended");
+                "timer task ended"
+            }
+        };
+
+        // Any task ending means connection is lost
+        Err(VpnError::ConnectionLost(reason.to_string()))
+    }
+
+    /// Connect to the VPN server with automatic reconnection on failure.
+    ///
+    /// This method wraps `connect()` with a reconnection loop that handles
+    /// transient failures using exponential backoff.
+    ///
+    /// # Arguments
+    /// * `endpoint` - The iroh endpoint to use for connections
+    /// * `max_attempts` - Maximum reconnection attempts (0 = unlimited)
+    pub async fn run_with_reconnect(
+        &self,
+        endpoint: &Endpoint,
+        max_attempts: u32,
+    ) -> VpnResult<()> {
+        let mut attempt = 0u32;
+
+        loop {
+            attempt = attempt.saturating_add(1);
+
+            if attempt == 1 {
+                log::info!("Connecting to VPN server...");
+            } else {
+                log::info!("VPN reconnection attempt #{}", attempt);
+            }
+
+            match self.connect(endpoint).await {
+                Ok(()) => {
+                    // Graceful exit (shouldn't normally happen)
+                    log::info!("VPN connection ended gracefully");
+                    return Ok(());
+                }
+                Err(e) if e.is_recoverable() => {
+                    // Check max attempts (0 = unlimited)
+                    if max_attempts > 0 && attempt >= max_attempts {
+                        log::error!(
+                            "Max reconnection attempts ({}) exceeded",
+                            max_attempts
+                        );
+                        return Err(VpnError::MaxReconnectAttemptsExceeded(max_attempts));
+                    }
+
+                    // Calculate backoff delay
+                    let delay = calculate_backoff(attempt);
+                    log::warn!(
+                        "Connection lost ({}), reconnecting in {:.1}s{}",
+                        e,
+                        delay.as_secs_f64(),
+                        if max_attempts > 0 {
+                            format!(" (attempt {}/{})", attempt, max_attempts)
+                        } else {
+                            String::new()
+                        }
+                    );
+
+                    tokio::time::sleep(delay).await;
+                }
+                Err(e) => {
+                    // Fatal error - don't retry
+                    log::error!("Fatal VPN error (not retrying): {}", e);
+                    return Err(e);
+                }
             }
         }
-
-        Ok(())
     }
 }
 
@@ -415,4 +481,23 @@ impl VpnClientBuilder {
     pub fn build(self) -> VpnResult<VpnClient> {
         VpnClient::new(self.config)
     }
+}
+
+/// Calculate exponential backoff delay with jitter.
+///
+/// Uses exponential backoff: `base * 2^(attempt-1)`, capped at max.
+/// Adds random jitter (0-500ms) to prevent thundering herd.
+fn calculate_backoff(attempt: u32) -> Duration {
+    const BASE_MS: u64 = 1000; // 1 second
+    const MAX_MS: u64 = 60000; // 60 seconds
+    const JITTER_MS: u64 = 500;
+
+    // Exponential backoff: 1s, 2s, 4s, 8s, 16s, 32s, 60s, 60s, ...
+    let multiplier = 2_u64.saturating_pow(attempt.saturating_sub(1));
+    let delay_ms = BASE_MS.saturating_mul(multiplier).min(MAX_MS);
+
+    // Add jitter to prevent thundering herd
+    let jitter_ms = rand::random::<u64>() % JITTER_MS;
+
+    Duration::from_millis(delay_ms + jitter_ms)
 }

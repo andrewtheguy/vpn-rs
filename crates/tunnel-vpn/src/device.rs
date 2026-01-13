@@ -225,6 +225,15 @@ pub async fn add_route(tun_name: &str, route: &Ipv4Net) -> VpnResult<()> {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
+            // Provide helpful message for common "route exists" error
+            if stderr.contains("File exists") {
+                return Err(VpnError::TunDevice(format!(
+                    "Route {} already exists. This may be the VPN network itself \
+                     (automatically routed) or a conflicting route. \
+                     Remove --route {} or delete the existing route first.",
+                    route, route
+                )));
+            }
             return Err(VpnError::TunDevice(format!(
                 "Failed to add route {}: {}",
                 route, stderr

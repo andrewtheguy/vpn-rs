@@ -36,6 +36,28 @@ pub enum VpnError {
     /// Peer not found.
     #[error("Peer not found: {0}")]
     PeerNotFound(String),
+
+    /// Connection lost during VPN session (recoverable via reconnect).
+    #[error("Connection lost: {0}")]
+    ConnectionLost(String),
+
+    /// Maximum reconnection attempts exceeded.
+    #[error("Max reconnection attempts ({0}) exceeded")]
+    MaxReconnectAttemptsExceeded(u32),
+}
+
+impl VpnError {
+    /// Returns true if this error is potentially recoverable via reconnection.
+    ///
+    /// Recoverable errors include connection loss, network issues, and signaling
+    /// failures. Non-recoverable errors include configuration problems, permission
+    /// issues, and authentication failures.
+    pub fn is_recoverable(&self) -> bool {
+        matches!(
+            self,
+            VpnError::ConnectionLost(_) | VpnError::Network(_) | VpnError::Signaling(_)
+        )
+    }
 }
 
 /// Result type alias for VPN operations.
