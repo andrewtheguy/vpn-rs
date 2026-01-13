@@ -275,7 +275,7 @@ impl VpnServer {
         });
 
         if let Some(ref pool) = ip6_pool {
-            let pool_guard = pool.blocking_read();
+            let pool_guard = pool.read().await;
             log::info!("IPv6 dual-stack enabled: {}", pool_guard.network());
         }
 

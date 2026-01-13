@@ -47,6 +47,7 @@ pub struct VpnClient {
 }
 
 /// Information received from the VPN server after successful handshake.
+#[non_exhaustive]
 pub struct ServerInfo {
     /// Server's WireGuard public key.
     pub wg_public_key: WgPublicKey,
@@ -231,7 +232,7 @@ impl VpnClient {
             (Some(ip), Some(net), Some(gw)) => (Some(ip), Some(net), Some(gw)),
             (None, None, None) => (None, None, None),
             _ => {
-                return Err(VpnError::Signaling(
+                return Err(VpnError::Config(
                     "Server response has incomplete IPv6 configuration: \
                      assigned_ip6, network6, and server_ip6 must all be present or all absent"
                         .into(),
@@ -264,9 +265,10 @@ impl VpnClient {
         .with_mtu(self.config.mtu);
 
         // Add IPv6 configuration if server provided it
-        if let Some(assigned_ip6) = server_info.assigned_ip6 {
-            // Use /128 prefix for the client's IPv6 address
-            tun_config = tun_config.with_ipv6(assigned_ip6, 128)?;
+        if let (Some(assigned_ip6), Some(network6)) =
+            (server_info.assigned_ip6, server_info.network6)
+        {
+            tun_config = tun_config.with_ipv6(assigned_ip6, network6.prefix_len())?;
         }
 
         TunDevice::create(tun_config)

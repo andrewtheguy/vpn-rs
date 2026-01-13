@@ -650,9 +650,8 @@ fn configure_tun_ipv6(tun_name: &str, addr: Ipv6Addr, prefix_len: u8) -> VpnResu
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        let stderr_lower = stderr.to_lowercase();
         // Treat "address already exists" as idempotent success
-        if stderr_lower.contains("file exists") || stderr_lower.contains("eexist") {
+        if is_already_exists_error(&stderr) {
             log::warn!(
                 "IPv6 address {}/{} already exists on {} (treating as success)",
                 addr,
