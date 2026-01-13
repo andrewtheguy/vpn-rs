@@ -1344,6 +1344,14 @@ impl VpnServerConfigBuilder {
         validate_vpn_network(&network, self.server_ip.as_deref(), "config")?;
 
         // Validate IPv6 network CIDR format (optional)
+        // Ensure server_ip6 is not orphaned without network6
+        if self.server_ip6.is_some() && self.network6.is_none() {
+            anyhow::bail!(
+                "'server_ip6' requires 'network6' to be set.\n\
+                 Specify via CLI: --network6 <CIDR>\n\
+                 Or in config: network6 = \"fd00::/64\""
+            );
+        }
         if let Some(ref network6) = self.network6 {
             validate_vpn_network6(network6, self.server_ip6.as_deref(), "config")?;
         }
