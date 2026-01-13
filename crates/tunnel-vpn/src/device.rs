@@ -221,18 +221,141 @@ fn is_already_exists_error(stderr: &str) -> bool {
     lower.contains("file exists") || lower.contains("eexist")
 }
 
-/// Handle the output of a route add command.
+// ============================================================================
+// Generic Route Trait and Implementations
+// ============================================================================
+
+/// Trait for route types (IPv4/IPv6) that can be added/removed from the system.
+///
+/// This trait abstracts the differences between IPv4 and IPv6 route handling,
+/// allowing shared logic for add/remove operations, rollback, and cleanup.
+pub trait Route: std::fmt::Display + Copy {
+    /// Label for log messages (e.g., "route" or "IPv6 route").
+    const LABEL: &'static str;
+
+    /// Build command args for adding a route on macOS.
+    fn macos_add_args(&self, tun_name: &str) -> Vec<String>;
+
+    /// Build command args for removing a route on macOS.
+    fn macos_delete_args(&self, tun_name: &str) -> Vec<String>;
+
+    /// Build command args for adding a route on Linux.
+    fn linux_add_args(&self, tun_name: &str) -> Vec<String>;
+
+    /// Build command args for removing a route on Linux.
+    fn linux_delete_args(&self, tun_name: &str) -> Vec<String>;
+}
+
+impl Route for Ipv4Net {
+    const LABEL: &'static str = "route";
+
+    fn macos_add_args(&self, tun_name: &str) -> Vec<String> {
+        vec![
+            "add".into(),
+            "-net".into(),
+            self.network().to_string(),
+            "-netmask".into(),
+            self.netmask().to_string(),
+            "-interface".into(),
+            tun_name.into(),
+        ]
+    }
+
+    fn macos_delete_args(&self, tun_name: &str) -> Vec<String> {
+        vec![
+            "delete".into(),
+            "-net".into(),
+            self.network().to_string(),
+            "-netmask".into(),
+            self.netmask().to_string(),
+            "-interface".into(),
+            tun_name.into(),
+        ]
+    }
+
+    fn linux_add_args(&self, tun_name: &str) -> Vec<String> {
+        vec![
+            "route".into(),
+            "add".into(),
+            self.to_string(),
+            "dev".into(),
+            tun_name.into(),
+        ]
+    }
+
+    fn linux_delete_args(&self, tun_name: &str) -> Vec<String> {
+        vec![
+            "route".into(),
+            "del".into(),
+            self.to_string(),
+            "dev".into(),
+            tun_name.into(),
+        ]
+    }
+}
+
+impl Route for Ipv6Net {
+    const LABEL: &'static str = "IPv6 route";
+
+    fn macos_add_args(&self, tun_name: &str) -> Vec<String> {
+        vec![
+            "add".into(),
+            "-inet6".into(),
+            self.to_string(),
+            "-interface".into(),
+            tun_name.into(),
+        ]
+    }
+
+    fn macos_delete_args(&self, tun_name: &str) -> Vec<String> {
+        vec![
+            "delete".into(),
+            "-inet6".into(),
+            self.to_string(),
+            "-interface".into(),
+            tun_name.into(),
+        ]
+    }
+
+    fn linux_add_args(&self, tun_name: &str) -> Vec<String> {
+        vec![
+            "-6".into(),
+            "route".into(),
+            "add".into(),
+            self.to_string(),
+            "dev".into(),
+            tun_name.into(),
+        ]
+    }
+
+    fn linux_delete_args(&self, tun_name: &str) -> Vec<String> {
+        vec![
+            "-6".into(),
+            "route".into(),
+            "del".into(),
+            self.to_string(),
+            "dev".into(),
+            tun_name.into(),
+        ]
+    }
+}
+
+// ============================================================================
+// Generic Route Operations
+// ============================================================================
+
+/// Handle the output of a route add command (generic version).
 ///
 /// - On success: logs info message
 /// - On failure with "route exists": logs warning, returns Ok (idempotent)
 /// - On other failure: returns error
-fn handle_route_add_output(
+fn handle_route_add_output<R: Route>(
     output: std::process::Output,
-    route: &Ipv4Net,
+    route: &R,
     tun_name: &str,
 ) -> VpnResult<()> {
     if output.status.success() {
-        log::info!("Added route {} via {}", route, tun_name);
+        log::info!("Added {} {} via {}", R::LABEL, route, tun_name);
         return Ok(());
     }
 
@@ -240,40 +363,44 @@ fn handle_route_add_output(
     let stderr_trimmed = stderr.trim();
     if is_already_exists_error(&stderr) {
         log::warn!(
-            "Route {} already exists (treating as success): {}",
+            "{} {} already exists (treating as success): {}",
+            R::LABEL,
             route,
             stderr_trimmed
         );
         Ok(())
     } else {
         Err(VpnError::TunDevice(format!(
-            "Failed to add route {}: {}",
-            route, stderr_trimmed
+            "Failed to add {} {}: {}",
+            R::LABEL,
+            route,
+            stderr_trimmed
         )))
     }
 }
 
-/// Add a route through the VPN TUN interface.
-///
-/// If the route already exists, this is treated as idempotent success
-/// (logs a warning and continues).
-///
-/// # Platform Support
-/// - macOS: Uses `route add -net <cidr> -interface <tun_device>`
-/// - Linux: Uses `ip route add <cidr> dev <tun_device>`
-pub async fn add_route(tun_name: &str, route: &Ipv4Net) -> VpnResult<()> {
+/// Handle the output of a route remove command (generic, best-effort).
+fn handle_route_remove_output<R: Route>(
+    output: std::process::Output,
+    route: &R,
+    tun_name: &str,
+) {
+    if output.status.success() {
+        log::info!("Removed {} {} via {}", R::LABEL, route, tun_name);
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        log::warn!("Failed to remove {} {}: {}", R::LABEL, route, stderr.trim());
+    }
+}
+
+/// Add a route through the VPN TUN interface (generic version).
+async fn add_route_generic<R: Route>(tun_name: &str, route: &R) -> VpnResult<()> {
     #[cfg(target_os = "macos")]
     {
+        let args = route.macos_add_args(tun_name);
+        let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
         let output = Command::new("route")
-            .args([
-                "add",
-                "-net",
-                &route.network().to_string(),
-                "-netmask",
-                &route.netmask().to_string(),
-                "-interface",
-                tun_name,
-            ])
+            .args(&args_ref)
             .output()
             .await
             .map_err(|e| VpnError::TunDevice(format!("Failed to execute route command: {}", e)))?;
@@ -283,11 +410,15 @@ pub async fn add_route(tun_name: &str, route: &Ipv4Net) -> VpnResult<()> {
 
     #[cfg(target_os = "linux")]
     {
+        let args = route.linux_add_args(tun_name);
+        let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
         let output = Command::new("ip")
-            .args(["route", "add", &route.to_string(), "dev", tun_name])
+            .args(&args_ref)
             .output()
             .await
-            .map_err(|e| VpnError::TunDevice(format!("Failed to execute ip route command: {}", e)))?;
+            .map_err(|e| {
+                VpnError::TunDevice(format!("Failed to execute ip route command: {}", e))
+            })?;
 
         handle_route_add_output(output, route, tun_name)
     }
@@ -299,6 +430,108 @@ pub async fn add_route(tun_name: &str, route: &Ipv4Net) -> VpnResult<()> {
             "Route management not supported on this platform".into(),
         ))
     }
+}
+
+/// Remove a route from the system (generic async version).
+async fn remove_route_generic<R: Route>(tun_name: &str, route: &R) -> VpnResult<()> {
+    #[cfg(target_os = "macos")]
+    {
+        let args = route.macos_delete_args(tun_name);
+        let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+        let output = Command::new("route")
+            .args(&args_ref)
+            .output()
+            .await
+            .map_err(|e| VpnError::TunDevice(format!("Failed to execute route command: {}", e)))?;
+
+        handle_route_remove_output(output, route, tun_name);
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let args = route.linux_delete_args(tun_name);
+        let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+        let output = Command::new("ip")
+            .args(&args_ref)
+            .output()
+            .await
+            .map_err(|e| {
+                VpnError::TunDevice(format!("Failed to execute ip route command: {}", e))
+            })?;
+
+        handle_route_remove_output(output, route, tun_name);
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        let _ = (tun_name, route);
+    }
+
+    Ok(())
+}
+
+/// Remove a route from the system (generic blocking version for Drop).
+fn remove_route_sync_generic<R: Route>(tun_name: &str, route: &R) {
+    #[cfg(target_os = "macos")]
+    {
+        let args = route.macos_delete_args(tun_name);
+        let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+        let result = std::process::Command::new("route").args(&args_ref).output();
+
+        match result {
+            Ok(output) if output.status.success() => {
+                log::info!("Removed {} {} via {}", R::LABEL, route, tun_name);
+            }
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                log::warn!("Failed to remove {} {}: {}", R::LABEL, route, stderr);
+            }
+            Err(e) => {
+                log::warn!("Failed to execute route delete command: {}", e);
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let args = route.linux_delete_args(tun_name);
+        let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+        let result = std::process::Command::new("ip").args(&args_ref).output();
+
+        match result {
+            Ok(output) if output.status.success() => {
+                log::info!("Removed {} {} via {}", R::LABEL, route, tun_name);
+            }
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                log::warn!("Failed to remove {} {}: {}", R::LABEL, route, stderr);
+            }
+            Err(e) => {
+                log::warn!("Failed to execute ip route del command: {}", e);
+            }
+        }
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        let _ = (tun_name, route);
+    }
+}
+
+// ============================================================================
+// IPv4 Route Public API (delegates to generic implementations)
+// ============================================================================
+
+/// Add a route through the VPN TUN interface.
+///
+/// If the route already exists, this is treated as idempotent success
+/// (logs a warning and continues).
+///
+/// # Platform Support
+/// - macOS: Uses `route add -net <cidr> -interface <tun_device>`
+/// - Linux: Uses `ip route add <cidr> dev <tun_device>`
+pub async fn add_route(tun_name: &str, route: &Ipv4Net) -> VpnResult<()> {
+    add_route_generic(tun_name, route).await
 }
 
 /// Add multiple routes through the VPN TUN interface.
@@ -324,116 +557,17 @@ pub async fn add_routes(tun_name: &str, routes: &[Ipv4Net]) -> VpnResult<RouteGu
     Ok(RouteGuard::new(tun_name.to_string(), added))
 }
 
-/// Handle the output of a route remove command (best-effort).
-///
-/// - On success: logs info message
-/// - On failure: logs warning (best-effort, doesn't return error)
-fn handle_route_remove_output(output: std::process::Output, route: &Ipv4Net, tun_name: &str) {
-    if output.status.success() {
-        log::info!("Removed route {} via {}", route, tun_name);
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        log::warn!("Failed to remove route {}: {}", route, stderr.trim());
-    }
-}
-
 /// Remove a route from the system (async version).
 ///
 /// This is called during cleanup to remove routes added by add_route.
 /// Best-effort: command failures are logged as warnings but don't return errors.
 pub async fn remove_route(tun_name: &str, route: &Ipv4Net) -> VpnResult<()> {
-    #[cfg(target_os = "macos")]
-    {
-        let output = Command::new("route")
-            .args([
-                "delete",
-                "-net",
-                &route.network().to_string(),
-                "-netmask",
-                &route.netmask().to_string(),
-                "-interface",
-                tun_name,
-            ])
-            .output()
-            .await
-            .map_err(|e| VpnError::TunDevice(format!("Failed to execute route command: {}", e)))?;
-
-        handle_route_remove_output(output, route, tun_name);
-    }
-
-    #[cfg(target_os = "linux")]
-    {
-        let output = Command::new("ip")
-            .args(["route", "del", &route.to_string(), "dev", tun_name])
-            .output()
-            .await
-            .map_err(|e| VpnError::TunDevice(format!("Failed to execute ip route command: {}", e)))?;
-
-        handle_route_remove_output(output, route, tun_name);
-    }
-
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-    {
-        let _ = (tun_name, route);
-    }
-
-    Ok(())
+    remove_route_generic(tun_name, route).await
 }
 
 /// Remove a route from the system (blocking version for Drop).
 fn remove_route_sync(tun_name: &str, route: &Ipv4Net) {
-    #[cfg(target_os = "macos")]
-    {
-        let result = std::process::Command::new("route")
-            .args([
-                "delete",
-                "-net",
-                &route.network().to_string(),
-                "-netmask",
-                &route.netmask().to_string(),
-                "-interface",
-                tun_name,
-            ])
-            .output();
-
-        match result {
-            Ok(output) if output.status.success() => {
-                log::info!("Removed route {} via {}", route, tun_name);
-            }
-            Ok(output) => {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                log::warn!("Failed to remove route {}: {}", route, stderr);
-            }
-            Err(e) => {
-                log::warn!("Failed to execute route delete command: {}", e);
-            }
-        }
-    }
-
-    #[cfg(target_os = "linux")]
-    {
-        let result = std::process::Command::new("ip")
-            .args(["route", "del", &route.to_string(), "dev", tun_name])
-            .output();
-
-        match result {
-            Ok(output) if output.status.success() => {
-                log::info!("Removed route {} via {}", route, tun_name);
-            }
-            Ok(output) => {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                log::warn!("Failed to remove route {}: {}", route, stderr);
-            }
-            Err(e) => {
-                log::warn!("Failed to execute ip route del command: {}", e);
-            }
-        }
-    }
-
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-    {
-        let _ = (tun_name, route);
-    }
+    remove_route_sync_generic(tun_name, route);
 }
 
 /// Guard that automatically removes routes when dropped.
@@ -544,179 +678,21 @@ fn configure_tun_ipv6(_tun_name: &str, _addr: Ipv6Addr, _prefix_len: u8) -> VpnR
     ))
 }
 
-/// Handle the output of an IPv6 route add command.
-fn handle_route6_add_output(
-    output: std::process::Output,
-    route: &Ipv6Net,
-    tun_name: &str,
-) -> VpnResult<()> {
-    if output.status.success() {
-        log::info!("Added IPv6 route {} via {}", route, tun_name);
-        return Ok(());
-    }
-
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let stderr_trimmed = stderr.trim();
-    if is_already_exists_error(&stderr) {
-        log::warn!(
-            "IPv6 route {} already exists (treating as success): {}",
-            route,
-            stderr_trimmed
-        );
-        Ok(())
-    } else {
-        Err(VpnError::TunDevice(format!(
-            "Failed to add IPv6 route {}: {}",
-            route, stderr_trimmed
-        )))
-    }
-}
-
 /// Add an IPv6 route through the VPN TUN interface.
 ///
 /// If the route already exists, this is treated as idempotent success.
 pub async fn add_route6(tun_name: &str, route: &Ipv6Net) -> VpnResult<()> {
-    #[cfg(target_os = "macos")]
-    {
-        let output = Command::new("route")
-            .args([
-                "add",
-                "-inet6",
-                &route.to_string(),
-                "-interface",
-                tun_name,
-            ])
-            .output()
-            .await
-            .map_err(|e| VpnError::TunDevice(format!("Failed to execute route command: {}", e)))?;
-
-        handle_route6_add_output(output, route, tun_name)
-    }
-
-    #[cfg(target_os = "linux")]
-    {
-        let output = Command::new("ip")
-            .args(["-6", "route", "add", &route.to_string(), "dev", tun_name])
-            .output()
-            .await
-            .map_err(|e| {
-                VpnError::TunDevice(format!("Failed to execute ip route command: {}", e))
-            })?;
-
-        handle_route6_add_output(output, route, tun_name)
-    }
-
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-    {
-        let _ = (tun_name, route);
-        Err(VpnError::TunDevice(
-            "IPv6 route management not supported on this platform".into(),
-        ))
-    }
-}
-
-/// Handle the output of an IPv6 route remove command (best-effort).
-fn handle_route6_remove_output(output: std::process::Output, route: &Ipv6Net, tun_name: &str) {
-    if output.status.success() {
-        log::info!("Removed IPv6 route {} via {}", route, tun_name);
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        log::warn!("Failed to remove IPv6 route {}: {}", route, stderr.trim());
-    }
+    add_route_generic(tun_name, route).await
 }
 
 /// Remove an IPv6 route from the system (async version).
 pub async fn remove_route6(tun_name: &str, route: &Ipv6Net) -> VpnResult<()> {
-    #[cfg(target_os = "macos")]
-    {
-        let output = Command::new("route")
-            .args([
-                "delete",
-                "-inet6",
-                &route.to_string(),
-                "-interface",
-                tun_name,
-            ])
-            .output()
-            .await
-            .map_err(|e| VpnError::TunDevice(format!("Failed to execute route command: {}", e)))?;
-
-        handle_route6_remove_output(output, route, tun_name);
-    }
-
-    #[cfg(target_os = "linux")]
-    {
-        let output = Command::new("ip")
-            .args(["-6", "route", "del", &route.to_string(), "dev", tun_name])
-            .output()
-            .await
-            .map_err(|e| {
-                VpnError::TunDevice(format!("Failed to execute ip route command: {}", e))
-            })?;
-
-        handle_route6_remove_output(output, route, tun_name);
-    }
-
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-    {
-        let _ = (tun_name, route);
-    }
-
-    Ok(())
+    remove_route_generic(tun_name, route).await
 }
 
 /// Remove an IPv6 route from the system (blocking version for Drop).
 fn remove_route6_sync(tun_name: &str, route: &Ipv6Net) {
-    #[cfg(target_os = "macos")]
-    {
-        let result = std::process::Command::new("route")
-            .args([
-                "delete",
-                "-inet6",
-                &route.to_string(),
-                "-interface",
-                tun_name,
-            ])
-            .output();
-
-        match result {
-            Ok(output) if output.status.success() => {
-                log::info!("Removed IPv6 route {} via {}", route, tun_name);
-            }
-            Ok(output) => {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                log::warn!("Failed to remove IPv6 route {}: {}", route, stderr);
-            }
-            Err(e) => {
-                log::warn!("Failed to execute route delete command: {}", e);
-            }
-        }
-    }
-
-    #[cfg(target_os = "linux")]
-    {
-        let result = std::process::Command::new("ip")
-            .args(["-6", "route", "del", &route.to_string(), "dev", tun_name])
-            .output();
-
-        match result {
-            Ok(output) if output.status.success() => {
-                log::info!("Removed IPv6 route {} via {}", route, tun_name);
-            }
-            Ok(output) => {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                log::warn!("Failed to remove IPv6 route {}: {}", route, stderr);
-            }
-            Err(e) => {
-                log::warn!("Failed to execute ip route del command: {}", e);
-            }
-        }
-    }
-
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-    {
-        let _ = (tun_name, route);
-    }
+    remove_route_sync_generic(tun_name, route);
 }
 
 /// Add multiple IPv6 routes through the VPN TUN interface.
