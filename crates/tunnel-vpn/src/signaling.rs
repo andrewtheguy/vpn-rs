@@ -322,6 +322,40 @@ mod tests {
     }
 
     #[test]
+    fn test_response_accepted_dual_stack_roundtrip() {
+        let key = WgPublicKey([3u8; 32]);
+        let assigned_ip: Ipv4Addr = "10.0.0.2".parse().unwrap();
+        let network: Ipv4Net = "10.0.0.0/24".parse().unwrap();
+        let server_ip: Ipv4Addr = "10.0.0.1".parse().unwrap();
+        let assigned_ip6: Ipv6Addr = "fd00::2".parse().unwrap();
+        let network6: Ipv6Net = "fd00::/64".parse().unwrap();
+        let server_ip6: Ipv6Addr = "fd00::1".parse().unwrap();
+
+        let response = VpnHandshakeResponse::accepted_dual_stack(
+            key.clone(),
+            assigned_ip,
+            network,
+            server_ip,
+            assigned_ip6,
+            network6,
+            server_ip6,
+        );
+
+        let encoded = response.encode().unwrap();
+        let decoded = VpnHandshakeResponse::decode(&encoded).unwrap();
+
+        assert!(decoded.accepted);
+        assert_eq!(decoded.wg_public_key, Some(key));
+        assert_eq!(decoded.assigned_ip, Some(assigned_ip));
+        assert_eq!(decoded.network, Some(network));
+        assert_eq!(decoded.server_ip, Some(server_ip));
+        assert_eq!(decoded.assigned_ip6, Some(assigned_ip6));
+        assert_eq!(decoded.network6, Some(network6));
+        assert_eq!(decoded.server_ip6, Some(server_ip6));
+        assert_eq!(decoded.reject_reason, None);
+    }
+
+    #[test]
     fn test_response_rejected_roundtrip() {
         let response = VpnHandshakeResponse::rejected("Server full");
 
