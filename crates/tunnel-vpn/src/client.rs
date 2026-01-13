@@ -169,7 +169,7 @@ impl VpnClient {
             let reason = response
                 .reject_reason
                 .unwrap_or_else(|| "Unknown".to_string());
-            return Err(VpnError::Signaling(format!("Server rejected: {}", reason)));
+            return Err(VpnError::AuthenticationFailed(reason));
         }
 
         // Extract server info
@@ -337,7 +337,7 @@ impl VpnClient {
         let mut timer_handle = tokio::spawn(async move {
             let mut write_buf = Vec::with_capacity(4 + MAX_WG_PACKET_SIZE);
             loop {
-                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                tokio::time::sleep(Duration::from_millis(100)).await;
                 let mut tunnel = tunnel_timers.lock().await;
                 let results = tunnel.update_timers();
                 drop(tunnel);
@@ -421,11 +421,22 @@ impl VpnClient {
     /// Connect to the VPN server with automatic reconnection on failure.
     ///
     /// This method wraps `connect()` with a reconnection loop that handles
-    /// transient failures using exponential backoff.
+    /// transient failures using exponential backoff (1s → 2s → 4s → ... → 60s max).
     ///
     /// # Arguments
     /// * `endpoint` - The iroh endpoint to use for connections
-    /// * `max_attempts` - Maximum reconnection attempts (None = unlimited)
+    /// * `max_attempts` - Maximum total connection attempts (None = unlimited).
+    ///   This counts all attempts including the initial one:
+    ///   - `Some(1)` = try once, exit on any failure (no retries)
+    ///   - `Some(3)` = try up to 3 times total (initial + 2 retries)
+    ///   - `None` = retry indefinitely on recoverable errors
+    ///
+    /// # Error Handling
+    /// Only recoverable errors (see [`VpnError::is_recoverable`]) trigger retries:
+    /// - `ConnectionLost`, `Network`, `Signaling` → retry with backoff
+    /// - `AuthenticationFailed`, `Config`, `TunDevice`, etc. → exit immediately
+    ///
+    /// This prevents infinite retry loops on permanent failures like invalid tokens.
     pub async fn run_with_reconnect(
         &self,
         endpoint: &Endpoint,

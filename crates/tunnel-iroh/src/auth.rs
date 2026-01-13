@@ -12,7 +12,10 @@
 //! Uses [Luhn mod N](https://en.wikipedia.org/wiki/Luhn_mod_N_algorithm), a generalization
 //! of the credit card checksum algorithm. This detects:
 //! - All single-character substitution errors (typos)
-//! - All adjacent transposition errors (swapping two neighboring characters)
+//! - Most adjacent transposition errors (swapping two neighboring characters)
+//!
+//! Note: With alphabet size 65, one pair ('A' and '.') cannot be detected when
+//! swapped adjacently due to mathematical properties of the algorithm.
 //!
 //! Generate tokens with: `tunnel-rs generate-token`
 
@@ -403,7 +406,14 @@ mod tests {
 
     #[test]
     fn test_checksum_detects_adjacent_transposition() {
-        // Luhn mod N guarantees detection of all adjacent transpositions
+        // Luhn mod N detects most adjacent transpositions, but with alphabet size n=65,
+        // there's one edge case: swapping chars at indices 0 ('A') and 64 ('.') is
+        // undetectable because g(0) = g(64) where g(x) = x for x<=32, x-64 for x>=33.
+        // This is a known mathematical property of Luhn mod N with this alphabet size.
+        fn is_undetectable_pair(c1: char, c2: char) -> bool {
+            (c1 == 'A' && c2 == '.') || (c1 == '.' && c2 == 'A')
+        }
+
         for _ in 0..10 {
             let token = generate_token();
             let chars: Vec<char> = token.chars().collect();
@@ -412,6 +422,11 @@ mod tests {
             for pos in 1..16 {
                 // Skip if adjacent chars are the same (transposition would be identical)
                 if chars[pos] == chars[pos + 1] {
+                    continue;
+                }
+
+                // Skip the known undetectable pair (A <-> .)
+                if is_undetectable_pair(chars[pos], chars[pos + 1]) {
                     continue;
                 }
 
