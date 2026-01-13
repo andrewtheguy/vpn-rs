@@ -136,7 +136,7 @@ enum Command {
         no_reconnect: bool,
 
         /// Maximum reconnect attempts (omit for unlimited)
-        #[arg(long)]
+        #[arg(long, conflicts_with = "no_reconnect")]
         max_reconnect_attempts: Option<NonZeroU32>,
     },
     /// Generate a new private key for persistent server identity

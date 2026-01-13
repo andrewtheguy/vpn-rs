@@ -193,6 +193,37 @@ fn is_route_exists_error(stderr: &str) -> bool {
     lower.contains("file exists") || lower.contains("eexist")
 }
 
+/// Handle the output of a route command (add/delete).
+///
+/// - On success: logs info message
+/// - On failure with "route exists": logs warning, returns Ok (idempotent)
+/// - On other failure: returns error
+fn handle_route_add_output(
+    output: std::process::Output,
+    route: &Ipv4Net,
+    tun_name: &str,
+) -> VpnResult<()> {
+    if output.status.success() {
+        log::info!("Added route {} via {}", route, tun_name);
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if is_route_exists_error(&stderr) {
+        log::warn!(
+            "Route {} already exists (treating as success): {}",
+            route,
+            stderr.trim()
+        );
+        Ok(())
+    } else {
+        Err(VpnError::TunDevice(format!(
+            "Failed to add route {}: {}",
+            route, stderr
+        )))
+    }
+}
+
 /// Add a route through the VPN TUN interface.
 ///
 /// If the route already exists, this is treated as idempotent success
@@ -218,23 +249,7 @@ pub async fn add_route(tun_name: &str, route: &Ipv4Net) -> VpnResult<()> {
             .await
             .map_err(|e| VpnError::TunDevice(format!("Failed to execute route command: {}", e)))?;
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            if is_route_exists_error(&stderr) {
-                log::warn!(
-                    "Route {} already exists (treating as success): {}",
-                    route,
-                    stderr.trim()
-                );
-            } else {
-                return Err(VpnError::TunDevice(format!(
-                    "Failed to add route {}: {}",
-                    route, stderr
-                )));
-            }
-        } else {
-            log::info!("Added route {} via {}", route, tun_name);
-        }
+        handle_route_add_output(output, route, tun_name)
     }
 
     #[cfg(target_os = "linux")]
@@ -245,34 +260,16 @@ pub async fn add_route(tun_name: &str, route: &Ipv4Net) -> VpnResult<()> {
             .await
             .map_err(|e| VpnError::TunDevice(format!("Failed to execute ip route command: {}", e)))?;
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            if is_route_exists_error(&stderr) {
-                log::warn!(
-                    "Route {} already exists (treating as success): {}",
-                    route,
-                    stderr.trim()
-                );
-            } else {
-                return Err(VpnError::TunDevice(format!(
-                    "Failed to add route {}: {}",
-                    route, stderr
-                )));
-            }
-        } else {
-            log::info!("Added route {} via {}", route, tun_name);
-        }
+        handle_route_add_output(output, route, tun_name)
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         let _ = (tun_name, route);
-        return Err(VpnError::TunDevice(
+        Err(VpnError::TunDevice(
             "Route management not supported on this platform".into(),
-        ));
+        ))
     }
-
-    Ok(())
 }
 
 /// Add multiple routes through the VPN TUN interface.
