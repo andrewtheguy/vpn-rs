@@ -308,19 +308,21 @@ fn validate_cidr(cidr: &str) -> Result<()> {
 
 /// Validate that a string is a valid IPv6-only CIDR network.
 fn validate_ipv6_cidr(cidr: &str) -> Result<()> {
-    let net = cidr.parse::<ipnet::IpNet>().with_context(|| {
+    cidr.parse::<ipnet::Ipv6Net>().with_context(|| {
         format!(
-            "Invalid CIDR network '{}'. Expected IPv6 format: fd00::/64 or ::/0",
+            "Invalid IPv6 CIDR '{}'. Expected format: fd00::/64 or ::/0",
             cidr
         )
     })?;
-    match net {
-        ipnet::IpNet::V6(_) => Ok(()),
-        ipnet::IpNet::V4(_) => anyhow::bail!(
-            "CIDR '{}' is IPv4, but IPv6 is required. Expected format: fd00::/64 or ::/0",
-            cidr
-        ),
-    }
+    Ok(())
+}
+
+/// Generate context message for invalid route6 CIDR errors.
+fn route6_context(route: &str) -> String {
+    format!(
+        "Invalid route6 CIDR '{}' (must be IPv6, e.g., ::/0)",
+        route
+    )
 }
 
 /// Validate that a string is a valid tcp:// or udp:// URL with host and port.
@@ -981,9 +983,8 @@ impl VpnClientConfig {
             // Validate routes6: valid IPv6 CIDR format (optional)
             if let Some(ref routes6) = iroh.routes6 {
                 for route6 in routes6 {
-                    validate_ipv6_cidr(route6).with_context(|| {
-                        format!("[iroh] Invalid route6 CIDR '{}' (must be IPv6, e.g., ::/0)", route6)
-                    })?;
+                    validate_ipv6_cidr(route6)
+                        .with_context(|| format!("[iroh] {}", route6_context(route6)))?;
                 }
             }
 
@@ -1579,8 +1580,7 @@ impl VpnClientConfigBuilder {
         // Validate routes6 CIDR format (optional, must be IPv6)
         let routes6 = self.routes6.unwrap_or_default();
         for route6 in &routes6 {
-            validate_ipv6_cidr(route6)
-                .with_context(|| format!("Invalid route6 CIDR '{}' (must be IPv6, e.g., ::/0)", route6))?;
+            validate_ipv6_cidr(route6).with_context(|| route6_context(route6))?;
         }
 
         // Validate auth_token mutual exclusion
