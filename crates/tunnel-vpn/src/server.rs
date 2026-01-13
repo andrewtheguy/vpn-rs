@@ -274,8 +274,9 @@ impl VpnServer {
             Arc::new(RwLock::new(Ip6Pool::new(network6, config.server_ip6)))
         });
 
-        if ip6_pool.is_some() {
-            log::info!("IPv6 dual-stack enabled: {}", config.network6.unwrap());
+        if let Some(ref pool) = ip6_pool {
+            let pool_guard = pool.blocking_read();
+            log::info!("IPv6 dual-stack enabled: {}", pool_guard.network());
         }
 
         Ok(Self {
@@ -1106,5 +1107,22 @@ mod tests {
         let id3 = random_endpoint_id();
         let ip3 = pool.allocate(id3).unwrap();
         assert_eq!(ip3, ip1); // Should reuse released IP
+    }
+
+    #[test]
+    fn test_ip6_pool_exhaustion() {
+        // Use a tiny /126 network (4 addresses: ::0 network, ::1 server, ::2 client, ::3 last)
+        let network: Ipv6Net = "fd00::/126".parse().unwrap();
+        let mut pool = Ip6Pool::new(network, None);
+
+        // Server uses ::1, only ::2 available for clients (::3 is excluded as last address)
+        let id1 = random_endpoint_id();
+        let id2 = random_endpoint_id();
+
+        let ip1 = pool.allocate(id1);
+        assert!(ip1.is_some());
+
+        let ip2 = pool.allocate(id2);
+        assert!(ip2.is_none()); // Pool exhausted
     }
 }
