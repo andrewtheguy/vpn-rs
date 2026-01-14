@@ -42,12 +42,12 @@ pub struct VpnServerConfig {
 
     /// Whether to drop packets when a client's send buffer is full.
     ///
-    /// When `true` (default): drops packets for slow clients instead of blocking,
+    /// When `true`: drops packets for slow clients instead of blocking,
     /// preventing one slow client from affecting packet delivery to other clients.
     /// Best for real-time traffic (VoIP, gaming) where latency matters more than
     /// guaranteed delivery.
     ///
-    /// When `false`: applies backpressure by awaiting the send, which blocks the
+    /// When `false` (default): applies backpressure by awaiting the send, which blocks the
     /// TUN reader and delays packets to all clients until the slow client's buffer
     /// has space. Best for bulk transfers where packet loss is unacceptable.
     #[serde(default = "default_drop_on_full")]

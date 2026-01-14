@@ -1026,14 +1026,16 @@ impl VpnServer {
                         );
                     } else {
                         // Apply backpressure - blocks TUN reader until space available
-                        log::trace!(
-                            "Packet channel full for client {} dev {}, applying backpressure",
+                        log::warn!(
+                            "Backpressure: blocking TUN reader for {} byte packet to slow client {} dev {} (buffer full)",
+                            packet.len(),
                             endpoint_id,
                             device_id
                         );
                         if packet_tx.send(data).await.is_err() {
-                            log::trace!(
-                                "Packet channel closed for client {} dev {}",
+                            log::warn!(
+                                "Backpressure: packet channel closed for {} byte packet to client {} dev {}",
+                                packet.len(),
                                 endpoint_id,
                                 device_id
                             );

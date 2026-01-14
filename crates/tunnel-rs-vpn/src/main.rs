@@ -197,9 +197,7 @@ async fn main() -> Result<()> {
 
             // Load and validate config file
             let (cfg, _from_file) = resolve_server_config(config, default_config)?;
-            let cfg = cfg.ok_or_else(|| {
-                anyhow::anyhow!("Failed to load config file")
-            })?;
+            let cfg = cfg.expect("resolve_server_config returns Some when config or default_config is set");
             cfg.validate()?;
 
             // Build resolved config from config file

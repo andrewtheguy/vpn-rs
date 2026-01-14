@@ -167,7 +167,7 @@ pub struct VpnServerIrohConfig {
     pub auth_tokens: Option<Vec<String>>,
     /// Path to file containing authentication tokens
     pub auth_tokens_file: Option<PathBuf>,
-    /// Drop packets when a client's buffer is full (default: true).
+    /// Drop packets when a client's buffer is full (default: false).
     /// - `true`: Drop packets for slow clients (avoids head-of-line blocking)
     /// - `false`: Apply backpressure (blocks TUN reader until space available)
     #[serde(default = "default_drop_on_full")]
