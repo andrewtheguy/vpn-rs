@@ -1135,70 +1135,131 @@ enum PacketIp {
     V6(Ipv6Addr),
 }
 
+// =============================================================================
+// Optimized packet parsing functions
+//
+// These functions use unsafe pointer operations to eliminate per-byte bounds
+// checks after validating packet length once. This is safe because:
+// 1. We validate minimum packet length before any unsafe access
+// 2. IP header offsets are fixed by protocol specification
+// 3. All reads are within the validated buffer bounds
+//
+// Performance optimizations:
+// - Single length check combines empty check + minimum header validation
+// - Version byte is extracted once and reused
+// - IPv4 addresses read as u32 via ptr::read_unaligned (single memory op)
+// - IPv6 addresses read as two u64s via ptr::read_unaligned (two memory ops)
+// - Fast-path for IPv4 (most common) checked first
+// =============================================================================
+
+/// Minimum IPv4 header size (20 bytes, no options).
+const IPV4_MIN_HEADER: usize = 20;
+
+/// Minimum IPv6 header size (40 bytes fixed).
+const IPV6_MIN_HEADER: usize = 40;
+
+/// IPv4 version nibble.
+const IP_VERSION_4: u8 = 4;
+
+/// IPv6 version nibble.
+const IP_VERSION_6: u8 = 6;
+
 /// Extract source IP address from an IP packet (IPv4 or IPv6).
+///
+/// Optimized for the hot path with minimal bounds checks and direct pointer reads.
+#[inline]
 fn extract_source_ip(packet: &[u8]) -> Option<PacketIp> {
-    if packet.is_empty() {
+    // Fast-path: check for IPv4 first (most common case).
+    // Combined length + version check eliminates separate empty check.
+    let len = packet.len();
+    if len < IPV4_MIN_HEADER {
         return None;
     }
 
+    // Cache version byte to avoid repeated indexing.
+    // SAFETY: len >= 20, so index 0 is valid.
     let version = packet[0] >> 4;
 
-    match version {
-        4 => {
-            // IPv4: minimum header is 20 bytes, source at bytes 12-15
-            if packet.len() < 20 {
-                return None;
-            }
-            let src = Ipv4Addr::new(packet[12], packet[13], packet[14], packet[15]);
-            Some(PacketIp::V4(src))
-        }
-        6 => {
-            // IPv6: minimum header is 40 bytes, source at bytes 8-23
-            if packet.len() < 40 {
-                return None;
-            }
-            let src = Ipv6Addr::from([
-                packet[8], packet[9], packet[10], packet[11], packet[12], packet[13], packet[14],
-                packet[15], packet[16], packet[17], packet[18], packet[19], packet[20], packet[21],
-                packet[22], packet[23],
-            ]);
-            Some(PacketIp::V6(src))
-        }
-        _ => None,
+    if version == IP_VERSION_4 {
+        // IPv4: source address at bytes 12-15.
+        // SAFETY: len >= 20, so bytes 12-15 are valid.
+        let src = unsafe { read_ipv4_addr_unchecked(packet, 12) };
+        return Some(PacketIp::V4(src));
     }
+
+    if version == IP_VERSION_6 {
+        // IPv6 requires 40 bytes minimum.
+        if len < IPV6_MIN_HEADER {
+            return None;
+        }
+        // IPv6: source address at bytes 8-23.
+        // SAFETY: len >= 40, so bytes 8-23 are valid.
+        let src = unsafe { read_ipv6_addr_unchecked(packet, 8) };
+        return Some(PacketIp::V6(src));
+    }
+
+    None
 }
 
 /// Extract destination IP address from an IP packet (IPv4 or IPv6).
+///
+/// Optimized for the hot path with minimal bounds checks and direct pointer reads.
+#[inline]
 fn extract_dest_ip(packet: &[u8]) -> Option<PacketIp> {
-    if packet.is_empty() {
+    // Fast-path: check for IPv4 first (most common case).
+    // Combined length + version check eliminates separate empty check.
+    let len = packet.len();
+    if len < IPV4_MIN_HEADER {
         return None;
     }
 
+    // Cache version byte to avoid repeated indexing.
+    // SAFETY: len >= 20, so index 0 is valid.
     let version = packet[0] >> 4;
 
-    match version {
-        4 => {
-            // IPv4: minimum header is 20 bytes, dest at bytes 16-19
-            if packet.len() < 20 {
-                return None;
-            }
-            let dest = Ipv4Addr::new(packet[16], packet[17], packet[18], packet[19]);
-            Some(PacketIp::V4(dest))
-        }
-        6 => {
-            // IPv6: minimum header is 40 bytes, dest at bytes 24-39
-            if packet.len() < 40 {
-                return None;
-            }
-            let dest = Ipv6Addr::from([
-                packet[24], packet[25], packet[26], packet[27], packet[28], packet[29], packet[30],
-                packet[31], packet[32], packet[33], packet[34], packet[35], packet[36], packet[37],
-                packet[38], packet[39],
-            ]);
-            Some(PacketIp::V6(dest))
-        }
-        _ => None,
+    if version == IP_VERSION_4 {
+        // IPv4: destination address at bytes 16-19.
+        // SAFETY: len >= 20, so bytes 16-19 are valid.
+        let dest = unsafe { read_ipv4_addr_unchecked(packet, 16) };
+        return Some(PacketIp::V4(dest));
     }
+
+    if version == IP_VERSION_6 {
+        // IPv6 requires 40 bytes minimum.
+        if len < IPV6_MIN_HEADER {
+            return None;
+        }
+        // IPv6: destination address at bytes 24-39.
+        // SAFETY: len >= 40, so bytes 24-39 are valid.
+        let dest = unsafe { read_ipv6_addr_unchecked(packet, 24) };
+        return Some(PacketIp::V6(dest));
+    }
+
+    None
+}
+
+/// Read an IPv4 address from a packet at the given offset without bounds checks.
+///
+/// # Safety
+/// Caller must ensure `packet.len() >= offset + 4`.
+#[inline(always)]
+unsafe fn read_ipv4_addr_unchecked(packet: &[u8], offset: usize) -> Ipv4Addr {
+    // Read 4 bytes as a single u32 operation.
+    // Network byte order is big-endian, Ipv4Addr::from expects big-endian bytes.
+    let ptr = packet.as_ptr().add(offset) as *const [u8; 4];
+    Ipv4Addr::from(std::ptr::read_unaligned(ptr))
+}
+
+/// Read an IPv6 address from a packet at the given offset without bounds checks.
+///
+/// # Safety
+/// Caller must ensure `packet.len() >= offset + 16`.
+#[inline(always)]
+unsafe fn read_ipv6_addr_unchecked(packet: &[u8], offset: usize) -> Ipv6Addr {
+    // Read 16 bytes as a single operation.
+    // Ipv6Addr::from expects big-endian bytes (network order).
+    let ptr = packet.as_ptr().add(offset) as *const [u8; 16];
+    Ipv6Addr::from(std::ptr::read_unaligned(ptr))
 }
 
 #[cfg(test)]
