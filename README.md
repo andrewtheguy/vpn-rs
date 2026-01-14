@@ -96,7 +96,7 @@ Choose an alternative mode only if you have specific requirements:
 
 You only need the binary in your PATH; no runtime dependencies or package managers are required.
 
-### Port Forwarding (`tunnel-rs`, `tunnel-rs-ice`)
+### Port Forwarding (`tunnel-rs`)
 
 **Linux & macOS:**
 ```bash
@@ -108,7 +108,7 @@ curl -sSL https://andrewtheguy.github.io/tunnel-rs/install.sh | bash
 irm https://andrewtheguy.github.io/tunnel-rs/install.ps1 | iex
 ```
 
-**Note:** The quick install scripts install `tunnel-rs` (iroh mode only). For nostr/manual modes, download `tunnel-rs-ice` from [GitHub releases](https://github.com/andrewtheguy/tunnel-rs/releases) or build from source.
+This installs `tunnel-rs` (iroh mode). For nostr/manual ICE modes, download `tunnel-rs-ice` separately from [GitHub releases](https://github.com/andrewtheguy/tunnel-rs/releases) or build from source.
 
 <details>
 <summary>Advanced installation options</summary>
