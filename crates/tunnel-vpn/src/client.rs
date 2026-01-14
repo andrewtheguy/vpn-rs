@@ -11,8 +11,9 @@ use crate::error::{VpnError, VpnResult};
 use crate::lock::VpnLock;
 use crate::signaling::{
     frame_ip_packet, read_message, write_message, DataMessageType, VpnHandshake,
-    VpnHandshakeResponse, MAX_HANDSHAKE_SIZE, VPN_ALPN,
+    VpnHandshakeResponse, HEARTBEAT_PING_BYTE, MAX_HANDSHAKE_SIZE, VPN_ALPN,
 };
+use bytes::{Bytes, BytesMut};
 use ipnet::{Ipv4Net, Ipv6Net};
 use iroh::endpoint::{RecvStream, SendStream};
 use iroh::{Endpoint, EndpointId};
@@ -22,7 +23,7 @@ use std::num::NonZeroU32;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::Mutex;
+use tokio::sync::mpsc;
 
 /// Maximum IP packet size (MTU + overhead).
 const MAX_IP_PACKET_SIZE: usize = 65536;
@@ -32,6 +33,10 @@ const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
 
 /// Heartbeat timeout (max time to wait for pong before triggering reconnection).
 const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Channel buffer size for outbound packets.
+/// Sized to handle bursts without blocking the TUN reader.
+const OUTBOUND_CHANNEL_SIZE: usize = 256;
 
 /// VPN client instance.
 pub struct VpnClient {
@@ -260,12 +265,26 @@ impl VpnClient {
         let (mut tun_reader, mut tun_writer) = tun_device.split()?;
         let buffer_size = tun_reader.buffer_size();
 
-        // Wrap data_send in Arc<Mutex> for sharing between outbound and heartbeat tasks
-        let data_send = Arc::new(Mutex::new(data_send));
-        // data_recv is only used by inbound task, so no wrapping needed
+        // Create channel for outbound data to decouple packet production from stream writes.
+        // The writer task owns the SendStream and performs actual I/O, eliminating
+        // per-packet mutex overhead from the TUN reader and heartbeat tasks.
+        // Uses Bytes for zero-copy sends (freeze BytesMut instead of cloning Vec).
+        let (outbound_tx, mut outbound_rx) = mpsc::channel::<Bytes>(OUTBOUND_CHANNEL_SIZE);
+        let outbound_tx_heartbeat = outbound_tx.clone();
 
-        // Clone for tasks
-        let send_outbound = data_send.clone();
+        // Spawn dedicated writer task that owns the SendStream.
+        // Returns error context if write fails for inclusion in shutdown reason.
+        let mut writer_handle: tokio::task::JoinHandle<Option<String>> = tokio::spawn(async move {
+            let mut data_send = data_send;
+            while let Some(data) = outbound_rx.recv().await {
+                if let Err(e) = data_send.write_all(&data).await {
+                    log::warn!("Failed to write to QUIC stream: {}", e);
+                    return Some(format!("QUIC write error: {}", e));
+                }
+            }
+            log::trace!("Writer task exiting");
+            None
+        });
 
         // Track last heartbeat pong received (as millis since start_time for atomic access)
         let start_time = Instant::now();
@@ -273,34 +292,38 @@ impl VpnClient {
         let last_pong_inbound = last_pong.clone();
         let last_pong_heartbeat = last_pong.clone();
 
-        // Spawn outbound task (TUN -> frame IP packet -> QUIC stream)
-        let mut outbound_handle = tokio::spawn(async move {
+        // Spawn outbound task (TUN -> frame IP packet -> channel -> writer task)
+        // Returns error reason if task exits due to an error.
+        let mut outbound_handle: tokio::task::JoinHandle<Option<String>> = tokio::spawn(async move {
             let mut read_buf = vec![0u8; buffer_size];
-            let mut write_buf = Vec::with_capacity(1 + 4 + MAX_IP_PACKET_SIZE);
+            // Reusable BytesMut for framing (avoids per-packet allocation)
+            let mut write_buf = BytesMut::with_capacity(1 + 4 + MAX_IP_PACKET_SIZE);
             loop {
                 match tun_reader.read(&mut read_buf).await {
                     Ok(n) if n > 0 => {
                         let packet = &read_buf[..n];
 
-                        // Frame IP packet for transmission
+                        // Frame IP packet for transmission (writes into write_buf)
                         if let Err(e) = frame_ip_packet(&mut write_buf, packet) {
                             log::warn!("Failed to frame packet: {}", e);
                             continue;
                         }
 
-                        let mut send = send_outbound.lock().await;
-                        if let Err(e) = send.write_all(&write_buf).await {
-                            log::warn!(
-                                "Failed to write outbound IP packet from client to server over QUIC: {}",
-                                e
-                            );
-                            break;
+                        // Freeze into Bytes for zero-copy send, then reserve capacity for next packet
+                        // to avoid reallocation when frame_ip_packet writes up to MAX_IP_PACKET_SIZE
+                        let bytes = write_buf.split().freeze();
+                        write_buf.reserve(1 + 4 + MAX_IP_PACKET_SIZE);
+
+                        // Send via channel to writer task (blocking send to apply backpressure)
+                        if outbound_tx.send(bytes).await.is_err() {
+                            log::warn!("Outbound channel closed");
+                            return None; // Normal exit, channel closed
                         }
                     }
                     Ok(_) => {}
                     Err(e) => {
                         log::error!("TUN read error: {}", e);
-                        break;
+                        return Some(format!("TUN read error: {}", e));
                     }
                 }
             }
@@ -308,8 +331,9 @@ impl VpnClient {
 
         // Spawn inbound task (QUIC stream -> TUN)
         // data_recv is moved into this task (no Arc/Mutex needed - single owner)
+        // Returns error reason if task exits due to an error.
         let inbound_start_time = start_time;
-        let mut inbound_handle = tokio::spawn(async move {
+        let mut inbound_handle: tokio::task::JoinHandle<Option<String>> = tokio::spawn(async move {
             const MAX_TUN_WRITE_FAILURES: u32 = 10;
             let mut data_recv = data_recv;
             let mut type_buf = [0u8; 1];
@@ -322,7 +346,7 @@ impl VpnClient {
                     Ok(()) => {}
                     Err(e) => {
                         log::error!("Failed to read message type: {}", e);
-                        break;
+                        return Some(format!("QUIC read error: {}", e));
                     }
                 }
 
@@ -332,7 +356,7 @@ impl VpnClient {
                         // Unknown message type - cannot determine framing, must disconnect
                         // to avoid stream desynchronization
                         log::error!("Unknown message type: 0x{:02x}, disconnecting", type_buf[0]);
-                        break;
+                        return Some(format!("Unknown message type: 0x{:02x}", type_buf[0]));
                     }
                 };
 
@@ -359,13 +383,13 @@ impl VpnClient {
                     Ok(()) => {}
                     Err(e) => {
                         log::error!("Failed to read IP packet length: {}", e);
-                        break;
+                        return Some(format!("QUIC read error: {}", e));
                     }
                 }
                 let len = u32::from_be_bytes(len_buf) as usize;
                 if len > MAX_IP_PACKET_SIZE {
                     log::error!("IP packet too large: {}", len);
-                    break;
+                    return Some(format!("IP packet too large: {}", len));
                 }
 
                 // Read packet data
@@ -373,7 +397,7 @@ impl VpnClient {
                     Ok(()) => {}
                     Err(e) => {
                         log::error!("Failed to read IP packet: {}", e);
-                        break;
+                        return Some(format!("QUIC read error: {}", e));
                     }
                 }
 
@@ -387,7 +411,7 @@ impl VpnClient {
                             consecutive_tun_failures,
                             e
                         );
-                        break;
+                        return Some(format!("TUN write failures exceeded: {}", e));
                     }
                     log::warn!(
                         "Failed to write to TUN ({}/{}): {}",
@@ -401,9 +425,9 @@ impl VpnClient {
             }
         });
 
-        // Spawn heartbeat task (sends pings, checks for timeout)
-        let send_heartbeat = data_send.clone();
-        let mut heartbeat_handle = tokio::spawn(async move {
+        // Spawn heartbeat task (sends pings via channel, checks for timeout)
+        // Returns error reason if task exits due to timeout.
+        let mut heartbeat_handle: tokio::task::JoinHandle<Option<String>> = tokio::spawn(async move {
             let heartbeat_start = start_time;
             loop {
                 tokio::time::sleep(HEARTBEAT_INTERVAL).await;
@@ -419,17 +443,17 @@ impl VpnClient {
                         elapsed_ms as f64 / 1000.0,
                         HEARTBEAT_TIMEOUT.as_secs_f64()
                     );
-                    break;
+                    return Some(format!(
+                        "Heartbeat timeout: no pong for {:.1}s",
+                        elapsed_ms as f64 / 1000.0
+                    ));
                 }
 
-                // Send ping
-                let mut send = send_heartbeat.lock().await;
-                if let Err(e) = send
-                    .write_all(&[DataMessageType::HeartbeatPing.as_byte()])
-                    .await
-                {
-                    log::warn!("Failed to send heartbeat ping: {}", e);
-                    break;
+                // Send ping via channel to writer task (static Bytes, zero allocation)
+                let ping = Bytes::from_static(HEARTBEAT_PING_BYTE);
+                if outbound_tx_heartbeat.send(ping).await.is_err() {
+                    log::warn!("Failed to send heartbeat ping: channel closed");
+                    return None; // Normal exit, channel closed
                 }
                 log::trace!("Heartbeat ping sent");
             }
@@ -438,13 +462,16 @@ impl VpnClient {
         // Wait for any task to complete (or error), then clean up all tasks
         let (first_task, first_result, remaining) = tokio::select! {
             result = &mut outbound_handle => {
-                ("outbound", result, vec![("inbound", inbound_handle), ("heartbeat", heartbeat_handle)])
+                ("outbound", result, vec![("inbound", inbound_handle), ("heartbeat", heartbeat_handle), ("writer", writer_handle)])
             }
             result = &mut inbound_handle => {
-                ("inbound", result, vec![("outbound", outbound_handle), ("heartbeat", heartbeat_handle)])
+                ("inbound", result, vec![("outbound", outbound_handle), ("heartbeat", heartbeat_handle), ("writer", writer_handle)])
             }
             result = &mut heartbeat_handle => {
-                ("heartbeat", result, vec![("outbound", outbound_handle), ("inbound", inbound_handle)])
+                ("heartbeat", result, vec![("outbound", outbound_handle), ("inbound", inbound_handle), ("writer", writer_handle)])
+            }
+            result = &mut writer_handle => {
+                ("writer", result, vec![("outbound", outbound_handle), ("inbound", inbound_handle), ("heartbeat", heartbeat_handle)])
             }
         };
 
@@ -463,8 +490,12 @@ impl VpnClient {
         let mut reasons = Vec::new();
         for (name, result) in &all_results {
             match result {
-                Ok(()) => {
-                    // Task completed normally (broke out of loop)
+                Ok(Some(error_reason)) => {
+                    // Task exited with an error reason
+                    reasons.push(error_reason.clone());
+                }
+                Ok(None) => {
+                    // Task completed normally (channel closed, etc.)
                     reasons.push(format!("{} task ended", name));
                 }
                 Err(e) if e.is_cancelled() => {

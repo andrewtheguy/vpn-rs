@@ -167,6 +167,11 @@ pub struct VpnServerIrohConfig {
     pub auth_tokens: Option<Vec<String>>,
     /// Path to file containing authentication tokens
     pub auth_tokens_file: Option<PathBuf>,
+    /// Drop packets when a client's buffer is full (default: false).
+    /// - `true`: Drop packets for slow clients (avoids head-of-line blocking)
+    /// - `false`: Apply backpressure (blocks TUN reader until space available)
+    #[serde(default = "default_drop_on_full")]
+    pub drop_on_full: bool,
     /// Shared configuration fields
     #[serde(flatten)]
     pub shared: VpnIrohSharedConfig,
@@ -1001,6 +1006,12 @@ fn load_config<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T> {
         .with_context(|| format!("Failed to parse config file: {}", path.display()))
 }
 
+/// Default value for `drop_on_full` in VPN server config.
+/// Defaults to false (apply backpressure) for development/homelab use.
+fn default_drop_on_full() -> bool {
+    false
+}
+
 /// Resolve the default server config path (~/.config/tunnel-rs/server.toml).
 fn default_server_config_path() -> Option<PathBuf> {
     dirs::home_dir().map(|home| home.join(".config").join("tunnel-rs").join("server.toml"))
@@ -1120,6 +1131,24 @@ pub fn default_nostr_relays() -> &'static [&'static str] {
 pub const DEFAULT_VPN_MTU: u16 = 1440;
 
 /// Resolved VPN server configuration (all values finalized).
+///
+/// Created from a TOML config file via `from_config()`.
+///
+/// # Example
+/// ```rust
+/// use tunnel_common::config::{ResolvedVpnServerConfig, VpnServerIrohConfig};
+///
+/// fn main() -> anyhow::Result<()> {
+///     let toml_config = VpnServerIrohConfig {
+///         network: Some("10.0.0.0/24".to_string()),
+///         ..Default::default()
+///     };
+///
+///     let config = ResolvedVpnServerConfig::from_config(&toml_config)?;
+///     assert_eq!(config.network, "10.0.0.0/24");
+///     Ok(())
+/// }
+/// ```
 #[derive(Debug, Clone)]
 pub struct ResolvedVpnServerConfig {
     pub network: String,
@@ -1132,214 +1161,59 @@ pub struct ResolvedVpnServerConfig {
     pub dns_server: Option<String>,
     pub auth_tokens: Vec<String>,
     pub auth_tokens_file: Option<PathBuf>,
+    pub drop_on_full: bool,
 }
 
-/// Builder for VPN server configuration with layered overrides.
-///
-/// Usage:
-/// ```rust
-/// use tunnel_common::config::{VpnServerConfigBuilder, VpnServerIrohConfig};
-///
-/// fn main() -> anyhow::Result<()> {
-///     let toml_config = VpnServerIrohConfig {
-///         network: Some("10.0.0.0/24".to_string()),
-///         ..Default::default()
-///     };
-///
-///     let config = VpnServerConfigBuilder::new()
-///         .apply_defaults()
-///         .apply_config(Some(&toml_config))
-///         .apply_cli(
-///             None,                             // network
-///             Some("10.0.0.1".to_string()),     // server_ip
-///             None,                             // network6
-///             None,                             // server_ip6
-///             Some(1400),                       // mtu
-///             None,                             // secret_file
-///             vec![],                           // relay_urls
-///             None,                             // dns_server
-///             vec!["token-1".to_string()],      // auth_tokens
-///             None,                             // auth_tokens_file
-///         )
-///         .build()?;
-///
-///     assert_eq!(config.network, "10.0.0.0/24");
-///     Ok(())
-/// }
-/// ```
-#[derive(Default)]
-pub struct VpnServerConfigBuilder {
-    network: Option<String>,
-    server_ip: Option<String>,
-    network6: Option<String>,
-    server_ip6: Option<String>,
-    mtu: Option<u16>,
-    secret_file: Option<PathBuf>,
-    relay_urls: Option<Vec<String>>,
-    dns_server: Option<String>,
-    auth_tokens: Option<Vec<String>>,
-    auth_tokens_file: Option<PathBuf>,
-}
-
-impl VpnServerConfigBuilder {
-    /// Create a new empty builder.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Apply default values (lowest priority).
-    pub fn apply_defaults(mut self) -> Self {
-        self.mtu = Some(DEFAULT_VPN_MTU);
-        self.relay_urls = Some(vec![]);
-        self.auth_tokens = Some(vec![]);
-        self
-    }
-
-    /// Apply values from TOML config (middle priority).
-    ///
-    /// For `Option<Vec<T>>` fields:
-    /// - `None` in config: don't override (use defaults/CLI)
-    /// - `Some([])` in config: explicitly set to empty (override defaults)
-    /// - `Some([...])` in config: set to these values
-    pub fn apply_config(mut self, config: Option<&VpnServerIrohConfig>) -> Self {
-        if let Some(cfg) = config {
-            if cfg.network.is_some() {
-                self.network = cfg.network.clone();
-            }
-            if cfg.server_ip.is_some() {
-                self.server_ip = cfg.server_ip.clone();
-            }
-            // IPv6 fields (optional)
-            if cfg.network6.is_some() {
-                self.network6 = cfg.network6.clone();
-            }
-            if cfg.server_ip6.is_some() {
-                self.server_ip6 = cfg.server_ip6.clone();
-            }
-            if cfg.shared.mtu.is_some() {
-                self.mtu = cfg.shared.mtu;
-            }
-            if cfg.secret_file.is_some() {
-                self.secret_file = cfg.secret_file.clone();
-            }
-            // relay_urls: None = not set, Some([]) = explicitly empty
-            if cfg.shared.relay_urls.is_some() {
-                self.relay_urls = cfg.shared.relay_urls.clone();
-            }
-            if cfg.shared.dns_server.is_some() {
-                self.dns_server = cfg.shared.dns_server.clone();
-            }
-            // auth_tokens: None = not set, Some([]) = explicitly no auth
-            if cfg.auth_tokens.is_some() {
-                self.auth_tokens = cfg.auth_tokens.clone();
-            }
-            if cfg.auth_tokens_file.is_some() {
-                self.auth_tokens_file = cfg.auth_tokens_file.clone();
-            }
-        }
-        self
-    }
-
-    /// Apply CLI arguments (highest priority).
-    /// Only non-None/non-empty values override.
-    #[allow(clippy::too_many_arguments)]
-    pub fn apply_cli(
-        mut self,
-        network: Option<String>,
-        server_ip: Option<String>,
-        network6: Option<String>,
-        server_ip6: Option<String>,
-        mtu: Option<u16>,
-        secret_file: Option<PathBuf>,
-        relay_urls: Vec<String>,
-        dns_server: Option<String>,
-        auth_tokens: Vec<String>,
-        auth_tokens_file: Option<PathBuf>,
-    ) -> Self {
-        if network.is_some() {
-            self.network = network;
-        }
-        if server_ip.is_some() {
-            self.server_ip = server_ip;
-        }
-        // IPv6 fields (optional)
-        if network6.is_some() {
-            self.network6 = network6;
-        }
-        if server_ip6.is_some() {
-            self.server_ip6 = server_ip6;
-        }
-        if mtu.is_some() {
-            self.mtu = mtu;
-        }
-        if secret_file.is_some() {
-            self.secret_file = secret_file;
-        }
-        if !relay_urls.is_empty() {
-            self.relay_urls = Some(relay_urls);
-        }
-        if dns_server.is_some() {
-            self.dns_server = dns_server;
-        }
-        if !auth_tokens.is_empty() {
-            self.auth_tokens = Some(auth_tokens);
-        }
-        if auth_tokens_file.is_some() {
-            self.auth_tokens_file = auth_tokens_file;
-        }
-        self
-    }
-
-    /// Build the final resolved configuration.
-    pub fn build(self) -> Result<ResolvedVpnServerConfig> {
-        let network = self.network.ok_or_else(|| {
+impl ResolvedVpnServerConfig {
+    /// Create resolved config from TOML config, applying defaults for missing values.
+    pub fn from_config(cfg: &VpnServerIrohConfig) -> Result<Self> {
+        let network = cfg.network.clone().ok_or_else(|| {
             anyhow::anyhow!(
                 "VPN network CIDR is required.\n\
-                 Specify via CLI: --network <CIDR>\n\
-                 Or in config: network = \"10.0.0.0/24\""
+                 In config: network = \"10.0.0.0/24\""
             )
         })?;
 
         // Validate network CIDR format
-        validate_vpn_network(&network, self.server_ip.as_deref(), "config")?;
+        validate_vpn_network(&network, cfg.server_ip.as_deref(), "config")?;
 
         // Validate IPv6 network CIDR format (optional)
         // Ensure server_ip6 is not orphaned without network6
-        if self.server_ip6.is_some() && self.network6.is_none() {
+        if cfg.server_ip6.is_some() && cfg.network6.is_none() {
             anyhow::bail!(
                 "'server_ip6' requires 'network6' to be set.\n\
-                 Specify via CLI: --network6 <CIDR>\n\
-                 Or in config: network6 = \"fd00::/64\""
+                 In config: network6 = \"fd00::/64\""
             );
         }
-        if let Some(ref network6) = self.network6 {
-            validate_vpn_network6(network6, self.server_ip6.as_deref(), "config")?;
+        if let Some(ref network6) = cfg.network6 {
+            validate_vpn_network6(network6, cfg.server_ip6.as_deref(), "config")?;
         }
 
-        // Validate MTU range
-        let mtu = self.mtu.unwrap_or(DEFAULT_VPN_MTU);
+        // Apply defaults for optional fields
+        let mtu = cfg.shared.mtu.unwrap_or(DEFAULT_VPN_MTU);
         validate_mtu(mtu, "config")?;
 
         // Validate auth_tokens mutual exclusion
-        let has_tokens = self.auth_tokens.as_ref().is_some_and(|t| !t.is_empty());
-        if has_tokens && self.auth_tokens_file.is_some() {
+        let has_tokens = cfg.auth_tokens.as_ref().is_some_and(|t| !t.is_empty());
+        if has_tokens && cfg.auth_tokens_file.is_some() {
             anyhow::bail!(
                 "Cannot specify both auth_tokens and auth_tokens_file.\n\
-                 Use --auth-tokens <TOKEN> or --auth-tokens-file <FILE>, not both."
+                 Use auth_tokens = [...] or auth_tokens_file = \"...\", not both."
             );
         }
 
-        Ok(ResolvedVpnServerConfig {
+        Ok(Self {
             network,
-            server_ip: self.server_ip,
-            network6: self.network6,
-            server_ip6: self.server_ip6,
+            server_ip: cfg.server_ip.clone(),
+            network6: cfg.network6.clone(),
+            server_ip6: cfg.server_ip6.clone(),
             mtu,
-            secret_file: self.secret_file,
-            relay_urls: self.relay_urls.unwrap_or_default(),
-            dns_server: self.dns_server,
-            auth_tokens: self.auth_tokens.unwrap_or_default(),
-            auth_tokens_file: self.auth_tokens_file,
+            secret_file: cfg.secret_file.clone(),
+            relay_urls: cfg.shared.relay_urls.clone().unwrap_or_default(),
+            dns_server: cfg.shared.dns_server.clone(),
+            auth_tokens: cfg.auth_tokens.clone().unwrap_or_default(),
+            auth_tokens_file: cfg.auth_tokens_file.clone(),
+            drop_on_full: cfg.drop_on_full,
         })
     }
 }

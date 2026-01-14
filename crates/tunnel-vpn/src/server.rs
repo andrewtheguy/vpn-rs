@@ -10,19 +10,25 @@ use crate::device::{TunConfig, TunDevice, TunWriter};
 use crate::error::{VpnError, VpnResult};
 use crate::signaling::{
     frame_ip_packet, read_message, write_message, DataMessageType, VpnHandshake,
-    VpnHandshakeResponse, MAX_HANDSHAKE_SIZE,
+    VpnHandshakeResponse, HEARTBEAT_PONG_BYTE, MAX_HANDSHAKE_SIZE,
 };
+use bytes::{Bytes, BytesMut};
+use dashmap::DashMap;
 use ipnet::{Ipv4Net, Ipv6Net};
-use iroh::endpoint::SendStream;
 use iroh::{Endpoint, EndpointId};
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::{mpsc, oneshot, Mutex, RwLock};
 
 /// Maximum IP packet size.
 const MAX_IP_PACKET_SIZE: usize = 65536;
+
+/// Channel buffer size for outbound packets per client.
+/// Large enough to handle bursts; behavior when full depends on
+/// `VpnServerConfig::drop_on_full` (drop packets vs. apply backpressure).
+const CLIENT_PACKET_CHANNEL_SIZE: usize = 1024;
 
 /// State for a connected VPN client.
 struct ClientState {
@@ -41,8 +47,10 @@ struct ClientState {
     /// Client's iroh endpoint ID.
     #[allow(dead_code)]
     endpoint_id: EndpointId,
-    /// Send stream to client (for sending encrypted packets).
-    send_stream: Arc<Mutex<SendStream>>,
+    /// Channel to send framed packets to the client's dedicated writer task.
+    /// The writer task owns the SendStream and performs actual I/O.
+    /// Uses Bytes for zero-copy sends (freeze BytesMut instead of cloning Vec).
+    packet_tx: mpsc::Sender<Bytes>,
 }
 
 /// IP address pool for assigning addresses to clients.
@@ -244,12 +252,14 @@ pub struct VpnServer {
     /// IPv6 address pool (None if IPv4-only mode).
     ip6_pool: Option<Arc<RwLock<Ip6Pool>>>,
     /// Connected clients (by (endpoint ID, device ID)).
-    clients: Arc<RwLock<HashMap<(EndpointId, u64), ClientState>>>,
+    /// Lock-free map for hot-path packet routing.
+    clients: Arc<DashMap<(EndpointId, u64), ClientState>>,
     /// Reverse lookup: IPv4 address -> (endpoint ID, device ID).
-    /// Used for routing.
-    ip_to_endpoint: Arc<RwLock<HashMap<Ipv4Addr, (EndpointId, u64)>>>,
+    /// Lock-free map for hot-path routing lookups.
+    ip_to_endpoint: Arc<DashMap<Ipv4Addr, (EndpointId, u64)>>,
     /// Reverse lookup: IPv6 address -> (endpoint ID, device ID).
-    ip6_to_endpoint: Arc<RwLock<HashMap<Ipv6Addr, (EndpointId, u64)>>>,
+    /// Lock-free map for hot-path routing lookups.
+    ip6_to_endpoint: Arc<DashMap<Ipv6Addr, (EndpointId, u64)>>,
     /// TUN device for VPN traffic.
     tun_device: Option<TunDevice>,
     /// Atomic counter for active connections (prevents race in max_clients check).
@@ -282,9 +292,9 @@ impl VpnServer {
             config,
             ip_pool,
             ip6_pool,
-            clients: Arc::new(RwLock::new(HashMap::new())),
-            ip_to_endpoint: Arc::new(RwLock::new(HashMap::new())),
-            ip6_to_endpoint: Arc::new(RwLock::new(HashMap::new())),
+            clients: Arc::new(DashMap::new()),
+            ip_to_endpoint: Arc::new(DashMap::new()),
+            ip6_to_endpoint: Arc::new(DashMap::new()),
             tun_device: None,
             active_connections: AtomicUsize::new(0),
             next_session_id: AtomicU64::new(1),
@@ -568,44 +578,79 @@ impl VpnServer {
 
         log::info!("Client {} data stream established", remote_id);
 
-        let data_send = Arc::new(Mutex::new(data_send));
+        // Create channel for sending framed packets to this client's writer task.
+        // The writer task owns the SendStream and performs actual I/O, decoupling
+        // packet production from stream writes to reduce locking overhead.
+        // Uses Bytes for zero-copy sends (freeze BytesMut instead of cloning Vec).
+        let (packet_tx, mut packet_rx) = mpsc::channel::<Bytes>(CLIENT_PACKET_CHANNEL_SIZE);
+
+        // Create oneshot channel for writer error signaling.
+        // When writer fails, it sends the error through this channel to trigger
+        // immediate cleanup instead of waiting for heartbeat timeout.
+        let (writer_error_tx, writer_error_rx) = oneshot::channel::<String>();
+
+        // Spawn dedicated writer task that owns the SendStream.
+        // Returns error through oneshot channel for immediate cleanup propagation.
+        let writer_assigned_ip = assigned_ip;
+        let mut data_send = data_send;
+        let writer_handle = tokio::spawn(async move {
+            let error = loop {
+                match packet_rx.recv().await {
+                    Some(data) => {
+                        if let Err(e) = data_send.write_all(&data).await {
+                            log::warn!("Failed to write to client {}: {}", writer_assigned_ip, e);
+                            break Some(format!("QUIC write error: {}", e));
+                        }
+                    }
+                    None => {
+                        // Channel closed (normal shutdown) - signal end of stream to peer
+                        if let Err(e) = data_send.finish() {
+                            log::warn!(
+                                "Failed to finish QUIC stream for client {}: {}",
+                                writer_assigned_ip,
+                                e
+                            );
+                            break Some(format!("QUIC finish error: {}", e));
+                        }
+                        break None;
+                    }
+                }
+            };
+            log::trace!("Writer task for {} exiting", writer_assigned_ip);
+            // Signal error to trigger immediate cleanup (ignore send error if receiver dropped)
+            if let Some(err_msg) = error {
+                let _ = writer_error_tx.send(err_msg);
+            }
+        });
 
         // Generate unique session ID for this connection
         // Used to detect stale cleanup when same client reconnects quickly
         let session_id = self.next_session_id.fetch_add(1, Ordering::Relaxed);
 
-        // Store client state (including send stream for TUN handler to use)
+        // Store client state with channel sender for TUN handler to use
         let client_state = ClientState {
             session_id,
             assigned_ip,
             assigned_ip6,
             device_id,
             endpoint_id: remote_id,
-            send_stream: data_send.clone(),
+            packet_tx: packet_tx.clone(),
         };
 
         // Reconnect handling: if a client with the same (EndpointId, DeviceId) exists,
         // we can safely overwrite its entry in the map with the new connection state.
-        // In Rust, inserting into the map replaces the previous ClientState and returns it;
-        // once that old ClientState is dropped (and if there are no other Arc clones),
-        // its resources (including the SendStream used for sending IP packets) are also dropped
-        // and the underlying QUIC stream is closed by normal Drop semantics.
-        // We also use session_id for cleanup safety: background cleanup for an old connection
-        // checks the current session_id in the map, so when a reconnect happens the stale
-        // cleanup task will see a different session_id and will NOT remove or affect the new entry.
+        // The old ClientState's packet_tx sender is dropped, causing its writer task
+        // to exit when the channel closes. The session_id check in cleanup prevents
+        // stale cleanup tasks from affecting the new connection.
         let client_key = (remote_id, device_id);
 
-        self.clients.write().await.insert(client_key, client_state);
+        // DashMap operations are lock-free (no async needed)
+        self.clients.insert(client_key, client_state);
         self.ip_to_endpoint
-            .write()
-            .await
             .insert(assigned_ip, (remote_id, device_id));
 
         if let Some(ip6) = assigned_ip6 {
-            self.ip6_to_endpoint
-                .write()
-                .await
-                .insert(ip6, (remote_id, device_id));
+            self.ip6_to_endpoint.insert(ip6, (remote_id, device_id));
         }
 
         // Handle client data
@@ -615,19 +660,21 @@ impl VpnServer {
         let ip_to_endpoint = self.ip_to_endpoint.clone();
         let ip6_to_endpoint = self.ip6_to_endpoint.clone();
 
-        // Run client handler (blocks until client disconnects)
-        // Note: data_send is passed as heartbeat_send since it's only used for
-        // heartbeat responses in handle_client_data (outbound traffic goes via
-        // ClientState.send_stream in run_tun_reader)
-        let heartbeat_send = data_send;
+        // Run client handler (blocks until client disconnects or writer fails)
+        // packet_tx is used for heartbeat responses (sent via the writer task)
+        // writer_error_rx triggers immediate cleanup on write failures
         let result = Self::handle_client_data(
-            heartbeat_send,
+            packet_tx,
             data_recv,
             assigned_ip,
             assigned_ip6,
             tun_writer,
+            writer_error_rx,
         )
         .await;
+
+        // Abort writer task if still running (cleanup on any exit path)
+        writer_handle.abort();
 
         if let Err(ref e) = result {
             log::error!("Client {} data error: {}", remote_id, e);
@@ -638,44 +685,27 @@ impl VpnServer {
         // Cleanup - use session_id to detect stale cleanup from rapid reconnection.
         // Check-before-remove: verify session_id matches before removing anything.
         // If a newer connection replaced us, do nothing - that connection owns the resources.
-        let mut endpoint_to_release = None;
-        let mut release_ipv6 = false;
-        {
-            let mut clients_map = clients.write().await;
-            let mut ip_map = ip_to_endpoint.write().await;
-            let mut ip6_map = ip6_to_endpoint.write().await;
+        // DashMap remove_if atomically checks and removes if the predicate holds.
+        let removed = clients.remove_if(&client_key, |_, state| state.session_id == session_id);
 
-            // Check if client entry still belongs to this session before removing
-            let should_cleanup = clients_map
-                .get(&client_key)
-                .map(|state| state.session_id == session_id)
-                .unwrap_or(false);
+        let (endpoint_to_release, release_ipv6) = if let Some((_, client_state)) = removed {
+            // Remove IPv4 mapping if it points to us
+            ip_to_endpoint.remove_if(&assigned_ip, |_, (ep, dev)| {
+                *ep == remote_id && *dev == device_id
+            });
 
-            if should_cleanup {
-                // Remove client state (we know it belongs to this session)
-                if let Some(client_state) = clients_map.remove(&client_key) {
-                    endpoint_to_release = Some((remote_id, device_id));
-                    release_ipv6 = client_state.assigned_ip6.is_some();
-                }
-
-                // Remove IPv4 mapping if it points to us
-                if let Some((ep, dev)) = ip_map.get(&assigned_ip) {
-                    if *ep == remote_id && *dev == device_id {
-                        ip_map.remove(&assigned_ip);
-                    }
-                }
-
-                // Remove IPv6 mapping if it points to us
-                if let Some(ip6) = assigned_ip6 {
-                    if let Some((ep6, dev6)) = ip6_map.get(&ip6) {
-                        if *ep6 == remote_id && *dev6 == device_id {
-                            ip6_map.remove(&ip6);
-                        }
-                    }
-                }
+            // Remove IPv6 mapping if it points to us
+            if let Some(ip6) = assigned_ip6 {
+                ip6_to_endpoint.remove_if(&ip6, |_, (ep6, dev6)| {
+                    *ep6 == remote_id && *dev6 == device_id
+                });
             }
-            // If session_id doesn't match or client already gone, do nothing
-        }
+
+            (Some((remote_id, device_id)), client_state.assigned_ip6.is_some())
+        } else {
+            // Session_id didn't match or client already gone - do nothing
+            (None, false)
+        };
 
         if let Some((endpoint_id, dev_id)) = endpoint_to_release {
             ip_pool.write().await.release(&endpoint_id, dev_id);
@@ -692,17 +722,21 @@ impl VpnServer {
     }
 
     /// Handle client data stream.
+    ///
+    /// This function processes incoming data from the client and responds to heartbeats.
+    /// It exits when either:
+    /// - The client disconnects (inbound stream closes)
+    /// - The writer task fails (error received via writer_error_rx)
     async fn handle_client_data(
-        heartbeat_send: Arc<Mutex<SendStream>>,
+        packet_tx: mpsc::Sender<Bytes>,
         mut data_recv: iroh::endpoint::RecvStream,
         assigned_ip: Ipv4Addr,
         assigned_ip6: Option<Ipv6Addr>,
         tun_writer: Arc<Mutex<TunWriter>>,
+        writer_error_rx: oneshot::Receiver<String>,
     ) -> VpnResult<()> {
-        let send_heartbeat = heartbeat_send.clone();
-
         // Spawn inbound task (QUIC stream -> TUN)
-        let inbound_handle = tokio::spawn(async move {
+        let mut inbound_handle = tokio::spawn(async move {
             let mut type_buf = [0u8; 1];
             let mut len_buf = [0u8; 4];
             let mut data_buf = vec![0u8; MAX_IP_PACKET_SIZE];
@@ -730,14 +764,11 @@ impl VpnServer {
 
                 match msg_type {
                     DataMessageType::HeartbeatPing => {
-                        // Respond with pong
+                        // Respond with pong via the writer task channel (static Bytes, zero allocation)
                         log::trace!("Heartbeat ping from {}", assigned_ip);
-                        let mut send = send_heartbeat.lock().await;
-                        if let Err(e) = send
-                            .write_all(&[DataMessageType::HeartbeatPong.as_byte()])
-                            .await
-                        {
-                            log::warn!("Failed to send heartbeat pong to {}: {}", assigned_ip, e);
+                        let pong = Bytes::from_static(HEARTBEAT_PONG_BYTE);
+                        if packet_tx.send(pong).await.is_err() {
+                            log::warn!("Failed to send heartbeat pong to {}: channel closed", assigned_ip);
                             break;
                         }
                         continue;
@@ -855,8 +886,44 @@ impl VpnServer {
             }
         });
 
-        // Wait for inbound task to complete (client disconnection)
-        let _ = inbound_handle.await;
+        // Wait for either:
+        // - Inbound task completes (client disconnection or stream error)
+        // - Writer task signals an error (QUIC write failure)
+        // This ensures immediate cleanup on writer failure instead of waiting for heartbeat timeout.
+        tokio::select! {
+            inbound_result = &mut inbound_handle => {
+                // Inspect JoinHandle result to catch panics
+                match inbound_result {
+                    Ok(()) => {
+                        // Client disconnected normally or stream error
+                        log::trace!("Client {} inbound task completed", assigned_ip);
+                    }
+                    Err(e) if e.is_panic() => {
+                        log::error!("Client {} inbound task panicked: {}", assigned_ip, e);
+                        return Err(VpnError::ConnectionLost(format!("inbound task panicked: {}", e)));
+                    }
+                    Err(e) => {
+                        // Cancelled or other JoinError
+                        log::debug!("Client {} inbound task failed: {}", assigned_ip, e);
+                        return Err(VpnError::ConnectionLost(format!("inbound task failed: {}", e)));
+                    }
+                }
+            }
+            writer_err = writer_error_rx => {
+                // Writer task failed - abort inbound task and return error
+                inbound_handle.abort();
+                match writer_err {
+                    Ok(err_msg) => {
+                        log::debug!("Client {} writer failed: {}", assigned_ip, err_msg);
+                        return Err(VpnError::ConnectionLost(err_msg));
+                    }
+                    Err(_) => {
+                        // Sender dropped without error (normal shutdown via channel close)
+                        log::trace!("Client {} writer channel closed", assigned_ip);
+                    }
+                }
+            }
+        }
 
         Ok(())
     }
@@ -867,7 +934,8 @@ impl VpnServer {
 
         let buffer_size = tun_reader.buffer_size();
         let mut buf = vec![0u8; buffer_size];
-        let mut write_buf = Vec::with_capacity(1 + 4 + buffer_size);
+        // Reusable BytesMut for framing (avoids per-packet allocation)
+        let mut write_buf = BytesMut::with_capacity(1 + 4 + buffer_size);
 
         loop {
             // Read packet from TUN device
@@ -883,10 +951,10 @@ impl VpnServer {
             let packet = &buf[..n];
 
             // Extract destination IP from packet (IPv4 or IPv6)
+            // DashMap lookups are lock-free - no async await needed
             let (endpoint_id, device_id) = match extract_dest_ip(packet) {
                 Some(PacketIp::V4(dest_ip)) => {
-                    let ip_map = self.ip_to_endpoint.read().await;
-                    match ip_map.get(&dest_ip).map(|&(id, dev)| (id, dev)) {
+                    match self.ip_to_endpoint.get(&dest_ip).map(|r| *r) {
                         Some(res) => res,
                         None => {
                             log::trace!("No client for destination IPv4 {}", dest_ip);
@@ -895,8 +963,7 @@ impl VpnServer {
                     }
                 }
                 Some(PacketIp::V6(dest_ip)) => {
-                    let ip6_map = self.ip6_to_endpoint.read().await;
-                    match ip6_map.get(&dest_ip).map(|&(id, dev)| (id, dev)) {
+                    match self.ip6_to_endpoint.get(&dest_ip).map(|r| *r) {
                         Some(res) => res,
                         None => {
                             log::trace!("No client for destination IPv6 {}", dest_ip);
@@ -912,19 +979,16 @@ impl VpnServer {
 
             let client_key = (endpoint_id, device_id);
 
-            // Get client's send stream (clone Arc to release read lock before I/O)
-            let send_stream = {
-                let clients = self.clients.read().await;
-                match clients.get(&client_key) {
-                    Some(c) => c.send_stream.clone(),
-                    None => {
-                        log::trace!("Client {} dev {} not found", endpoint_id, device_id);
-                        continue;
-                    }
+            // Get client's packet channel sender (DashMap lookup is lock-free)
+            let packet_tx = match self.clients.get(&client_key) {
+                Some(c) => c.packet_tx.clone(),
+                None => {
+                    log::trace!("Client {} dev {} not found", endpoint_id, device_id);
+                    continue;
                 }
             };
 
-            // Directly frame and send packet
+            // Frame packet and enqueue for the client's writer task
             if let Err(e) = frame_ip_packet(&mut write_buf, packet) {
                 log::warn!(
                     "Failed to frame packet for {} dev {}: {}",
@@ -934,22 +998,58 @@ impl VpnServer {
                 );
                 continue;
             }
-            let mut send = send_stream.lock().await;
-            if let Err(e) = send.write_all(&write_buf).await {
-                log::warn!(
-                    "Failed to send to client {} dev {}: {}",
-                    endpoint_id,
-                    device_id,
-                    e
-                );
-                continue;
+
+            // Freeze into Bytes for zero-copy send, then reserve capacity for next packet
+            // to avoid reallocation when frame_ip_packet writes up to buffer_size
+            let bytes = write_buf.split().freeze();
+            write_buf.reserve(1 + 4 + buffer_size);
+
+            // Send via channel - try non-blocking first
+            match packet_tx.try_send(bytes) {
+                Ok(()) => {
+                    log::trace!(
+                        "Enqueued {} bytes for client {} dev {}",
+                        packet.len(),
+                        endpoint_id,
+                        device_id
+                    );
+                }
+                Err(mpsc::error::TrySendError::Full(data)) => {
+                    // Buffer full - behavior depends on drop_on_full config
+                    if self.config.drop_on_full {
+                        // Drop packet to avoid blocking other clients (head-of-line blocking)
+                        log::warn!(
+                            "Dropping {} byte packet for slow client {} dev {} (buffer full)",
+                            packet.len(),
+                            endpoint_id,
+                            device_id
+                        );
+                    } else {
+                        // Apply backpressure - blocks TUN reader until space available
+                        log::warn!(
+                            "Backpressure: blocking TUN reader for {} byte packet to slow client {} dev {} (buffer full)",
+                            packet.len(),
+                            endpoint_id,
+                            device_id
+                        );
+                        if packet_tx.send(data).await.is_err() {
+                            log::warn!(
+                                "Backpressure: packet channel closed for {} byte packet to client {} dev {}",
+                                packet.len(),
+                                endpoint_id,
+                                device_id
+                            );
+                        }
+                    }
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    log::trace!(
+                        "Packet channel closed for client {} dev {}",
+                        endpoint_id,
+                        device_id
+                    );
+                }
             }
-            log::trace!(
-                "Sent {} bytes to client {} dev {}",
-                packet.len(),
-                endpoint_id,
-                device_id
-            );
         }
 
         Ok(())

@@ -48,6 +48,24 @@ mtu = 1420
 # keepalive_secs = 25
 
 # ============================================================================
+# Backpressure Behavior
+# ============================================================================
+
+# What to do when a client's send buffer is full (default: false = apply backpressure)
+#
+# false (default): Apply backpressure by blocking the TUN reader until the slow
+#                  client's buffer has space. This guarantees no packet loss.
+#                  Best for development/homelab use where reliability matters.
+#
+# true:            Drop packets for slow clients. Prevents one slow client from
+#                  blocking packet delivery to all other clients (head-of-line
+#                  blocking). Best for real-time traffic like VoIP, gaming, or
+#                  interactive sessions at scale where latency matters more than
+#                  guaranteed delivery.
+#
+# drop_on_full = false
+
+# ============================================================================
 # Server Identity (Optional)
 # ============================================================================
 

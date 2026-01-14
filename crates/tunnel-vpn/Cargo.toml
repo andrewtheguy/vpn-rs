@@ -42,6 +42,12 @@ rand = "0.8"
 # IP address handling
 ipnet = { version = "2", features = ["serde"] }
 
+# Lock-free concurrent hashmap for hot-path lookups
+dashmap = "6"
+
+# Zero-copy byte buffers for efficient packet handling
+bytes = "1"
+
 # Futures utilities
 futures = "0.3"
 

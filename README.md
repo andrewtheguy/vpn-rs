@@ -1032,13 +1032,24 @@ AUTH_TOKEN=$(tunnel-rs generate-token)
 echo $AUTH_TOKEN
 ```
 
-### 2. Start VPN Server
+### 2. Create Server Config
+
+Create `vpn_server.toml` (or copy from `vpn_server.toml.example`):
+
+```toml
+role = "vpnserver"
+mode = "iroh"
+
+[iroh]
+network = "10.0.0.0/24"
+secret_file = "./server.key"
+auth_tokens = ["<YOUR_AUTH_TOKEN>"]  # Replace with token from step 1
+```
+
+### 3. Start VPN Server
 
 ```bash
-sudo tunnel-rs-vpn server \
-  --network 10.0.0.0/24 \
-  --secret-file ./server.key \
-  --auth-tokens "$AUTH_TOKEN"
+sudo tunnel-rs-vpn server -c vpn_server.toml
 ```
 
 Output:
@@ -1047,7 +1058,7 @@ VPN Server Node ID: 2xnbkpbc7izsilvewd7c62w7wnwziacmpfwvhcrya5nt76dqkpga
 Clients connect with: tunnel-rs-vpn client --server-node-id <ID> --auth-token <TOKEN>
 ```
 
-### 3. Connect VPN Client
+### 4. Connect VPN Client
 
 ```bash
 sudo tunnel-rs-vpn client \
@@ -1060,7 +1071,7 @@ The client will:
 2. Receive an assigned IP (e.g., 10.0.0.2)
 3. Create a TUN device and configure routes
 
-### 4. Verify Connection
+### 5. Verify Connection
 
 ```bash
 # Check assigned IP
@@ -1073,21 +1084,16 @@ ping 10.0.0.1
 
 ## CLI Options
 
-> **Note:** VPN mode currently does not support configuration files. All options must be passed via CLI.
-
 ### server (tunnel-rs-vpn)
 
-| Option | Default | Description |
-|--------|---------|-------------|
-| `--network`, `-n` | 10.0.0.0/24 | VPN network CIDR. Server gets .1, clients get subsequent IPs |
-| `--server-ip` | First IP in network | Override server's VPN IP address |
-| `--mtu` | 1420 | MTU for VPN packets |
-| `--keepalive-secs` | 25 | Keepalive interval |
-| `--secret-file` | - | Path to secret key for persistent iroh identity |
-| `--relay-url` | public | Custom relay server URL(s), repeatable |
-| `--dns-server` | public | Custom DNS server URL for peer discovery |
-| `--auth-tokens` | required | Authentication tokens (repeatable) |
-| `--auth-tokens-file` | - | Path to file with tokens (one per line) |
+VPN server requires a config file. Use `-c <FILE>` or `--default-config` for `~/.config/tunnel-rs/vpn_server.toml`.
+
+| Option | Description |
+|--------|-------------|
+| `-c, --config <FILE>` | Path to config file (required unless --default-config) |
+| `--default-config` | Use `~/.config/tunnel-rs/vpn_server.toml` |
+
+See [`vpn_server.toml.example`](vpn_server.toml.example) for all available configuration options.
 
 ### client (tunnel-rs-vpn)
 
