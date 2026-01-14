@@ -111,5 +111,5 @@ fn default_max_clients() -> usize {
 }
 
 fn default_drop_on_full() -> bool {
-    true
+    false
 }

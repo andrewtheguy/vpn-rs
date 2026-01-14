@@ -1007,8 +1007,9 @@ fn load_config<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T> {
 }
 
 /// Default value for `drop_on_full` in VPN server config.
+/// Defaults to false (apply backpressure) for development/homelab use.
 fn default_drop_on_full() -> bool {
-    true
+    false
 }
 
 /// Resolve the default server config path (~/.config/tunnel-rs/server.toml).
@@ -1204,7 +1205,7 @@ impl VpnServerConfigBuilder {
         self.mtu = Some(DEFAULT_VPN_MTU);
         self.relay_urls = Some(vec![]);
         self.auth_tokens = Some(vec![]);
-        self.drop_on_full = Some(true);
+        self.drop_on_full = Some(false);
         self
     }
 
@@ -1355,7 +1356,7 @@ impl VpnServerConfigBuilder {
             dns_server: self.dns_server,
             auth_tokens: self.auth_tokens.unwrap_or_default(),
             auth_tokens_file: self.auth_tokens_file,
-            drop_on_full: self.drop_on_full.unwrap_or(true),
+            drop_on_full: self.drop_on_full.unwrap_or(false),
         })
     }
 }
