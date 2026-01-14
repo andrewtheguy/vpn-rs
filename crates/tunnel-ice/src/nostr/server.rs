@@ -713,7 +713,8 @@ pub async fn run_nostr_server(config: NostrServerConfig) -> Result<()> {
     } else {
         Some(config.relays)
     };
-    let signaling = Arc::new(NostrSignaling::new(&config.nsec, &config.peer_npub, relay_list).await?);
+    let signaling =
+        Arc::new(NostrSignaling::new(&config.nsec, &config.peer_npub, relay_list).await?);
 
     log::info!("Your pubkey: {}", signaling.public_key_bech32());
     log::info!("Transfer ID: {}", signaling.transfer_id());

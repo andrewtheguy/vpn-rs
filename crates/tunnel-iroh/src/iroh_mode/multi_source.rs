@@ -44,7 +44,10 @@ impl std::fmt::Debug for MultiSourceServerConfig {
             .field("relay_urls", &self.relay_urls)
             .field("relay_only", &self.relay_only)
             .field("dns_server", &self.dns_server)
-            .field("auth_tokens", &format!("[{} tokens]", self.auth_tokens.len()))
+            .field(
+                "auth_tokens",
+                &format!("[{} tokens]", self.auth_tokens.len()),
+            )
             .finish()
     }
 }
@@ -221,8 +224,14 @@ pub async fn run_multi_source_server(config: MultiSourceServerConfig) -> Result<
         let auth_tokens = Arc::clone(&auth_tokens);
 
         connection_tasks.spawn(async move {
-            if let Err(e) =
-                handle_multi_source_connection(conn, allowed_tcp, allowed_udp, semaphore, auth_tokens).await
+            if let Err(e) = handle_multi_source_connection(
+                conn,
+                allowed_tcp,
+                allowed_udp,
+                semaphore,
+                auth_tokens,
+            )
+            .await
             {
                 log::warn!("Connection error for {}: {}", remote_id, e);
             }
@@ -260,8 +269,7 @@ async fn handle_multi_source_connection(
         let request_bytes = read_length_prefixed(&mut recv_stream)
             .await
             .context("Failed to read auth request")?;
-        let request = decode_auth_request(&request_bytes)
-            .context("Invalid auth request")?;
+        let request = decode_auth_request(&request_bytes).context("Invalid auth request")?;
 
         // Validate token
         let token_str = request.auth_token.as_str();
@@ -524,7 +532,10 @@ pub async fn run_multi_source_client(config: MultiSourceClientConfig) -> Result<
     let is_tcp = config.source.starts_with("tcp://");
     let is_udp = config.source.starts_with("udp://");
     if !is_tcp && !is_udp {
-        anyhow::bail!("Source must start with tcp:// or udp:// (got: {})", config.source);
+        anyhow::bail!(
+            "Source must start with tcp:// or udp:// (got: {})",
+            config.source
+        );
     }
 
     // Resolve listen addresses - for localhost, returns both IPv4 and IPv6
@@ -533,7 +544,8 @@ pub async fn run_multi_source_client(config: MultiSourceClientConfig) -> Result<
         .await
         .context("Invalid target address format. Use format like localhost:2222, 127.0.0.1:2222 or [::]:2222")?;
 
-    let server_id: EndpointId = config.node_id
+    let server_id: EndpointId = config
+        .node_id
         .parse()
         .context("Invalid EndpointId format. Should be a 52-character base32 string.")?;
 
@@ -551,7 +563,14 @@ pub async fn run_multi_source_client(config: MultiSourceClientConfig) -> Result<
     )
     .await?;
 
-    let conn = connect_to_server(&endpoint, server_id, &config.relay_urls, relay_only, MULTI_ALPN).await?;
+    let conn = connect_to_server(
+        &endpoint,
+        server_id,
+        &config.relay_urls,
+        relay_only,
+        MULTI_ALPN,
+    )
+    .await?;
 
     log::info!("Connected to server!");
     print_connection_type(&endpoint, conn.remote_id());
@@ -596,7 +615,10 @@ async fn run_multi_source_tcp_client(
     for addr in listen_addrs {
         match TcpListener::bind(addr).await {
             Ok(listener) => {
-                log::info!("Listening on TCP {} - configure your client to connect here", addr);
+                log::info!(
+                    "Listening on TCP {} - configure your client to connect here",
+                    addr
+                );
                 listeners.push(listener);
             }
             Err(e) => {

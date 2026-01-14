@@ -546,7 +546,10 @@ mod tests {
     fn test_non_loopback_addresses_preserve_order() {
         // Non-loopback addresses should preserve input order (no sorting)
         let addrs = vec![
-            SocketAddr::new(IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1)), 80),
+            SocketAddr::new(
+                IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1)),
+                80,
+            ),
             SocketAddr::new(IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34)), 80),
         ];
 
@@ -557,7 +560,10 @@ mod tests {
         let result = order_by_loopback_preference(addrs.clone());
 
         // Order should be preserved exactly (IPv6 still first, as input)
-        assert_eq!(result, addrs, "Non-loopback addresses should preserve input order");
+        assert_eq!(
+            result, addrs,
+            "Non-loopback addresses should preserve input order"
+        );
         assert!(result[0].is_ipv6(), "First address should remain IPv6");
         assert!(result[1].is_ipv4(), "Second address should remain IPv4");
     }
@@ -598,8 +604,14 @@ mod tests {
     #[test]
     fn test_interleave_addresses_only_ipv6() {
         let addrs = vec![
-            SocketAddr::new(IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1)), 8080),
-            SocketAddr::new(IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 2)), 8080),
+            SocketAddr::new(
+                IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1)),
+                8080,
+            ),
+            SocketAddr::new(
+                IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 2)),
+                8080,
+            ),
         ];
         let result = interleave_addresses(&addrs);
         assert_eq!(result.len(), 2);
@@ -610,8 +622,14 @@ mod tests {
     fn test_interleave_addresses_ipv6_first() {
         let v4_1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)), 8080);
         let v4_2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 8080);
-        let v6_1 = SocketAddr::new(IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1)), 8080);
-        let v6_2 = SocketAddr::new(IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 2)), 8080);
+        let v6_1 = SocketAddr::new(
+            IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1)),
+            8080,
+        );
+        let v6_2 = SocketAddr::new(
+            IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 2)),
+            8080,
+        );
 
         // Input: v4, v4, v6, v6
         let addrs = vec![v4_1, v4_2, v6_1, v6_2];
@@ -628,9 +646,18 @@ mod tests {
     #[test]
     fn test_interleave_addresses_unequal_counts() {
         let v4_1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)), 8080);
-        let v6_1 = SocketAddr::new(IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1)), 8080);
-        let v6_2 = SocketAddr::new(IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 2)), 8080);
-        let v6_3 = SocketAddr::new(IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 3)), 8080);
+        let v6_1 = SocketAddr::new(
+            IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1)),
+            8080,
+        );
+        let v6_2 = SocketAddr::new(
+            IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 2)),
+            8080,
+        );
+        let v6_3 = SocketAddr::new(
+            IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 3)),
+            8080,
+        );
 
         // Input: 1 IPv4, 3 IPv6
         let addrs = vec![v4_1, v6_1, v6_2, v6_3];
@@ -648,7 +675,10 @@ mod tests {
     fn test_interleave_addresses_preserves_all() {
         let v4_1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)), 8080);
         let v4_2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 8081);
-        let v6_1 = SocketAddr::new(IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1)), 8082);
+        let v6_1 = SocketAddr::new(
+            IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1)),
+            8082,
+        );
 
         let addrs = vec![v4_1, v4_2, v6_1];
         let result = interleave_addresses(&addrs);
@@ -665,7 +695,10 @@ mod tests {
         // Verify order_udp_addresses returns same result as interleave_addresses
         let addrs = vec![
             SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)), 8080),
-            SocketAddr::new(IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1)), 8080),
+            SocketAddr::new(
+                IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1)),
+                8080,
+            ),
         ];
         assert_eq!(order_udp_addresses(&addrs), interleave_addresses(&addrs));
     }

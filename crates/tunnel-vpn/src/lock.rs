@@ -37,9 +37,8 @@ impl VpnLock {
 
         // Ensure parent directory exists
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| {
-                VpnError::Config(format!("Failed to create lock directory: {}", e))
-            })?;
+            std::fs::create_dir_all(parent)
+                .map_err(|e| VpnError::Config(format!("Failed to create lock directory: {}", e)))?;
         }
 
         // Open or create the lock file (do not truncate before acquiring lock)

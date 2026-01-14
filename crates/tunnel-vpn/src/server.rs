@@ -291,7 +291,6 @@ impl VpnServer {
         })
     }
 
-
     /// Get the server's VPN IP address.
     pub async fn server_ip(&self) -> Ipv4Addr {
         self.ip_pool.read().await.server_ip()
@@ -455,7 +454,9 @@ impl VpnServer {
             let response = VpnHandshakeResponse::rejected("Server misconfigured");
             write_message(&mut send, &response.encode()?).await?;
             let _ = send.finish();
-            return Err(VpnError::Signaling("Server has no auth tokens configured".into()));
+            return Err(VpnError::Signaling(
+                "Server has no auth tokens configured".into(),
+            ));
         }
 
         // Atomically increment connection count and check max_clients
@@ -536,11 +537,7 @@ impl VpnServer {
                 ip6_pool.server_ip(),
             )
         } else {
-            VpnHandshakeResponse::accepted(
-                assigned_ip,
-                network,
-                server_ip,
-            )
+            VpnHandshakeResponse::accepted(assigned_ip, network, server_ip)
         };
 
         write_message(send, &response.encode()?).await?;
@@ -722,7 +719,11 @@ impl VpnServer {
                 let msg_type = match DataMessageType::from_byte(type_buf[0]) {
                     Some(t) => t,
                     None => {
-                        log::error!("Unknown message type from {}: 0x{:02x}, closing connection", assigned_ip, type_buf[0]);
+                        log::error!(
+                            "Unknown message type from {}: 0x{:02x}, closing connection",
+                            assigned_ip,
+                            type_buf[0]
+                        );
                         break;
                     }
                 };
@@ -732,7 +733,10 @@ impl VpnServer {
                         // Respond with pong
                         log::trace!("Heartbeat ping from {}", assigned_ip);
                         let mut send = send_heartbeat.lock().await;
-                        if let Err(e) = send.write_all(&[DataMessageType::HeartbeatPong.as_byte()]).await {
+                        if let Err(e) = send
+                            .write_all(&[DataMessageType::HeartbeatPong.as_byte()])
+                            .await
+                        {
                             log::warn!("Failed to send heartbeat pong to {}: {}", assigned_ip, e);
                             break;
                         }
@@ -752,7 +756,11 @@ impl VpnServer {
                 match data_recv.read_exact(&mut len_buf).await {
                     Ok(()) => {}
                     Err(e) => {
-                        log::debug!("Failed to read IP packet length from {}: {}", assigned_ip, e);
+                        log::debug!(
+                            "Failed to read IP packet length from {}: {}",
+                            assigned_ip,
+                            e
+                        );
                         break;
                     }
                 }
@@ -781,7 +789,9 @@ impl VpnServer {
                         } else {
                             log::warn!(
                                 "IP spoofing attempt from client {}: expected source {}, got {}",
-                                assigned_ip, assigned_ip, src_ip
+                                assigned_ip,
+                                assigned_ip,
+                                src_ip
                             );
                             false
                         }
@@ -792,7 +802,11 @@ impl VpnServer {
                         let src_bytes = src_ip.octets();
                         let is_link_local = src_bytes[0] == 0xfe && (src_bytes[1] & 0xc0) == 0x80;
                         if is_link_local {
-                            log::trace!("Dropping link-local IPv6 packet from client {}: {}", assigned_ip, src_ip);
+                            log::trace!(
+                                "Dropping link-local IPv6 packet from client {}: {}",
+                                assigned_ip,
+                                src_ip
+                            );
                             false
                         } else {
                             match assigned_ip6 {
@@ -815,7 +829,10 @@ impl VpnServer {
                         }
                     }
                     None => {
-                        log::warn!("Failed to parse source IP from packet from client {}", assigned_ip);
+                        log::warn!(
+                            "Failed to parse source IP from packet from client {}",
+                            assigned_ip
+                        );
                         false
                     }
                 };
@@ -830,7 +847,11 @@ impl VpnServer {
                 if let Err(e) = writer.write_all(packet).await {
                     log::warn!("Failed to write to server TUN: {}", e);
                 }
-                log::trace!("Wrote {} bytes to TUN from client {}", packet.len(), assigned_ip);
+                log::trace!(
+                    "Wrote {} bytes to TUN from client {}",
+                    packet.len(),
+                    assigned_ip
+                );
             }
         });
 
@@ -888,7 +909,7 @@ impl VpnServer {
                     continue;
                 }
             };
-            
+
             let client_key = (endpoint_id, device_id);
 
             // Get client's send stream (clone Arc to release read lock before I/O)
@@ -905,15 +926,30 @@ impl VpnServer {
 
             // Directly frame and send packet
             if let Err(e) = frame_ip_packet(&mut write_buf, packet) {
-                 log::warn!("Failed to frame packet for {} dev {}: {}", endpoint_id, device_id, e);
-                 continue;
+                log::warn!(
+                    "Failed to frame packet for {} dev {}: {}",
+                    endpoint_id,
+                    device_id,
+                    e
+                );
+                continue;
             }
             let mut send = send_stream.lock().await;
             if let Err(e) = send.write_all(&write_buf).await {
-                log::warn!("Failed to send to client {} dev {}: {}", endpoint_id, device_id, e);
+                log::warn!(
+                    "Failed to send to client {} dev {}: {}",
+                    endpoint_id,
+                    device_id,
+                    e
+                );
                 continue;
             }
-            log::trace!("Sent {} bytes to client {} dev {}", packet.len(), endpoint_id, device_id);
+            log::trace!(
+                "Sent {} bytes to client {} dev {}",
+                packet.len(),
+                endpoint_id,
+                device_id
+            );
         }
 
         Ok(())
@@ -949,10 +985,9 @@ fn extract_source_ip(packet: &[u8]) -> Option<PacketIp> {
                 return None;
             }
             let src = Ipv6Addr::from([
-                packet[8], packet[9], packet[10], packet[11],
-                packet[12], packet[13], packet[14], packet[15],
-                packet[16], packet[17], packet[18], packet[19],
-                packet[20], packet[21], packet[22], packet[23],
+                packet[8], packet[9], packet[10], packet[11], packet[12], packet[13], packet[14],
+                packet[15], packet[16], packet[17], packet[18], packet[19], packet[20], packet[21],
+                packet[22], packet[23],
             ]);
             Some(PacketIp::V6(src))
         }
@@ -983,10 +1018,9 @@ fn extract_dest_ip(packet: &[u8]) -> Option<PacketIp> {
                 return None;
             }
             let dest = Ipv6Addr::from([
-                packet[24], packet[25], packet[26], packet[27],
-                packet[28], packet[29], packet[30], packet[31],
-                packet[32], packet[33], packet[34], packet[35],
-                packet[36], packet[37], packet[38], packet[39],
+                packet[24], packet[25], packet[26], packet[27], packet[28], packet[29], packet[30],
+                packet[31], packet[32], packet[33], packet[34], packet[35], packet[36], packet[37],
+                packet[38], packet[39],
             ]);
             Some(PacketIp::V6(dest))
         }
@@ -1079,10 +1113,10 @@ mod tests {
         // Valid IPv6 packet header (40 bytes minimum)
         let mut packet = [0u8; 40];
         packet[0] = 0x60; // Version 6
-        // Destination at bytes 24-39
+                          // Destination at bytes 24-39
         packet[24..40].copy_from_slice(&[
-            0xfd, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05,
+            0xfd, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x05,
         ]);
 
         match extract_dest_ip(&packet) {
@@ -1114,7 +1148,7 @@ mod tests {
         // Valid IPv4 packet header (minimal)
         let mut packet = [0u8; 20];
         packet[0] = 0x45; // Version 4, IHL 5
-        // Source at bytes 12-15
+                          // Source at bytes 12-15
         packet[12] = 192;
         packet[13] = 168;
         packet[14] = 1;
@@ -1136,10 +1170,10 @@ mod tests {
         // Valid IPv6 packet header (40 bytes minimum)
         let mut packet = [0u8; 40];
         packet[0] = 0x60; // Version 6
-        // Source at bytes 8-23
+                          // Source at bytes 8-23
         packet[8..24].copy_from_slice(&[
-            0xfd, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02,
+            0xfd, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x02,
         ]);
 
         match extract_source_ip(&packet) {

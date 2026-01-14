@@ -15,11 +15,13 @@ use std::path::PathBuf;
 
 use tunnel_common::config::{
     expand_tilde, load_vpn_client_config, load_vpn_server_config, ResolvedVpnClientConfig,
-    ResolvedVpnServerConfig, VpnClientConfigBuilder, VpnServerConfigBuilder,
-    VpnClientConfig as TomlClientConfig, VpnServerConfig as TomlServerConfig,
+    ResolvedVpnServerConfig, VpnClientConfig as TomlClientConfig, VpnClientConfigBuilder,
+    VpnServerConfig as TomlServerConfig, VpnServerConfigBuilder,
 };
 use tunnel_iroh::auth;
-use tunnel_iroh::iroh_mode::endpoint::{create_client_endpoint, create_server_endpoint, load_secret};
+use tunnel_iroh::iroh_mode::endpoint::{
+    create_client_endpoint, create_server_endpoint, load_secret,
+};
 use tunnel_iroh::secret;
 // Runtime config types from tunnel-vpn (different from TOML config types)
 use tunnel_vpn::config::{VpnClientConfig, VpnServerConfig};
@@ -289,9 +291,9 @@ async fn main() -> Result<()> {
                 "both --auto-reconnect and --no-auto-reconnect were set (clap conflicts_with should prevent this)"
             );
             let auto_reconnect_opt = match (auto_reconnect, no_auto_reconnect) {
-                (true, false) => Some(true),   // --auto-reconnect: enable reconnect
-                (false, true) => Some(false),  // --no-auto-reconnect: disable reconnect
-                (false, false) => None,        // neither: use config/default
+                (true, false) => Some(true),    // --auto-reconnect: enable reconnect
+                (false, true) => Some(false),   // --no-auto-reconnect: disable reconnect
+                (false, false) => None,         // neither: use config/default
                 (true, true) => unreachable!(), // guarded by assert above
             };
 
@@ -361,11 +363,9 @@ async fn run_vpn_server(resolved: ResolvedVpnServerConfig) -> Result<()> {
         .context("Invalid server IPv6 address")?;
 
     // Load and validate auth tokens (required for VPN server)
-    let valid_tokens = auth::load_auth_tokens(
-        &resolved.auth_tokens,
-        resolved.auth_tokens_file.as_deref(),
-    )
-    .context("Failed to load authentication tokens")?;
+    let valid_tokens =
+        auth::load_auth_tokens(&resolved.auth_tokens, resolved.auth_tokens_file.as_deref())
+            .context("Failed to load authentication tokens")?;
 
     if valid_tokens.is_empty() {
         anyhow::bail!(

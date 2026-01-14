@@ -249,9 +249,7 @@ fn resolve_server_iroh_params(
         } else {
             auth_tokens.clone()
         },
-        auth_tokens_file: auth_tokens_file
-            .clone()
-            .or(cfg.auth_tokens_file.clone()),
+        auth_tokens_file: auth_tokens_file.clone().or(cfg.auth_tokens_file.clone()),
     }
 }
 
@@ -438,12 +436,9 @@ async fn main() -> Result<()> {
             let secret = resolve_iroh_secret(secret, secret_file)?;
 
             // Load auth tokens for authentication
-            let auth_tokens_file_expanded =
-                auth_tokens_file.as_ref().map(|p| expand_tilde(p));
-            let auth_tokens = auth::load_auth_tokens(
-                &auth_tokens,
-                auth_tokens_file_expanded.as_deref(),
-            )?;
+            let auth_tokens_file_expanded = auth_tokens_file.as_ref().map(|p| expand_tilde(p));
+            let auth_tokens =
+                auth::load_auth_tokens(&auth_tokens, auth_tokens_file_expanded.as_deref())?;
 
             if auth_tokens.is_empty() {
                 anyhow::bail!(
@@ -452,10 +447,7 @@ async fn main() -> Result<()> {
                 );
             }
 
-            log::info!(
-                "Auth tokens: {} token(s) configured",
-                auth_tokens.len()
-            );
+            log::info!("Auth tokens: {} token(s) configured", auth_tokens.len());
 
             validate_socks5_proxy_if_present(&socks5_proxy).await?;
 

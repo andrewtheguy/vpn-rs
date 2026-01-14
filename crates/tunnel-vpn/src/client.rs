@@ -8,11 +8,11 @@
 use crate::config::VpnClientConfig;
 use crate::device::{add_routes, add_routes6, Route6Guard, RouteGuard, TunConfig, TunDevice};
 use crate::error::{VpnError, VpnResult};
-use crate::signaling::{
-    read_message, write_message, DataMessageType, VpnHandshake, VpnHandshakeResponse,
-    frame_ip_packet, MAX_HANDSHAKE_SIZE, VPN_ALPN,
-};
 use crate::lock::VpnLock;
+use crate::signaling::{
+    frame_ip_packet, read_message, write_message, DataMessageType, VpnHandshake,
+    VpnHandshakeResponse, MAX_HANDSHAKE_SIZE, VPN_ALPN,
+};
 use ipnet::{Ipv4Net, Ipv6Net};
 use iroh::endpoint::{RecvStream, SendStream};
 use iroh::{Endpoint, EndpointId};
@@ -139,9 +139,10 @@ impl VpnClient {
             };
 
         // Open data stream for IP packets
-        let (data_send, data_recv) = connection.open_bi().await.map_err(|e| {
-            VpnError::Signaling(format!("Failed to open data stream: {}", e))
-        })?;
+        let (data_send, data_recv) = connection
+            .open_bi()
+            .await
+            .map_err(|e| VpnError::Signaling(format!("Failed to open data stream: {}", e)))?;
 
         log::info!("VPN data stream opened");
 
@@ -162,9 +163,10 @@ impl VpnClient {
         connection: &iroh::endpoint::Connection,
     ) -> VpnResult<ServerInfo> {
         // Open bidirectional stream for handshake
-        let (mut send, mut recv) = connection.open_bi().await.map_err(|e| {
-            VpnError::Signaling(format!("Failed to open stream: {}", e))
-        })?;
+        let (mut send, mut recv) = connection
+            .open_bi()
+            .await
+            .map_err(|e| VpnError::Signaling(format!("Failed to open stream: {}", e)))?;
 
         // Send handshake
         let mut handshake = VpnHandshake::new(self.device_id);
@@ -186,15 +188,15 @@ impl VpnClient {
         }
 
         // Extract server info (IPv4 required)
-        let assigned_ip = response.assigned_ip.ok_or_else(|| {
-            VpnError::Signaling("Server response missing assigned IP".into())
-        })?;
-        let network = response.network.ok_or_else(|| {
-            VpnError::Signaling("Server response missing network".into())
-        })?;
-        let server_ip = response.server_ip.ok_or_else(|| {
-            VpnError::Signaling("Server response missing server IP".into())
-        })?;
+        let assigned_ip = response
+            .assigned_ip
+            .ok_or_else(|| VpnError::Signaling("Server response missing assigned IP".into()))?;
+        let network = response
+            .network
+            .ok_or_else(|| VpnError::Signaling("Server response missing network".into()))?;
+        let server_ip = response
+            .server_ip
+            .ok_or_else(|| VpnError::Signaling("Server response missing server IP".into()))?;
 
         // Extract IPv6 info (optional, for dual-stack)
         // All three must be present together or all absent for consistency
