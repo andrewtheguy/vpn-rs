@@ -179,7 +179,7 @@ impl Ip6Pool {
 
         // Calculate max_ip based on prefix length
         let host_bits: u32 = 128 - u32::from(prefix_len);
-        // host_bits is guaranteed > 0 here since prefix_len < 127
+        // host_bits is guaranteed >= 2 here because prefix_len < 127, so the shift is safe
         let max_ip = net_addr + ((1u128 << host_bits) - 1) - 1; // Exclude last address
 
         Ok(Self {
@@ -588,12 +588,14 @@ impl VpnServer {
         };
 
         // Reconnect handling: if a client with the same (EndpointId, DeviceId) exists,
-        // we should remove it first, or overwrite it.
-        // Overwriting in the map is atomic for the map itself, but we should make sure
-        // resources are cleaned up.
-        // Since we are using session_id for cleanup safety, overwriting is fine.
-        // The old connection's cleanup will see a different session_id in the map and will NOT remove the new one.
-        
+        // we can safely overwrite its entry in the map with the new connection state.
+        // In Rust, inserting into the map replaces the previous ClientState and returns it;
+        // once that old ClientState is dropped (and if there are no other Arc clones),
+        // its resources (including the SendStream used for sending IP packets) are also dropped
+        // and the underlying QUIC stream is closed by normal Drop semantics.
+        // We also use session_id for cleanup safety: background cleanup for an old connection
+        // checks the current session_id in the map, so when a reconnect happens the stale
+        // cleanup task will see a different session_id and will NOT remove or affect the new entry.
         let client_key = (remote_id, device_id);
 
         self.clients.write().await.insert(client_key, client_state);
@@ -815,7 +817,7 @@ impl VpnServer {
                 }
 
                 // Write validated packet to TUN
-                let mut writer = tun_writer.lock().await;
+                     log::warn!("Failed to write to server TUN: {}", e);
                 if let Err(e) = writer.write_all(packet).await {
                      log::warn!("Failed to write to TUN: {}", e);
                 }

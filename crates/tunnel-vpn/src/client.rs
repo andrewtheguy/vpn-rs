@@ -288,8 +288,11 @@ impl VpnClient {
 
                         let mut send = send_outbound.lock().await;
                         if let Err(e) = send.write_all(&write_buf).await {
-                             log::warn!("Failed to write IP packet: {}", e);
-                             break;
+                            log::warn!(
+                                "Failed to write outbound IP packet from client to server over QUIC: {}",
+                                e
+                            );
+                            break;
                         }
                     }
                     Ok(_) => {}
