@@ -341,6 +341,8 @@ async fn run_vpn_server(resolved: ResolvedVpnServerConfig) -> Result<()> {
         max_clients: 254,
         auth_tokens: Some(valid_tokens),
         drop_on_full: resolved.drop_on_full,
+        client_channel_size: resolved.client_channel_size,
+        tun_writer_channel_size: resolved.tun_writer_channel_size,
     };
 
     // Create iroh endpoint for signaling.

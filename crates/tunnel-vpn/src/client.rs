@@ -35,8 +35,17 @@ const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
 const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Channel buffer size for outbound packets.
-/// Sized to handle bursts without blocking the TUN reader.
-const OUTBOUND_CHANNEL_SIZE: usize = 256;
+///
+/// Sized to handle bursts without blocking the TUN reader. Larger buffers
+/// improve throughput for bursty traffic but increase memory usage and
+/// latency under congestion. The value 1024 matches the server's default
+/// client channel size for symmetric buffering.
+///
+/// Memory impact (typical): ~1024 * ~1500 bytes (standard MTU) = ~1.5 MB.
+/// Memory impact (max): ~1024 * ~65KB (MAX_IP_PACKET_SIZE) = ~64 MB if jumbo packets allowed.
+/// Actual memory depends on the TUN device's configured MTU (usually 1440-1500 bytes).
+/// Latency impact: At 100 Mbps, a full 1024-packet buffer adds ~120ms latency.
+const OUTBOUND_CHANNEL_SIZE: usize = 1024;
 
 /// VPN client instance.
 pub struct VpnClient {
@@ -294,14 +303,21 @@ impl VpnClient {
 
         // Spawn outbound task (TUN -> frame IP packet -> channel -> writer task)
         // Returns error reason if task exits due to an error.
+        //
+        // Memory note: Each packet requires a small allocation (5 bytes framing + packet length).
+        // We allocate based on actual packet size to avoid over-allocation for small packets.
+        // Most allocations are small and served from thread-local caches, making them fast.
         let mut outbound_handle: tokio::task::JoinHandle<Option<String>> = tokio::spawn(async move {
             let mut read_buf = vec![0u8; buffer_size];
-            // Reusable BytesMut for framing (avoids per-packet allocation)
-            let mut write_buf = BytesMut::with_capacity(1 + 4 + MAX_IP_PACKET_SIZE);
             loop {
                 match tun_reader.read(&mut read_buf).await {
                     Ok(n) if n > 0 => {
                         let packet = &read_buf[..n];
+
+                        // Allocate buffer sized to actual packet (1 byte type + 4 byte length + packet).
+                        // Avoids over-allocation for small packets; allocator serves from thread-local caches.
+                        let frame_size = 1 + 4 + n;
+                        let mut write_buf = BytesMut::with_capacity(frame_size);
 
                         // Frame IP packet for transmission (writes into write_buf)
                         if let Err(e) = frame_ip_packet(&mut write_buf, packet) {
@@ -309,10 +325,8 @@ impl VpnClient {
                             continue;
                         }
 
-                        // Freeze into Bytes for zero-copy send, then reserve capacity for next packet
-                        // to avoid reallocation when frame_ip_packet writes up to MAX_IP_PACKET_SIZE
-                        let bytes = write_buf.split().freeze();
-                        write_buf.reserve(1 + 4 + MAX_IP_PACKET_SIZE);
+                        // Freeze into Bytes for send to writer task.
+                        let bytes = write_buf.freeze();
 
                         // Send via channel to writer task (blocking send to apply backpressure)
                         if outbound_tx.send(bytes).await.is_err() {

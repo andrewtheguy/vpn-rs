@@ -172,6 +172,12 @@ pub struct VpnServerIrohConfig {
     /// - `false`: Apply backpressure (blocks TUN reader until space available)
     #[serde(default = "default_drop_on_full")]
     pub drop_on_full: bool,
+    /// Channel buffer size for outbound packets to each client (default: 1024).
+    /// Controls how many packets can be queued per client before backpressure/drops.
+    pub client_channel_size: Option<usize>,
+    /// Channel buffer size for TUN writer task (default: 512).
+    /// Aggregate buffer for all client -> TUN traffic. Lower values bound memory usage.
+    pub tun_writer_channel_size: Option<usize>,
     /// Shared configuration fields
     #[serde(flatten)]
     pub shared: VpnIrohSharedConfig,
@@ -412,6 +418,22 @@ fn validate_mtu(mtu: u16, section: &str) -> Result<()> {
             "[{}] MTU {} is out of range. Valid range: 576-1500",
             section,
             mtu
+        );
+    }
+    Ok(())
+}
+
+/// Validate channel buffer size is within acceptable range (1-65536).
+fn validate_channel_size(size: usize, field_name: &str, section: &str) -> Result<()> {
+    if size == 0 {
+        anyhow::bail!("[{}] {} must be at least 1", section, field_name);
+    }
+    if size > 65536 {
+        anyhow::bail!(
+            "[{}] {} value {} exceeds maximum of 65536",
+            section,
+            field_name,
+            size
         );
     }
     Ok(())
@@ -1130,6 +1152,13 @@ pub fn default_nostr_relays() -> &'static [&'static str] {
 /// Default MTU for VPN packets (1500 - 60 bytes for QUIC/TLS + framing overhead).
 pub const DEFAULT_VPN_MTU: u16 = 1440;
 
+/// Default channel buffer size for outbound packets to each client.
+pub const DEFAULT_CLIENT_CHANNEL_SIZE: usize = 1024;
+
+/// Default channel buffer size for TUN writer task.
+/// Conservative default to bound memory usage on constrained hosts.
+pub const DEFAULT_TUN_WRITER_CHANNEL_SIZE: usize = 512;
+
 /// Resolved VPN server configuration (all values finalized).
 ///
 /// Created from a TOML config file via `from_config()`.
@@ -1162,6 +1191,8 @@ pub struct ResolvedVpnServerConfig {
     pub auth_tokens: Vec<String>,
     pub auth_tokens_file: Option<PathBuf>,
     pub drop_on_full: bool,
+    pub client_channel_size: usize,
+    pub tun_writer_channel_size: usize,
 }
 
 impl ResolvedVpnServerConfig {
@@ -1202,6 +1233,17 @@ impl ResolvedVpnServerConfig {
             );
         }
 
+        // Apply defaults and validate channel sizes
+        let client_channel_size = cfg
+            .client_channel_size
+            .unwrap_or(DEFAULT_CLIENT_CHANNEL_SIZE);
+        validate_channel_size(client_channel_size, "client_channel_size", "config")?;
+
+        let tun_writer_channel_size = cfg
+            .tun_writer_channel_size
+            .unwrap_or(DEFAULT_TUN_WRITER_CHANNEL_SIZE);
+        validate_channel_size(tun_writer_channel_size, "tun_writer_channel_size", "config")?;
+
         Ok(Self {
             network,
             server_ip: cfg.server_ip.clone(),
@@ -1214,6 +1256,8 @@ impl ResolvedVpnServerConfig {
             auth_tokens: cfg.auth_tokens.clone().unwrap_or_default(),
             auth_tokens_file: cfg.auth_tokens_file.clone(),
             drop_on_full: cfg.drop_on_full,
+            client_channel_size,
+            tun_writer_channel_size,
         })
     }
 }

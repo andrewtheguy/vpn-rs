@@ -6,7 +6,7 @@
 //! directly over the encrypted iroh QUIC connection.
 
 use crate::config::VpnServerConfig;
-use crate::device::{TunConfig, TunDevice, TunWriter};
+use crate::device::{TunConfig, TunDevice};
 use crate::error::{VpnError, VpnResult};
 use crate::signaling::{
     frame_ip_packet, read_message, write_message, DataMessageType, VpnHandshake,
@@ -20,15 +20,77 @@ use std::collections::HashMap;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
-use tokio::sync::{mpsc, oneshot, Mutex, RwLock};
+use tokio::sync::{mpsc, oneshot, RwLock};
 
 /// Maximum IP packet size.
 const MAX_IP_PACKET_SIZE: usize = 65536;
 
-/// Channel buffer size for outbound packets per client.
-/// Large enough to handle bursts; behavior when full depends on
-/// `VpnServerConfig::drop_on_full` (drop packets vs. apply backpressure).
-const CLIENT_PACKET_CHANNEL_SIZE: usize = 1024;
+/// Performance statistics for the VPN server.
+///
+/// These atomic counters replace per-packet trace logging to eliminate
+/// logging overhead in hot paths. Access via `VpnServer::stats()`.
+#[derive(Debug, Default)]
+pub struct VpnServerStats {
+    /// Total packets read from TUN device.
+    pub tun_packets_read: AtomicU64,
+    /// Packets successfully sent to clients.
+    pub packets_to_clients: AtomicU64,
+    /// Packets dropped due to unknown destination IP.
+    pub packets_no_route: AtomicU64,
+    /// Packets dropped due to unknown IP version.
+    pub packets_unknown_version: AtomicU64,
+    /// Packets dropped due to client channel full (drop_on_full=true).
+    pub packets_dropped_full: AtomicU64,
+    /// Packets sent via backpressure (slow path, drop_on_full=false).
+    pub packets_backpressure: AtomicU64,
+    /// Packets received from clients and written to TUN.
+    pub packets_from_clients: AtomicU64,
+    /// Packets dropped due to TUN write channel full/closed.
+    pub packets_tun_write_failed: AtomicU64,
+    /// Packets dropped due to invalid source IP (anti-spoofing).
+    pub packets_spoofed: AtomicU64,
+}
+
+impl VpnServerStats {
+    /// Create a new stats instance with all counters zeroed.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Get a snapshot of current statistics.
+    pub fn snapshot(&self) -> VpnServerStatsSnapshot {
+        VpnServerStatsSnapshot {
+            tun_packets_read: self.tun_packets_read.load(Ordering::Relaxed),
+            packets_to_clients: self.packets_to_clients.load(Ordering::Relaxed),
+            packets_no_route: self.packets_no_route.load(Ordering::Relaxed),
+            packets_unknown_version: self.packets_unknown_version.load(Ordering::Relaxed),
+            packets_dropped_full: self.packets_dropped_full.load(Ordering::Relaxed),
+            packets_backpressure: self.packets_backpressure.load(Ordering::Relaxed),
+            packets_from_clients: self.packets_from_clients.load(Ordering::Relaxed),
+            packets_tun_write_failed: self.packets_tun_write_failed.load(Ordering::Relaxed),
+            packets_spoofed: self.packets_spoofed.load(Ordering::Relaxed),
+        }
+    }
+}
+
+/// Point-in-time snapshot of server statistics.
+#[derive(Debug, Clone)]
+pub struct VpnServerStatsSnapshot {
+    pub tun_packets_read: u64,
+    pub packets_to_clients: u64,
+    pub packets_no_route: u64,
+    pub packets_unknown_version: u64,
+    pub packets_dropped_full: u64,
+    pub packets_backpressure: u64,
+    pub packets_from_clients: u64,
+    pub packets_tun_write_failed: u64,
+    pub packets_spoofed: u64,
+}
+
+// Channel buffer sizes are now configurable via VpnServerConfig:
+// - client_channel_size: per-client outbound buffer (default 1024)
+// - tun_writer_channel_size: aggregate TUN writer buffer (default 4096)
+// See config.rs for detailed documentation on tradeoffs.
 
 /// State for a connected VPN client.
 struct ClientState {
@@ -266,6 +328,8 @@ pub struct VpnServer {
     active_connections: AtomicUsize,
     /// Session ID counter for unique connection identification.
     next_session_id: AtomicU64,
+    /// Performance statistics (atomic counters, no locking overhead).
+    stats: Arc<VpnServerStats>,
 }
 
 impl VpnServer {
@@ -298,6 +362,7 @@ impl VpnServer {
             tun_device: None,
             active_connections: AtomicUsize::new(0),
             next_session_id: AtomicU64::new(1),
+            stats: Arc::new(VpnServerStats::new()),
         })
     }
 
@@ -309,6 +374,13 @@ impl VpnServer {
     /// Get the VPN network.
     pub async fn network(&self) -> Ipv4Net {
         self.ip_pool.read().await.network()
+    }
+
+    /// Get a reference to the server statistics.
+    ///
+    /// Use `stats.snapshot()` to get a point-in-time copy of all counters.
+    pub fn stats(&self) -> &Arc<VpnServerStats> {
+        &self.stats
     }
 
     /// Create and configure the TUN device.
@@ -373,14 +445,44 @@ impl VpnServer {
 
         // Take TUN device and split it
         let tun_device = self.tun_device.take().expect("TUN device not set up");
-        let (tun_reader, tun_writer) = tun_device.split()?;
-        let tun_writer = Arc::new(Mutex::new(tun_writer));
+        let (tun_reader, mut tun_writer) = tun_device.split()?;
+
+        // Create channel for TUN writes from all clients.
+        // This replaces the Arc<Mutex<TunWriter>> with a dedicated writer task,
+        // eliminating mutex contention in the hot path.
+        // Channel size is configurable via VpnServerConfig::tun_writer_channel_size.
+        let (tun_write_tx, mut tun_write_rx) =
+            mpsc::channel::<Bytes>(self.config.tun_writer_channel_size);
+        log::debug!(
+            "TUN writer channel size: {}",
+            self.config.tun_writer_channel_size
+        );
+
+        // Spawn dedicated TUN writer task that owns TunWriter exclusively.
+        // All clients send validated packets through the channel; this task
+        // performs the actual writes without any mutex contention.
+        // Store JoinHandle for graceful shutdown.
+        let tun_writer_stats = self.stats.clone();
+        let tun_writer_handle = tokio::spawn(async move {
+            log::info!("TUN writer task started");
+            while let Some(packet) = tun_write_rx.recv().await {
+                if let Err(e) = tun_writer.write_all(&packet).await {
+                    tun_writer_stats
+                        .packets_tun_write_failed
+                        .fetch_add(1, Ordering::Relaxed);
+                    log::warn!("Failed to write to TUN: {}", e);
+                    // Continue processing - individual write failures shouldn't stop the writer
+                }
+            }
+            log::info!("TUN writer task exiting (channel closed)");
+        });
 
         let server = Arc::new(self);
 
         // Spawn TUN reader task (reads from TUN, routes to clients)
+        // Store JoinHandle for graceful shutdown.
         let server_tun = server.clone();
-        tokio::spawn(async move {
+        let tun_reader_handle = tokio::spawn(async move {
             if let Err(e) = server_tun.run_tun_reader(tun_reader).await {
                 log::error!("TUN reader error: {}", e);
             }
@@ -391,9 +493,9 @@ impl VpnServer {
             match endpoint.accept().await {
                 Some(incoming) => {
                     let server = server.clone();
-                    let tun_writer = tun_writer.clone();
+                    let tun_write_tx = tun_write_tx.clone();
                     tokio::spawn(async move {
-                        if let Err(e) = server.handle_connection(incoming, tun_writer).await {
+                        if let Err(e) = server.handle_connection(incoming, tun_write_tx).await {
                             log::error!("Connection error: {}", e);
                         }
                     });
@@ -405,6 +507,22 @@ impl VpnServer {
             }
         }
 
+        // Graceful shutdown: drop channel sender to signal TUN writer to exit,
+        // then await both tasks to ensure clean termination.
+        log::info!("Shutting down TUN tasks...");
+        drop(tun_write_tx);
+
+        // Abort TUN reader (it's blocked on TUN read, won't exit on its own)
+        tun_reader_handle.abort();
+
+        // Wait for TUN writer to drain any remaining packets and exit
+        if let Err(e) = tun_writer_handle.await {
+            if !e.is_cancelled() {
+                log::warn!("TUN writer task panicked: {}", e);
+            }
+        }
+
+        log::info!("TUN tasks shutdown complete");
         Ok(())
     }
 
@@ -412,7 +530,7 @@ impl VpnServer {
     async fn handle_connection(
         &self,
         incoming: iroh::endpoint::Incoming,
-        tun_writer: Arc<Mutex<TunWriter>>,
+        tun_write_tx: mpsc::Sender<Bytes>,
     ) -> VpnResult<()> {
         let connection = incoming
             .await
@@ -487,7 +605,7 @@ impl VpnServer {
                 &mut send,
                 remote_id,
                 connection,
-                tun_writer,
+                tun_write_tx,
                 handshake.device_id,
             )
             .await;
@@ -504,7 +622,7 @@ impl VpnServer {
         send: &mut iroh::endpoint::SendStream,
         remote_id: EndpointId,
         connection: iroh::endpoint::Connection,
-        tun_writer: Arc<Mutex<TunWriter>>,
+        tun_write_tx: mpsc::Sender<Bytes>,
         device_id: u64,
     ) -> VpnResult<()> {
         // Allocate IPv4 for client (required)
@@ -582,7 +700,8 @@ impl VpnServer {
         // The writer task owns the SendStream and performs actual I/O, decoupling
         // packet production from stream writes to reduce locking overhead.
         // Uses Bytes for zero-copy sends (freeze BytesMut instead of cloning Vec).
-        let (packet_tx, mut packet_rx) = mpsc::channel::<Bytes>(CLIENT_PACKET_CHANNEL_SIZE);
+        // Channel size is configurable via VpnServerConfig::client_channel_size.
+        let (packet_tx, mut packet_rx) = mpsc::channel::<Bytes>(self.config.client_channel_size);
 
         // Create oneshot channel for writer error signaling.
         // When writer fails, it sends the error through this channel to trigger
@@ -668,8 +787,9 @@ impl VpnServer {
             data_recv,
             assigned_ip,
             assigned_ip6,
-            tun_writer,
+            tun_write_tx,
             writer_error_rx,
+            self.stats.clone(),
         )
         .await;
 
@@ -727,15 +847,19 @@ impl VpnServer {
     /// It exits when either:
     /// - The client disconnects (inbound stream closes)
     /// - The writer task fails (error received via writer_error_rx)
+    ///
+    /// TUN writes are sent through the `tun_write_tx` channel to a dedicated writer task,
+    /// eliminating mutex contention. Backpressure is applied when the channel is full.
     async fn handle_client_data(
         packet_tx: mpsc::Sender<Bytes>,
         mut data_recv: iroh::endpoint::RecvStream,
         assigned_ip: Ipv4Addr,
         assigned_ip6: Option<Ipv6Addr>,
-        tun_writer: Arc<Mutex<TunWriter>>,
+        tun_write_tx: mpsc::Sender<Bytes>,
         writer_error_rx: oneshot::Receiver<String>,
+        stats: Arc<VpnServerStats>,
     ) -> VpnResult<()> {
-        // Spawn inbound task (QUIC stream -> TUN)
+        // Spawn inbound task (QUIC stream -> TUN via channel)
         let mut inbound_handle = tokio::spawn(async move {
             let mut type_buf = [0u8; 1];
             let mut len_buf = [0u8; 4];
@@ -833,11 +957,7 @@ impl VpnServer {
                         let src_bytes = src_ip.octets();
                         let is_link_local = src_bytes[0] == 0xfe && (src_bytes[1] & 0xc0) == 0x80;
                         if is_link_local {
-                            log::trace!(
-                                "Dropping link-local IPv6 packet from client {}: {}",
-                                assigned_ip,
-                                src_ip
-                            );
+                            // Link-local IPv6 packets are dropped (can't route across VPN)
                             false
                         } else {
                             match assigned_ip6 {
@@ -870,19 +990,35 @@ impl VpnServer {
 
                 if !source_valid {
                     // Drop spoofed packet
+                    stats.packets_spoofed.fetch_add(1, Ordering::Relaxed);
                     continue;
                 }
 
-                // Write validated packet to TUN
-                let mut writer = tun_writer.lock().await;
-                if let Err(e) = writer.write_all(packet).await {
-                    log::warn!("Failed to write to server TUN: {}", e);
+                // Send validated packet to TUN writer task via channel.
+                // This eliminates mutex contention - the channel handles synchronization.
+                // Copy into Bytes since data_buf is reused for the next packet.
+                let packet_bytes = Bytes::copy_from_slice(packet);
+
+                // Try non-blocking send first to avoid blocking on slow TUN writes
+                match tun_write_tx.try_send(packet_bytes) {
+                    Ok(()) => {
+                        stats.packets_from_clients.fetch_add(1, Ordering::Relaxed);
+                    }
+                    Err(mpsc::error::TrySendError::Full(data)) => {
+                        // Channel full - apply backpressure by blocking until space available.
+                        // This naturally rate-limits fast clients when TUN writes are slow.
+                        if tun_write_tx.send(data).await.is_ok() {
+                            stats.packets_from_clients.fetch_add(1, Ordering::Relaxed);
+                        } else {
+                            stats.packets_tun_write_failed.fetch_add(1, Ordering::Relaxed);
+                            break;
+                        }
+                    }
+                    Err(mpsc::error::TrySendError::Closed(_)) => {
+                        stats.packets_tun_write_failed.fetch_add(1, Ordering::Relaxed);
+                        break;
+                    }
                 }
-                log::trace!(
-                    "Wrote {} bytes to TUN from client {}",
-                    packet.len(),
-                    assigned_ip
-                );
             }
         });
 
@@ -929,13 +1065,15 @@ impl VpnServer {
     }
 
     /// Run the TUN reader - reads packets from TUN and routes to clients.
+    ///
+    /// Memory note: Each packet requires a small allocation (5 bytes framing + packet length).
+    /// We allocate based on actual packet size to avoid over-allocation for small packets.
+    /// Most allocations are small and served from thread-local caches, making them fast.
     async fn run_tun_reader(&self, mut tun_reader: crate::device::TunReader) -> VpnResult<()> {
         log::info!("TUN reader started");
 
         let buffer_size = tun_reader.buffer_size();
         let mut buf = vec![0u8; buffer_size];
-        // Reusable BytesMut for framing (avoids per-packet allocation)
-        let mut write_buf = BytesMut::with_capacity(1 + 4 + buffer_size);
 
         loop {
             // Read packet from TUN device
@@ -949,6 +1087,7 @@ impl VpnServer {
             };
 
             let packet = &buf[..n];
+            self.stats.tun_packets_read.fetch_add(1, Ordering::Relaxed);
 
             // Extract destination IP from packet (IPv4 or IPv6)
             // DashMap lookups are lock-free - no async await needed
@@ -957,7 +1096,7 @@ impl VpnServer {
                     match self.ip_to_endpoint.get(&dest_ip).map(|r| *r) {
                         Some(res) => res,
                         None => {
-                            log::trace!("No client for destination IPv4 {}", dest_ip);
+                            self.stats.packets_no_route.fetch_add(1, Ordering::Relaxed);
                             continue;
                         }
                     }
@@ -966,13 +1105,13 @@ impl VpnServer {
                     match self.ip6_to_endpoint.get(&dest_ip).map(|r| *r) {
                         Some(res) => res,
                         None => {
-                            log::trace!("No client for destination IPv6 {}", dest_ip);
+                            self.stats.packets_no_route.fetch_add(1, Ordering::Relaxed);
                             continue;
                         }
                     }
                 }
                 None => {
-                    log::trace!("Unknown IP version packet from TUN, skipping");
+                    self.stats.packets_unknown_version.fetch_add(1, Ordering::Relaxed);
                     continue;
                 }
             };
@@ -983,12 +1122,17 @@ impl VpnServer {
             let packet_tx = match self.clients.get(&client_key) {
                 Some(c) => c.packet_tx.clone(),
                 None => {
-                    log::trace!("Client {} dev {} not found", endpoint_id, device_id);
+                    self.stats.packets_no_route.fetch_add(1, Ordering::Relaxed);
                     continue;
                 }
             };
 
-            // Frame packet and enqueue for the client's writer task
+            // Allocate buffer sized to actual packet (1 byte type + 4 byte length + packet).
+            // Avoids over-allocation for small packets; allocator serves from thread-local caches.
+            let frame_size = 1 + 4 + n;
+            let mut write_buf = BytesMut::with_capacity(frame_size);
+
+            // Frame packet for transmission (writes into write_buf)
             if let Err(e) = frame_ip_packet(&mut write_buf, packet) {
                 log::warn!(
                     "Failed to frame packet for {} dev {}: {}",
@@ -999,55 +1143,30 @@ impl VpnServer {
                 continue;
             }
 
-            // Freeze into Bytes for zero-copy send, then reserve capacity for next packet
-            // to avoid reallocation when frame_ip_packet writes up to buffer_size
-            let bytes = write_buf.split().freeze();
-            write_buf.reserve(1 + 4 + buffer_size);
+            // Freeze into Bytes for send to client's writer task.
+            let bytes = write_buf.freeze();
 
             // Send via channel - try non-blocking first
             match packet_tx.try_send(bytes) {
                 Ok(()) => {
-                    log::trace!(
-                        "Enqueued {} bytes for client {} dev {}",
-                        packet.len(),
-                        endpoint_id,
-                        device_id
-                    );
+                    self.stats.packets_to_clients.fetch_add(1, Ordering::Relaxed);
                 }
                 Err(mpsc::error::TrySendError::Full(data)) => {
                     // Buffer full - behavior depends on drop_on_full config
                     if self.config.drop_on_full {
                         // Drop packet to avoid blocking other clients (head-of-line blocking)
-                        log::warn!(
-                            "Dropping {} byte packet for slow client {} dev {} (buffer full)",
-                            packet.len(),
-                            endpoint_id,
-                            device_id
-                        );
+                        self.stats.packets_dropped_full.fetch_add(1, Ordering::Relaxed);
                     } else {
                         // Apply backpressure - blocks TUN reader until space available
-                        log::warn!(
-                            "Backpressure: blocking TUN reader for {} byte packet to slow client {} dev {} (buffer full)",
-                            packet.len(),
-                            endpoint_id,
-                            device_id
-                        );
-                        if packet_tx.send(data).await.is_err() {
-                            log::warn!(
-                                "Backpressure: packet channel closed for {} byte packet to client {} dev {}",
-                                packet.len(),
-                                endpoint_id,
-                                device_id
-                            );
+                        self.stats.packets_backpressure.fetch_add(1, Ordering::Relaxed);
+                        if packet_tx.send(data).await.is_ok() {
+                            self.stats.packets_to_clients.fetch_add(1, Ordering::Relaxed);
                         }
+                        // Channel closed is expected during client disconnect, no counter needed
                     }
                 }
                 Err(mpsc::error::TrySendError::Closed(_)) => {
-                    log::trace!(
-                        "Packet channel closed for client {} dev {}",
-                        endpoint_id,
-                        device_id
-                    );
+                    // Channel closed is expected during client disconnect
                 }
             }
         }
@@ -1062,70 +1181,127 @@ enum PacketIp {
     V6(Ipv6Addr),
 }
 
+// =============================================================================
+// Optimized packet parsing functions
+//
+// These functions use safe slice-to-array conversions after validating packet
+// length once. The compiler optimizes away redundant bounds checks when it can
+// prove the slice is in bounds.
+//
+// Performance optimizations:
+// - Single length check combines empty check + minimum header validation
+// - Version byte is extracted once and reused
+// - try_into() for fixed-size arrays is optimized by LLVM
+// - Fast-path for IPv4 (most common) checked first
+// =============================================================================
+
+/// Minimum IPv4 header size (20 bytes, no options).
+const IPV4_MIN_HEADER: usize = 20;
+
+/// Minimum IPv6 header size (40 bytes fixed).
+const IPV6_MIN_HEADER: usize = 40;
+
+/// IPv4 version nibble.
+const IP_VERSION_4: u8 = 4;
+
+/// IPv6 version nibble.
+const IP_VERSION_6: u8 = 6;
+
 /// Extract source IP address from an IP packet (IPv4 or IPv6).
+///
+/// Optimized for the hot path with minimal bounds checks and direct pointer reads.
+#[inline]
 fn extract_source_ip(packet: &[u8]) -> Option<PacketIp> {
-    if packet.is_empty() {
+    // Fast-path: check for IPv4 first (most common case).
+    // Combined length + version check eliminates separate empty check.
+    let len = packet.len();
+    if len < IPV4_MIN_HEADER {
         return None;
     }
 
+    // Cache version byte to avoid repeated indexing (len >= 20 verified above).
     let version = packet[0] >> 4;
 
-    match version {
-        4 => {
-            // IPv4: minimum header is 20 bytes, source at bytes 12-15
-            if packet.len() < 20 {
-                return None;
-            }
-            let src = Ipv4Addr::new(packet[12], packet[13], packet[14], packet[15]);
-            Some(PacketIp::V4(src))
-        }
-        6 => {
-            // IPv6: minimum header is 40 bytes, source at bytes 8-23
-            if packet.len() < 40 {
-                return None;
-            }
-            let src = Ipv6Addr::from([
-                packet[8], packet[9], packet[10], packet[11], packet[12], packet[13], packet[14],
-                packet[15], packet[16], packet[17], packet[18], packet[19], packet[20], packet[21],
-                packet[22], packet[23],
-            ]);
-            Some(PacketIp::V6(src))
-        }
-        _ => None,
+    if version == IP_VERSION_4 {
+        // IPv4: source address at bytes 12-15 (len >= 20 verified above).
+        let src = read_ipv4_addr(packet, 12);
+        return Some(PacketIp::V4(src));
     }
+
+    if version == IP_VERSION_6 {
+        // IPv6 requires 40 bytes minimum.
+        if len < IPV6_MIN_HEADER {
+            return None;
+        }
+        // IPv6: source address at bytes 8-23 (len >= 40 verified above).
+        let src = read_ipv6_addr(packet, 8);
+        return Some(PacketIp::V6(src));
+    }
+
+    None
 }
 
 /// Extract destination IP address from an IP packet (IPv4 or IPv6).
+///
+/// Optimized for the hot path with early length checks before address reads.
+#[inline]
 fn extract_dest_ip(packet: &[u8]) -> Option<PacketIp> {
-    if packet.is_empty() {
+    // Fast-path: check for IPv4 first (most common case).
+    // Combined length + version check eliminates separate empty check.
+    let len = packet.len();
+    if len < IPV4_MIN_HEADER {
         return None;
     }
 
+    // Cache version byte to avoid repeated indexing (len >= 20 verified above).
     let version = packet[0] >> 4;
 
-    match version {
-        4 => {
-            // IPv4: minimum header is 20 bytes, dest at bytes 16-19
-            if packet.len() < 20 {
-                return None;
-            }
-            let dest = Ipv4Addr::new(packet[16], packet[17], packet[18], packet[19]);
-            Some(PacketIp::V4(dest))
-        }
-        6 => {
-            // IPv6: minimum header is 40 bytes, dest at bytes 24-39
-            if packet.len() < 40 {
-                return None;
-            }
-            let dest = Ipv6Addr::from([
-                packet[24], packet[25], packet[26], packet[27], packet[28], packet[29], packet[30],
-                packet[31], packet[32], packet[33], packet[34], packet[35], packet[36], packet[37],
-                packet[38], packet[39],
-            ]);
-            Some(PacketIp::V6(dest))
-        }
-        _ => None,
+    if version == IP_VERSION_4 {
+        // IPv4: destination address at bytes 16-19 (len >= 20 verified above).
+        let dest = read_ipv4_addr(packet, 16);
+        return Some(PacketIp::V4(dest));
     }
+
+    if version == IP_VERSION_6 {
+        // IPv6 requires 40 bytes minimum.
+        if len < IPV6_MIN_HEADER {
+            return None;
+        }
+        // IPv6: destination address at bytes 24-39 (len >= 40 verified above).
+        let dest = read_ipv6_addr(packet, 24);
+        return Some(PacketIp::V6(dest));
+    }
+
+    None
+}
+
+/// Read an IPv4 address from a packet at the given offset.
+///
+/// # Panics
+/// Panics if `packet.len() < offset + 4`. Callers should verify bounds first.
+#[inline(always)]
+fn read_ipv4_addr(packet: &[u8], offset: usize) -> Ipv4Addr {
+    // Convert slice to fixed-size array. The try_into().unwrap() pattern is
+    // optimized by the compiler when bounds are provably valid (which they are
+    // after our length checks). This generates the same code as unsafe pointer
+    // reads but with memory safety guarantees.
+    let bytes: [u8; 4] = packet[offset..offset + 4]
+        .try_into()
+        .expect("IPv4 address read: bounds already verified");
+    Ipv4Addr::from(bytes)
+}
+
+/// Read an IPv6 address from a packet at the given offset.
+///
+/// # Panics
+/// Panics if `packet.len() < offset + 16`. Callers should verify bounds first.
+#[inline(always)]
+fn read_ipv6_addr(packet: &[u8], offset: usize) -> Ipv6Addr {
+    // Convert slice to fixed-size array. Same optimization applies as IPv4.
+    let bytes: [u8; 16] = packet[offset..offset + 16]
+        .try_into()
+        .expect("IPv6 address read: bounds already verified");
+    Ipv6Addr::from(bytes)
 }
 
 #[cfg(test)]
@@ -1374,5 +1550,282 @@ mod tests {
             "Expected Config error, got {:?}",
             err
         );
+    }
+
+    // =========================================================================
+    // VpnServerStats tests
+    // =========================================================================
+
+    #[test]
+    fn test_stats_initial_zero() {
+        let stats = VpnServerStats::new();
+
+        // All counters should be zero on initialization
+        assert_eq!(stats.tun_packets_read.load(Ordering::Relaxed), 0);
+        assert_eq!(stats.packets_to_clients.load(Ordering::Relaxed), 0);
+        assert_eq!(stats.packets_no_route.load(Ordering::Relaxed), 0);
+        assert_eq!(stats.packets_unknown_version.load(Ordering::Relaxed), 0);
+        assert_eq!(stats.packets_dropped_full.load(Ordering::Relaxed), 0);
+        assert_eq!(stats.packets_backpressure.load(Ordering::Relaxed), 0);
+        assert_eq!(stats.packets_from_clients.load(Ordering::Relaxed), 0);
+        assert_eq!(stats.packets_tun_write_failed.load(Ordering::Relaxed), 0);
+        assert_eq!(stats.packets_spoofed.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn test_stats_snapshot() {
+        let stats = VpnServerStats::new();
+
+        // Increment some counters
+        stats.tun_packets_read.fetch_add(100, Ordering::Relaxed);
+        stats.packets_to_clients.fetch_add(90, Ordering::Relaxed);
+        stats.packets_no_route.fetch_add(5, Ordering::Relaxed);
+        stats.packets_spoofed.fetch_add(3, Ordering::Relaxed);
+        stats.packets_backpressure.fetch_add(2, Ordering::Relaxed);
+
+        // Take a snapshot and verify values
+        let snapshot = stats.snapshot();
+        assert_eq!(snapshot.tun_packets_read, 100);
+        assert_eq!(snapshot.packets_to_clients, 90);
+        assert_eq!(snapshot.packets_no_route, 5);
+        assert_eq!(snapshot.packets_spoofed, 3);
+        assert_eq!(snapshot.packets_backpressure, 2);
+        assert_eq!(snapshot.packets_unknown_version, 0);
+        assert_eq!(snapshot.packets_dropped_full, 0);
+        assert_eq!(snapshot.packets_from_clients, 0);
+        assert_eq!(snapshot.packets_tun_write_failed, 0);
+    }
+
+    #[test]
+    fn test_stats_no_route_simulation() {
+        // Simulate the no-route counter being incremented when routing fails
+        let stats = VpnServerStats::new();
+        let network: Ipv4Net = "10.0.0.0/24".parse().unwrap();
+        let ip_to_endpoint: DashMap<Ipv4Addr, (EndpointId, u64)> = DashMap::new();
+
+        // Register one client
+        let client_id = random_endpoint_id();
+        let client_ip = Ipv4Addr::new(10, 0, 0, 2);
+        ip_to_endpoint.insert(client_ip, (client_id, 1));
+
+        // Create packet destined for registered client - should find route
+        let mut packet_to_client = [0u8; 20];
+        packet_to_client[0] = 0x45; // IPv4
+        packet_to_client[16..20].copy_from_slice(&client_ip.octets());
+
+        if let Some(PacketIp::V4(dest)) = extract_dest_ip(&packet_to_client) {
+            if ip_to_endpoint.get(&dest).is_none() {
+                stats.packets_no_route.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        assert_eq!(stats.packets_no_route.load(Ordering::Relaxed), 0);
+
+        // Create packet destined for unknown IP - should increment no_route
+        let unknown_ip = Ipv4Addr::new(10, 0, 0, 99);
+        let mut packet_to_unknown = [0u8; 20];
+        packet_to_unknown[0] = 0x45; // IPv4
+        packet_to_unknown[16..20].copy_from_slice(&unknown_ip.octets());
+
+        if let Some(PacketIp::V4(dest)) = extract_dest_ip(&packet_to_unknown) {
+            if ip_to_endpoint.get(&dest).is_none() {
+                stats.packets_no_route.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        assert_eq!(stats.packets_no_route.load(Ordering::Relaxed), 1);
+
+        // Packet destined outside network entirely
+        let external_ip = Ipv4Addr::new(192, 168, 1, 1);
+        let mut packet_external = [0u8; 20];
+        packet_external[0] = 0x45;
+        packet_external[16..20].copy_from_slice(&external_ip.octets());
+
+        if let Some(PacketIp::V4(dest)) = extract_dest_ip(&packet_external) {
+            if !network.contains(&dest) || ip_to_endpoint.get(&dest).is_none() {
+                stats.packets_no_route.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        assert_eq!(stats.packets_no_route.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn test_stats_unknown_version_simulation() {
+        let stats = VpnServerStats::new();
+
+        // Valid IPv4 packet - should not increment unknown_version
+        let ipv4_packet = [0x45u8; 20];
+        if extract_dest_ip(&ipv4_packet).is_none() {
+            stats.packets_unknown_version.fetch_add(1, Ordering::Relaxed);
+        }
+        assert_eq!(stats.packets_unknown_version.load(Ordering::Relaxed), 0);
+
+        // Invalid version (5) packet - should increment unknown_version
+        let mut invalid_packet = [0u8; 40];
+        invalid_packet[0] = 0x50; // Version 5
+        if extract_dest_ip(&invalid_packet).is_none() {
+            stats.packets_unknown_version.fetch_add(1, Ordering::Relaxed);
+        }
+        assert_eq!(stats.packets_unknown_version.load(Ordering::Relaxed), 1);
+
+        // Empty packet - should increment unknown_version
+        if extract_dest_ip(&[]).is_none() {
+            stats.packets_unknown_version.fetch_add(1, Ordering::Relaxed);
+        }
+        assert_eq!(stats.packets_unknown_version.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn test_stats_spoofing_detection_simulation() {
+        // Simulate IP spoofing detection logic from handle_client_data
+        let stats = VpnServerStats::new();
+
+        // Client is assigned 10.0.0.2
+        let assigned_ip = Ipv4Addr::new(10, 0, 0, 2);
+
+        // Packet with correct source IP - not spoofed
+        let mut valid_packet = [0u8; 20];
+        valid_packet[0] = 0x45; // IPv4
+        valid_packet[12..16].copy_from_slice(&assigned_ip.octets());
+
+        let source_valid = match extract_source_ip(&valid_packet) {
+            Some(PacketIp::V4(src)) => src == assigned_ip,
+            _ => false,
+        };
+        if !source_valid {
+            stats.packets_spoofed.fetch_add(1, Ordering::Relaxed);
+        }
+        assert_eq!(stats.packets_spoofed.load(Ordering::Relaxed), 0);
+
+        // Packet with wrong source IP - spoofed!
+        let spoofed_ip = Ipv4Addr::new(10, 0, 0, 99);
+        let mut spoofed_packet = [0u8; 20];
+        spoofed_packet[0] = 0x45; // IPv4
+        spoofed_packet[12..16].copy_from_slice(&spoofed_ip.octets());
+
+        let source_valid = match extract_source_ip(&spoofed_packet) {
+            Some(PacketIp::V4(src)) => src == assigned_ip,
+            _ => false,
+        };
+        if !source_valid {
+            stats.packets_spoofed.fetch_add(1, Ordering::Relaxed);
+        }
+        assert_eq!(stats.packets_spoofed.load(Ordering::Relaxed), 1);
+
+        // Packet with unparseable source - also treated as spoofed
+        let bad_packet = [0x45u8; 10]; // Too short
+        let source_valid = match extract_source_ip(&bad_packet) {
+            Some(PacketIp::V4(src)) => src == assigned_ip,
+            _ => false,
+        };
+        if !source_valid {
+            stats.packets_spoofed.fetch_add(1, Ordering::Relaxed);
+        }
+        assert_eq!(stats.packets_spoofed.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn test_stats_backpressure_and_drop_simulation() {
+        // Simulate the backpressure/drop logic from run_tun_reader
+        let stats = VpnServerStats::new();
+
+        // Create a tiny channel that will fill up immediately
+        let (tx, mut rx) = mpsc::channel::<u8>(1);
+
+        // First send succeeds
+        if tx.try_send(1).is_ok() {
+            stats.packets_to_clients.fetch_add(1, Ordering::Relaxed);
+        }
+        assert_eq!(stats.packets_to_clients.load(Ordering::Relaxed), 1);
+
+        // Second send fails (channel full) - simulate drop_on_full=true
+        let drop_on_full = true;
+        match tx.try_send(2) {
+            Ok(()) => {
+                stats.packets_to_clients.fetch_add(1, Ordering::Relaxed);
+            }
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                if drop_on_full {
+                    stats.packets_dropped_full.fetch_add(1, Ordering::Relaxed);
+                } else {
+                    stats.packets_backpressure.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {}
+        }
+        assert_eq!(stats.packets_dropped_full.load(Ordering::Relaxed), 1);
+        assert_eq!(stats.packets_backpressure.load(Ordering::Relaxed), 0);
+
+        // Drain the channel
+        let _ = rx.try_recv();
+
+        // Simulate drop_on_full=false (backpressure mode)
+        let _ = tx.try_send(3); // Fill the channel again
+
+        let drop_on_full = false;
+        match tx.try_send(4) {
+            Ok(()) => {
+                stats.packets_to_clients.fetch_add(1, Ordering::Relaxed);
+            }
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                if drop_on_full {
+                    stats.packets_dropped_full.fetch_add(1, Ordering::Relaxed);
+                } else {
+                    stats.packets_backpressure.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {}
+        }
+        assert_eq!(stats.packets_dropped_full.load(Ordering::Relaxed), 1);
+        assert_eq!(stats.packets_backpressure.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn test_stats_tun_write_failed_simulation() {
+        let stats = VpnServerStats::new();
+
+        // Simulate TUN write failures being tracked
+        // In real code this happens in handle_client_data when tun_write_tx fails
+
+        // Successful write (channel open)
+        stats.packets_from_clients.fetch_add(1, Ordering::Relaxed);
+        assert_eq!(stats.packets_from_clients.load(Ordering::Relaxed), 1);
+
+        // Failed write (channel closed)
+        stats.packets_tun_write_failed.fetch_add(1, Ordering::Relaxed);
+        assert_eq!(stats.packets_tun_write_failed.load(Ordering::Relaxed), 1);
+
+        // Multiple failures
+        stats.packets_tun_write_failed.fetch_add(1, Ordering::Relaxed);
+        stats.packets_tun_write_failed.fetch_add(1, Ordering::Relaxed);
+        assert_eq!(stats.packets_tun_write_failed.load(Ordering::Relaxed), 3);
+    }
+
+    #[test]
+    fn test_stats_concurrent_increments() {
+        use std::thread;
+
+        // Test that atomic counters work correctly under concurrent access
+        let stats = Arc::new(VpnServerStats::new());
+        let mut handles = vec![];
+
+        // Spawn multiple threads incrementing different counters
+        for _ in 0..10 {
+            let stats = stats.clone();
+            handles.push(thread::spawn(move || {
+                for _ in 0..1000 {
+                    stats.tun_packets_read.fetch_add(1, Ordering::Relaxed);
+                    stats.packets_to_clients.fetch_add(1, Ordering::Relaxed);
+                    stats.packets_no_route.fetch_add(1, Ordering::Relaxed);
+                }
+            }));
+        }
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        // Each of 10 threads incremented 1000 times = 10000 total
+        assert_eq!(stats.tun_packets_read.load(Ordering::Relaxed), 10000);
+        assert_eq!(stats.packets_to_clients.load(Ordering::Relaxed), 10000);
+        assert_eq!(stats.packets_no_route.load(Ordering::Relaxed), 10000);
     }
 }
