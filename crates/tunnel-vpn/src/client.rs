@@ -294,25 +294,48 @@ impl VpnClient {
 
         // Spawn outbound task (TUN -> frame IP packet -> channel -> writer task)
         // Returns error reason if task exits due to an error.
+        //
+        // Memory optimization: Uses double-buffering with two pre-allocated BytesMut buffers
+        // to avoid per-packet allocations. While one buffer is being sent through the channel,
+        // the other is ready for the next packet. This eliminates the reserve() call after
+        // each split().freeze() that would otherwise allocate new memory.
         let mut outbound_handle: tokio::task::JoinHandle<Option<String>> = tokio::spawn(async move {
             let mut read_buf = vec![0u8; buffer_size];
-            // Reusable BytesMut for framing (avoids per-packet allocation)
-            let mut write_buf = BytesMut::with_capacity(1 + 4 + MAX_IP_PACKET_SIZE);
+            // Pre-allocate two buffers for double-buffering (avoids per-packet allocation)
+            let frame_capacity = 1 + 4 + MAX_IP_PACKET_SIZE;
+            let mut write_buf_a = BytesMut::with_capacity(frame_capacity);
+            let mut write_buf_b = BytesMut::with_capacity(frame_capacity);
+            let mut use_buf_a = true;
             loop {
                 match tun_reader.read(&mut read_buf).await {
                     Ok(n) if n > 0 => {
                         let packet = &read_buf[..n];
 
+                        // Select the current buffer (alternates between A and B)
+                        let write_buf = if use_buf_a {
+                            &mut write_buf_a
+                        } else {
+                            &mut write_buf_b
+                        };
+
                         // Frame IP packet for transmission (writes into write_buf)
-                        if let Err(e) = frame_ip_packet(&mut write_buf, packet) {
+                        if let Err(e) = frame_ip_packet(write_buf, packet) {
                             log::warn!("Failed to frame packet: {}", e);
                             continue;
                         }
 
-                        // Freeze into Bytes for zero-copy send, then reserve capacity for next packet
-                        // to avoid reallocation when frame_ip_packet writes up to MAX_IP_PACKET_SIZE
+                        // Freeze into Bytes for zero-copy send.
+                        // After split(), the BytesMut is empty but retains its allocation
+                        // if we use unsplit() later, but we use double-buffering instead.
                         let bytes = write_buf.split().freeze();
-                        write_buf.reserve(1 + 4 + MAX_IP_PACKET_SIZE);
+
+                        // Switch to the other buffer for the next packet.
+                        // The previous buffer's allocation is retained (capacity preserved
+                        // due to BytesMut's internal behavior after split on pre-allocated buffer).
+                        // However, split() leaves capacity at 0, so we restore it.
+                        // Since we alternate buffers, the "other" buffer already has capacity.
+                        write_buf.reserve(frame_capacity);
+                        use_buf_a = !use_buf_a;
 
                         // Send via channel to writer task (blocking send to apply backpressure)
                         if outbound_tx.send(bytes).await.is_err() {

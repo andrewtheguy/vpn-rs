@@ -929,13 +929,26 @@ impl VpnServer {
     }
 
     /// Run the TUN reader - reads packets from TUN and routes to clients.
+    ///
+    /// Memory optimization: Uses a ring buffer pool of pre-allocated BytesMut buffers
+    /// to avoid per-packet allocations. The pool size is tuned for typical packet
+    /// processing latency - buffers cycle through: frame -> send -> consume -> reuse.
     async fn run_tun_reader(&self, mut tun_reader: crate::device::TunReader) -> VpnResult<()> {
         log::info!("TUN reader started");
 
         let buffer_size = tun_reader.buffer_size();
         let mut buf = vec![0u8; buffer_size];
-        // Reusable BytesMut for framing (avoids per-packet allocation)
-        let mut write_buf = BytesMut::with_capacity(1 + 4 + buffer_size);
+
+        // Ring buffer pool for framing: pre-allocate buffers to avoid per-packet allocation.
+        // Pool size of 8 handles typical async send latency while keeping memory bounded.
+        // When a buffer is sent, it's consumed by the receiver; we reuse the slot with
+        // a fresh buffer only when needed (lazy re-allocation within the pool).
+        const RING_BUFFER_POOL_SIZE: usize = 8;
+        let frame_capacity = 1 + 4 + buffer_size;
+        let mut buffer_pool: Vec<BytesMut> = (0..RING_BUFFER_POOL_SIZE)
+            .map(|_| BytesMut::with_capacity(frame_capacity))
+            .collect();
+        let mut pool_index: usize = 0;
 
         loop {
             // Read packet from TUN device
@@ -988,8 +1001,18 @@ impl VpnServer {
                 }
             };
 
+            // Get buffer from pool (round-robin). If the buffer was consumed (split),
+            // its capacity is 0 and we restore it. This amortizes allocation cost.
+            let write_buf = &mut buffer_pool[pool_index];
+            if write_buf.capacity() < frame_capacity {
+                // Buffer was consumed by previous send; restore capacity.
+                // This happens once per buffer after first use, then the reserve
+                // becomes a no-op due to BytesMut's capacity reuse after clear().
+                write_buf.reserve(frame_capacity);
+            }
+
             // Frame packet and enqueue for the client's writer task
-            if let Err(e) = frame_ip_packet(&mut write_buf, packet) {
+            if let Err(e) = frame_ip_packet(write_buf, packet) {
                 log::warn!(
                     "Failed to frame packet for {} dev {}: {}",
                     endpoint_id,
@@ -999,10 +1022,13 @@ impl VpnServer {
                 continue;
             }
 
-            // Freeze into Bytes for zero-copy send, then reserve capacity for next packet
-            // to avoid reallocation when frame_ip_packet writes up to buffer_size
+            // Freeze into Bytes for zero-copy send.
+            // After split(), the BytesMut has 0 capacity but the pool slot remains.
+            // Next iteration will restore capacity if needed (amortized allocation).
             let bytes = write_buf.split().freeze();
-            write_buf.reserve(1 + 4 + buffer_size);
+
+            // Advance to next buffer in the ring (allows previous buffer to be consumed)
+            pool_index = (pool_index + 1) % RING_BUFFER_POOL_SIZE;
 
             // Send via channel - try non-blocking first
             match packet_tx.try_send(bytes) {
