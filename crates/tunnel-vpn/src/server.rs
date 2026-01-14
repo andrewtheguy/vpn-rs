@@ -1544,4 +1544,284 @@ mod tests {
             err
         );
     }
+
+    // =========================================================================
+    // VpnServerStats tests
+    // =========================================================================
+
+    #[test]
+    fn test_stats_initial_zero() {
+        let stats = VpnServerStats::new();
+
+        // All counters should be zero on initialization
+        assert_eq!(stats.tun_packets_read.load(Ordering::Relaxed), 0);
+        assert_eq!(stats.packets_to_clients.load(Ordering::Relaxed), 0);
+        assert_eq!(stats.packets_no_route.load(Ordering::Relaxed), 0);
+        assert_eq!(stats.packets_unknown_version.load(Ordering::Relaxed), 0);
+        assert_eq!(stats.packets_dropped_full.load(Ordering::Relaxed), 0);
+        assert_eq!(stats.packets_backpressure.load(Ordering::Relaxed), 0);
+        assert_eq!(stats.packets_from_clients.load(Ordering::Relaxed), 0);
+        assert_eq!(stats.packets_tun_write_failed.load(Ordering::Relaxed), 0);
+        assert_eq!(stats.packets_spoofed.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn test_stats_snapshot() {
+        let stats = VpnServerStats::new();
+
+        // Increment some counters
+        stats.tun_packets_read.fetch_add(100, Ordering::Relaxed);
+        stats.packets_to_clients.fetch_add(90, Ordering::Relaxed);
+        stats.packets_no_route.fetch_add(5, Ordering::Relaxed);
+        stats.packets_spoofed.fetch_add(3, Ordering::Relaxed);
+        stats.packets_backpressure.fetch_add(2, Ordering::Relaxed);
+
+        // Take a snapshot and verify values
+        let snapshot = stats.snapshot();
+        assert_eq!(snapshot.tun_packets_read, 100);
+        assert_eq!(snapshot.packets_to_clients, 90);
+        assert_eq!(snapshot.packets_no_route, 5);
+        assert_eq!(snapshot.packets_spoofed, 3);
+        assert_eq!(snapshot.packets_backpressure, 2);
+        assert_eq!(snapshot.packets_unknown_version, 0);
+        assert_eq!(snapshot.packets_dropped_full, 0);
+        assert_eq!(snapshot.packets_from_clients, 0);
+        assert_eq!(snapshot.packets_tun_write_failed, 0);
+    }
+
+    #[test]
+    fn test_stats_no_route_simulation() {
+        // Simulate the no-route counter being incremented when routing fails
+        let stats = VpnServerStats::new();
+        let network: Ipv4Net = "10.0.0.0/24".parse().unwrap();
+        let ip_to_endpoint: DashMap<Ipv4Addr, (EndpointId, u64)> = DashMap::new();
+
+        // Register one client
+        let client_id = random_endpoint_id();
+        let client_ip = Ipv4Addr::new(10, 0, 0, 2);
+        ip_to_endpoint.insert(client_ip, (client_id, 1));
+
+        // Create packet destined for registered client - should find route
+        let mut packet_to_client = [0u8; 20];
+        packet_to_client[0] = 0x45; // IPv4
+        packet_to_client[16..20].copy_from_slice(&client_ip.octets());
+
+        if let Some(PacketIp::V4(dest)) = extract_dest_ip(&packet_to_client) {
+            if ip_to_endpoint.get(&dest).is_none() {
+                stats.packets_no_route.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        assert_eq!(stats.packets_no_route.load(Ordering::Relaxed), 0);
+
+        // Create packet destined for unknown IP - should increment no_route
+        let unknown_ip = Ipv4Addr::new(10, 0, 0, 99);
+        let mut packet_to_unknown = [0u8; 20];
+        packet_to_unknown[0] = 0x45; // IPv4
+        packet_to_unknown[16..20].copy_from_slice(&unknown_ip.octets());
+
+        if let Some(PacketIp::V4(dest)) = extract_dest_ip(&packet_to_unknown) {
+            if ip_to_endpoint.get(&dest).is_none() {
+                stats.packets_no_route.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        assert_eq!(stats.packets_no_route.load(Ordering::Relaxed), 1);
+
+        // Packet destined outside network entirely
+        let external_ip = Ipv4Addr::new(192, 168, 1, 1);
+        let mut packet_external = [0u8; 20];
+        packet_external[0] = 0x45;
+        packet_external[16..20].copy_from_slice(&external_ip.octets());
+
+        if let Some(PacketIp::V4(dest)) = extract_dest_ip(&packet_external) {
+            if !network.contains(&dest) || ip_to_endpoint.get(&dest).is_none() {
+                stats.packets_no_route.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        assert_eq!(stats.packets_no_route.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn test_stats_unknown_version_simulation() {
+        let stats = VpnServerStats::new();
+
+        // Valid IPv4 packet - should not increment unknown_version
+        let ipv4_packet = [0x45u8; 20];
+        if extract_dest_ip(&ipv4_packet).is_none() {
+            stats.packets_unknown_version.fetch_add(1, Ordering::Relaxed);
+        }
+        assert_eq!(stats.packets_unknown_version.load(Ordering::Relaxed), 0);
+
+        // Invalid version (5) packet - should increment unknown_version
+        let mut invalid_packet = [0u8; 40];
+        invalid_packet[0] = 0x50; // Version 5
+        if extract_dest_ip(&invalid_packet).is_none() {
+            stats.packets_unknown_version.fetch_add(1, Ordering::Relaxed);
+        }
+        assert_eq!(stats.packets_unknown_version.load(Ordering::Relaxed), 1);
+
+        // Empty packet - should increment unknown_version
+        if extract_dest_ip(&[]).is_none() {
+            stats.packets_unknown_version.fetch_add(1, Ordering::Relaxed);
+        }
+        assert_eq!(stats.packets_unknown_version.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn test_stats_spoofing_detection_simulation() {
+        // Simulate IP spoofing detection logic from handle_client_data
+        let stats = VpnServerStats::new();
+
+        // Client is assigned 10.0.0.2
+        let assigned_ip = Ipv4Addr::new(10, 0, 0, 2);
+
+        // Packet with correct source IP - not spoofed
+        let mut valid_packet = [0u8; 20];
+        valid_packet[0] = 0x45; // IPv4
+        valid_packet[12..16].copy_from_slice(&assigned_ip.octets());
+
+        let source_valid = match extract_source_ip(&valid_packet) {
+            Some(PacketIp::V4(src)) => src == assigned_ip,
+            _ => false,
+        };
+        if !source_valid {
+            stats.packets_spoofed.fetch_add(1, Ordering::Relaxed);
+        }
+        assert_eq!(stats.packets_spoofed.load(Ordering::Relaxed), 0);
+
+        // Packet with wrong source IP - spoofed!
+        let spoofed_ip = Ipv4Addr::new(10, 0, 0, 99);
+        let mut spoofed_packet = [0u8; 20];
+        spoofed_packet[0] = 0x45; // IPv4
+        spoofed_packet[12..16].copy_from_slice(&spoofed_ip.octets());
+
+        let source_valid = match extract_source_ip(&spoofed_packet) {
+            Some(PacketIp::V4(src)) => src == assigned_ip,
+            _ => false,
+        };
+        if !source_valid {
+            stats.packets_spoofed.fetch_add(1, Ordering::Relaxed);
+        }
+        assert_eq!(stats.packets_spoofed.load(Ordering::Relaxed), 1);
+
+        // Packet with unparseable source - also treated as spoofed
+        let bad_packet = [0x45u8; 10]; // Too short
+        let source_valid = match extract_source_ip(&bad_packet) {
+            Some(PacketIp::V4(src)) => src == assigned_ip,
+            _ => false,
+        };
+        if !source_valid {
+            stats.packets_spoofed.fetch_add(1, Ordering::Relaxed);
+        }
+        assert_eq!(stats.packets_spoofed.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn test_stats_backpressure_and_drop_simulation() {
+        use tokio::sync::mpsc;
+
+        // Simulate the backpressure/drop logic from run_tun_reader
+        let stats = VpnServerStats::new();
+
+        // Create a tiny channel that will fill up immediately
+        let (tx, mut rx) = mpsc::channel::<u8>(1);
+
+        // First send succeeds
+        if tx.try_send(1).is_ok() {
+            stats.packets_to_clients.fetch_add(1, Ordering::Relaxed);
+        }
+        assert_eq!(stats.packets_to_clients.load(Ordering::Relaxed), 1);
+
+        // Second send fails (channel full) - simulate drop_on_full=true
+        let drop_on_full = true;
+        match tx.try_send(2) {
+            Ok(()) => {
+                stats.packets_to_clients.fetch_add(1, Ordering::Relaxed);
+            }
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                if drop_on_full {
+                    stats.packets_dropped_full.fetch_add(1, Ordering::Relaxed);
+                } else {
+                    stats.packets_backpressure.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {}
+        }
+        assert_eq!(stats.packets_dropped_full.load(Ordering::Relaxed), 1);
+        assert_eq!(stats.packets_backpressure.load(Ordering::Relaxed), 0);
+
+        // Drain the channel
+        let _ = rx.try_recv();
+
+        // Simulate drop_on_full=false (backpressure mode)
+        let _ = tx.try_send(3); // Fill the channel again
+
+        let drop_on_full = false;
+        match tx.try_send(4) {
+            Ok(()) => {
+                stats.packets_to_clients.fetch_add(1, Ordering::Relaxed);
+            }
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                if drop_on_full {
+                    stats.packets_dropped_full.fetch_add(1, Ordering::Relaxed);
+                } else {
+                    stats.packets_backpressure.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {}
+        }
+        assert_eq!(stats.packets_dropped_full.load(Ordering::Relaxed), 1);
+        assert_eq!(stats.packets_backpressure.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn test_stats_tun_write_failed_simulation() {
+        let stats = VpnServerStats::new();
+
+        // Simulate TUN write failures being tracked
+        // In real code this happens in handle_client_data when tun_write_tx fails
+
+        // Successful write (channel open)
+        stats.packets_from_clients.fetch_add(1, Ordering::Relaxed);
+        assert_eq!(stats.packets_from_clients.load(Ordering::Relaxed), 1);
+
+        // Failed write (channel closed)
+        stats.packets_tun_write_failed.fetch_add(1, Ordering::Relaxed);
+        assert_eq!(stats.packets_tun_write_failed.load(Ordering::Relaxed), 1);
+
+        // Multiple failures
+        stats.packets_tun_write_failed.fetch_add(1, Ordering::Relaxed);
+        stats.packets_tun_write_failed.fetch_add(1, Ordering::Relaxed);
+        assert_eq!(stats.packets_tun_write_failed.load(Ordering::Relaxed), 3);
+    }
+
+    #[test]
+    fn test_stats_concurrent_increments() {
+        use std::sync::Arc;
+        use std::thread;
+
+        // Test that atomic counters work correctly under concurrent access
+        let stats = Arc::new(VpnServerStats::new());
+        let mut handles = vec![];
+
+        // Spawn multiple threads incrementing different counters
+        for _ in 0..10 {
+            let stats = stats.clone();
+            handles.push(thread::spawn(move || {
+                for _ in 0..1000 {
+                    stats.tun_packets_read.fetch_add(1, Ordering::Relaxed);
+                    stats.packets_to_clients.fetch_add(1, Ordering::Relaxed);
+                    stats.packets_no_route.fetch_add(1, Ordering::Relaxed);
+                }
+            }));
+        }
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        // Each of 10 threads incremented 1000 times = 10000 total
+        assert_eq!(stats.tun_packets_read.load(Ordering::Relaxed), 10000);
+        assert_eq!(stats.packets_to_clients.load(Ordering::Relaxed), 10000);
+        assert_eq!(stats.packets_no_route.load(Ordering::Relaxed), 10000);
+    }
 }
