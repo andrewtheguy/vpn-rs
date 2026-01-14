@@ -393,6 +393,7 @@ async fn run_vpn_server(resolved: ResolvedVpnServerConfig) -> Result<()> {
         mtu: resolved.mtu,
         max_clients: 254,
         auth_tokens: Some(valid_tokens),
+        drop_on_full: true, // Drop packets for slow clients to avoid head-of-line blocking
     };
 
     // Create iroh endpoint for signaling.

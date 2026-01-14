@@ -26,8 +26,8 @@ use tokio::sync::{mpsc, oneshot, Mutex, RwLock};
 const MAX_IP_PACKET_SIZE: usize = 65536;
 
 /// Channel buffer size for outbound packets per client.
-/// Large enough to handle bursts; if full, TUN reader applies backpressure
-/// via awaited send rather than dropping packets.
+/// Large enough to handle bursts; behavior when full depends on
+/// `VpnServerConfig::drop_on_full` (drop packets vs. apply backpressure).
 const CLIENT_PACKET_CHANNEL_SIZE: usize = 1024;
 
 /// State for a connected VPN client.
@@ -603,7 +603,15 @@ impl VpnServer {
                         }
                     }
                     None => {
-                        // Channel closed (normal shutdown)
+                        // Channel closed (normal shutdown) - signal end of stream to peer
+                        if let Err(e) = data_send.finish() {
+                            log::warn!(
+                                "Failed to finish QUIC stream for client {}: {}",
+                                writer_assigned_ip,
+                                e
+                            );
+                            break Some(format!("QUIC finish error: {}", e));
+                        }
                         break None;
                     }
                 }
@@ -996,8 +1004,7 @@ impl VpnServer {
             let bytes = write_buf.split().freeze();
             write_buf.reserve(1 + 4 + buffer_size);
 
-            // Send via channel - try non-blocking first, fall back to awaited send if full
-            // to apply backpressure rather than silently dropping packets
+            // Send via channel - try non-blocking first
             match packet_tx.try_send(bytes) {
                 Ok(()) => {
                     log::trace!(
@@ -1008,18 +1015,29 @@ impl VpnServer {
                     );
                 }
                 Err(mpsc::error::TrySendError::Full(data)) => {
-                    // Buffer full - apply backpressure via awaited send
-                    log::trace!(
-                        "Packet channel full for client {} dev {}, applying backpressure",
-                        endpoint_id,
-                        device_id
-                    );
-                    if packet_tx.send(data).await.is_err() {
-                        log::trace!(
-                            "Packet channel closed for client {} dev {}",
+                    // Buffer full - behavior depends on drop_on_full config
+                    if self.config.drop_on_full {
+                        // Drop packet to avoid blocking other clients (head-of-line blocking)
+                        log::warn!(
+                            "Dropping {} byte packet for slow client {} dev {} (buffer full)",
+                            packet.len(),
                             endpoint_id,
                             device_id
                         );
+                    } else {
+                        // Apply backpressure - blocks TUN reader until space available
+                        log::trace!(
+                            "Packet channel full for client {} dev {}, applying backpressure",
+                            endpoint_id,
+                            device_id
+                        );
+                        if packet_tx.send(data).await.is_err() {
+                            log::trace!(
+                                "Packet channel closed for client {} dev {}",
+                                endpoint_id,
+                                device_id
+                            );
+                        }
                     }
                 }
                 Err(mpsc::error::TrySendError::Closed(_)) => {
