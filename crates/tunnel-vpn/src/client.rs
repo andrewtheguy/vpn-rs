@@ -1,10 +1,9 @@
 //! VPN client implementation.
 //!
-//! The VPN client connects to a VPN server via iroh, performs WireGuard
-//! key exchange, configures the TUN device, and manages the VPN tunnel.
-//!
-//! WireGuard packets are tunneled through the iroh QUIC connection to handle
-//! NAT traversal automatically.
+//! The VPN client connects to a VPN server via iroh, performs handshake
+//! to receive IP assignment, configures the TUN device, and manages the
+//! IP-over-QUIC tunnel. IP packets are framed and sent directly over the
+//! encrypted iroh QUIC connection for automatic NAT traversal.
 
 use crate::config::VpnClientConfig;
 use crate::device::{add_routes, add_routes6, Route6Guard, RouteGuard, TunConfig, TunDevice};
@@ -47,8 +46,6 @@ pub struct VpnClient {
 /// Information received from the VPN server after successful handshake.
 #[non_exhaustive]
 pub struct ServerInfo {
-    /// Server's unique endpoint ID (if needed, or just connection info).
-    // pub wg_public_key: WgPublicKey, // Removed
     /// Assigned VPN IP for this client (IPv4).
     pub assigned_ip: Ipv4Addr,
     /// VPN network CIDR (IPv4).
@@ -66,8 +63,8 @@ pub struct ServerInfo {
 impl VpnClient {
     /// Create a new VPN client.
     ///
-    /// WireGuard keypair is always ephemeral (generated fresh each session).
-    /// This allows multiple clients to connect without key conflicts.
+    /// Device ID is always generated fresh each session using CSPRNG.
+    /// This allows multiple clients to connect without conflicts.
     pub fn new(config: VpnClientConfig) -> VpnResult<Self> {
         // Acquire single-instance lock
         let lock = VpnLock::acquire()?;
@@ -82,8 +79,6 @@ impl VpnClient {
             _lock: lock,
         })
     }
-
-
 
     /// Connect to the VPN server and establish the tunnel.
     pub async fn connect(&self, endpoint: &Endpoint) -> VpnResult<()> {
@@ -141,12 +136,12 @@ impl VpnClient {
                 None
             };
 
-        // Open data stream for WireGuard packets
+        // Open data stream for IP packets
         let (wg_send, wg_recv) = connection.open_bi().await.map_err(|e| {
             VpnError::Signaling(format!("Failed to open data stream: {}", e))
         })?;
 
-        log::info!("Opened WireGuard data stream");
+        log::info!("Data stream opened");
 
         // No WireGuard tunnel setup needed. We send raw IP packets framed over QUIC.
 
@@ -191,9 +186,6 @@ impl VpnClient {
         }
 
         // Extract server info (IPv4 required)
-        /* let wg_public_key = response.wg_public_key.ok_or_else(|| {
-            VpnError::Signaling("Server response missing WG public key".into())
-        })?; */ // Removed wg_public_key
         let assigned_ip = response.assigned_ip.ok_or_else(|| {
             VpnError::Signaling("Server response missing assigned IP".into())
         })?;
@@ -227,7 +219,6 @@ impl VpnClient {
             log::debug!("Failed to finish handshake stream: {}", e);
         }
         Ok(ServerInfo {
-            // wg_public_key, // Removed
             assigned_ip,
             network,
             server_ip,
@@ -260,7 +251,6 @@ impl VpnClient {
     async fn run_vpn_loop(
         &self,
         tun_device: TunDevice,
-        // tunnel: Arc<Mutex<WgTunnel>>, // Removed
         wg_send: SendStream,
         wg_recv: RecvStream,
     ) -> VpnResult<()> {
@@ -273,12 +263,7 @@ impl VpnClient {
         let wg_recv = Arc::new(Mutex::new(wg_recv));
 
         // Clone for tasks
-        // let tunnel_outbound = tunnel.clone();
-        // let tunnel_inbound = tunnel.clone();
-        // let tunnel_timers = tunnel.clone();
         let send_outbound = wg_send.clone();
-        let _send_inbound = wg_send.clone();
-        // let send_timers = wg_send.clone();
 
         // Track last heartbeat pong received (as millis since start_time for atomic access)
         let start_time = Instant::now();
@@ -286,7 +271,7 @@ impl VpnClient {
         let last_pong_inbound = last_pong.clone();
         let last_pong_heartbeat = last_pong.clone();
 
-        // Spawn outbound task (TUN -> WireGuard -> iroh stream)
+        // Spawn outbound task (TUN -> frame IP packet -> QUIC stream)
         let mut outbound_handle = tokio::spawn(async move {
             let mut read_buf = vec![0u8; buffer_size];
             let mut write_buf = Vec::with_capacity(1 + 4 + MAX_IP_PACKET_SIZE);
@@ -294,11 +279,8 @@ impl VpnClient {
                 match tun_reader.read(&mut read_buf).await {
                     Ok(n) if n > 0 => {
                         let packet = &read_buf[..n];
-                        // let mut tunnel = tunnel_outbound.lock().await;
-                        // let result = tunnel.encapsulate(packet);
-                        // drop(tunnel); // Release tunnel lock before acquiring send lock
 
-                        // Directly frame IP packet
+                        // Frame IP packet for transmission
                         if let Err(e) = frame_ip_packet(&mut write_buf, packet) {
                             log::warn!("Failed to frame packet: {}", e);
                             continue;
@@ -319,13 +301,12 @@ impl VpnClient {
             }
         });
 
-        // Spawn inbound task (iroh stream -> WireGuard -> TUN)
+        // Spawn inbound task (QUIC stream -> TUN)
         let inbound_start_time = start_time;
         let mut inbound_handle = tokio::spawn(async move {
             let mut type_buf = [0u8; 1];
             let mut len_buf = [0u8; 4];
             let mut data_buf = vec![0u8; MAX_IP_PACKET_SIZE];
-            // let mut write_buf = Vec::with_capacity(1 + 4 + MAX_IP_PACKET_SIZE);  // write_buf unused for inbound
             loop {
                 let mut recv = wg_recv.lock().await;
                 // Read message type
@@ -399,15 +380,6 @@ impl VpnClient {
             }
         });
 
-        // Spawn timer task - NOOP for direct IP tunnel (no WG keepalives/rekeys needed)
-        let mut timer_handle = tokio::spawn(async move {
-            // Placeholder to keep the select! structure valid and allow future periodic tasks
-            // For now just sleep forever or exit immediately?
-            // If we exit immediately, the select! below will trigger shutdown.
-            // So we sleep forever.
-            std::future::pending::<()>().await;
-        });
-
         // Spawn heartbeat task (sends pings, checks for timeout)
         let send_heartbeat = wg_send.clone();
         let mut heartbeat_handle = tokio::spawn(async move {
@@ -445,16 +417,13 @@ impl VpnClient {
         // Wait for any task to complete (or error), then clean up all tasks
         let (first_task, first_result, remaining) = tokio::select! {
             result = &mut outbound_handle => {
-                ("outbound", result, vec![("inbound", inbound_handle), ("timer", timer_handle), ("heartbeat", heartbeat_handle)])
+                ("outbound", result, vec![("inbound", inbound_handle), ("heartbeat", heartbeat_handle)])
             }
             result = &mut inbound_handle => {
-                ("inbound", result, vec![("outbound", outbound_handle), ("timer", timer_handle), ("heartbeat", heartbeat_handle)])
-            }
-            result = &mut timer_handle => {
-                ("timer", result, vec![("outbound", outbound_handle), ("inbound", inbound_handle), ("heartbeat", heartbeat_handle)])
+                ("inbound", result, vec![("outbound", outbound_handle), ("heartbeat", heartbeat_handle)])
             }
             result = &mut heartbeat_handle => {
-                ("heartbeat", result, vec![("outbound", outbound_handle), ("inbound", inbound_handle), ("timer", timer_handle)])
+                ("heartbeat", result, vec![("outbound", outbound_handle), ("inbound", inbound_handle)])
             }
         };
 
