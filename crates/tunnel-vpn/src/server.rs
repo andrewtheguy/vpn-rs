@@ -817,9 +817,9 @@ impl VpnServer {
                 }
 
                 // Write validated packet to TUN
-                     log::warn!("Failed to write to server TUN: {}", e);
+                let mut writer = tun_writer.lock().await;
                 if let Err(e) = writer.write_all(packet).await {
-                     log::warn!("Failed to write to TUN: {}", e);
+                    log::warn!("Failed to write to server TUN: {}", e);
                 }
                 log::trace!("Wrote {} bytes to TUN from client {}", packet.len(), assigned_ip);
             }
