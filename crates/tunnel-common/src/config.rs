@@ -172,6 +172,12 @@ pub struct VpnServerIrohConfig {
     /// - `false`: Apply backpressure (blocks TUN reader until space available)
     #[serde(default = "default_drop_on_full")]
     pub drop_on_full: bool,
+    /// Channel buffer size for outbound packets to each client (default: 1024).
+    /// Controls how many packets can be queued per client before backpressure/drops.
+    pub client_channel_size: Option<usize>,
+    /// Channel buffer size for TUN writer task (default: 512).
+    /// Aggregate buffer for all client -> TUN traffic. Lower values bound memory usage.
+    pub tun_writer_channel_size: Option<usize>,
     /// Shared configuration fields
     #[serde(flatten)]
     pub shared: VpnIrohSharedConfig,
@@ -1149,6 +1155,13 @@ pub const DEFAULT_VPN_MTU: u16 = 1440;
 ///     Ok(())
 /// }
 /// ```
+/// Default channel buffer size for outbound packets to each client.
+pub const DEFAULT_CLIENT_CHANNEL_SIZE: usize = 1024;
+
+/// Default channel buffer size for TUN writer task.
+/// Conservative default to bound memory usage on constrained hosts.
+pub const DEFAULT_TUN_WRITER_CHANNEL_SIZE: usize = 512;
+
 #[derive(Debug, Clone)]
 pub struct ResolvedVpnServerConfig {
     pub network: String,
@@ -1162,6 +1175,8 @@ pub struct ResolvedVpnServerConfig {
     pub auth_tokens: Vec<String>,
     pub auth_tokens_file: Option<PathBuf>,
     pub drop_on_full: bool,
+    pub client_channel_size: usize,
+    pub tun_writer_channel_size: usize,
 }
 
 impl ResolvedVpnServerConfig {
@@ -1214,6 +1229,12 @@ impl ResolvedVpnServerConfig {
             auth_tokens: cfg.auth_tokens.clone().unwrap_or_default(),
             auth_tokens_file: cfg.auth_tokens_file.clone(),
             drop_on_full: cfg.drop_on_full,
+            client_channel_size: cfg
+                .client_channel_size
+                .unwrap_or(DEFAULT_CLIENT_CHANNEL_SIZE),
+            tun_writer_channel_size: cfg
+                .tun_writer_channel_size
+                .unwrap_or(DEFAULT_TUN_WRITER_CHANNEL_SIZE),
         })
     }
 }

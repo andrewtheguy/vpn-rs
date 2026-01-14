@@ -76,20 +76,24 @@ pub struct VpnServerConfig {
     #[serde(default = "default_client_channel_size")]
     pub client_channel_size: usize,
 
-    /// Channel buffer size for TUN writer task (default: 4096).
+    /// Channel buffer size for TUN writer task (default: 512).
     ///
     /// This is the aggregate buffer for all client -> TUN traffic. Since all
     /// clients share this channel, it should be larger than per-client buffers.
     ///
     /// **Tradeoffs:**
-    /// - **Higher values:** Better burst absorption from multiple clients,
-    ///   prevents TUN write backpressure from affecting individual clients.
-    /// - **Lower values:** Faster backpressure propagation to clients,
-    ///   lower memory usage.
+    /// - **Higher values (e.g., 2048-4096):** Better burst absorption from multiple clients,
+    ///   prevents TUN write backpressure from affecting individual clients, but risks
+    ///   high memory usage if TUN writes stall (~4096 * 1500 bytes = ~6MB).
+    /// - **Lower values (e.g., 256-512):** Faster backpressure propagation to clients,
+    ///   bounded memory usage, but may cause more backpressure during bursts.
     ///
-    /// **Recommendation:** Set to `client_channel_size * expected_active_clients / 2`
-    /// for balanced behavior, or `client_channel_size * max_clients` for maximum
-    /// burst tolerance.
+    /// **Memory impact:** `tun_writer_channel_size * ~1500 bytes`
+    /// - Default (512): ~750 KB worst case
+    /// - High (4096): ~6 MB worst case
+    ///
+    /// **Recommendation:** 512 is a safe default for memory-constrained hosts.
+    /// Increase to 2048-4096 for high-bandwidth servers with many active clients.
     #[serde(default = "default_tun_writer_channel_size")]
     pub tun_writer_channel_size: usize,
 }
@@ -159,5 +163,5 @@ fn default_client_channel_size() -> usize {
 }
 
 fn default_tun_writer_channel_size() -> usize {
-    4096
+    512
 }
