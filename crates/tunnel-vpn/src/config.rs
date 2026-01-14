@@ -8,9 +8,6 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 /// Default MTU for VPN tunnel (1500 - 60 bytes overhead for QUIC/TLS + framing).
 pub const DEFAULT_MTU: u16 = 1440;
 
-/// Default keepalive interval in seconds.
-pub const DEFAULT_KEEPALIVE_SECS: u16 = 25;
-
 /// VPN server configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VpnServerConfig {
@@ -33,10 +30,6 @@ pub struct VpnServerConfig {
     /// MTU for the TUN device.
     #[serde(default = "default_mtu")]
     pub mtu: u16,
-
-    /// Keepalive/heartbeat interval in seconds.
-    #[serde(default = "default_keepalive")]
-    pub keepalive_secs: u16,
 
     /// Maximum number of connected clients.
     #[serde(default = "default_max_clients")]
@@ -61,10 +54,6 @@ pub struct VpnClientConfig {
     #[serde(default = "default_mtu")]
     pub mtu: u16,
 
-    /// Keepalive/heartbeat interval in seconds.
-    #[serde(default = "default_keepalive")]
-    pub keepalive_secs: u16,
-
     /// IPv4 routes to send through the VPN (CIDRs).
     /// At least one route is required (e.g., 0.0.0.0/0 for full tunnel).
     pub routes: Vec<Ipv4Net>,
@@ -80,7 +69,6 @@ impl Default for VpnClientConfig {
             server_node_id: String::new(),
             auth_token: None,
             mtu: DEFAULT_MTU,
-            keepalive_secs: DEFAULT_KEEPALIVE_SECS,
             routes: vec![],
             routes6: vec![],
         }
@@ -103,10 +91,6 @@ pub enum VpnConfig {
 // Default value functions for serde
 fn default_mtu() -> u16 {
     DEFAULT_MTU
-}
-
-fn default_keepalive() -> u16 {
-    DEFAULT_KEEPALIVE_SECS
 }
 
 fn default_max_clients() -> usize {

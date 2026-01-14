@@ -577,12 +577,6 @@ impl VpnClientBuilder {
         self
     }
 
-    /// Set the keepalive interval.
-    pub fn keepalive_secs(mut self, secs: u16) -> Self {
-        self.config.keepalive_secs = secs;
-        self
-    }
-
     /// Build the client.
     pub fn build(self) -> VpnResult<VpnClient> {
         VpnClient::new(self.config)

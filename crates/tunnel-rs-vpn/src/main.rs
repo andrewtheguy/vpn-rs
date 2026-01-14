@@ -1,7 +1,7 @@
 //! tunnel-rs-vpn
 //!
-//! WireGuard-based VPN tunnel via iroh P2P connections.
-//! Uses ephemeral WireGuard keys with tunnel-auth tokens for access control.
+//! IP-over-QUIC VPN tunnel via iroh P2P connections.
+//! Uses tunnel-auth tokens for access control and TLS 1.3/QUIC for encryption.
 
 #[cfg(not(unix))]
 compile_error!("tunnel-rs-vpn only supports Linux and macOS");
@@ -29,7 +29,7 @@ use tunnel_vpn::{VpnClient, VpnServer};
 #[derive(Parser)]
 #[command(name = "tunnel-rs-vpn")]
 #[command(version)]
-#[command(about = "WireGuard-based VPN tunnel via iroh P2P")]
+#[command(about = "IP-over-QUIC VPN tunnel via iroh P2P")]
 struct Args {
     #[command(subcommand)]
     command: Command,
@@ -66,10 +66,6 @@ enum Command {
         /// MTU for VPN packets (default: 1440, valid range: 576-1500)
         #[arg(long, value_parser = clap::value_parser!(u16).range(576..=1500))]
         mtu: Option<u16>,
-
-        /// Keepalive interval in seconds (default: 25, valid range: 10-300)
-        #[arg(long, value_parser = clap::value_parser!(u16).range(10..=300))]
-        keepalive_secs: Option<u16>,
 
         /// Path to secret key file for persistent iroh identity (same EndpointId across restarts)
         #[arg(long)]
@@ -108,10 +104,6 @@ enum Command {
         /// MTU for VPN packets (default: 1440, valid range: 576-1500)
         #[arg(long, value_parser = clap::value_parser!(u16).range(576..=1500))]
         mtu: Option<u16>,
-
-        /// Keepalive interval in seconds (default: 25, valid range: 10-300)
-        #[arg(long, value_parser = clap::value_parser!(u16).range(10..=300))]
-        keepalive_secs: Option<u16>,
 
         /// Custom relay server URL(s) for failover
         #[arg(long = "relay-url")]
@@ -232,7 +224,6 @@ async fn main() -> Result<()> {
             network6,
             server_ip6,
             mtu,
-            keepalive_secs,
             secret_file,
             relay_urls,
             dns_server,
@@ -257,7 +248,6 @@ async fn main() -> Result<()> {
                     network6,
                     server_ip6,
                     mtu,
-                    keepalive_secs,
                     secret_file.map(|p| expand_tilde(&p)),
                     relay_urls,
                     dns_server,
@@ -273,7 +263,6 @@ async fn main() -> Result<()> {
             default_config,
             server_node_id,
             mtu,
-            keepalive_secs,
             relay_urls,
             dns_server,
             auth_token,
@@ -312,7 +301,6 @@ async fn main() -> Result<()> {
                 .apply_cli(
                     server_node_id,
                     mtu,
-                    keepalive_secs,
                     auth_token,
                     auth_token_file.map(|p| expand_tilde(&p)),
                     routes,
@@ -395,14 +383,13 @@ async fn run_vpn_server(resolved: ResolvedVpnServerConfig) -> Result<()> {
         None
     };
 
-    // Create VPN server config (WireGuard keys are ephemeral, generated per-client)
+    // Create VPN server config
     let config = VpnServerConfig {
         network,
         network6,
         server_ip,
         server_ip6,
         mtu: resolved.mtu,
-        keepalive_secs: resolved.keepalive_secs,
         max_clients: 254,
         auth_tokens: Some(valid_tokens),
     };
@@ -481,11 +468,10 @@ async fn run_vpn_client(resolved: ResolvedVpnClientConfig) -> Result<()> {
         }
     }
 
-    // Create VPN client config (WireGuard key is ephemeral, auto-generated)
+    // Create VPN client config
     let config = VpnClientConfig {
         server_node_id: resolved.server_node_id.clone(),
         mtu: resolved.mtu,
-        keepalive_secs: resolved.keepalive_secs,
         auth_token: Some(token),
         routes: parsed_routes,
         routes6: parsed_routes6,
