@@ -548,14 +548,14 @@ impl VpnServer {
         }
 
         // Accept data stream for IP packets
-        let (wg_send, wg_recv) = connection
+        let (data_send, data_recv) = connection
             .accept_bi()
             .await
             .map_err(|e| VpnError::Signaling(format!("Failed to accept data stream: {}", e)))?;
 
         log::info!("Client {} data stream established", remote_id);
 
-        let wg_send = Arc::new(Mutex::new(wg_send));
+        let data_send = Arc::new(Mutex::new(data_send));
 
         // Generate unique session ID for this connection
         // Used to detect stale cleanup when same client reconnects quickly
@@ -568,7 +568,7 @@ impl VpnServer {
             assigned_ip6,
             device_id,
             endpoint_id: remote_id,
-            send_stream: wg_send.clone(),
+            send_stream: data_send.clone(),
         };
 
         // Reconnect handling: if a client with the same (EndpointId, DeviceId) exists,
@@ -602,9 +602,8 @@ impl VpnServer {
 
         // Run client handler (blocks until client disconnects)
         let result = Self::handle_client_data(
-            // tunnel,
-            wg_send,
-            wg_recv,
+            data_send,
+            data_recv,
             assigned_ip,
             assigned_ip6,
             tun_writer,
@@ -675,23 +674,22 @@ impl VpnServer {
 
     /// Handle client data stream.
     async fn handle_client_data(
-        wg_send: Arc<Mutex<SendStream>>,
-        mut wg_recv: iroh::endpoint::RecvStream,
+        data_send: Arc<Mutex<SendStream>>,
+        mut data_recv: iroh::endpoint::RecvStream,
         assigned_ip: Ipv4Addr,
         assigned_ip6: Option<Ipv6Addr>,
         tun_writer: Arc<Mutex<TunWriter>>,
     ) -> VpnResult<()> {
-        let send_heartbeat = wg_send.clone();
+        let send_heartbeat = data_send.clone();
 
-        // Spawn inbound task (iroh stream -> TUN)
+        // Spawn inbound task (QUIC stream -> TUN)
         let inbound_handle = tokio::spawn(async move {
             let mut type_buf = [0u8; 1];
             let mut len_buf = [0u8; 4];
             let mut data_buf = vec![0u8; MAX_IP_PACKET_SIZE];
-            // let mut write_buf = Vec::with_capacity(1 + 4 + MAX_IP_PACKET_SIZE);
             loop {
                 // Read message type
-                match wg_recv.read_exact(&mut type_buf).await {
+                match data_recv.read_exact(&mut type_buf).await {
                     Ok(()) => {}
                     Err(e) => {
                         log::debug!("Client {} stream closed: {}", assigned_ip, e);
@@ -729,7 +727,7 @@ impl VpnServer {
                 }
 
                 // Read length prefix for IP packet
-                match wg_recv.read_exact(&mut len_buf).await {
+                match data_recv.read_exact(&mut len_buf).await {
                     Ok(()) => {}
                     Err(e) => {
                         log::debug!("Failed to read IP packet length from {}: {}", assigned_ip, e);
@@ -743,7 +741,7 @@ impl VpnServer {
                 }
 
                 // Read packet data
-                match wg_recv.read_exact(&mut data_buf[..len]).await {
+                match data_recv.read_exact(&mut data_buf[..len]).await {
                     Ok(()) => {}
                     Err(e) => {
                         log::debug!("Failed to read IP packet from {}: {}", assigned_ip, e);

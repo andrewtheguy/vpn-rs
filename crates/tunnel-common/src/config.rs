@@ -136,7 +136,7 @@ pub struct NostrConfig {
 pub struct VpnIrohSharedConfig {
     /// MTU for VPN packets (576-1500, default: 1420)
     pub mtu: Option<u16>,
-    /// WireGuard keepalive interval in seconds (10-300, default: 25)
+    /// Keepalive/heartbeat interval in seconds (10-300, default: 25)
     pub keepalive_secs: Option<u16>,
     /// Custom relay server URLs.
     /// - `None`: not specified (use defaults or CLI)
@@ -149,7 +149,7 @@ pub struct VpnIrohSharedConfig {
 
 /// VPN server iroh configuration (TOML section: `[iroh]` in vpn_server.toml).
 ///
-/// VPN mode uses iroh for P2P connectivity with WireGuard encryption.
+/// VPN mode uses iroh for P2P connectivity with TLS 1.3/QUIC encryption.
 #[derive(Deserialize, Default, Clone)]
 pub struct VpnServerIrohConfig {
     /// VPN network CIDR (e.g., "10.0.0.0/24")
@@ -1149,7 +1149,7 @@ pub fn default_nostr_relays() -> &'static [&'static str] {
 /// Default MTU for VPN packets.
 pub const DEFAULT_VPN_MTU: u16 = 1420;
 
-/// Default WireGuard keepalive interval in seconds.
+/// Default keepalive/heartbeat interval in seconds.
 pub const DEFAULT_VPN_KEEPALIVE_SECS: u16 = 25;
 
 /// Resolved VPN server configuration (all values finalized).
@@ -1564,7 +1564,7 @@ impl VpnClientConfigBuilder {
         validate_mtu(mtu, "config")?;
         validate_keepalive(keepalive_secs, "config")?;
 
-        // Require at least one route (like WireGuard AllowedIPs)
+        // Require at least one route (defines which traffic goes through VPN)
         let routes = self.routes.unwrap_or_default();
         if routes.is_empty() {
             anyhow::bail!(

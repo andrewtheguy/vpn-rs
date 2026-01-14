@@ -5,9 +5,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::net::{Ipv4Addr, Ipv6Addr};
 
-
-/// Default MTU for WireGuard (1500 - 80 bytes overhead).
-pub const DEFAULT_WG_MTU: u16 = 1420;
+/// Default MTU for VPN tunnel (1500 - 80 bytes overhead for QUIC/TLS).
+pub const DEFAULT_MTU: u16 = 1420;
 
 /// Default keepalive interval in seconds.
 pub const DEFAULT_KEEPALIVE_SECS: u16 = 25;
@@ -32,10 +31,10 @@ pub struct VpnServerConfig {
     pub server_ip6: Option<Ipv6Addr>,
 
     /// MTU for the TUN device.
-    #[serde(default = "default_wg_mtu")]
+    #[serde(default = "default_mtu")]
     pub mtu: u16,
 
-    /// WireGuard keepalive interval in seconds.
+    /// Keepalive/heartbeat interval in seconds.
     #[serde(default = "default_keepalive")]
     pub keepalive_secs: u16,
 
@@ -59,10 +58,10 @@ pub struct VpnClientConfig {
     pub auth_token: Option<String>,
 
     /// MTU for the TUN device.
-    #[serde(default = "default_wg_mtu")]
+    #[serde(default = "default_mtu")]
     pub mtu: u16,
 
-    /// WireGuard keepalive interval in seconds.
+    /// Keepalive/heartbeat interval in seconds.
     #[serde(default = "default_keepalive")]
     pub keepalive_secs: u16,
 
@@ -80,7 +79,7 @@ impl Default for VpnClientConfig {
         Self {
             server_node_id: String::new(),
             auth_token: None,
-            mtu: DEFAULT_WG_MTU,
+            mtu: DEFAULT_MTU,
             keepalive_secs: DEFAULT_KEEPALIVE_SECS,
             routes: vec![],
             routes6: vec![],
@@ -102,8 +101,8 @@ pub enum VpnConfig {
 }
 
 // Default value functions for serde
-fn default_wg_mtu() -> u16 {
-    DEFAULT_WG_MTU
+fn default_mtu() -> u16 {
+    DEFAULT_MTU
 }
 
 fn default_keepalive() -> u16 {

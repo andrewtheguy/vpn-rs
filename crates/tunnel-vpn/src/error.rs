@@ -11,9 +11,9 @@ pub enum VpnError {
     #[error("TUN device error: {0}")]
     TunDevice(String),
 
-    /// WireGuard tunnel error.
-    #[error("WireGuard tunnel error: {0}")]
-    WireGuard(String),
+    /// Tunnel/protocol error.
+    #[error("Tunnel error: {0}")]
+    Tunnel(String),
 
     /// Key generation or parsing error.
     #[error("Key error: {0}")]
@@ -64,7 +64,7 @@ impl VpnError {
     /// - `AuthenticationFailed` - invalid token, server rejected credentials
     /// - `Config` - invalid configuration (won't change without user action)
     /// - `TunDevice` - permission denied, device creation failed
-    /// - `WireGuard` - crypto/protocol errors
+    /// - `Tunnel` - protocol errors
     /// - `Key` - invalid key format
     /// - `IpAssignment` - IP pool exhausted (unlikely to recover quickly)
     /// - `PeerNotFound` - unknown peer
