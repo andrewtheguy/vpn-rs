@@ -1178,4 +1178,38 @@ mod tests {
         let ip2 = pool.allocate(id2, 1);
         assert!(ip2.is_none()); // Pool exhausted
     }
+
+    #[test]
+    fn test_ip6_pool_exhaustion_slash127() {
+        // /127 network has only 2 addresses: ::0 (network) and ::1 (server)
+        // No addresses available for clients
+        let network: Ipv6Net = "fd00::/127".parse().unwrap();
+        let mut pool = Ip6Pool::new(network, None);
+
+        // Server takes ::1, leaving no addresses for clients
+        // (::0 is excluded as it would be < next_ip which starts at ::2)
+        assert_eq!(pool.server_ip(), "fd00::1".parse::<Ipv6Addr>().unwrap());
+
+        let id1 = random_endpoint_id();
+        let ip1 = pool.allocate(id1, 1);
+        assert!(ip1.is_none()); // No client addresses available in /127
+    }
+
+    #[test]
+    fn test_ip6_pool_exhaustion_slash128() {
+        // /128 is a single-host network (just ::0)
+        // Server gets ::1 which is technically outside the /128 range
+        // No client addresses available
+        let network: Ipv6Net = "fd00::/128".parse().unwrap();
+        let mut pool = Ip6Pool::new(network, None);
+
+        // Server IP is ::1 (outside the strict /128 but follows the convention)
+        assert_eq!(pool.server_ip(), "fd00::1".parse::<Ipv6Addr>().unwrap());
+
+        let id1 = random_endpoint_id();
+        let ip1 = pool.allocate(id1, 1);
+        // /128 has no usable client addresses - the max_ip calculation
+        // results in underflow (net_addr + 0 - 1), making allocation fail
+        assert!(ip1.is_none());
+    }
 }
