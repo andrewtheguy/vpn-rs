@@ -16,7 +16,7 @@ use std::path::PathBuf;
 use tunnel_common::config::{
     expand_tilde, load_vpn_client_config, load_vpn_server_config, ResolvedVpnClientConfig,
     ResolvedVpnServerConfig, VpnClientConfig as TomlClientConfig, VpnClientConfigBuilder,
-    VpnServerConfig as TomlServerConfig, VpnServerConfigBuilder,
+    VpnServerConfig as TomlServerConfig,
 };
 use tunnel_iroh::auth;
 use tunnel_iroh::iroh_mode::endpoint::{
@@ -202,11 +202,11 @@ async fn main() -> Result<()> {
             })?;
             cfg.validate()?;
 
-            // Build resolved config from config file only (no CLI overrides)
-            let resolved = VpnServerConfigBuilder::new()
-                .apply_defaults()
-                .apply_config(cfg.iroh())
-                .build()?;
+            // Build resolved config from config file
+            let iroh_cfg = cfg.iroh().ok_or_else(|| {
+                anyhow::anyhow!("Missing [iroh] section in config file")
+            })?;
+            let resolved = ResolvedVpnServerConfig::from_config(iroh_cfg)?;
 
             run_vpn_server(resolved).await
         }
