@@ -134,10 +134,8 @@ pub struct NostrConfig {
 /// Shared VPN iroh configuration fields (used by both server and client).
 #[derive(Deserialize, Default, Clone)]
 pub struct VpnIrohSharedConfig {
-    /// MTU for VPN packets (576-1500, default: 1420)
+    /// MTU for VPN packets (576-1500, default: 1440)
     pub mtu: Option<u16>,
-    /// WireGuard keepalive interval in seconds (10-300, default: 25)
-    pub keepalive_secs: Option<u16>,
     /// Custom relay server URLs.
     /// - `None`: not specified (use defaults or CLI)
     /// - `Some([])`: explicitly cleared (override defaults)
@@ -149,7 +147,7 @@ pub struct VpnIrohSharedConfig {
 
 /// VPN server iroh configuration (TOML section: `[iroh]` in vpn_server.toml).
 ///
-/// VPN mode uses iroh for P2P connectivity with WireGuard encryption.
+/// VPN mode uses iroh for P2P connectivity with TLS 1.3/QUIC encryption.
 #[derive(Deserialize, Default, Clone)]
 pub struct VpnServerIrohConfig {
     /// VPN network CIDR (e.g., "10.0.0.0/24")
@@ -414,17 +412,6 @@ fn validate_mtu(mtu: u16, section: &str) -> Result<()> {
     Ok(())
 }
 
-/// Validate keepalive_secs value is within acceptable range (10-300).
-fn validate_keepalive(keepalive: u16, section: &str) -> Result<()> {
-    if !(10..=300).contains(&keepalive) {
-        anyhow::bail!(
-            "[{}] keepalive_secs {} is out of range. Valid range: 10-300",
-            section,
-            keepalive
-        );
-    }
-    Ok(())
-}
 
 /// Validate IPv4 network CIDR and optional server IP within network.
 fn validate_vpn_network(
@@ -857,7 +844,7 @@ impl VpnServerConfig {
     /// - Mode must be "iroh"
     /// - Validates network CIDR format
     /// - Validates server_ip is within network if specified
-    /// - Validates MTU and keepalive ranges
+    /// - Validates MTU range
     pub fn validate(&self) -> Result<()> {
         let role = self.role.context(
             "Config file missing required 'role' field. Add: role = \"vpnserver\"",
@@ -907,12 +894,9 @@ impl VpnServerConfig {
                 validate_vpn_network6(network6, iroh.server_ip6.as_deref(), "iroh")?;
             }
 
-            // Validate MTU and keepalive ranges
+            // Validate MTU range
             if let Some(mtu) = iroh.shared.mtu {
                 validate_mtu(mtu, "iroh")?;
-            }
-            if let Some(keepalive) = iroh.shared.keepalive_secs {
-                validate_keepalive(keepalive, "iroh")?;
             }
         }
 
@@ -932,7 +916,7 @@ impl VpnClientConfig {
     /// - Role must be "vpnclient"
     /// - Mode must be "iroh"
     /// - Validates routes CIDR format
-    /// - Validates MTU and keepalive ranges
+    /// - Validates MTU range
     pub fn validate(&self) -> Result<()> {
         let role = self.role.context(
             "Config file missing required 'role' field. Add: role = \"vpnclient\"",
@@ -968,14 +952,8 @@ impl VpnClientConfig {
                 );
             }
 
-            // Validate routes: at least one IPv4 route required, valid CIDR format
+            // Validate routes: valid CIDR format (optional - VPN subnet routed by default)
             if let Some(ref routes) = iroh.routes {
-                if routes.is_empty() {
-                    anyhow::bail!(
-                        "[iroh] At least one route is required.\n\
-                         Example: routes = [\"0.0.0.0/0\"] for full tunnel"
-                    );
-                }
                 for route in routes {
                     validate_cidr(route).with_context(|| {
                         format!("[iroh] Invalid route CIDR '{}'", route)
@@ -991,12 +969,9 @@ impl VpnClientConfig {
                 }
             }
 
-            // Validate MTU and keepalive ranges
+            // Validate MTU range
             if let Some(mtu) = iroh.shared.mtu {
                 validate_mtu(mtu, "iroh")?;
-            }
-            if let Some(keepalive) = iroh.shared.keepalive_secs {
-                validate_keepalive(keepalive, "iroh")?;
             }
         }
 
@@ -1146,11 +1121,8 @@ pub fn default_nostr_relays() -> &'static [&'static str] {
 // VPN Config Builders
 // ============================================================================
 
-/// Default MTU for VPN packets.
-pub const DEFAULT_VPN_MTU: u16 = 1420;
-
-/// Default WireGuard keepalive interval in seconds.
-pub const DEFAULT_VPN_KEEPALIVE_SECS: u16 = 25;
+/// Default MTU for VPN packets (1500 - 60 bytes for QUIC/TLS + framing overhead).
+pub const DEFAULT_VPN_MTU: u16 = 1440;
 
 /// Resolved VPN server configuration (all values finalized).
 #[derive(Debug, Clone)]
@@ -1160,7 +1132,6 @@ pub struct ResolvedVpnServerConfig {
     pub network6: Option<String>,
     pub server_ip6: Option<String>,
     pub mtu: u16,
-    pub keepalive_secs: u16,
     pub secret_file: Option<PathBuf>,
     pub relay_urls: Vec<String>,
     pub dns_server: Option<String>,
@@ -1189,7 +1160,6 @@ pub struct ResolvedVpnServerConfig {
 ///             None,                             // network6
 ///             None,                             // server_ip6
 ///             Some(1400),                       // mtu
-///             None,                             // keepalive_secs
 ///             None,                             // secret_file
 ///             vec![],                           // relay_urls
 ///             None,                             // dns_server
@@ -1209,7 +1179,6 @@ pub struct VpnServerConfigBuilder {
     network6: Option<String>,
     server_ip6: Option<String>,
     mtu: Option<u16>,
-    keepalive_secs: Option<u16>,
     secret_file: Option<PathBuf>,
     relay_urls: Option<Vec<String>>,
     dns_server: Option<String>,
@@ -1226,7 +1195,6 @@ impl VpnServerConfigBuilder {
     /// Apply default values (lowest priority).
     pub fn apply_defaults(mut self) -> Self {
         self.mtu = Some(DEFAULT_VPN_MTU);
-        self.keepalive_secs = Some(DEFAULT_VPN_KEEPALIVE_SECS);
         self.relay_urls = Some(vec![]);
         self.auth_tokens = Some(vec![]);
         self
@@ -1255,9 +1223,6 @@ impl VpnServerConfigBuilder {
             }
             if cfg.shared.mtu.is_some() {
                 self.mtu = cfg.shared.mtu;
-            }
-            if cfg.shared.keepalive_secs.is_some() {
-                self.keepalive_secs = cfg.shared.keepalive_secs;
             }
             if cfg.secret_file.is_some() {
                 self.secret_file = cfg.secret_file.clone();
@@ -1290,7 +1255,6 @@ impl VpnServerConfigBuilder {
         network6: Option<String>,
         server_ip6: Option<String>,
         mtu: Option<u16>,
-        keepalive_secs: Option<u16>,
         secret_file: Option<PathBuf>,
         relay_urls: Vec<String>,
         dns_server: Option<String>,
@@ -1312,9 +1276,6 @@ impl VpnServerConfigBuilder {
         }
         if mtu.is_some() {
             self.mtu = mtu;
-        }
-        if keepalive_secs.is_some() {
-            self.keepalive_secs = keepalive_secs;
         }
         if secret_file.is_some() {
             self.secret_file = secret_file;
@@ -1360,11 +1321,9 @@ impl VpnServerConfigBuilder {
             validate_vpn_network6(network6, self.server_ip6.as_deref(), "config")?;
         }
 
-        // Validate MTU and keepalive ranges
+        // Validate MTU range
         let mtu = self.mtu.unwrap_or(DEFAULT_VPN_MTU);
-        let keepalive_secs = self.keepalive_secs.unwrap_or(DEFAULT_VPN_KEEPALIVE_SECS);
         validate_mtu(mtu, "config")?;
-        validate_keepalive(keepalive_secs, "config")?;
 
         // Validate auth_tokens mutual exclusion
         let has_tokens = self.auth_tokens.as_ref().is_some_and(|t| !t.is_empty());
@@ -1381,7 +1340,6 @@ impl VpnServerConfigBuilder {
             network6: self.network6,
             server_ip6: self.server_ip6,
             mtu,
-            keepalive_secs,
             secret_file: self.secret_file,
             relay_urls: self.relay_urls.unwrap_or_default(),
             dns_server: self.dns_server,
@@ -1396,7 +1354,6 @@ impl VpnServerConfigBuilder {
 pub struct ResolvedVpnClientConfig {
     pub server_node_id: String,
     pub mtu: u16,
-    pub keepalive_secs: u16,
     pub auth_token: Option<String>,
     pub auth_token_file: Option<PathBuf>,
     pub routes: Vec<String>,
@@ -1412,7 +1369,6 @@ pub struct ResolvedVpnClientConfig {
 pub struct VpnClientConfigBuilder {
     server_node_id: Option<String>,
     mtu: Option<u16>,
-    keepalive_secs: Option<u16>,
     auth_token: Option<String>,
     auth_token_file: Option<PathBuf>,
     routes: Option<Vec<String>>,
@@ -1432,7 +1388,6 @@ impl VpnClientConfigBuilder {
     /// Apply default values (lowest priority).
     pub fn apply_defaults(mut self) -> Self {
         self.mtu = Some(DEFAULT_VPN_MTU);
-        self.keepalive_secs = Some(DEFAULT_VPN_KEEPALIVE_SECS);
         self.routes = Some(vec![]);
         self.routes6 = Some(vec![]);
         self.relay_urls = Some(vec![]);
@@ -1454,9 +1409,6 @@ impl VpnClientConfigBuilder {
             }
             if cfg.shared.mtu.is_some() {
                 self.mtu = cfg.shared.mtu;
-            }
-            if cfg.shared.keepalive_secs.is_some() {
-                self.keepalive_secs = cfg.shared.keepalive_secs;
             }
             if cfg.auth_token.is_some() {
                 self.auth_token = cfg.auth_token.clone();
@@ -1501,7 +1453,6 @@ impl VpnClientConfigBuilder {
         mut self,
         server_node_id: Option<String>,
         mtu: Option<u16>,
-        keepalive_secs: Option<u16>,
         auth_token: Option<String>,
         auth_token_file: Option<PathBuf>,
         routes: Vec<String>,
@@ -1516,9 +1467,6 @@ impl VpnClientConfigBuilder {
         }
         if mtu.is_some() {
             self.mtu = mtu;
-        }
-        if keepalive_secs.is_some() {
-            self.keepalive_secs = keepalive_secs;
         }
         if auth_token.is_some() {
             self.auth_token = auth_token;
@@ -1558,21 +1506,12 @@ impl VpnClientConfigBuilder {
             )
         })?;
 
-        // Validate MTU and keepalive ranges
+        // Validate MTU range
         let mtu = self.mtu.unwrap_or(DEFAULT_VPN_MTU);
-        let keepalive_secs = self.keepalive_secs.unwrap_or(DEFAULT_VPN_KEEPALIVE_SECS);
         validate_mtu(mtu, "config")?;
-        validate_keepalive(keepalive_secs, "config")?;
 
-        // Require at least one route (like WireGuard AllowedIPs)
+        // Routes are optional - VPN subnet is always routed by default
         let routes = self.routes.unwrap_or_default();
-        if routes.is_empty() {
-            anyhow::bail!(
-                "At least one route is required.\n\
-                 Specify via CLI: --route 0.0.0.0/0 (full tunnel) or --route 10.0.0.0/24 (split tunnel)\n\
-                 Or in config: routes = [\"0.0.0.0/0\"]"
-            );
-        }
 
         // Validate route CIDR format
         for route in &routes {
@@ -1597,7 +1536,6 @@ impl VpnClientConfigBuilder {
         Ok(ResolvedVpnClientConfig {
             server_node_id,
             mtu,
-            keepalive_secs,
             auth_token: self.auth_token,
             auth_token_file: self.auth_token_file,
             routes,

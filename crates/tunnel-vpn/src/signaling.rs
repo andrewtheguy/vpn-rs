@@ -1,10 +1,11 @@
-//! VPN signaling protocol for WireGuard key exchange over iroh.
+//! VPN signaling protocol for tunnel establishment over iroh.
 //!
 //! This module defines the handshake messages exchanged between VPN
-//! client and server to establish WireGuard tunnels.
+//! client and server to establish IP-over-QUIC tunnels. Clients identify
+//! via a random `device_id` (allowing multiple sessions per iroh endpoint),
+//! and the server responds with assigned IP addresses and network configuration.
 
 use crate::error::{VpnError, VpnResult};
-use crate::keys::WgPublicKey;
 use ipnet::{Ipv4Net, Ipv6Net};
 use serde::{Deserialize, Serialize};
 use std::net::{Ipv4Addr, Ipv6Addr};
@@ -22,8 +23,8 @@ pub const VPN_ALPN: &[u8] = b"tunnel-vpn/1";
 pub struct VpnHandshake {
     /// Protocol version.
     pub version: u16,
-    /// Client's WireGuard public key.
-    pub wg_public_key: WgPublicKey,
+    /// Client's unique device ID (randomly generated per session).
+    pub device_id: u64,
     /// Authentication token (optional, for token-based auth).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_token: Option<String>,
@@ -31,10 +32,10 @@ pub struct VpnHandshake {
 
 impl VpnHandshake {
     /// Create a new handshake request.
-    pub fn new(wg_public_key: WgPublicKey) -> Self {
+    pub fn new(device_id: u64) -> Self {
         Self {
             version: VPN_PROTOCOL_VERSION,
-            wg_public_key,
+            device_id,
             auth_token: None,
         }
     }
@@ -65,9 +66,6 @@ pub struct VpnHandshakeResponse {
     pub version: u16,
     /// Whether the handshake was accepted.
     pub accepted: bool,
-    /// Server's WireGuard public key (if accepted).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub wg_public_key: Option<WgPublicKey>,
     /// Assigned VPN IP address for the client (IPv4).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assigned_ip: Option<Ipv4Addr>,
@@ -94,7 +92,6 @@ pub struct VpnHandshakeResponse {
 impl VpnHandshakeResponse {
     /// Create an accepted response (IPv4 only).
     pub fn accepted(
-        wg_public_key: WgPublicKey,
         assigned_ip: Ipv4Addr,
         network: Ipv4Net,
         server_ip: Ipv4Addr,
@@ -102,7 +99,6 @@ impl VpnHandshakeResponse {
         Self {
             version: VPN_PROTOCOL_VERSION,
             accepted: true,
-            wg_public_key: Some(wg_public_key),
             assigned_ip: Some(assigned_ip),
             network: Some(network),
             server_ip: Some(server_ip),
@@ -115,7 +111,6 @@ impl VpnHandshakeResponse {
 
     /// Create an accepted response with dual-stack (IPv4 + IPv6).
     pub fn accepted_dual_stack(
-        wg_public_key: WgPublicKey,
         assigned_ip: Ipv4Addr,
         network: Ipv4Net,
         server_ip: Ipv4Addr,
@@ -126,7 +121,6 @@ impl VpnHandshakeResponse {
         Self {
             version: VPN_PROTOCOL_VERSION,
             accepted: true,
-            wg_public_key: Some(wg_public_key),
             assigned_ip: Some(assigned_ip),
             network: Some(network),
             server_ip: Some(server_ip),
@@ -142,7 +136,6 @@ impl VpnHandshakeResponse {
         Self {
             version: VPN_PROTOCOL_VERSION,
             accepted: false,
-            wg_public_key: None,
             assigned_ip: None,
             network: None,
             server_ip: None,
@@ -206,13 +199,13 @@ pub const MAX_HANDSHAKE_SIZE: usize = 16 * 1024;
 ///
 /// The data channel uses a simple framing protocol:
 /// - First byte: message type
-/// - For WireGuard packets: 4-byte big-endian length + packet data
+/// - For IP packets: 4-byte big-endian length + packet data
 /// - For heartbeat: no additional payload
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum DataMessageType {
-    /// WireGuard encrypted packet (followed by length-prefixed data).
-    WireGuard = 0x00,
+    /// IP packet (followed by length-prefixed data).
+    IpPacket = 0x00,
     /// Heartbeat ping (client -> server).
     HeartbeatPing = 0x01,
     /// Heartbeat pong (server -> client).
@@ -223,7 +216,7 @@ impl DataMessageType {
     /// Convert from byte value.
     pub fn from_byte(b: u8) -> Option<Self> {
         match b {
-            0x00 => Some(Self::WireGuard),
+            0x00 => Some(Self::IpPacket),
             0x01 => Some(Self::HeartbeatPing),
             0x02 => Some(Self::HeartbeatPong),
             _ => None,
@@ -262,25 +255,25 @@ impl From<DataMessageType> for u8 {
     }
 }
 
-/// Frame a WireGuard packet for transmission on the data channel.
+/// Frame an IP packet for transmission on the data channel.
 ///
 /// Builds a buffer with the format: `[type: 0x00] [length: 4 bytes BE] [data: N bytes]`
 ///
-/// This is the standard framing for WireGuard packets on the multiplexed data stream.
+/// This is the standard framing for IP packets on the multiplexed data stream.
 /// The buffer is cleared and filled with the framed packet, then can be passed to `write_all()`.
 ///
 /// # Arguments
 /// * `buf` - Reusable buffer to write into (cleared and resized as needed)
-/// * `data` - The WireGuard packet payload to frame
+/// * `data` - The IP packet payload to frame
 ///
 /// Returns an error if the packet exceeds `u32::MAX` bytes (matching `write_message` behavior).
 #[inline]
-pub fn frame_wireguard_packet(buf: &mut Vec<u8>, data: &[u8]) -> VpnResult<()> {
+pub fn frame_ip_packet(buf: &mut Vec<u8>, data: &[u8]) -> VpnResult<()> {
     let len = u32::try_from(data.len())
         .map_err(|_| VpnError::Signaling(format!("Packet too large: {} bytes", data.len())))?;
     buf.clear();
     buf.reserve(1 + 4 + data.len());
-    buf.push(DataMessageType::WireGuard.as_byte());
+    buf.push(DataMessageType::IpPacket.as_byte());
     buf.extend_from_slice(&len.to_be_bytes());
     buf.extend_from_slice(data);
     Ok(())
@@ -292,38 +285,29 @@ mod tests {
 
     #[test]
     fn test_handshake_roundtrip() {
-        let key = WgPublicKey([1u8; 32]);
-        let handshake = VpnHandshake::new(key.clone()).with_auth_token("test-token");
-
+        let handshake = VpnHandshake::new(12345).with_auth_token("test-token");
         let encoded = handshake.encode().unwrap();
         let decoded = VpnHandshake::decode(&encoded).unwrap();
-
         assert_eq!(decoded.version, VPN_PROTOCOL_VERSION);
-        assert_eq!(decoded.wg_public_key, key);
+        assert_eq!(decoded.device_id, 12345);
         assert_eq!(decoded.auth_token, Some("test-token".to_string()));
     }
 
     #[test]
     fn test_response_accepted_roundtrip() {
-        let key = WgPublicKey([2u8; 32]);
         let response = VpnHandshakeResponse::accepted(
-            key.clone(),
             "10.0.0.2".parse().unwrap(),
             "10.0.0.0/24".parse().unwrap(),
             "10.0.0.1".parse().unwrap(),
         );
-
         let encoded = response.encode().unwrap();
         let decoded = VpnHandshakeResponse::decode(&encoded).unwrap();
-
         assert!(decoded.accepted);
-        assert_eq!(decoded.wg_public_key, Some(key));
         assert_eq!(decoded.assigned_ip, Some("10.0.0.2".parse().unwrap()));
     }
 
     #[test]
     fn test_response_accepted_dual_stack_roundtrip() {
-        let key = WgPublicKey([3u8; 32]);
         let assigned_ip: Ipv4Addr = "10.0.0.2".parse().unwrap();
         let network: Ipv4Net = "10.0.0.0/24".parse().unwrap();
         let server_ip: Ipv4Addr = "10.0.0.1".parse().unwrap();
@@ -332,7 +316,6 @@ mod tests {
         let server_ip6: Ipv6Addr = "fd00::1".parse().unwrap();
 
         let response = VpnHandshakeResponse::accepted_dual_stack(
-            key.clone(),
             assigned_ip,
             network,
             server_ip,
@@ -345,7 +328,6 @@ mod tests {
         let decoded = VpnHandshakeResponse::decode(&encoded).unwrap();
 
         assert!(decoded.accepted);
-        assert_eq!(decoded.wg_public_key, Some(key));
         assert_eq!(decoded.assigned_ip, Some(assigned_ip));
         assert_eq!(decoded.network, Some(network));
         assert_eq!(decoded.server_ip, Some(server_ip));
@@ -358,10 +340,8 @@ mod tests {
     #[test]
     fn test_response_rejected_roundtrip() {
         let response = VpnHandshakeResponse::rejected("Server full");
-
         let encoded = response.encode().unwrap();
         let decoded = VpnHandshakeResponse::decode(&encoded).unwrap();
-
         assert!(!decoded.accepted);
         assert_eq!(decoded.reject_reason, Some("Server full".to_string()));
     }
@@ -370,7 +350,7 @@ mod tests {
     fn test_data_message_type_roundtrip() {
         // Test all valid message types: byte -> DataMessageType -> byte
         for (byte, expected_type) in [
-            (0x00, DataMessageType::WireGuard),
+            (0x00, DataMessageType::IpPacket),
             (0x01, DataMessageType::HeartbeatPing),
             (0x02, DataMessageType::HeartbeatPong),
         ] {
@@ -413,16 +393,16 @@ mod tests {
     }
 
     #[test]
-    fn test_frame_wireguard_packet() {
-        let payload = b"hello wireguard";
+    fn test_frame_ip_packet() {
+        let payload = b"hello ip packet";
         let mut buf = Vec::new();
-        frame_wireguard_packet(&mut buf, payload).unwrap();
+        frame_ip_packet(&mut buf, payload).unwrap();
 
         // Total length: 1 (type) + 4 (length) + payload
         assert_eq!(buf.len(), 1 + 4 + payload.len());
 
         // First byte is message type
-        assert_eq!(buf[0], DataMessageType::WireGuard.as_byte());
+        assert_eq!(buf[0], DataMessageType::IpPacket.as_byte());
 
         // Next 4 bytes are big-endian length
         let len_bytes = (payload.len() as u32).to_be_bytes();

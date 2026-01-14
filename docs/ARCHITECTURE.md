@@ -40,7 +40,7 @@ graph TB
 
     subgraph "Use Cases"
         D[Persistent<br/>Best NAT Traversal]
-        D3[Full Network VPN<br/>WireGuard Encryption]
+        D3[Full Network VPN<br/>Direct QUIC Encryption]
         F[Manual Signaling<br/>Full ICE]
         F2[Automated Signaling<br/>Static Keys]
     end
@@ -416,7 +416,7 @@ graph TB
 
 ## VPN Mode
 
-VPN mode provides full network tunneling using WireGuard encryption via the boringtun library. Unlike port forwarding modes, VPN mode creates a TUN device and routes IP traffic.
+VPN mode provides full network tunneling using direct IP-over-QUIC. Unlike port forwarding modes, VPN mode creates a TUN device and routes IP traffic directly through the encrypted Iroh QUIC connection. This eliminates double encryption overhead while maintaining strong security via TLS 1.3.
 
 > **Note:** VPN mode is only available on Linux and macOS. It requires root/sudo privileges.
 
@@ -427,7 +427,6 @@ graph TB
     subgraph "Client Side"
         A[Applications]
         B[TUN Device<br/>tun0: 10.0.0.2<br/>fd00::2]
-        C[WireGuard Tunnel<br/>boringtun]
         D[iroh Endpoint]
     end
 
@@ -437,22 +436,19 @@ graph TB
 
     subgraph "Server Side"
         F[iroh Endpoint]
-        G[WireGuard Tunnel<br/>boringtun]
         H[TUN Device<br/>tun0: 10.0.0.1<br/>fd00::1]
         I[Target Network<br/>LAN / Internet]
     end
 
     A -->|IP packets| B
-    B -->|capture| C
-    C -->|encrypt| D
+    B -->|read & frame| D
     D <-->|iroh QUIC| E
     E <-->|iroh QUIC| F
-    F -->|decrypt| G
-    G -->|inject| H
+    F -->|write & unframe| H
     H -->|forward| I
 
-    style C fill:#4CAF50
-    style G fill:#4CAF50
+    style B fill:#FFE0B2
+    style H fill:#FFE0B2
     style E fill:#BBDEFB
 ```
 
@@ -469,20 +465,17 @@ VPN mode supports optional IPv6 alongside IPv4. When `network6` is configured on
 graph LR
     subgraph "tunnel-vpn Crate"
         A[VpnServer / VpnClient]
-        B[WgTunnel<br/>boringtun wrapper]
         C[TUN Device<br/>tun crate]
         D[IP Pool<br/>address management]
-        E[Signaling<br/>key exchange]
+        E[Signaling<br/>handshake & framing]
         F[VpnLock<br/>single instance]
     end
 
-    A --> B
     A --> C
     A --> D
     A --> E
     A --> F
 
-    style B fill:#C8E6C9
     style C fill:#FFE0B2
     style E fill:#BBDEFB
 ```
@@ -498,18 +491,18 @@ sequenceDiagram
 
     Note over C: User runs vpn client
     C->>C: Acquire VPN lock
-    C->>C: Generate ephemeral WireGuard keypair
+    C->>C: Generate session device_id
     C->>CI: Create iroh endpoint
 
     CI->>SI: Connect via iroh (NAT traversal)
     SI-->>CI: Connection established
 
     Note over C,S: VPN Handshake Phase
-    C->>S: VpnHandshake {wg_pubkey, auth_token}
+    C->>S: VpnHandshake {device_id, auth_token}
     S->>S: Validate auth token
+    S->>S: Store client (EndpointId, device_id)
     S->>S: Allocate IP from pool
-    S->>S: Generate ephemeral WireGuard keypair
-    S-->>C: VpnHandshakeResponse {wg_pubkey, assigned_ip, network}
+    S-->>C: VpnHandshakeResponse {assigned_ip, network}
 
     Note over C,S: TUN Device Setup
     C->>C: Create TUN device (tun0)
@@ -518,51 +511,43 @@ sequenceDiagram
     S->>S: Create TUN device (tun0)
     S->>S: Assign IP (10.0.0.1)
 
-    Note over C,S: WireGuard Tunnel Active
+    Note over C,S: Direct IP Tunnel Active
     loop Packet Flow
         C->>C: Application sends packet
         C->>C: TUN captures packet
-        C->>C: WireGuard encrypts
-        C->>S: Send via iroh
-        S->>S: WireGuard decrypts
+        C->>S: Send over QUIC (encrypted)
+        S->>S: Unframe IP packet
         S->>S: TUN injects packet
         S->>S: Forward to destination
     end
 ```
 
-### WireGuard Integration
+### Direct IP over QUIC Integration
 
-The VPN mode uses **boringtun** (Cloudflare's userspace WireGuard) for encryption:
-
-```mermaid
-graph TB
-    subgraph "WgTunnel Wrapper"
-        A[encapsulate<br/>plaintext → ciphertext]
-        B[decapsulate<br/>ciphertext → plaintext]
-        C[update_timers<br/>keepalive + handshake]
-        D[Reusable Buffer<br/>avoid per-packet alloc]
-    end
-
-    subgraph "boringtun Tunn"
-        E[Noise Protocol<br/>key derivation]
-        F[ChaCha20-Poly1305<br/>AEAD encryption]
-        G[Handshake State<br/>automatic rekey]
-    end
-
-    A --> E
-    B --> E
-    E --> F
-    C --> G
-
-    style F fill:#C8E6C9
-    style D fill:#FFF9C4
-```
+The VPN mode sends raw IP packets directly over Iroh's QUIC streams (using TLS 1.3). This removes the double encryption overhead of running WireGuard inside QUIC.
 
 **Key Design Decisions:**
-- **Ephemeral keys**: WireGuard keypairs are generated per-session (no static config)
-- **Reusable buffers**: Avoid heap allocation per packet for performance
-- **Atomic connection counting**: Server tracks active clients with `AtomicUsize`
-- **Single instance lock**: File-based lock prevents multiple VPN clients
+- **Framing**: IP packets are length-prefixed and sent over the QUIC stream.
+- **Security**: Relies on Iroh/QUIC's built-in encryption (TLS 1.3) with Noise-derived keys.
+- **Efficiency**: Zero-copy forwarding where possible between TUN and QUIC buffers.
+- **Identification**: Clients identify via a random `u64` `device_id` generated at startup, allowing multiple sessions per Iroh endpoint.
+- **Reconnects**: The server automatically manages session limits and cleanup, allowing seamless reconnects from the same device ID.
+
+**Device ID Generation:**
+
+The `device_id` is generated using `rand::thread_rng()`, which in rand 0.8 provides a thread-local CSPRNG (ChaCha12) seeded from OS entropy via `OsRng`. This produces cryptographically random 64-bit values suitable for unique session identification.
+
+**Security Considerations:**
+
+The `device_id` is used **purely for session tracking** within an already-authenticated iroh connection—it is NOT used for access control. Security relies on:
+1. Iroh's cryptographic `EndpointId` authentication (Noise protocol)
+2. Auth token validation (if configured)
+
+Clients are keyed by `(EndpointId, device_id)`, so an attacker cannot hijack a session by guessing a `device_id` without also possessing the victim's iroh private key.
+
+**Collision Handling:**
+
+The 64-bit ID space provides a ~2^32 birthday bound for collisions, which is sufficient for session tracking across reasonable client counts (thousands of concurrent sessions). Unpredictability is not a security requirement since `device_id` only differentiates sessions from the same authenticated endpoint. We use `rand::thread_rng()` (a CSPRNG) for defense-in-depth: it avoids predictable collision patterns, reduces correlation/timing attack surface, and makes accidental collisions less likely in practice.
 
 ### IP Pool Management
 
@@ -615,7 +600,7 @@ graph TB
     style D6 fill:#BBDEFB
 ```
 
-When `network6` is configured, each client receives both an IPv4 and IPv6 address. The IPv6 pool works identically to the IPv4 pool, with each client getting a single /128 address. Unlike IPv4, a /64 network provides an effectively unlimited address space (~18 quintillion addresses), so pool exhaustion is not a practical concern for IPv6.
+When `network6` is configured, each client receives both an IPv4 and IPv6 address. The IPv6 pool works identically to the IPv4 pool, with each client getting a single /128 address. Unlike IPv4, a /64 network provides an effectively unlimited address space (~18.4 quintillion (2^64) addresses), so pool exhaustion is not a practical concern for IPv6.
 
 ### Platform-Specific Details
 
@@ -634,28 +619,25 @@ graph TB
     end
 
     subgraph "Encryption"
-        C[WireGuard<br/>Noise Protocol]
-        D[ChaCha20-Poly1305]
-        E[Perfect Forward Secrecy]
+        C[Iroh QUIC<br/>TLS 1.3]
+        E[Forward Secrecy]
     end
 
     subgraph "Isolation"
         F[Single Instance Lock<br/>prevents conflicts]
-        G[Ephemeral Keys<br/>no key reuse]
+        G[Session Keys<br/>per-connection]
     end
 
     A --> B
-    C --> D
     C --> E
 
-    style D fill:#C8E6C9
     style E fill:#C8E6C9
     style F fill:#FFF9C4
 ```
 
 ### Auto-Reconnect and Connection Health
 
-VPN mode includes automatic reconnection when the WireGuard tunnel fails. This handles scenarios like server restarts, network changes, or WireGuard session expiration.
+VPN mode includes automatic reconnection when the tunnel connection fails. This handles scenarios like server restarts or network partitions.
 
 **Configuration:**
 - `auto_reconnect = true` (default): Automatically reconnect on connection loss
@@ -672,23 +654,13 @@ The VPN client uses two complementary health monitoring mechanisms:
    - Client triggers reconnection if no pong received within 30 seconds
    - Detects: server restart, IP changes, network partitions, NAT timeout, relay issues
 
-2. **WireGuard-Level Timers** (backup, ~90s)
-   - Keepalives every 25 seconds (configurable)
-   - Rekey handshake attempted every 120 seconds
-   - Session expiration after 90 seconds of continuous handshake failures
-   - Detects: WireGuard-specific issues, key mismatch
-
-**Timing Clarification:**
-- Rekey handshakes occur every 120 seconds during normal operation
-- If a rekey handshake fails, WireGuard retries with exponential backoff
-- After 90 seconds of continuous handshake failures (not 90 seconds after a single failure), the session expires
-- This means the tunnel tolerates temporary disruptions but gives up after prolonged failures
+2. **Connection Monitoring** (instant)
+   - Iroh/QUIC connection errors (timeouts, closures)
+   - TUN read/write errors
 
 **Interaction Between Layers:**
-- WireGuard keepalives (25s) and application heartbeat timeout (30s) are intentionally close
-- If WireGuard keepalives succeed but application heartbeats fail, this indicates an issue with the QUIC data channel itself (not WireGuard state)
-- The application heartbeat typically detects failures faster because its timeout (30s without a pong) is shorter than WireGuard's session expiration window (~90s of continuous handshake failures).
-- Both heartbeat and WireGuard traffic use the same underlying iroh QUIC connection and traverse it in the same way.
+- Heartbeat traffic uses the same underlying iroh QUIC connection as the VPN data.
+- If heartbeats fail, it indicates an issue with the QUIC connection itself.
 ```mermaid
 graph TB
     subgraph "Application Heartbeat (Fast)"
@@ -697,16 +669,10 @@ graph TB
         H3[Timeout Check<br/>30s threshold]
     end
 
-    subgraph "WireGuard Timers (Backup)"
-        A[WireGuard Timers<br/>100ms interval]
-        B[Keepalive Packets<br/>default 25s]
-        C[Rekey Handshake<br/>every 120s]
-    end
-
     subgraph "Failure Detection"
         D[Heartbeat Timeout<br/>30s no pong]
-        E[Session Expiration<br/>90s continuous failures]
-        F[Connection Lost<br/>trigger reconnect]
+        E[QUIC Error<br/>Connection Lost]
+        F[Connection Down<br/>trigger reconnect]
     end
 
     subgraph "Recovery"
@@ -719,10 +685,6 @@ graph TB
     H2 --> H3
     H3 -->|no pong| D
     D --> F
-
-    A --> B
-    A --> C
-    C -->|failures| E
     E --> F
     F --> G
     G --> HH
@@ -736,13 +698,13 @@ graph TB
 
 **Application-Level Heartbeat Protocol:**
 
-Heartbeats and WireGuard packets are multiplexed on the same bidirectional QUIC stream (the "data stream" opened after handshake). All messages are prefixed with a 1-byte type discriminator defined in `DataMessageType` (`crates/tunnel-vpn/src/signaling.rs:174`):
+Heartbeats and IP packets are multiplexed on the same bidirectional QUIC stream (the "data stream" opened after handshake). All messages are prefixed with a 1-byte type discriminator defined in `DataMessageType` (`crates/tunnel-vpn/src/signaling.rs:174`):
 
 ```
 Data channel message framing:
 
-  WireGuard packet (type 0x00):
-    [0x00] [4 bytes: length BE u32] [N bytes: encrypted WG packet]
+  IP packet (type 0x00):
+    [0x00] [4 bytes: length BE u32] [N bytes: raw IP packet]
 
   Heartbeat ping (type 0x01):
     [0x01]
@@ -753,46 +715,33 @@ Data channel message framing:
 
 **Implementation locations** (search by symbol name; line numbers may shift):
 - Type enum: `DataMessageType` in `signaling.rs`
-- Packet framing: `frame_wireguard_packet()` in `signaling.rs`
-- Client send (outbound): TUN reader task in `client.rs` - calls `frame_wireguard_packet()`
+- Packet framing: `frame_ip_packet()` in `signaling.rs`
+- Client send (outbound): TUN reader task in `client.rs` - calls `frame_ip_packet()`
 - Client receive (inbound): inbound reader task in `client.rs` - reads type byte, dispatches via `DataMessageType::from_byte()`
 - Client heartbeat sender: heartbeat task in `client.rs` - sends `HeartbeatPing` byte
 - Server receive: inbound reader task in `server.rs` - reads type byte, responds to pings with `HeartbeatPong`
-- Server send: TUN reader and timer tasks in `server.rs` - call `frame_wireguard_packet()`
+- Server send: TUN reader and timer tasks in `server.rs` - call `frame_ip_packet()`
 
-**Compatibility note:** This framing was added with the heartbeat feature. Older clients/servers that expect raw length-prefixed WireGuard packets (without the type byte) are incompatible.
+**Compatibility note:** This framing was added with the heartbeat feature. Older clients/servers that expect raw length-prefixed IP packets (without the type byte) are incompatible.
 
-This allows fast failure detection (~30 seconds) for common issues like server restarts or network changes, without waiting for WireGuard's 90-second session expiration.
+This allows fast failure detection (~30 seconds) for common issues like server restarts or network changes.
 
-**WireGuard Session Expiration:**
+**Connection Check:**
 
-The boringtun library manages WireGuard handshake state. When rekey fails:
-1. `REKEY_TIMEOUT` warning logged every 5 seconds
-2. After 90 seconds of failures, `ConnectionExpired` error returned
-3. Timer task detects error and exits VPN loop
-4. `run_with_reconnect` handles reconnection with backoff
+The application uses the heartbeat to detect broken connections faster than standard TCP/QUIC timeouts.
 
 ```mermaid
 sequenceDiagram
     participant T as Timer Task
-    participant WG as WireGuard (boringtun)
     participant VPN as VPN Loop
     participant RC as Reconnect Logic
 
-    loop Every 100ms
-        T->>WG: update_timers()
-        WG-->>T: PacketResult::WriteToNetwork (handshake init)
+    loop Every 10s
+        T->>VPN: Send Heartbeat Ping
     end
 
-    Note over WG: Handshake responses not received
-    WG->>WG: Log REKEY_TIMEOUT (5s)
-    WG->>WG: Retry handshake
-
-    Note over WG: After 90s of failures
-    WG-->>T: PacketResult::Error (ConnectionExpired)
-    T->>T: Log error, exit loop
-
-    T-->>VPN: Task ended
+    Note over VPN: No Pong received (30s)
+    T->>VPN: Timeout Error
     VPN-->>RC: VpnError::ConnectionLost
 
     alt auto_reconnect = true
@@ -1882,7 +1831,7 @@ graph TB
 | Mode | Multi-Session | Dynamic Source | Encryption | Platform |
 |------|---------------|----------------|------------|----------|
 | `iroh` | **Yes** | **Yes** | QUIC/TLS 1.3 | Linux, macOS, Windows |
-| `vpn` | **Yes** | N/A (full tunnel) | WireGuard + QUIC | Linux, macOS |
+| `vpn` | **Yes** | N/A (full tunnel) | QUIC (TLS 1.3) | Linux, macOS |
 | `nostr` | **Yes** | **Yes** | QUIC/TLS 1.3 | Linux, macOS, Windows |
 | `manual` | No | **Yes** | QUIC/TLS 1.3 | Linux, macOS, Windows |
 

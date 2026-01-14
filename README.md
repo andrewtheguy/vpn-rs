@@ -18,7 +18,7 @@ Tunnel-rs enables you to forward TCP and UDP traffic between machines without re
 
 **VPN Mode Features (Linux/macOS only):**
 - **Full network tunneling** — Route entire subnets, not just individual ports
-- **WireGuard encryption** — Industry-standard VPN protocol via boringtun
+- **Direct IP-over-QUIC** — High performance direct tunneling with TLS 1.3 encryption
 - **Automatic IP assignment** — No manual keypair or IP management
 - **Split tunneling** — Route only specific networks through the VPN
 
@@ -30,7 +30,7 @@ Tunnel-rs enables you to forward TCP and UDP traffic between machines without re
 **Common Use Cases:**
 - **SSH access** to machines behind NAT/firewalls
 - **UDP Tunneling** — A key advantage over AWS SSM and `kubectl port-forward` which typically lack UDP support. Ideal for:
-  - WireGuard VPNs over P2P
+  - WireGuard/OpenVPN over P2P
   - Game servers (Valheim, Minecraft Bedrock, etc.)
   - VoIP applications and WebRTC
   - Accessing UDP services in Kubernetes (bypassing the [7+ year old limitation in `kubectl`](https://github.com/kubernetes/kubernetes/issues/47862) without complex sidecar workarounds)
@@ -224,13 +224,13 @@ Uses iroh's P2P network for automatic peer discovery and NAT traversal with rela
      Client Side                                            Server Side
 ```
 
-### UDP Tunneling
+### Full Network Tunneling (VPN Mode)
 
 ```
 +-----------------+        +-----------------+        +-----------------+        +-----------------+
-| WireGuard       |  UDP   | client          |  iroh  | server          |  UDP   | WireGuard       |
-| Client          |<------>| (local:51820)   |<======>|                 |<------>| Server          |
-|                 |        |                 |  QUIC  |                 |        | (client req)    |
+| System Network  |  IP    | client          |  iroh  | server          |  IP    | Target Network  |
+| Stack (tun0)    |<------>| (frame/unframe) |<======>| (frame/unframe) |<------>| (LAN/Internet)  |
+|                 |        |                 |  QUIC  |                 |        |                 |
 +-----------------+        +-----------------+        +-----------------+        +-----------------+
      Client Side                                            Server Side
 ```
@@ -280,7 +280,7 @@ tunnel-rs client \
 
 Then connect: `ssh -p 2222 user@127.0.0.1`
 
-### 3. UDP Tunnel (e.g., WireGuard)
+### 3. UDP Tunnel (e.g., WireGuard/Game/DNS)
 
 **Server**:
 ```bash
@@ -732,7 +732,7 @@ Uses full ICE (Interactive Connectivity Establishment) with str0m + quinn QUIC. 
    ssh -p 2222 user@127.0.0.1
    ```
 
-### UDP Tunnel (e.g., WireGuard)
+### UDP Tunnel (e.g., WireGuard/Game/DNS)
 
 ```bash
 # Client (starts first)
@@ -854,7 +854,7 @@ tunnel-rs-ice client nostr \
 ssh -p 2222 user@127.0.0.1
 ```
 
-### UDP Tunnel (e.g., WireGuard)
+### UDP Tunnel (e.g., WireGuard/Game/DNS)
 
 ```bash
 # Server (allows UDP traffic to localhost)
@@ -863,7 +863,7 @@ tunnel-rs-ice server nostr \
   --nsec-file ./server.nsec \
   --peer-npub npub1client...
 
-# Client (requests WireGuard tunnel)
+# Client (requests direct UDP tunnel)
 tunnel-rs-ice client nostr \
   --source udp://127.0.0.1:51820 \
   --target udp://0.0.0.0:51820 \
@@ -990,9 +990,9 @@ For `manual`, use separate instances for each tunnel:
 
 # VPN Mode
 
-Full network tunneling with WireGuard encryption. Linux/macOS only, requires root.
+Full network tunneling with Direct QUIC encryption. Linux/macOS only, requires root.
 
-Native WireGuard-based VPN mode for full network tunneling. Unlike port forwarding modes, VPN mode creates a TUN device and routes IP traffic through an encrypted WireGuard tunnel.
+Native direct TUN-based VPN mode for full network tunneling. Unlike port forwarding modes, VPN mode creates a TUN device and routes IP traffic directly through the encrypted Iroh QUIC connection, eliminating double encryption overhead.
 
 > **Note:** VPN mode is only available on Linux and macOS. It requires root/sudo privileges to create TUN devices and configure routes.
 
@@ -1005,17 +1005,17 @@ Client                                     Server
 │        ↓            │                   │        ↑            │
 │  [tun0: 10.0.0.2]   │                   │  [tun0: 10.0.0.1]   │
 │        ↓            │                   │        ↑            │
-│  WireGuard (boringtun)                  │  WireGuard (boringtun)
+│  Tunnel (VPN)       │                   │  Tunnel (VPN)       │
 │        ↓            │                   │        ↑            │
-│  iroh (signaling)   │ ════════════════► │  iroh (signaling)   │
+│  iroh (transport)   │ ════════════════► │  iroh (transport)   │
 └─────────────────────┘   NAT traversal   └─────────────────────┘
 ```
 
-**Key Differences from Port Forwarding:**
 - Creates a virtual network interface (TUN device)
 - Assigns VPN IP addresses automatically (no keypair management)
 - Routes entire IP subnets, not just individual ports
-- Uses WireGuard encryption (via boringtun) on top of iroh's QUIC transport
+- **Direct IP-over-QUIC** tunneling (TLS 1.3 encryption)
+- No double encryption (removes WireGuard overhead)
 
 ## Quick Start
 
@@ -1057,9 +1057,8 @@ sudo tunnel-rs-vpn client \
 
 The client will:
 1. Connect to the server via iroh (NAT traversal)
-2. Exchange ephemeral WireGuard keys
-3. Receive an assigned IP (e.g., 10.0.0.2)
-4. Create a TUN device and configure routes
+2. Receive an assigned IP (e.g., 10.0.0.2)
+3. Create a TUN device and configure routes
 
 ### 4. Verify Connection
 
@@ -1083,7 +1082,7 @@ ping 10.0.0.1
 | `--network`, `-n` | 10.0.0.0/24 | VPN network CIDR. Server gets .1, clients get subsequent IPs |
 | `--server-ip` | First IP in network | Override server's VPN IP address |
 | `--mtu` | 1420 | MTU for VPN packets |
-| `--keepalive-secs` | 25 | WireGuard keepalive interval |
+| `--keepalive-secs` | 25 | Keepalive interval |
 | `--secret-file` | - | Path to secret key for persistent iroh identity |
 | `--relay-url` | public | Custom relay server URL(s), repeatable |
 | `--dns-server` | public | Custom DNS server URL for peer discovery |
@@ -1096,7 +1095,7 @@ ping 10.0.0.1
 |--------|---------|-------------|
 | `--server-node-id`, `-n` | required | EndpointId of the VPN server |
 | `--mtu` | 1420 | MTU for VPN packets |
-| `--keepalive-secs` | 25 | WireGuard keepalive interval |
+| `--keepalive-secs` | 25 | Keepalive interval |
 | `--relay-url` | public | Custom relay server URL(s), repeatable |
 | `--dns-server` | public | Custom DNS server URL for peer discovery |
 | `--auth-token` | required | Authentication token |
@@ -1121,18 +1120,29 @@ sudo tunnel-rs-vpn client \
 ## How It Works
 
 1. **Signaling via iroh**: Client connects to server using iroh for peer discovery and NAT traversal
-2. **WireGuard Key Exchange**: Ephemeral WireGuard keys are generated and exchanged (no manual keypair management)
+2. **Handshake**: Client and server exchange device IDs and session parameters (TLS 1.3 secured)
 3. **IP Assignment**: Server assigns client an IP from the VPN network pool
 4. **TUN Device**: Both sides create TUN devices for packet capture
-5. **Packet Flow**: IP packets are encrypted with WireGuard and tunneled through the iroh connection
+5. **Packet Flow**: IP packets are framed and sent directly over the encrypted Iroh QUIC stream
 
 **Advantages over traditional WireGuard:**
 | Feature | WireGuard | tunnel-rs VPN |
 |---------|-----------|---------------|
-| Identity | Static keypair per device | Ephemeral keys (auto-generated) |
-| Config conflict | Same keypair = conflict | Each session unique |
+| Identity | Static keypair per device | Ephemeral `device_id` (per session) |
+| Config conflict | Same keypair = conflict | Each session unique via `device_id` |
 | NAT traversal | Manual endpoint config | Automatic via iroh |
 | IP assignment | Static in config | Dynamic from server |
+
+### About `device_id`
+
+The `device_id` is a random 64-bit integer generated fresh each time the VPN client starts (ephemeral per session). It is used purely for **session tracking** on the server, not for security or access control.
+
+- **Format**: Random `u64` (displayed as 16 hex characters in logs, e.g., `a1b2c3d4e5f67890`)
+- **Lifecycle**: Generated at client startup using CSPRNG; not persisted across restarts
+- **Purpose**: Allows multiple VPN sessions from the same iroh endpoint (the server keys clients by `(EndpointId, device_id)`)
+- **Security**: Authentication relies on iroh's cryptographic EndpointId + auth tokens, not on device_id unpredictability
+
+This differs from WireGuard where a static public key identifies each device and conflicts arise if the same key is used from multiple locations.
 
 ## Single Instance Lock
 

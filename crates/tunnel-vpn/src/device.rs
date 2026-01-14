@@ -25,7 +25,7 @@ pub struct TunConfig {
     pub address6: Option<Ipv6Addr>,
     /// IPv6 prefix length (usually 128 for /128 per client).
     pub prefix_len6: Option<u8>,
-    /// MTU for the device (default: 1420 for WireGuard).
+    /// MTU for the device (default: 1440, accounts for QUIC/TLS overhead).
     pub mtu: u16,
 }
 
@@ -39,7 +39,7 @@ impl TunConfig {
             destination,
             address6: None,
             prefix_len6: None,
-            mtu: 1420,
+            mtu: 1440,
         }
     }
 
