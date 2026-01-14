@@ -634,6 +634,7 @@ impl VpnServer {
             wg_send,
             wg_recv,
             assigned_ip,
+            assigned_ip6,
             tun_writer,
         )
         .await;
@@ -741,6 +742,7 @@ impl VpnServer {
         wg_send: Arc<Mutex<SendStream>>,
         mut wg_recv: iroh::endpoint::RecvStream,
         assigned_ip: Ipv4Addr,
+        assigned_ip6: Option<Ipv6Addr>,
         tun_writer: Arc<Mutex<TunWriter>>,
     ) -> VpnResult<()> {
         // let tunnel_inbound = tunnel.clone();
@@ -817,7 +819,51 @@ impl VpnServer {
                 }
 
                 let packet = &data_buf[..len];
-                // Write directly to TUN
+
+                // Validate source IP to prevent IP spoofing
+                let source_valid = match extract_source_ip(packet) {
+                    Some(PacketIp::V4(src_ip)) => {
+                        if src_ip == assigned_ip {
+                            true
+                        } else {
+                            log::warn!(
+                                "IP spoofing attempt from client {}: expected source {}, got {}",
+                                assigned_ip, assigned_ip, src_ip
+                            );
+                            false
+                        }
+                    }
+                    Some(PacketIp::V6(src_ip)) => {
+                        match assigned_ip6 {
+                            Some(expected_ip6) if src_ip == expected_ip6 => true,
+                            Some(expected_ip6) => {
+                                log::warn!(
+                                    "IPv6 spoofing attempt from client {}: expected source {}, got {}",
+                                    assigned_ip, expected_ip6, src_ip
+                                );
+                                false
+                            }
+                            None => {
+                                log::warn!(
+                                    "IPv6 packet from client {} without assigned IPv6 address, source: {}",
+                                    assigned_ip, src_ip
+                                );
+                                false
+                            }
+                        }
+                    }
+                    None => {
+                        log::warn!("Failed to parse source IP from packet from client {}", assigned_ip);
+                        false
+                    }
+                };
+
+                if !source_valid {
+                    // Drop spoofed packet
+                    continue;
+                }
+
+                // Write validated packet to TUN
                 let mut writer = tun_writer.lock().await;
                 if let Err(e) = writer.write_all(packet).await {
                      log::warn!("Failed to write to TUN: {}", e);
@@ -863,7 +909,7 @@ impl VpnServer {
 
             // Extract destination IP from packet (IPv4 or IPv6)
             let (endpoint_id, device_id) = match extract_dest_ip(packet) {
-                Some(PacketDest::V4(dest_ip)) => {
+                Some(PacketIp::V4(dest_ip)) => {
                     let ip_map = self.ip_to_endpoint.read().await;
                     match ip_map.get(&dest_ip).map(|&(id, dev)| (id, dev)) {
                         Some(res) => res,
@@ -873,7 +919,7 @@ impl VpnServer {
                         }
                     }
                 }
-                Some(PacketDest::V6(dest_ip)) => {
+                Some(PacketIp::V6(dest_ip)) => {
                     let ip6_map = self.ip6_to_endpoint.read().await;
                     match ip6_map.get(&dest_ip).map(|&(id, dev)| (id, dev)) {
                         Some(res) => res,
@@ -924,14 +970,48 @@ impl VpnServer {
     }
 }
 
-/// IP destination extracted from a packet.
-enum PacketDest {
+/// IP address extracted from a packet (source or destination).
+enum PacketIp {
     V4(Ipv4Addr),
     V6(Ipv6Addr),
 }
 
+/// Extract source IP address from an IP packet (IPv4 or IPv6).
+fn extract_source_ip(packet: &[u8]) -> Option<PacketIp> {
+    if packet.is_empty() {
+        return None;
+    }
+
+    let version = packet[0] >> 4;
+
+    match version {
+        4 => {
+            // IPv4: minimum header is 20 bytes, source at bytes 12-15
+            if packet.len() < 20 {
+                return None;
+            }
+            let src = Ipv4Addr::new(packet[12], packet[13], packet[14], packet[15]);
+            Some(PacketIp::V4(src))
+        }
+        6 => {
+            // IPv6: minimum header is 40 bytes, source at bytes 8-23
+            if packet.len() < 40 {
+                return None;
+            }
+            let src = Ipv6Addr::from([
+                packet[8], packet[9], packet[10], packet[11],
+                packet[12], packet[13], packet[14], packet[15],
+                packet[16], packet[17], packet[18], packet[19],
+                packet[20], packet[21], packet[22], packet[23],
+            ]);
+            Some(PacketIp::V6(src))
+        }
+        _ => None,
+    }
+}
+
 /// Extract destination IP address from an IP packet (IPv4 or IPv6).
-fn extract_dest_ip(packet: &[u8]) -> Option<PacketDest> {
+fn extract_dest_ip(packet: &[u8]) -> Option<PacketIp> {
     if packet.is_empty() {
         return None;
     }
@@ -945,7 +1025,7 @@ fn extract_dest_ip(packet: &[u8]) -> Option<PacketDest> {
                 return None;
             }
             let dest = Ipv4Addr::new(packet[16], packet[17], packet[18], packet[19]);
-            Some(PacketDest::V4(dest))
+            Some(PacketIp::V4(dest))
         }
         6 => {
             // IPv6: minimum header is 40 bytes, dest at bytes 24-39
@@ -958,7 +1038,7 @@ fn extract_dest_ip(packet: &[u8]) -> Option<PacketDest> {
                 packet[32], packet[33], packet[34], packet[35],
                 packet[36], packet[37], packet[38], packet[39],
             ]);
-            Some(PacketDest::V6(dest))
+            Some(PacketIp::V6(dest))
         }
         _ => None,
     }
@@ -1034,7 +1114,7 @@ mod tests {
         packet[19] = 5;
 
         match extract_dest_ip(&packet) {
-            Some(PacketDest::V4(ip)) => {
+            Some(PacketIp::V4(ip)) => {
                 assert_eq!(ip, Ipv4Addr::new(10, 0, 0, 5));
             }
             _ => panic!("Expected IPv4 destination"),
@@ -1056,7 +1136,7 @@ mod tests {
         ]);
 
         match extract_dest_ip(&packet) {
-            Some(PacketDest::V6(ip)) => {
+            Some(PacketIp::V6(ip)) => {
                 assert_eq!(ip, "fd00::5".parse::<Ipv6Addr>().unwrap());
             }
             _ => panic!("Expected IPv6 destination"),
@@ -1077,6 +1157,63 @@ mod tests {
         let mut packet = [0u8; 40];
         packet[0] = 0x50; // Version 5 (invalid)
         assert!(extract_dest_ip(&packet).is_none());
+    }
+
+    #[test]
+    fn test_extract_source_ip_v4() {
+        // Valid IPv4 packet header (minimal)
+        let mut packet = [0u8; 20];
+        packet[0] = 0x45; // Version 4, IHL 5
+        // Source at bytes 12-15
+        packet[12] = 192;
+        packet[13] = 168;
+        packet[14] = 1;
+        packet[15] = 100;
+
+        match extract_source_ip(&packet) {
+            Some(PacketIp::V4(ip)) => {
+                assert_eq!(ip, Ipv4Addr::new(192, 168, 1, 100));
+            }
+            _ => panic!("Expected IPv4 source"),
+        }
+
+        // Too short for IPv4
+        assert!(extract_source_ip(&[0x45u8; 10]).is_none());
+    }
+
+    #[test]
+    fn test_extract_source_ip_v6() {
+        // Valid IPv6 packet header (40 bytes minimum)
+        let mut packet = [0u8; 40];
+        packet[0] = 0x60; // Version 6
+        // Source at bytes 8-23
+        packet[8..24].copy_from_slice(&[
+            0xfd, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02,
+        ]);
+
+        match extract_source_ip(&packet) {
+            Some(PacketIp::V6(ip)) => {
+                assert_eq!(ip, "fd00::2".parse::<Ipv6Addr>().unwrap());
+            }
+            _ => panic!("Expected IPv6 source"),
+        }
+
+        // Too short for IPv6
+        let mut short_packet = [0u8; 20];
+        short_packet[0] = 0x60;
+        assert!(extract_source_ip(&short_packet).is_none());
+    }
+
+    #[test]
+    fn test_extract_source_ip_unknown_version() {
+        // Empty packet
+        assert!(extract_source_ip(&[]).is_none());
+
+        // Unknown version
+        let mut packet = [0u8; 40];
+        packet[0] = 0x50; // Version 5 (invalid)
+        assert!(extract_source_ip(&packet).is_none());
     }
 
     #[test]

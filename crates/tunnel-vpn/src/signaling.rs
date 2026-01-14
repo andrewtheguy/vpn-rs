@@ -1,7 +1,9 @@
-//! VPN signaling protocol for WireGuard key exchange over iroh.
+//! VPN signaling protocol for tunnel establishment over iroh.
 //!
 //! This module defines the handshake messages exchanged between VPN
-//! client and server to establish WireGuard tunnels.
+//! client and server to establish IP-over-QUIC tunnels. Clients identify
+//! via a random `device_id` (allowing multiple sessions per iroh endpoint),
+//! and the server responds with assigned IP addresses and network configuration.
 
 use crate::error::{VpnError, VpnResult};
 use ipnet::{Ipv4Net, Ipv6Net};

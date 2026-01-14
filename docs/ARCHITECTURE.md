@@ -530,7 +530,7 @@ The VPN mode sends raw IP packets directly over Iroh's QUIC streams (using TLS 1
 - **Framing**: IP packets are length-prefixed and sent over the QUIC stream.
 - **Security**: Relies on Iroh/QUIC's built-in encryption (TLS 1.3) with Noise-derived keys.
 - **Efficiency**: Zero-copy forwarding where possible between TUN and QUIC buffers.
-- **Identification**: Clients identify via a random `u64` `device_id` generated at startup, allowing multiple sessions per Iroh endpoint.
+- **Identification**: Clients identify via a random `u64` `device_id` generated at startup using `rand::thread_rng()` (CSPRNG-backed via OsRng), allowing multiple sessions per Iroh endpoint. **Security note**: The `device_id` is used purely for session tracking within an already-authenticated iroh connection—it is NOT used for access control. Security relies on: (1) iroh's cryptographic EndpointId authentication, and (2) auth token validation. Clients are keyed by `(EndpointId, device_id)`, so an attacker cannot hijack a session by guessing a device_id without also possessing the victim's iroh private key. The 64-bit space (~2^32 birthday bound for collisions) is sufficient for session tracking across reasonable client counts; unpredictability is not a security requirement here.
 - **Reconnects**: The server automatically manages session limits and cleanup, allowing seamless reconnects from the same device ID.
 
 ### IP Pool Management
@@ -709,10 +709,6 @@ Data channel message framing:
 **Compatibility note:** This framing was added with the heartbeat feature. Older clients/servers that expect raw length-prefixed IP packets (without the type byte) are incompatible.
 
 This allows fast failure detection (~30 seconds) for common issues like server restarts or network changes.
-
-**Interaction Between Layers:**
-- Heartbeat traffic uses the same underlying iroh QUIC connection as the VPN data.
-- If heartbeats fail, it indicates an issue with the QUIC connection itself.
 
 **Connection Check:**
 
