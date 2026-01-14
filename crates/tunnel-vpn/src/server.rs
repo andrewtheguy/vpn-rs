@@ -864,13 +864,15 @@ impl VpnServer {
             
             let client_key = (endpoint_id, device_id);
 
-            // Get client state
-            let clients = self.clients.read().await;
-            let client = match clients.get(&client_key) {
-                Some(c) => c,
-                None => {
-                    log::trace!("Client {} dev {} not found", endpoint_id, device_id);
-                    continue;
+            // Get client's send stream (clone Arc to release read lock before I/O)
+            let send_stream = {
+                let clients = self.clients.read().await;
+                match clients.get(&client_key) {
+                    Some(c) => c.send_stream.clone(),
+                    None => {
+                        log::trace!("Client {} dev {} not found", endpoint_id, device_id);
+                        continue;
+                    }
                 }
             };
 
@@ -879,7 +881,7 @@ impl VpnServer {
                  log::warn!("Failed to frame packet for {} dev {}: {}", endpoint_id, device_id, e);
                  continue;
             }
-            let mut send = client.send_stream.lock().await;
+            let mut send = send_stream.lock().await;
             if let Err(e) = send.write_all(&write_buf).await {
                 log::warn!("Failed to send to client {} dev {}: {}", endpoint_id, device_id, e);
                 continue;
