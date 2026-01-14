@@ -12,6 +12,7 @@ use crate::signaling::{
     frame_ip_packet, read_message, write_message, DataMessageType, VpnHandshake,
     VpnHandshakeResponse, MAX_HANDSHAKE_SIZE,
 };
+use bytes::{Bytes, BytesMut};
 use dashmap::DashMap;
 use ipnet::{Ipv4Net, Ipv6Net};
 use iroh::{Endpoint, EndpointId};
@@ -48,7 +49,8 @@ struct ClientState {
     endpoint_id: EndpointId,
     /// Channel to send framed packets to the client's dedicated writer task.
     /// The writer task owns the SendStream and performs actual I/O.
-    packet_tx: mpsc::Sender<Vec<u8>>,
+    /// Uses Bytes for zero-copy sends (freeze BytesMut instead of cloning Vec).
+    packet_tx: mpsc::Sender<Bytes>,
 }
 
 /// IP address pool for assigning addresses to clients.
@@ -579,7 +581,8 @@ impl VpnServer {
         // Create channel for sending framed packets to this client's writer task.
         // The writer task owns the SendStream and performs actual I/O, decoupling
         // packet production from stream writes to reduce locking overhead.
-        let (packet_tx, mut packet_rx) = mpsc::channel::<Vec<u8>>(CLIENT_PACKET_CHANNEL_SIZE);
+        // Uses Bytes for zero-copy sends (freeze BytesMut instead of cloning Vec).
+        let (packet_tx, mut packet_rx) = mpsc::channel::<Bytes>(CLIENT_PACKET_CHANNEL_SIZE);
 
         // Spawn dedicated writer task that owns the SendStream
         let writer_assigned_ip = assigned_ip;
@@ -689,7 +692,7 @@ impl VpnServer {
 
     /// Handle client data stream.
     async fn handle_client_data(
-        packet_tx: mpsc::Sender<Vec<u8>>,
+        packet_tx: mpsc::Sender<Bytes>,
         mut data_recv: iroh::endpoint::RecvStream,
         assigned_ip: Ipv4Addr,
         assigned_ip6: Option<Ipv6Addr>,
@@ -724,9 +727,9 @@ impl VpnServer {
 
                 match msg_type {
                     DataMessageType::HeartbeatPing => {
-                        // Respond with pong via the writer task channel
+                        // Respond with pong via the writer task channel (1 byte allocation, negligible)
                         log::trace!("Heartbeat ping from {}", assigned_ip);
-                        let pong = vec![DataMessageType::HeartbeatPong.as_byte()];
+                        let pong = Bytes::copy_from_slice(&[DataMessageType::HeartbeatPong.as_byte()]);
                         if packet_tx.send(pong).await.is_err() {
                             log::warn!("Failed to send heartbeat pong to {}: channel closed", assigned_ip);
                             break;
@@ -858,7 +861,8 @@ impl VpnServer {
 
         let buffer_size = tun_reader.buffer_size();
         let mut buf = vec![0u8; buffer_size];
-        let mut write_buf = Vec::with_capacity(1 + 4 + buffer_size);
+        // Reusable BytesMut for framing (avoids per-packet allocation)
+        let mut write_buf = BytesMut::with_capacity(1 + 4 + buffer_size);
 
         loop {
             // Read packet from TUN device
@@ -922,9 +926,12 @@ impl VpnServer {
                 continue;
             }
 
+            // Freeze into Bytes for zero-copy send, then reserve for next packet
+            let bytes = write_buf.split().freeze();
+
             // Send via channel - try non-blocking first, fall back to awaited send if full
             // to apply backpressure rather than silently dropping packets
-            match packet_tx.try_send(write_buf.clone()) {
+            match packet_tx.try_send(bytes) {
                 Ok(()) => {
                     log::trace!(
                         "Enqueued {} bytes for client {} dev {}",

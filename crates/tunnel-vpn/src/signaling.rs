@@ -6,6 +6,7 @@
 //! and the server responds with assigned IP addresses and network configuration.
 
 use crate::error::{VpnError, VpnResult};
+use bytes::{BufMut, BytesMut};
 use ipnet::{Ipv4Net, Ipv6Net};
 use serde::{Deserialize, Serialize};
 use std::net::{Ipv4Addr, Ipv6Addr};
@@ -264,14 +265,14 @@ impl From<DataMessageType> for u8 {
 ///
 /// Returns an error if the packet exceeds `u32::MAX` bytes (matching `write_message` behavior).
 #[inline]
-pub fn frame_ip_packet(buf: &mut Vec<u8>, data: &[u8]) -> VpnResult<()> {
+pub fn frame_ip_packet(buf: &mut BytesMut, data: &[u8]) -> VpnResult<()> {
     let len = u32::try_from(data.len())
         .map_err(|_| VpnError::Signaling(format!("Packet too large: {} bytes", data.len())))?;
     buf.clear();
     buf.reserve(1 + 4 + data.len());
-    buf.push(DataMessageType::IpPacket.as_byte());
-    buf.extend_from_slice(&len.to_be_bytes());
-    buf.extend_from_slice(data);
+    buf.put_u8(DataMessageType::IpPacket.as_byte());
+    buf.put_slice(&len.to_be_bytes());
+    buf.put_slice(data);
     Ok(())
 }
 
@@ -391,7 +392,7 @@ mod tests {
     #[test]
     fn test_frame_ip_packet() {
         let payload = b"hello ip packet";
-        let mut buf = Vec::new();
+        let mut buf = BytesMut::new();
         frame_ip_packet(&mut buf, payload).unwrap();
 
         // Total length: 1 (type) + 4 (length) + payload

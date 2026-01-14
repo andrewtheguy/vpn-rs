@@ -5050,6 +5050,7 @@ name = "tunnel-vpn"
 version = "0.1.58-dev"
 dependencies = [
  "anyhow",
+ "bytes",
  "dashmap",
  "fs2",
  "futures",
