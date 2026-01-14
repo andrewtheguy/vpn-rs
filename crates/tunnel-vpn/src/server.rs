@@ -25,8 +25,9 @@ use tokio::sync::{mpsc, Mutex, RwLock};
 const MAX_IP_PACKET_SIZE: usize = 65536;
 
 /// Channel buffer size for outbound packets per client.
-/// Sized to handle bursts without blocking the TUN reader.
-const CLIENT_PACKET_CHANNEL_SIZE: usize = 256;
+/// Large enough to handle bursts; if full, TUN reader applies backpressure
+/// via awaited send rather than dropping packets.
+const CLIENT_PACKET_CHANNEL_SIZE: usize = 1024;
 
 /// State for a connected VPN client.
 struct ClientState {
@@ -249,7 +250,8 @@ pub struct VpnServer {
     /// IPv6 address pool (None if IPv4-only mode).
     ip6_pool: Option<Arc<RwLock<Ip6Pool>>>,
     /// Connected clients (by (endpoint ID, device ID)).
-    clients: Arc<RwLock<HashMap<(EndpointId, u64), ClientState>>>,
+    /// Lock-free map for hot-path packet routing.
+    clients: Arc<DashMap<(EndpointId, u64), ClientState>>,
     /// Reverse lookup: IPv4 address -> (endpoint ID, device ID).
     /// Lock-free map for hot-path routing lookups.
     ip_to_endpoint: Arc<DashMap<Ipv4Addr, (EndpointId, u64)>>,
@@ -288,7 +290,7 @@ impl VpnServer {
             config,
             ip_pool,
             ip6_pool,
-            clients: Arc::new(RwLock::new(HashMap::new())),
+            clients: Arc::new(DashMap::new()),
             ip_to_endpoint: Arc::new(DashMap::new()),
             ip6_to_endpoint: Arc::new(DashMap::new()),
             tun_device: None,
@@ -613,8 +615,8 @@ impl VpnServer {
         // stale cleanup tasks from affecting the new connection.
         let client_key = (remote_id, device_id);
 
-        self.clients.write().await.insert(client_key, client_state);
         // DashMap operations are lock-free (no async needed)
+        self.clients.insert(client_key, client_state);
         self.ip_to_endpoint
             .insert(assigned_ip, (remote_id, device_id));
 
@@ -649,38 +651,27 @@ impl VpnServer {
         // Cleanup - use session_id to detect stale cleanup from rapid reconnection.
         // Check-before-remove: verify session_id matches before removing anything.
         // If a newer connection replaced us, do nothing - that connection owns the resources.
-        let mut endpoint_to_release = None;
-        let mut release_ipv6 = false;
-        {
-            let mut clients_map = clients.write().await;
+        // DashMap remove_if atomically checks and removes if the predicate holds.
+        let removed = clients.remove_if(&client_key, |_, state| state.session_id == session_id);
 
-            // Check if client entry still belongs to this session before removing
-            let should_cleanup = clients_map
-                .get(&client_key)
-                .map(|state| state.session_id == session_id)
-                .unwrap_or(false);
+        let (endpoint_to_release, release_ipv6) = if let Some((_, client_state)) = removed {
+            // Remove IPv4 mapping if it points to us
+            ip_to_endpoint.remove_if(&assigned_ip, |_, (ep, dev)| {
+                *ep == remote_id && *dev == device_id
+            });
 
-            if should_cleanup {
-                // Remove client state (we know it belongs to this session)
-                if let Some(client_state) = clients_map.remove(&client_key) {
-                    endpoint_to_release = Some((remote_id, device_id));
-                    release_ipv6 = client_state.assigned_ip6.is_some();
-                }
-
-                // Remove IPv4 mapping if it points to us (DashMap atomic remove_if)
-                ip_to_endpoint.remove_if(&assigned_ip, |_, (ep, dev)| {
-                    *ep == remote_id && *dev == device_id
+            // Remove IPv6 mapping if it points to us
+            if let Some(ip6) = assigned_ip6 {
+                ip6_to_endpoint.remove_if(&ip6, |_, (ep6, dev6)| {
+                    *ep6 == remote_id && *dev6 == device_id
                 });
-
-                // Remove IPv6 mapping if it points to us
-                if let Some(ip6) = assigned_ip6 {
-                    ip6_to_endpoint.remove_if(&ip6, |_, (ep6, dev6)| {
-                        *ep6 == remote_id && *dev6 == device_id
-                    });
-                }
             }
-            // If session_id doesn't match or client already gone, do nothing
-        }
+
+            (Some((remote_id, device_id)), client_state.assigned_ip6.is_some())
+        } else {
+            // Session_id didn't match or client already gone - do nothing
+            (None, false)
+        };
 
         if let Some((endpoint_id, dev_id)) = endpoint_to_release {
             ip_pool.write().await.release(&endpoint_id, dev_id);
@@ -911,15 +902,12 @@ impl VpnServer {
 
             let client_key = (endpoint_id, device_id);
 
-            // Get client's packet channel sender (clone to avoid holding lock during send)
-            let packet_tx = {
-                let clients = self.clients.read().await;
-                match clients.get(&client_key) {
-                    Some(c) => c.packet_tx.clone(),
-                    None => {
-                        log::trace!("Client {} dev {} not found", endpoint_id, device_id);
-                        continue;
-                    }
+            // Get client's packet channel sender (DashMap lookup is lock-free)
+            let packet_tx = match self.clients.get(&client_key) {
+                Some(c) => c.packet_tx.clone(),
+                None => {
+                    log::trace!("Client {} dev {} not found", endpoint_id, device_id);
+                    continue;
                 }
             };
 
@@ -934,7 +922,8 @@ impl VpnServer {
                 continue;
             }
 
-            // Send via channel - non-blocking try_send to avoid backpressure stalling TUN reader
+            // Send via channel - try non-blocking first, fall back to awaited send if full
+            // to apply backpressure rather than silently dropping packets
             match packet_tx.try_send(write_buf.clone()) {
                 Ok(()) => {
                     log::trace!(
@@ -944,12 +933,20 @@ impl VpnServer {
                         device_id
                     );
                 }
-                Err(mpsc::error::TrySendError::Full(_)) => {
-                    log::warn!(
-                        "Packet channel full for client {} dev {}, dropping packet",
+                Err(mpsc::error::TrySendError::Full(data)) => {
+                    // Buffer full - apply backpressure via awaited send
+                    log::trace!(
+                        "Packet channel full for client {} dev {}, applying backpressure",
                         endpoint_id,
                         device_id
                     );
+                    if packet_tx.send(data).await.is_err() {
+                        log::trace!(
+                            "Packet channel closed for client {} dev {}",
+                            endpoint_id,
+                            device_id
+                        );
+                    }
                 }
                 Err(mpsc::error::TrySendError::Closed(_)) => {
                     log::trace!(
