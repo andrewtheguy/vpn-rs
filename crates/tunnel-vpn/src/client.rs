@@ -9,26 +9,24 @@
 use crate::config::VpnClientConfig;
 use crate::device::{add_routes, add_routes6, Route6Guard, RouteGuard, TunConfig, TunDevice};
 use crate::error::{VpnError, VpnResult};
-use crate::keys::{WgKeyPair, WgPublicKey};
-use crate::lock::VpnLock;
 use crate::signaling::{
     read_message, write_message, DataMessageType, VpnHandshake, VpnHandshakeResponse,
-    MAX_HANDSHAKE_SIZE, VPN_ALPN,
+    frame_ip_packet, MAX_HANDSHAKE_SIZE, VPN_ALPN,
 };
-use crate::tunnel::{PacketResult, WgTunnel, WgTunnelBuilder};
+use crate::lock::VpnLock;
 use ipnet::{Ipv4Net, Ipv6Net};
 use iroh::endpoint::{RecvStream, SendStream};
 use iroh::{Endpoint, EndpointId};
 use rand::Rng;
-use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::num::NonZeroU32;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 
-/// Maximum WireGuard packet size (MTU + overhead).
-const MAX_WG_PACKET_SIZE: usize = 65536;
+/// Maximum IP packet size (MTU + overhead).
+const MAX_IP_PACKET_SIZE: usize = 65536;
 
 /// Heartbeat ping interval (how often client sends ping).
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
@@ -40,8 +38,8 @@ const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(30);
 pub struct VpnClient {
     /// Client configuration.
     config: VpnClientConfig,
-    /// Client's WireGuard keypair.
-    keypair: WgKeyPair,
+    /// Client's unique device ID.
+    device_id: u64,
     /// Single-instance lock.
     _lock: VpnLock,
 }
@@ -49,8 +47,8 @@ pub struct VpnClient {
 /// Information received from the VPN server after successful handshake.
 #[non_exhaustive]
 pub struct ServerInfo {
-    /// Server's WireGuard public key.
-    pub wg_public_key: WgPublicKey,
+    /// Server's unique endpoint ID (if needed, or just connection info).
+    // pub wg_public_key: WgPublicKey, // Removed
     /// Assigned VPN IP for this client (IPv4).
     pub assigned_ip: Ipv4Addr,
     /// VPN network CIDR (IPv4).
@@ -74,24 +72,18 @@ impl VpnClient {
         // Acquire single-instance lock
         let lock = VpnLock::acquire()?;
 
-        // Generate ephemeral WireGuard keypair (unique per session)
-        let keypair = WgKeyPair::generate();
-        log::info!(
-            "Generated ephemeral WireGuard keypair: {}",
-            keypair.public_key_base64()
-        );
+        // Generate random device ID (unique per session)
+        let device_id: u64 = rand::thread_rng().gen();
+        log::info!("Generated device ID: {:016x}", device_id);
 
         Ok(Self {
             config,
-            keypair,
+            device_id,
             _lock: lock,
         })
     }
 
-    /// Get the client's WireGuard public key.
-    pub fn public_key(&self) -> WgPublicKey {
-        WgPublicKey::from(self.keypair.public_key())
-    }
+
 
     /// Connect to the VPN server and establish the tunnel.
     pub async fn connect(&self, endpoint: &Endpoint) -> VpnResult<()> {
@@ -156,17 +148,7 @@ impl VpnClient {
 
         log::info!("Opened WireGuard data stream");
 
-        // Create WireGuard tunnel (using dummy endpoint since we tunnel over iroh)
-        let peer_public_key = server_info.wg_public_key.to_public_key();
-        let dummy_endpoint: SocketAddr = "127.0.0.1:51820".parse().unwrap();
-        let tunnel = WgTunnelBuilder::new()
-            .keypair(self.keypair.clone())
-            .peer_public_key(peer_public_key)
-            .peer_endpoint(dummy_endpoint)
-            .keepalive_secs(Some(self.config.keepalive_secs))
-            .build()?;
-
-        let tunnel = Arc::new(Mutex::new(tunnel));
+        // No WireGuard tunnel setup needed. We send raw IP packets framed over QUIC.
 
         log::info!("VPN tunnel established!");
         log::info!("  TUN device: {}", tun_device.name());
@@ -176,7 +158,7 @@ impl VpnClient {
         }
 
         // Run the VPN packet loop (tunneled over iroh)
-        self.run_vpn_loop(tun_device, tunnel, wg_send, wg_recv).await
+        self.run_vpn_loop(tun_device, wg_send, wg_recv).await
     }
 
     /// Perform VPN handshake with the server.
@@ -190,7 +172,7 @@ impl VpnClient {
         })?;
 
         // Send handshake
-        let mut handshake = VpnHandshake::new(self.public_key());
+        let mut handshake = VpnHandshake::new(self.device_id);
         if let Some(ref token) = self.config.auth_token {
             handshake = handshake.with_auth_token(token);
         }
@@ -209,9 +191,9 @@ impl VpnClient {
         }
 
         // Extract server info (IPv4 required)
-        let wg_public_key = response.wg_public_key.ok_or_else(|| {
+        /* let wg_public_key = response.wg_public_key.ok_or_else(|| {
             VpnError::Signaling("Server response missing WG public key".into())
-        })?;
+        })?; */ // Removed wg_public_key
         let assigned_ip = response.assigned_ip.ok_or_else(|| {
             VpnError::Signaling("Server response missing assigned IP".into())
         })?;
@@ -245,7 +227,7 @@ impl VpnClient {
             log::debug!("Failed to finish handshake stream: {}", e);
         }
         Ok(ServerInfo {
-            wg_public_key,
+            // wg_public_key, // Removed
             assigned_ip,
             network,
             server_ip,
@@ -278,7 +260,7 @@ impl VpnClient {
     async fn run_vpn_loop(
         &self,
         tun_device: TunDevice,
-        tunnel: Arc<Mutex<WgTunnel>>,
+        // tunnel: Arc<Mutex<WgTunnel>>, // Removed
         wg_send: SendStream,
         wg_recv: RecvStream,
     ) -> VpnResult<()> {
@@ -291,12 +273,12 @@ impl VpnClient {
         let wg_recv = Arc::new(Mutex::new(wg_recv));
 
         // Clone for tasks
-        let tunnel_outbound = tunnel.clone();
-        let tunnel_inbound = tunnel.clone();
-        let tunnel_timers = tunnel.clone();
+        // let tunnel_outbound = tunnel.clone();
+        // let tunnel_inbound = tunnel.clone();
+        // let tunnel_timers = tunnel.clone();
         let send_outbound = wg_send.clone();
-        let send_inbound = wg_send.clone();
-        let send_timers = wg_send.clone();
+        let _send_inbound = wg_send.clone();
+        // let send_timers = wg_send.clone();
 
         // Track last heartbeat pong received (as millis since start_time for atomic access)
         let start_time = Instant::now();
@@ -307,33 +289,25 @@ impl VpnClient {
         // Spawn outbound task (TUN -> WireGuard -> iroh stream)
         let mut outbound_handle = tokio::spawn(async move {
             let mut read_buf = vec![0u8; buffer_size];
-            let mut write_buf = Vec::with_capacity(1 + 4 + MAX_WG_PACKET_SIZE);
+            let mut write_buf = Vec::with_capacity(1 + 4 + MAX_IP_PACKET_SIZE);
             loop {
                 match tun_reader.read(&mut read_buf).await {
                     Ok(n) if n > 0 => {
                         let packet = &read_buf[..n];
-                        let mut tunnel = tunnel_outbound.lock().await;
-                        let result = tunnel.encapsulate(packet);
-                        drop(tunnel); // Release tunnel lock before acquiring send lock
+                        // let mut tunnel = tunnel_outbound.lock().await;
+                        // let result = tunnel.encapsulate(packet);
+                        // drop(tunnel); // Release tunnel lock before acquiring send lock
 
-                        match result {
-                            Ok(PacketResult::WriteToNetwork(data)) => {
-                                // Message format: type byte + length + data
-                                write_buf.clear();
-                                write_buf.push(DataMessageType::WireGuard.as_byte());
-                                write_buf.extend_from_slice(&(data.len() as u32).to_be_bytes());
-                                write_buf.extend_from_slice(&data);
+                        // Directly frame IP packet
+                        if let Err(e) = frame_ip_packet(&mut write_buf, packet) {
+                            log::warn!("Failed to frame packet: {}", e);
+                            continue;
+                        }
 
-                                let mut send = send_outbound.lock().await;
-                                if let Err(e) = send.write_all(&write_buf).await {
-                                    log::warn!("Failed to write WG packet: {}", e);
-                                    break;
-                                }
-                            }
-                            Ok(_) => {}
-                            Err(e) => {
-                                log::warn!("Encapsulation error: {}", e);
-                            }
+                        let mut send = send_outbound.lock().await;
+                        if let Err(e) = send.write_all(&write_buf).await {
+                             log::warn!("Failed to write IP packet: {}", e);
+                             break;
                         }
                     }
                     Ok(_) => {}
@@ -350,8 +324,8 @@ impl VpnClient {
         let mut inbound_handle = tokio::spawn(async move {
             let mut type_buf = [0u8; 1];
             let mut len_buf = [0u8; 4];
-            let mut data_buf = vec![0u8; MAX_WG_PACKET_SIZE];
-            let mut write_buf = Vec::with_capacity(1 + 4 + MAX_WG_PACKET_SIZE);
+            let mut data_buf = vec![0u8; MAX_IP_PACKET_SIZE];
+            // let mut write_buf = Vec::with_capacity(1 + 4 + MAX_IP_PACKET_SIZE);  // write_buf unused for inbound
             loop {
                 let mut recv = wg_recv.lock().await;
                 // Read message type
@@ -388,22 +362,22 @@ impl VpnClient {
                         log::trace!("Unexpected heartbeat ping received");
                         continue;
                     }
-                    DataMessageType::WireGuard => {
-                        // Continue to read WireGuard packet below
+                    DataMessageType::IpPacket => {
+                        // Continue to read IP packet below
                     }
                 }
 
-                // Read length prefix for WireGuard packet
+                // Read length prefix for IP packet
                 match recv.read_exact(&mut len_buf).await {
                     Ok(()) => {}
                     Err(e) => {
-                        log::error!("Failed to read WG packet length: {}", e);
+                        log::error!("Failed to read IP packet length: {}", e);
                         break;
                     }
                 }
                 let len = u32::from_be_bytes(len_buf) as usize;
-                if len > MAX_WG_PACKET_SIZE {
-                    log::error!("WG packet too large: {}", len);
+                if len > MAX_IP_PACKET_SIZE {
+                    log::error!("IP packet too large: {}", len);
                     break;
                 }
 
@@ -411,74 +385,27 @@ impl VpnClient {
                 match recv.read_exact(&mut data_buf[..len]).await {
                     Ok(()) => {}
                     Err(e) => {
-                        log::error!("Failed to read WG packet: {}", e);
+                        log::error!("Failed to read IP packet: {}", e);
                         break;
                     }
                 }
                 drop(recv); // Release lock before processing
 
                 let packet = &data_buf[..len];
-                let mut tunnel = tunnel_inbound.lock().await;
-                match tunnel.decapsulate(None, packet) {
-                    Ok(PacketResult::WriteToTunV4(data, _))
-                    | Ok(PacketResult::WriteToTunV6(data, _)) => {
-                        if let Err(e) = tun_writer.write_all(&data).await {
-                            log::warn!("Failed to write to TUN: {}", e);
-                        }
-                    }
-                    Ok(PacketResult::WriteToNetwork(data)) => {
-                        // Need to send response back through stream atomically
-                        // Message format: type byte + length + data
-                        drop(tunnel);
-                        let mut send = send_inbound.lock().await;
-                        write_buf.clear();
-                        write_buf.push(DataMessageType::WireGuard.as_byte());
-                        write_buf.extend_from_slice(&(data.len() as u32).to_be_bytes());
-                        write_buf.extend_from_slice(&data);
-                        if let Err(e) = send.write_all(&write_buf).await {
-                            log::warn!("Failed to send response packet: {}", e);
-                        }
-                    }
-                    Ok(_) => {}
-                    Err(e) => {
-                        log::warn!("Decapsulation error: {}", e);
-                    }
+                // Directly write to TUN (packet is already decrypted/raw IP)
+                if let Err(e) = tun_writer.write_all(packet).await {
+                     log::warn!("Failed to write to TUN: {}", e);
                 }
             }
         });
 
-        // Spawn timer task
+        // Spawn timer task - NOOP for direct IP tunnel (no WG keepalives/rekeys needed)
         let mut timer_handle = tokio::spawn(async move {
-            let mut write_buf = Vec::with_capacity(1 + 4 + MAX_WG_PACKET_SIZE);
-            'timer_loop: loop {
-                tokio::time::sleep(Duration::from_millis(100)).await;
-                let mut tunnel = tunnel_timers.lock().await;
-                let results = tunnel.update_timers();
-                drop(tunnel);
-
-                for result in results {
-                    match result {
-                        PacketResult::WriteToNetwork(data) => {
-                            let mut send = send_timers.lock().await;
-                            // Message format: type byte + length + data
-                            write_buf.clear();
-                            write_buf.push(DataMessageType::WireGuard.as_byte());
-                            write_buf.extend_from_slice(&(data.len() as u32).to_be_bytes());
-                            write_buf.extend_from_slice(&data);
-                            if let Err(e) = send.write_all(&write_buf).await {
-                                log::warn!("Failed to send timer packet: {}", e);
-                            }
-                        }
-                        PacketResult::Error(e) => {
-                            // Timer errors indicate WireGuard tunnel failure (e.g., ConnectionExpired
-                            // after 90 seconds of failed handshakes). Exit to trigger reconnection.
-                            log::error!("WireGuard tunnel error: {}", e);
-                            break 'timer_loop;
-                        }
-                        _ => {}
-                    }
-                }
-            }
+            // Placeholder to keep the select! structure valid and allow future periodic tasks
+            // For now just sleep forever or exit immediately?
+            // If we exit immediately, the select! below will trigger shutdown.
+            // So we sleep forever.
+            std::future::pending::<()>().await;
         });
 
         // Spawn heartbeat task (sends pings, checks for timeout)

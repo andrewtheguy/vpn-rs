@@ -10,24 +10,23 @@
 use crate::config::VpnServerConfig;
 use crate::device::{TunConfig, TunDevice, TunWriter};
 use crate::error::{VpnError, VpnResult};
-use crate::keys::{WgKeyPair, WgPublicKey};
 use crate::signaling::{
-    frame_wireguard_packet, read_message, write_message, DataMessageType, VpnHandshake,
+    frame_ip_packet, read_message, write_message, DataMessageType, VpnHandshake,
     VpnHandshakeResponse, MAX_HANDSHAKE_SIZE,
 };
-use crate::tunnel::{PacketResult, WgTunnel, WgTunnelBuilder};
-use boringtun::x25519::PublicKey;
+// Removed WgTunnel, WgTunnelBuilder import
+// use crate::tunnel::{PacketResult, WgTunnel, WgTunnelBuilder};
 use ipnet::{Ipv4Net, Ipv6Net};
 use iroh::endpoint::SendStream;
 use iroh::{Endpoint, EndpointId};
 use std::collections::HashMap;
-use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
 
-/// Maximum WireGuard packet size.
-const MAX_WG_PACKET_SIZE: usize = 65536;
+/// Maximum IP packet size.
+const MAX_IP_PACKET_SIZE: usize = 65536;
 
 /// State for a connected VPN client.
 struct ClientState {
@@ -40,14 +39,12 @@ struct ClientState {
     /// Client's assigned IPv6 VPN address (optional, for dual-stack).
     #[allow(dead_code)]
     assigned_ip6: Option<Ipv6Addr>,
-    /// Client's WireGuard public key.
+    /// Client's device ID.
     #[allow(dead_code)]
-    wg_public_key: PublicKey,
+    device_id: u64,
     /// Client's iroh endpoint ID.
     #[allow(dead_code)]
     endpoint_id: EndpointId,
-    /// WireGuard tunnel for this client.
-    tunnel: Arc<Mutex<WgTunnel>>,
     /// Send stream to client (for sending encrypted packets).
     send_stream: Arc<Mutex<SendStream>>,
 }
@@ -62,8 +59,8 @@ struct IpPool {
     next_ip: u32,
     /// Maximum IP in the range.
     max_ip: u32,
-    /// IPs currently in use (mapped from client endpoint ID).
-    in_use: HashMap<EndpointId, Ipv4Addr>,
+    /// IPs currently in use (mapped from (client endpoint ID, device ID)).
+    in_use: HashMap<(EndpointId, u64), Ipv4Addr>,
     /// Released IPs available for reuse.
     released: Vec<Ipv4Addr>,
 }
@@ -106,15 +103,16 @@ impl IpPool {
     }
 
     /// Allocate an IP address for a client.
-    fn allocate(&mut self, endpoint_id: EndpointId) -> Option<Ipv4Addr> {
+    fn allocate(&mut self, endpoint_id: EndpointId, device_id: u64) -> Option<Ipv4Addr> {
+        let key = (endpoint_id, device_id);
         // Check if client already has an IP
-        if let Some(&ip) = self.in_use.get(&endpoint_id) {
+        if let Some(&ip) = self.in_use.get(&key) {
             return Some(ip);
         }
 
         // Try to reuse a released IP first
         if let Some(ip) = self.released.pop() {
-            self.in_use.insert(endpoint_id, ip);
+            self.in_use.insert(key, ip);
             return Some(ip);
         }
 
@@ -122,7 +120,7 @@ impl IpPool {
         if self.next_ip <= self.max_ip {
             let ip = Ipv4Addr::from(self.next_ip);
             self.next_ip += 1;
-            self.in_use.insert(endpoint_id, ip);
+            self.in_use.insert(key, ip);
             Some(ip)
         } else {
             None // Pool exhausted
@@ -130,8 +128,8 @@ impl IpPool {
     }
 
     /// Release an IP address when a client disconnects.
-    fn release(&mut self, endpoint_id: &EndpointId) {
-        if let Some(ip) = self.in_use.remove(endpoint_id) {
+    fn release(&mut self, endpoint_id: &EndpointId, device_id: u64) {
+        if let Some(ip) = self.in_use.remove(&(*endpoint_id, device_id)) {
             self.released.push(ip);
         }
     }
@@ -147,8 +145,8 @@ struct Ip6Pool {
     next_ip: u128,
     /// Maximum IP in the range.
     max_ip: u128,
-    /// IPs currently in use (mapped from client endpoint ID).
-    in_use: HashMap<EndpointId, Ipv6Addr>,
+    /// IPs currently in use (mapped from (client endpoint ID, device ID)).
+    in_use: HashMap<(EndpointId, u64), Ipv6Addr>,
     /// Released IPs available for reuse.
     released: Vec<Ipv6Addr>,
 }
@@ -197,15 +195,16 @@ impl Ip6Pool {
     }
 
     /// Allocate an IPv6 address for a client.
-    fn allocate(&mut self, endpoint_id: EndpointId) -> Option<Ipv6Addr> {
+    fn allocate(&mut self, endpoint_id: EndpointId, device_id: u64) -> Option<Ipv6Addr> {
+        let key = (endpoint_id, device_id);
         // Check if client already has an IP
-        if let Some(&ip) = self.in_use.get(&endpoint_id) {
+        if let Some(&ip) = self.in_use.get(&key) {
             return Some(ip);
         }
 
         // Try to reuse a released IP first
         if let Some(ip) = self.released.pop() {
-            self.in_use.insert(endpoint_id, ip);
+            self.in_use.insert(key, ip);
             return Some(ip);
         }
 
@@ -213,7 +212,7 @@ impl Ip6Pool {
         if self.next_ip <= self.max_ip {
             let ip = Ipv6Addr::from(self.next_ip);
             self.next_ip += 1;
-            self.in_use.insert(endpoint_id, ip);
+            self.in_use.insert(key, ip);
             Some(ip)
         } else {
             None // Pool exhausted
@@ -221,8 +220,8 @@ impl Ip6Pool {
     }
 
     /// Release an IPv6 address when a client disconnects.
-    fn release(&mut self, endpoint_id: &EndpointId) {
-        if let Some(ip) = self.in_use.remove(endpoint_id) {
+    fn release(&mut self, endpoint_id: &EndpointId, device_id: u64) {
+        if let Some(ip) = self.in_use.remove(&(*endpoint_id, device_id)) {
             self.released.push(ip);
         }
     }
@@ -232,18 +231,18 @@ impl Ip6Pool {
 pub struct VpnServer {
     /// Server configuration.
     config: VpnServerConfig,
-    /// Server's WireGuard keypair.
-    keypair: WgKeyPair,
+    // Removed keypair
+    // keypair: WgKeyPair,
     /// IPv4 address pool.
     ip_pool: Arc<RwLock<IpPool>>,
     /// IPv6 address pool (None if IPv4-only mode).
     ip6_pool: Option<Arc<RwLock<Ip6Pool>>>,
-    /// Connected clients (by endpoint ID).
-    clients: Arc<RwLock<HashMap<EndpointId, ClientState>>>,
-    /// Reverse lookup: IPv4 address -> (endpoint ID, session ID).
-    /// Session ID is used to detect stale cleanup operations.
+    /// Connected clients (by (endpoint ID, device ID)).
+    clients: Arc<RwLock<HashMap<(EndpointId, u64), ClientState>>>,
+    /// Reverse lookup: IPv4 address -> (endpoint ID, device ID).
+    /// Used for routing.
     ip_to_endpoint: Arc<RwLock<HashMap<Ipv4Addr, (EndpointId, u64)>>>,
-    /// Reverse lookup: IPv6 address -> (endpoint ID, session ID).
+    /// Reverse lookup: IPv6 address -> (endpoint ID, device ID).
     ip6_to_endpoint: Arc<RwLock<HashMap<Ipv6Addr, (EndpointId, u64)>>>,
     /// TUN device for VPN traffic.
     tun_device: Option<TunDevice>,
@@ -259,12 +258,8 @@ impl VpnServer {
     /// WireGuard keypair is always ephemeral (generated fresh each server start).
     /// This allows clients to use ephemeral keys without conflicts.
     pub async fn new(config: VpnServerConfig) -> VpnResult<Self> {
-        // Generate ephemeral WireGuard keypair
-        let keypair = WgKeyPair::generate();
-        log::info!(
-            "Generated ephemeral server WireGuard keypair: {}",
-            keypair.public_key_base64()
-        );
+        // No WG keypair needed
+        // let keypair = WgKeyPair::generate();
 
         // Create IPv4 pool
         let ip_pool = Arc::new(RwLock::new(IpPool::new(config.network, config.server_ip)));
@@ -281,7 +276,7 @@ impl VpnServer {
 
         Ok(Self {
             config,
-            keypair,
+            // keypair,
             ip_pool,
             ip6_pool,
             clients: Arc::new(RwLock::new(HashMap::new())),
@@ -293,10 +288,8 @@ impl VpnServer {
         })
     }
 
-    /// Get the server's WireGuard public key.
-    pub fn public_key(&self) -> WgPublicKey {
-        WgPublicKey::from(self.keypair.public_key())
-    }
+    /// Get the server's public key (noop now).
+    // pub fn public_key(&self) -> WgPublicKey { ... } // Removed
 
     /// Get the server's VPN IP address.
     pub async fn server_ip(&self) -> Ipv4Addr {
@@ -355,7 +348,7 @@ impl VpnServer {
 
         let server_ip = self.server_ip().await;
         let network = self.network().await;
-        let public_key = self.public_key();
+        // let public_key = self.public_key();
 
         log::info!("VPN Server started:");
         log::info!("  Network: {}", network);
@@ -365,7 +358,7 @@ impl VpnServer {
             log::info!("  Network6: {}", pool.network());
             log::info!("  Server IP6: {}", pool.server_ip());
         }
-        log::info!("  Public key: {}", public_key.to_base64());
+        // log::info!("  Public key: {}", public_key.to_base64());
         log::info!("  Node ID: {}", endpoint.id());
 
         // Take TUN device and split it
@@ -429,9 +422,9 @@ impl VpnServer {
         let handshake = VpnHandshake::decode(&handshake_data)?;
 
         log::debug!(
-            "Received handshake from {} with WG key: {}",
+            "Received handshake from {} for device {}",
             remote_id,
-            handshake.wg_public_key.to_base64()
+            handshake.device_id
         );
 
         // Validate auth token (required - server must have auth_tokens configured)
@@ -483,7 +476,7 @@ impl VpnServer {
                 remote_id,
                 connection,
                 tun_writer,
-                handshake.wg_public_key,
+                handshake.device_id,
             )
             .await;
 
@@ -500,19 +493,19 @@ impl VpnServer {
         remote_id: EndpointId,
         connection: iroh::endpoint::Connection,
         tun_writer: Arc<Mutex<TunWriter>>,
-        client_wg_public_key: WgPublicKey,
+        device_id: u64,
     ) -> VpnResult<()> {
         // Allocate IPv4 for client (required)
         let assigned_ip = {
             let mut pool = self.ip_pool.write().await;
-            pool.allocate(remote_id)
+            pool.allocate(remote_id, device_id)
                 .ok_or_else(|| VpnError::IpAssignment("IPv4 pool exhausted".into()))?
         };
 
         // Allocate IPv6 for client (optional, if server has IPv6 configured)
         let assigned_ip6 = if let Some(ref ip6_pool) = self.ip6_pool {
             let mut pool = ip6_pool.write().await;
-            match pool.allocate(remote_id) {
+            match pool.allocate(remote_id, device_id) {
                 Some(ip) => Some(ip),
                 None => {
                     // IPv6 allocation failure is not fatal - client just won't have IPv6
@@ -530,8 +523,8 @@ impl VpnServer {
         let network = pool.network();
         drop(pool);
 
-        // Create WireGuard tunnel for this client
-        let peer_public_key = client_wg_public_key.to_public_key();
+        // Create WireGuard tunnel for this client - REMOVED
+        /* let peer_public_key = client_wg_public_key.to_public_key();
         let dummy_endpoint: SocketAddr = "127.0.0.1:51820".parse().unwrap();
         let tunnel = WgTunnelBuilder::new()
             .keypair(self.keypair.clone())
@@ -540,13 +533,12 @@ impl VpnServer {
             .keepalive_secs(Some(self.config.keepalive_secs))
             .build()?;
 
-        let tunnel = Arc::new(Mutex::new(tunnel));
+        let tunnel = Arc::new(Mutex::new(tunnel)); */
 
         // Send response - include IPv6 info if allocated
         let response = if let Some(ip6) = assigned_ip6 {
             let ip6_pool = self.ip6_pool.as_ref().unwrap().read().await;
             VpnHandshakeResponse::accepted_dual_stack(
-                self.public_key(),
                 assigned_ip,
                 network,
                 server_ip,
@@ -556,7 +548,6 @@ impl VpnServer {
             )
         } else {
             VpnHandshakeResponse::accepted(
-                self.public_key(),
                 assigned_ip,
                 network,
                 server_ip,
@@ -598,28 +589,38 @@ impl VpnServer {
         let session_id = self.next_session_id.fetch_add(1, Ordering::Relaxed);
 
         // Store client state (including send stream for TUN handler to use)
+        // Store client state (including send stream for TUN handler to use)
         let client_state = ClientState {
             session_id,
             assigned_ip,
             assigned_ip6,
-            wg_public_key: peer_public_key,
+            // wg_public_key: peer_public_key, // Removed
+            device_id,
             endpoint_id: remote_id,
-            tunnel: tunnel.clone(),
+            // tunnel: tunnel.clone(), // Removed
             send_stream: wg_send.clone(),
         };
 
-        self.clients.write().await.insert(remote_id, client_state);
+        // Reconnect handling: if a client with the same (EndpointId, DeviceId) exists,
+        // we should remove it first, or overwrite it.
+        // Overwriting in the map is atomic for the map itself, but we should make sure
+        // resources are cleaned up.
+        // Since we are using session_id for cleanup safety, overwriting is fine.
+        // The old connection's cleanup will see a different session_id in the map and will NOT remove the new one.
+        
+        let client_key = (remote_id, device_id);
+
+        self.clients.write().await.insert(client_key, client_state);
         self.ip_to_endpoint
             .write()
             .await
-            .insert(assigned_ip, (remote_id, session_id));
-
+            .insert(assigned_ip, (remote_id, device_id));
 
         if let Some(ip6) = assigned_ip6 {
             self.ip6_to_endpoint
                 .write()
                 .await
-                .insert(ip6, (remote_id, session_id));
+                .insert(ip6, (remote_id, device_id));
         }
 
         // Handle client data
@@ -631,7 +632,7 @@ impl VpnServer {
 
         // Run client handler (blocks until client disconnects)
         let result = Self::handle_client_data(
-            tunnel,
+            // tunnel,
             wg_send,
             wg_recv,
             assigned_ip,
@@ -656,55 +657,79 @@ impl VpnServer {
             let mut ip_map = ip_to_endpoint.write().await;
             let mut ip6_map = ip6_to_endpoint.write().await;
 
-            let removed_client = clients_map.remove(&remote_id);
-            let removed_ip = ip_map.remove(&assigned_ip);
+            let removed_client = clients_map.remove(&client_key);
+            // We don't remove IP mappings here strictly by key if we assume IPs are unique
+            // But let's check.
+            // Actually, we should check if the currently mapped (Endpoint, Device) for this IP is us.
+            
+            // Check IP mapping
+            let ip_belongs_to_us = if let Some((ep, dev)) = ip_map.get(&assigned_ip) {
+                 *ep == remote_id && *dev == device_id
+            } else {
+                false
+            };
 
-            match (removed_client, removed_ip) {
-                // Both entries existed; only keep them removed if both session_ids match
-                (Some(client_state), Some((endpoint_id, ip_session_id))) => {
-                    if client_state.session_id == session_id && ip_session_id == session_id {
-                        // Both belong to this session; remember endpoint for IP release
-                        endpoint_to_release = Some(endpoint_id);
+            if ip_belongs_to_us {
+                // Only remove if it points to us
+                 ip_map.remove(&assigned_ip);
+            }
+
+            match (removed_client, ip_belongs_to_us) {
+                // Both entries existed and belonged to us
+                (Some(client_state), true) => {
+                    if client_state.session_id == session_id {
+                        // Belongs to this session; remember endpoint for IP release
+                        // (We need strict cleanup logic here)
+                        endpoint_to_release = Some((remote_id, device_id));
                         release_ipv6 = client_state.assigned_ip6.is_some();
-                        // Clean up IPv6 mapping if applicable (inside same critical section)
+                        
+                        // Clean up IPv6 mapping
                         if let Some(ip6) = assigned_ip6 {
-                            if let Some((_, ip6_session_id)) = ip6_map.get(&ip6) {
-                                if *ip6_session_id == session_id {
+                            if let Some((ep6, dev6)) = ip6_map.get(&ip6) {
+                                if *ep6 == remote_id && *dev6 == device_id {
                                     ip6_map.remove(&ip6);
                                 }
                             }
                         }
-                        // Keep both entries removed
                     } else {
-                        // One or both entries belong to a different session; restore both
-                        clients_map.insert(remote_id, client_state);
-                        ip_map.insert(assigned_ip, (endpoint_id, ip_session_id));
+                        // The removed client state belonged to a different session (e.g. newer one)?
+                        // Wait, if we removed it from clients_map using client_key, and client_key matches...
+                        // If session_id mismatches, it means we removed a NEWER session (if session IDs increase).
+                        // Or we removed an OLDER session?
+                        // Actually, if we just overwrote it in insert, then remove here returns the current one.
+                        // If current state's session_id != our session_id, it means someone else replaced us.
+                        // So we should PUT IT BACK.
+                        clients_map.insert(client_key, client_state);
+                        
+                        // And if we removed IP mapping but it wasn't ours... wait, we checked ip_belongs_to_us.
+                        // If ip_belongs_to_us was true, it means IP map pointed to (remote_id, device_id).
+                        // Since (remote_id, device_id) is unique key, checking session_id on client_state is enough to know if it's THIS session.
+                        // If client_state.session_id != session_id, then it is NOT this session, so we should restore everything.
+                        
+                        // Restore IP map
+                        ip_map.insert(assigned_ip, (remote_id, device_id));
                     }
                 }
-                // Only client entry existed
-                (Some(client_state), None) => {
-                    if client_state.session_id != session_id {
-                        // Belongs to a different session; restore it
-                        clients_map.insert(remote_id, client_state);
-                    }
-                    // If session_id matches, it's safe to drop this stale client entry
+                (Some(client_state), false) => {
+                     // Client state existed but IP mapping didn't point to us? Weird.
+                     // Check session id.
+                     if client_state.session_id != session_id {
+                         clients_map.insert(client_key, client_state);
+                     }
                 }
-                // Only IP entry existed; restore it to avoid corrupting a different session
-                (None, Some((endpoint_id, ip_session_id))) => {
-                    ip_map.insert(assigned_ip, (endpoint_id, ip_session_id));
+                (None, _) => {
+                    // Client state already gone. Nothing to do.
                 }
-                // Neither entry existed; nothing to do
-                (None, None) => {}
             }
         }
 
-        if let Some(endpoint_id) = endpoint_to_release {
-            ip_pool.write().await.release(&endpoint_id);
+        if let Some((endpoint_id, dev_id)) = endpoint_to_release {
+            ip_pool.write().await.release(&endpoint_id, dev_id);
 
             // Release IPv6 if allocated for this session
             if release_ipv6 {
                 if let Some(ref ip6_pool) = ip6_pool {
-                    ip6_pool.write().await.release(&endpoint_id);
+                    ip6_pool.write().await.release(&endpoint_id, dev_id);
                 }
             }
         }
@@ -712,25 +737,25 @@ impl VpnServer {
         result
     }
 
-    /// Handle client WireGuard data stream.
+    /// Handle client data stream.
     async fn handle_client_data(
-        tunnel: Arc<Mutex<WgTunnel>>,
+        // tunnel: Arc<Mutex<WgTunnel>>,
         wg_send: Arc<Mutex<SendStream>>,
         mut wg_recv: iroh::endpoint::RecvStream,
         assigned_ip: Ipv4Addr,
         tun_writer: Arc<Mutex<TunWriter>>,
     ) -> VpnResult<()> {
-        let tunnel_inbound = tunnel.clone();
-        let tunnel_timers = tunnel.clone();
-        let send_inbound = wg_send.clone();
+        // let tunnel_inbound = tunnel.clone();
+        // let tunnel_timers = tunnel.clone();
+        // let send_inbound = wg_send.clone();
         let send_heartbeat = wg_send.clone();
 
-        // Spawn inbound task (iroh stream -> WireGuard -> TUN)
+        // Spawn inbound task (iroh stream -> TUN)
         let inbound_handle = tokio::spawn(async move {
             let mut type_buf = [0u8; 1];
             let mut len_buf = [0u8; 4];
-            let mut data_buf = vec![0u8; MAX_WG_PACKET_SIZE];
-            let mut write_buf = Vec::with_capacity(1 + 4 + MAX_WG_PACKET_SIZE);
+            let mut data_buf = vec![0u8; MAX_IP_PACKET_SIZE];
+            // let mut write_buf = Vec::with_capacity(1 + 4 + MAX_IP_PACKET_SIZE);
             loop {
                 // Read message type
                 match wg_recv.read_exact(&mut type_buf).await {
@@ -765,22 +790,22 @@ impl VpnServer {
                         log::trace!("Unexpected heartbeat pong from {}", assigned_ip);
                         continue;
                     }
-                    DataMessageType::WireGuard => {
-                        // Continue to read WireGuard packet below
+                    DataMessageType::IpPacket => {
+                        // Continue to read IP packet below
                     }
                 }
 
-                // Read length prefix for WireGuard packet
+                // Read length prefix for IP packet
                 match wg_recv.read_exact(&mut len_buf).await {
                     Ok(()) => {}
                     Err(e) => {
-                        log::debug!("Failed to read WG packet length from {}: {}", assigned_ip, e);
+                        log::debug!("Failed to read IP packet length from {}: {}", assigned_ip, e);
                         break;
                     }
                 }
                 let len = u32::from_be_bytes(len_buf) as usize;
-                if len > MAX_WG_PACKET_SIZE {
-                    log::error!("WG packet too large from {}: {}", assigned_ip, len);
+                if len > MAX_IP_PACKET_SIZE {
+                    log::error!("IP packet too large from {}: {}", assigned_ip, len);
                     break;
                 }
 
@@ -788,72 +813,24 @@ impl VpnServer {
                 match wg_recv.read_exact(&mut data_buf[..len]).await {
                     Ok(()) => {}
                     Err(e) => {
-                        log::debug!("Failed to read WG packet from {}: {}", assigned_ip, e);
+                        log::debug!("Failed to read IP packet from {}: {}", assigned_ip, e);
                         break;
                     }
                 }
 
                 let packet = &data_buf[..len];
-                let mut tunnel = tunnel_inbound.lock().await;
-                match tunnel.decapsulate(None, packet) {
-                    Ok(PacketResult::WriteToTunV4(data, _))
-                    | Ok(PacketResult::WriteToTunV6(data, _)) => {
-                        // Write decrypted packet to TUN device
-                        let mut writer = tun_writer.lock().await;
-                        if let Err(e) = writer.write_all(&data).await {
-                            log::warn!("Failed to write to TUN: {}", e);
-                        }
-                        log::trace!("Wrote {} bytes to TUN from client {}", data.len(), assigned_ip);
-                    }
-                    Ok(PacketResult::WriteToNetwork(data)) => {
-                        // Send WireGuard response back to client atomically
-                        drop(tunnel);
-                        if let Err(e) = frame_wireguard_packet(&mut write_buf, &data) {
-                            log::warn!("Failed to frame packet for {}: {}", assigned_ip, e);
-                            continue;
-                        }
-                        let mut send = send_inbound.lock().await;
-                        if let Err(e) = send.write_all(&write_buf).await {
-                            log::warn!("Failed to send response to {}: {}", assigned_ip, e);
-                        }
-                    }
-                    Ok(_) => {}
-                    Err(e) => {
-                        log::warn!("Decapsulation error from {}: {}", assigned_ip, e);
-                    }
+                // Write directly to TUN
+                let mut writer = tun_writer.lock().await;
+                if let Err(e) = writer.write_all(packet).await {
+                     log::warn!("Failed to write to TUN: {}", e);
                 }
+                log::trace!("Wrote {} bytes to TUN from client {}", packet.len(), assigned_ip);
             }
         });
 
-        // Spawn timer task for WireGuard keepalives
+        // Timer task is now just a placeholder/cleanup since we don't have WG timers
         let timer_handle = tokio::spawn(async move {
-            let mut write_buf = Vec::with_capacity(1 + 4 + MAX_WG_PACKET_SIZE);
-            loop {
-                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-                let mut tunnel = tunnel_timers.lock().await;
-                let results = tunnel.update_timers();
-                drop(tunnel);
-
-                for result in results {
-                    match result {
-                        PacketResult::WriteToNetwork(data) => {
-                            if let Err(e) = frame_wireguard_packet(&mut write_buf, &data) {
-                                log::warn!("Failed to frame timer packet: {}", e);
-                                continue;
-                            }
-                            let mut send = wg_send.lock().await;
-                            if let Err(e) = send.write_all(&write_buf).await {
-                                log::warn!("Failed to send timer packet: {}", e);
-                                return;
-                            }
-                        }
-                        PacketResult::Error(e) => {
-                            log::warn!("Timer error: {}", e);
-                        }
-                        _ => {}
-                    }
-                }
-            }
+            std::future::pending::<()>().await;
         });
 
         // Wait for either task to complete
@@ -887,11 +864,11 @@ impl VpnServer {
             let packet = &buf[..n];
 
             // Extract destination IP from packet (IPv4 or IPv6)
-            let endpoint_id = match extract_dest_ip(packet) {
+            let (endpoint_id, device_id) = match extract_dest_ip(packet) {
                 Some(PacketDest::V4(dest_ip)) => {
                     let ip_map = self.ip_to_endpoint.read().await;
-                    match ip_map.get(&dest_ip).map(|&(id, _)| id) {
-                        Some(id) => id,
+                    match ip_map.get(&dest_ip).map(|&(id, dev)| (id, dev)) {
+                        Some(res) => res,
                         None => {
                             log::trace!("No client for destination IPv4 {}", dest_ip);
                             continue;
@@ -900,8 +877,8 @@ impl VpnServer {
                 }
                 Some(PacketDest::V6(dest_ip)) => {
                     let ip6_map = self.ip6_to_endpoint.read().await;
-                    match ip6_map.get(&dest_ip).map(|&(id, _)| id) {
-                        Some(id) => id,
+                    match ip6_map.get(&dest_ip).map(|&(id, dev)| (id, dev)) {
+                        Some(res) => res,
                         None => {
                             log::trace!("No client for destination IPv6 {}", dest_ip);
                             continue;
@@ -913,38 +890,36 @@ impl VpnServer {
                     continue;
                 }
             };
+            
+            let client_key = (endpoint_id, device_id);
 
             // Get client state
             let clients = self.clients.read().await;
-            let client = match clients.get(&endpoint_id) {
+            let client = match clients.get(&client_key) {
                 Some(c) => c,
                 None => {
-                    log::trace!("Client {} not found", endpoint_id);
+                    log::trace!("Client {} dev {} not found", endpoint_id, device_id);
                     continue;
                 }
             };
 
+            // Directly frame and send packet
+            if let Err(e) = frame_ip_packet(&mut write_buf, packet) {
+                 log::warn!("Failed to frame packet for {} dev {}: {}", endpoint_id, device_id, e);
+                 continue;
+            }
+            let mut send = client.send_stream.lock().await;
+            if let Err(e) = send.write_all(&write_buf).await {
+                log::warn!("Failed to send to client {} dev {}: {}", endpoint_id, device_id, e);
+                continue;
+            }
+            log::trace!("Sent {} bytes to client {} dev {}", packet.len(), endpoint_id, device_id);
+            // Ignore logic for encryption below
+            /*
             // Encrypt packet with client's WireGuard tunnel
             let mut tunnel = client.tunnel.lock().await;
-            match tunnel.encapsulate(packet) {
-                Ok(PacketResult::WriteToNetwork(data)) => {
-                    // Send encrypted packet to client via iroh stream atomically
-                    if let Err(e) = frame_wireguard_packet(&mut write_buf, &data) {
-                        log::warn!("Failed to frame packet for {}: {}", endpoint_id, e);
-                        continue;
-                    }
-                    let mut send = client.send_stream.lock().await;
-                    if let Err(e) = send.write_all(&write_buf).await {
-                        log::warn!("Failed to send to client {}: {}", endpoint_id, e);
-                        continue;
-                    }
-                    log::trace!("Sent {} bytes to client {}", data.len(), endpoint_id);
-                }
-                Ok(_) => {}
-                Err(e) => {
-                    log::warn!("Encapsulation error for {}: {}", endpoint_id, e);
-                }
-            }
+            match tunnel.encapsulate(packet) { ... }
+            */
         }
 
         Ok(())
@@ -1016,20 +991,20 @@ mod tests {
         let id1 = random_endpoint_id();
         let id2 = random_endpoint_id();
 
-        let ip1 = pool.allocate(id1).unwrap();
-        let ip2 = pool.allocate(id2).unwrap();
+        let ip1 = pool.allocate(id1, 1).unwrap();
+        let ip2 = pool.allocate(id2, 1).unwrap();
 
         assert_eq!(ip1, Ipv4Addr::new(10, 0, 0, 2));
         assert_eq!(ip2, Ipv4Addr::new(10, 0, 0, 3));
 
         // Re-allocate same client should return same IP
-        let ip1_again = pool.allocate(id1).unwrap();
+        let ip1_again = pool.allocate(id1, 1).unwrap();
         assert_eq!(ip1, ip1_again);
 
         // Release and reallocate
-        pool.release(&id1);
+        pool.release(&id1, 1);
         let id3 = random_endpoint_id();
-        let ip3 = pool.allocate(id3).unwrap();
+        let ip3 = pool.allocate(id3, 1).unwrap();
         assert_eq!(ip3, ip1); // Should reuse released IP
     }
 
@@ -1043,10 +1018,10 @@ mod tests {
         let id1 = random_endpoint_id();
         let id2 = random_endpoint_id();
 
-        let ip1 = pool.allocate(id1);
+        let ip1 = pool.allocate(id1, 1);
         assert!(ip1.is_some());
 
-        let ip2 = pool.allocate(id2);
+        let ip2 = pool.allocate(id2, 1);
         assert!(ip2.is_none()); // Pool exhausted
     }
 
@@ -1118,20 +1093,20 @@ mod tests {
         let id1 = random_endpoint_id();
         let id2 = random_endpoint_id();
 
-        let ip1 = pool.allocate(id1).unwrap();
-        let ip2 = pool.allocate(id2).unwrap();
+        let ip1 = pool.allocate(id1, 1).unwrap();
+        let ip2 = pool.allocate(id2, 1).unwrap();
 
         assert_eq!(ip1, "fd00::2".parse::<Ipv6Addr>().unwrap());
         assert_eq!(ip2, "fd00::3".parse::<Ipv6Addr>().unwrap());
 
         // Re-allocate same client should return same IP
-        let ip1_again = pool.allocate(id1).unwrap();
+        let ip1_again = pool.allocate(id1, 1).unwrap();
         assert_eq!(ip1, ip1_again);
 
         // Release and reallocate
-        pool.release(&id1);
+        pool.release(&id1, 1);
         let id3 = random_endpoint_id();
-        let ip3 = pool.allocate(id3).unwrap();
+        let ip3 = pool.allocate(id3, 1).unwrap();
         assert_eq!(ip3, ip1); // Should reuse released IP
     }
 
@@ -1145,10 +1120,10 @@ mod tests {
         let id1 = random_endpoint_id();
         let id2 = random_endpoint_id();
 
-        let ip1 = pool.allocate(id1);
+        let ip1 = pool.allocate(id1, 1);
         assert!(ip1.is_some());
 
-        let ip2 = pool.allocate(id2);
+        let ip2 = pool.allocate(id2, 1);
         assert!(ip2.is_none()); // Pool exhausted
     }
 }
