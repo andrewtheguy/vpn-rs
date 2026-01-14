@@ -304,22 +304,20 @@ impl VpnClient {
         // Spawn outbound task (TUN -> frame IP packet -> channel -> writer task)
         // Returns error reason if task exits due to an error.
         //
-        // Memory note: Each packet requires a small allocation (~MTU + 5 bytes for framing).
-        // We allocate a fresh BytesMut per packet and freeze() it for the channel.
-        // Buffer size is MTU-based (~1.5KB), and allocations are typically served from
-        // thread-local caches, making them fast.
+        // Memory note: Each packet requires a small allocation (5 bytes framing + packet length).
+        // We allocate based on actual packet size to avoid over-allocation for small packets.
+        // Most allocations are small and served from thread-local caches, making them fast.
         let mut outbound_handle: tokio::task::JoinHandle<Option<String>> = tokio::spawn(async move {
             let mut read_buf = vec![0u8; buffer_size];
-            // Frame capacity: 1 byte type + 4 byte length + packet data (up to buffer_size/MTU)
-            let frame_capacity = 1 + 4 + buffer_size;
             loop {
                 match tun_reader.read(&mut read_buf).await {
                     Ok(n) if n > 0 => {
                         let packet = &read_buf[..n];
 
-                        // Allocate fresh buffer for this packet.
-                        // Small allocations (~1.5KB) are served from thread-local caches.
-                        let mut write_buf = BytesMut::with_capacity(frame_capacity);
+                        // Allocate buffer sized to actual packet (1 byte type + 4 byte length + packet).
+                        // Avoids over-allocation for small packets; allocator serves from thread-local caches.
+                        let frame_size = 1 + 4 + n;
+                        let mut write_buf = BytesMut::with_capacity(frame_size);
 
                         // Frame IP packet for transmission (writes into write_buf)
                         if let Err(e) = frame_ip_packet(&mut write_buf, packet) {

@@ -1048,18 +1048,14 @@ impl VpnServer {
 
     /// Run the TUN reader - reads packets from TUN and routes to clients.
     ///
-    /// Memory note: Each packet requires a small allocation (~MTU + 5 bytes for framing).
-    /// We allocate a fresh BytesMut per packet and freeze() it for the channel.
-    /// Buffer size is MTU-based (~1.5KB), and allocations are typically served from
-    /// thread-local caches, making them fast.
+    /// Memory note: Each packet requires a small allocation (5 bytes framing + packet length).
+    /// We allocate based on actual packet size to avoid over-allocation for small packets.
+    /// Most allocations are small and served from thread-local caches, making them fast.
     async fn run_tun_reader(&self, mut tun_reader: crate::device::TunReader) -> VpnResult<()> {
         log::info!("TUN reader started");
 
         let buffer_size = tun_reader.buffer_size();
         let mut buf = vec![0u8; buffer_size];
-
-        // Frame capacity: 1 byte type + 4 byte length + packet data (up to buffer_size/MTU)
-        let frame_capacity = 1 + 4 + buffer_size;
 
         loop {
             // Read packet from TUN device
@@ -1113,9 +1109,10 @@ impl VpnServer {
                 }
             };
 
-            // Allocate fresh buffer for this packet.
-            // Small allocations (~1.5KB) are served from thread-local caches.
-            let mut write_buf = BytesMut::with_capacity(frame_capacity);
+            // Allocate buffer sized to actual packet (1 byte type + 4 byte length + packet).
+            // Avoids over-allocation for small packets; allocator serves from thread-local caches.
+            let frame_size = 1 + 4 + n;
+            let mut write_buf = BytesMut::with_capacity(frame_size);
 
             // Frame packet for transmission (writes into write_buf)
             if let Err(e) = frame_ip_packet(&mut write_buf, packet) {
