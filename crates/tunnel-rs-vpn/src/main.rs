@@ -121,7 +121,8 @@ enum Command {
         #[arg(long)]
         auth_token_file: Option<PathBuf>,
 
-        /// IPv4 route CIDRs through the VPN (at least one required, repeatable)
+        /// Additional IPv4 route CIDRs through the VPN (optional, repeatable).
+        /// The VPN subnet is always routed by default.
         /// Full tunnel: --route 0.0.0.0/0
         /// Split tunnel: --route 192.168.1.0/24 --route 10.0.0.0/8
         #[arg(long = "route")]
@@ -441,7 +442,7 @@ async fn run_vpn_client(resolved: ResolvedVpnClientConfig) -> Result<()> {
         );
     };
 
-    // Parse IPv4 routes
+    // Parse IPv4 routes (optional - VPN subnet is always routed by default)
     let parsed_routes: Vec<Ipv4Net> = resolved
         .routes
         .iter()

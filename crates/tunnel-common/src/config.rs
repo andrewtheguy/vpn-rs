@@ -952,14 +952,8 @@ impl VpnClientConfig {
                 );
             }
 
-            // Validate routes: at least one IPv4 route required, valid CIDR format
+            // Validate routes: valid CIDR format (optional - VPN subnet routed by default)
             if let Some(ref routes) = iroh.routes {
-                if routes.is_empty() {
-                    anyhow::bail!(
-                        "[iroh] At least one route is required.\n\
-                         Example: routes = [\"0.0.0.0/0\"] for full tunnel"
-                    );
-                }
                 for route in routes {
                     validate_cidr(route).with_context(|| {
                         format!("[iroh] Invalid route CIDR '{}'", route)
@@ -1516,15 +1510,8 @@ impl VpnClientConfigBuilder {
         let mtu = self.mtu.unwrap_or(DEFAULT_VPN_MTU);
         validate_mtu(mtu, "config")?;
 
-        // Require at least one route (defines which traffic goes through VPN)
+        // Routes are optional - VPN subnet is always routed by default
         let routes = self.routes.unwrap_or_default();
-        if routes.is_empty() {
-            anyhow::bail!(
-                "At least one route is required.\n\
-                 Specify via CLI: --route 0.0.0.0/0 (full tunnel) or --route 10.0.0.0/24 (split tunnel)\n\
-                 Or in config: routes = [\"0.0.0.0/0\"]"
-            );
-        }
 
         // Validate route CIDR format
         for route in &routes {

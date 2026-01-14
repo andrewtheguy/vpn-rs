@@ -258,9 +258,9 @@ impl VpnClient {
         let (mut tun_reader, mut tun_writer) = tun_device.split()?;
         let buffer_size = tun_reader.buffer_size();
 
-        // Wrap streams in Arc<Mutex> for sharing
+        // Wrap data_send in Arc<Mutex> for sharing between outbound and heartbeat tasks
         let data_send = Arc::new(Mutex::new(data_send));
-        let data_recv = Arc::new(Mutex::new(data_recv));
+        // data_recv is only used by inbound task, so no wrapping needed
 
         // Clone for tasks
         let send_outbound = data_send.clone();
@@ -302,15 +302,18 @@ impl VpnClient {
         });
 
         // Spawn inbound task (QUIC stream -> TUN)
+        // data_recv is moved into this task (no Arc/Mutex needed - single owner)
         let inbound_start_time = start_time;
         let mut inbound_handle = tokio::spawn(async move {
+            const MAX_TUN_WRITE_FAILURES: u32 = 10;
+            let mut data_recv = data_recv;
             let mut type_buf = [0u8; 1];
             let mut len_buf = [0u8; 4];
             let mut data_buf = vec![0u8; MAX_IP_PACKET_SIZE];
+            let mut consecutive_tun_failures = 0u32;
             loop {
-                let mut recv = data_recv.lock().await;
                 // Read message type
-                match recv.read_exact(&mut type_buf).await {
+                match data_recv.read_exact(&mut type_buf).await {
                     Ok(()) => {}
                     Err(e) => {
                         log::error!("Failed to read message type: {}", e);
@@ -331,7 +334,6 @@ impl VpnClient {
                 match msg_type {
                     DataMessageType::HeartbeatPong => {
                         // Update last pong time
-                        drop(recv);
                         let now = inbound_start_time.elapsed().as_millis() as u64;
                         last_pong_inbound.store(now, Ordering::Relaxed);
                         log::trace!("Heartbeat pong received");
@@ -339,7 +341,6 @@ impl VpnClient {
                     }
                     DataMessageType::HeartbeatPing => {
                         // Client shouldn't receive pings, ignore
-                        drop(recv);
                         log::trace!("Unexpected heartbeat ping received");
                         continue;
                     }
@@ -349,7 +350,7 @@ impl VpnClient {
                 }
 
                 // Read length prefix for IP packet
-                match recv.read_exact(&mut len_buf).await {
+                match data_recv.read_exact(&mut len_buf).await {
                     Ok(()) => {}
                     Err(e) => {
                         log::error!("Failed to read IP packet length: {}", e);
@@ -363,19 +364,34 @@ impl VpnClient {
                 }
 
                 // Read packet data
-                match recv.read_exact(&mut data_buf[..len]).await {
+                match data_recv.read_exact(&mut data_buf[..len]).await {
                     Ok(()) => {}
                     Err(e) => {
                         log::error!("Failed to read IP packet: {}", e);
                         break;
                     }
                 }
-                drop(recv); // Release lock before processing
 
                 let packet = &data_buf[..len];
                 // Directly write to TUN (packet is already decrypted/raw IP)
                 if let Err(e) = tun_writer.write_all(packet).await {
-                     log::warn!("Failed to write to TUN: {}", e);
+                    consecutive_tun_failures += 1;
+                    if consecutive_tun_failures >= MAX_TUN_WRITE_FAILURES {
+                        log::error!(
+                            "Too many consecutive TUN write failures ({}), disconnecting: {}",
+                            consecutive_tun_failures,
+                            e
+                        );
+                        break;
+                    }
+                    log::warn!(
+                        "Failed to write to TUN ({}/{}): {}",
+                        consecutive_tun_failures,
+                        MAX_TUN_WRITE_FAILURES,
+                        e
+                    );
+                } else {
+                    consecutive_tun_failures = 0;
                 }
             }
         });
