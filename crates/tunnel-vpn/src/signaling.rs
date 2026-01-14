@@ -221,10 +221,14 @@ impl DataMessageType {
     }
 
     /// Convert to byte value.
-    pub fn as_byte(self) -> u8 {
+    pub const fn as_byte(self) -> u8 {
         self as u8
     }
 }
+
+/// Static byte slices for heartbeat messages (avoids per-send allocation).
+pub const HEARTBEAT_PING_BYTE: &[u8] = &[DataMessageType::HeartbeatPing.as_byte()];
+pub const HEARTBEAT_PONG_BYTE: &[u8] = &[DataMessageType::HeartbeatPong.as_byte()];
 
 /// Error returned when converting an invalid byte to `DataMessageType`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

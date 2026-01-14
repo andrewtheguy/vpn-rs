@@ -11,7 +11,7 @@ use crate::error::{VpnError, VpnResult};
 use crate::lock::VpnLock;
 use crate::signaling::{
     frame_ip_packet, read_message, write_message, DataMessageType, VpnHandshake,
-    VpnHandshakeResponse, MAX_HANDSHAKE_SIZE, VPN_ALPN,
+    VpnHandshakeResponse, HEARTBEAT_PING_BYTE, MAX_HANDSHAKE_SIZE, VPN_ALPN,
 };
 use bytes::{Bytes, BytesMut};
 use ipnet::{Ipv4Net, Ipv6Net};
@@ -309,8 +309,10 @@ impl VpnClient {
                             continue;
                         }
 
-                        // Freeze into Bytes for zero-copy send, then reserve for next packet
+                        // Freeze into Bytes for zero-copy send, then reserve capacity for next packet
+                        // to avoid reallocation when frame_ip_packet writes up to MAX_IP_PACKET_SIZE
                         let bytes = write_buf.split().freeze();
+                        write_buf.reserve(1 + 4 + MAX_IP_PACKET_SIZE);
 
                         // Send via channel to writer task (blocking send to apply backpressure)
                         if outbound_tx.send(bytes).await.is_err() {
@@ -447,8 +449,8 @@ impl VpnClient {
                     ));
                 }
 
-                // Send ping via channel to writer task (1 byte allocation, negligible for heartbeats)
-                let ping = Bytes::copy_from_slice(&[DataMessageType::HeartbeatPing.as_byte()]);
+                // Send ping via channel to writer task (static Bytes, zero allocation)
+                let ping = Bytes::from_static(HEARTBEAT_PING_BYTE);
                 if outbound_tx_heartbeat.send(ping).await.is_err() {
                     log::warn!("Failed to send heartbeat ping: channel closed");
                     return None; // Normal exit, channel closed

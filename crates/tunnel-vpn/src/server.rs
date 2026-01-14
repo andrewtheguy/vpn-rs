@@ -10,7 +10,7 @@ use crate::device::{TunConfig, TunDevice, TunWriter};
 use crate::error::{VpnError, VpnResult};
 use crate::signaling::{
     frame_ip_packet, read_message, write_message, DataMessageType, VpnHandshake,
-    VpnHandshakeResponse, MAX_HANDSHAKE_SIZE,
+    VpnHandshakeResponse, HEARTBEAT_PONG_BYTE, MAX_HANDSHAKE_SIZE,
 };
 use bytes::{Bytes, BytesMut};
 use dashmap::DashMap;
@@ -756,9 +756,9 @@ impl VpnServer {
 
                 match msg_type {
                     DataMessageType::HeartbeatPing => {
-                        // Respond with pong via the writer task channel (1 byte allocation, negligible)
+                        // Respond with pong via the writer task channel (static Bytes, zero allocation)
                         log::trace!("Heartbeat ping from {}", assigned_ip);
-                        let pong = Bytes::copy_from_slice(&[DataMessageType::HeartbeatPong.as_byte()]);
+                        let pong = Bytes::from_static(HEARTBEAT_PONG_BYTE);
                         if packet_tx.send(pong).await.is_err() {
                             log::warn!("Failed to send heartbeat pong to {}: channel closed", assigned_ip);
                             break;
@@ -883,9 +883,23 @@ impl VpnServer {
         // - Writer task signals an error (QUIC write failure)
         // This ensures immediate cleanup on writer failure instead of waiting for heartbeat timeout.
         tokio::select! {
-            _ = &mut inbound_handle => {
-                // Client disconnected normally or stream error
-                log::trace!("Client {} inbound task completed", assigned_ip);
+            inbound_result = &mut inbound_handle => {
+                // Inspect JoinHandle result to catch panics
+                match inbound_result {
+                    Ok(()) => {
+                        // Client disconnected normally or stream error
+                        log::trace!("Client {} inbound task completed", assigned_ip);
+                    }
+                    Err(e) if e.is_panic() => {
+                        log::error!("Client {} inbound task panicked: {}", assigned_ip, e);
+                        return Err(VpnError::ConnectionLost(format!("inbound task panicked: {}", e)));
+                    }
+                    Err(e) => {
+                        // Cancelled or other JoinError
+                        log::debug!("Client {} inbound task failed: {}", assigned_ip, e);
+                        return Err(VpnError::ConnectionLost(format!("inbound task failed: {}", e)));
+                    }
+                }
             }
             writer_err = writer_error_rx => {
                 // Writer task failed - abort inbound task and return error
@@ -977,8 +991,10 @@ impl VpnServer {
                 continue;
             }
 
-            // Freeze into Bytes for zero-copy send, then reserve for next packet
+            // Freeze into Bytes for zero-copy send, then reserve capacity for next packet
+            // to avoid reallocation when frame_ip_packet writes up to buffer_size
             let bytes = write_buf.split().freeze();
+            write_buf.reserve(1 + 4 + buffer_size);
 
             // Send via channel - try non-blocking first, fall back to awaited send if full
             // to apply backpressure rather than silently dropping packets
