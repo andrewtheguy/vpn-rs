@@ -20,7 +20,7 @@ use std::collections::HashMap;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
-use tokio::sync::{mpsc, Mutex, RwLock};
+use tokio::sync::{mpsc, oneshot, Mutex, RwLock};
 
 /// Maximum IP packet size.
 const MAX_IP_PACKET_SIZE: usize = 65536;
@@ -584,17 +584,35 @@ impl VpnServer {
         // Uses Bytes for zero-copy sends (freeze BytesMut instead of cloning Vec).
         let (packet_tx, mut packet_rx) = mpsc::channel::<Bytes>(CLIENT_PACKET_CHANNEL_SIZE);
 
-        // Spawn dedicated writer task that owns the SendStream
+        // Create oneshot channel for writer error signaling.
+        // When writer fails, it sends the error through this channel to trigger
+        // immediate cleanup instead of waiting for heartbeat timeout.
+        let (writer_error_tx, writer_error_rx) = oneshot::channel::<String>();
+
+        // Spawn dedicated writer task that owns the SendStream.
+        // Returns error through oneshot channel for immediate cleanup propagation.
         let writer_assigned_ip = assigned_ip;
         let mut data_send = data_send;
-        tokio::spawn(async move {
-            while let Some(data) = packet_rx.recv().await {
-                if let Err(e) = data_send.write_all(&data).await {
-                    log::warn!("Failed to write to client {}: {}", writer_assigned_ip, e);
-                    break;
+        let writer_handle = tokio::spawn(async move {
+            let error = loop {
+                match packet_rx.recv().await {
+                    Some(data) => {
+                        if let Err(e) = data_send.write_all(&data).await {
+                            log::warn!("Failed to write to client {}: {}", writer_assigned_ip, e);
+                            break Some(format!("QUIC write error: {}", e));
+                        }
+                    }
+                    None => {
+                        // Channel closed (normal shutdown)
+                        break None;
+                    }
                 }
-            }
+            };
             log::trace!("Writer task for {} exiting", writer_assigned_ip);
+            // Signal error to trigger immediate cleanup (ignore send error if receiver dropped)
+            if let Some(err_msg) = error {
+                let _ = writer_error_tx.send(err_msg);
+            }
         });
 
         // Generate unique session ID for this connection
@@ -634,16 +652,21 @@ impl VpnServer {
         let ip_to_endpoint = self.ip_to_endpoint.clone();
         let ip6_to_endpoint = self.ip6_to_endpoint.clone();
 
-        // Run client handler (blocks until client disconnects)
+        // Run client handler (blocks until client disconnects or writer fails)
         // packet_tx is used for heartbeat responses (sent via the writer task)
+        // writer_error_rx triggers immediate cleanup on write failures
         let result = Self::handle_client_data(
             packet_tx,
             data_recv,
             assigned_ip,
             assigned_ip6,
             tun_writer,
+            writer_error_rx,
         )
         .await;
+
+        // Abort writer task if still running (cleanup on any exit path)
+        writer_handle.abort();
 
         if let Err(ref e) = result {
             log::error!("Client {} data error: {}", remote_id, e);
@@ -691,15 +714,21 @@ impl VpnServer {
     }
 
     /// Handle client data stream.
+    ///
+    /// This function processes incoming data from the client and responds to heartbeats.
+    /// It exits when either:
+    /// - The client disconnects (inbound stream closes)
+    /// - The writer task fails (error received via writer_error_rx)
     async fn handle_client_data(
         packet_tx: mpsc::Sender<Bytes>,
         mut data_recv: iroh::endpoint::RecvStream,
         assigned_ip: Ipv4Addr,
         assigned_ip6: Option<Ipv6Addr>,
         tun_writer: Arc<Mutex<TunWriter>>,
+        writer_error_rx: oneshot::Receiver<String>,
     ) -> VpnResult<()> {
         // Spawn inbound task (QUIC stream -> TUN)
-        let inbound_handle = tokio::spawn(async move {
+        let mut inbound_handle = tokio::spawn(async move {
             let mut type_buf = [0u8; 1];
             let mut len_buf = [0u8; 4];
             let mut data_buf = vec![0u8; MAX_IP_PACKET_SIZE];
@@ -849,8 +878,30 @@ impl VpnServer {
             }
         });
 
-        // Wait for inbound task to complete (client disconnection)
-        let _ = inbound_handle.await;
+        // Wait for either:
+        // - Inbound task completes (client disconnection or stream error)
+        // - Writer task signals an error (QUIC write failure)
+        // This ensures immediate cleanup on writer failure instead of waiting for heartbeat timeout.
+        tokio::select! {
+            _ = &mut inbound_handle => {
+                // Client disconnected normally or stream error
+                log::trace!("Client {} inbound task completed", assigned_ip);
+            }
+            writer_err = writer_error_rx => {
+                // Writer task failed - abort inbound task and return error
+                inbound_handle.abort();
+                match writer_err {
+                    Ok(err_msg) => {
+                        log::debug!("Client {} writer failed: {}", assigned_ip, err_msg);
+                        return Err(VpnError::ConnectionLost(err_msg));
+                    }
+                    Err(_) => {
+                        // Sender dropped without error (normal shutdown via channel close)
+                        log::trace!("Client {} writer channel closed", assigned_ip);
+                    }
+                }
+            }
+        }
 
         Ok(())
     }
