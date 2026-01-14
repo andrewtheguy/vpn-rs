@@ -288,8 +288,6 @@ impl VpnServer {
         })
     }
 
-    /// Get the server's public key (noop now).
-    // pub fn public_key(&self) -> WgPublicKey { ... } // Removed
 
     /// Get the server's VPN IP address.
     pub async fn server_ip(&self) -> Ipv4Addr {
