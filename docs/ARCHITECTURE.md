@@ -547,7 +547,7 @@ Clients are keyed by `(EndpointId, device_id)`, so an attacker cannot hijack a s
 
 **Collision Handling:**
 
-The 64-bit ID space provides a ~2^32 birthday bound for collisions, which is sufficient for session tracking across reasonable client counts (thousands of concurrent sessions). Unpredictability is not a security requirement since `device_id` only differentiates sessions from the same authenticated endpoint.
+The 64-bit ID space provides a ~2^32 birthday bound for collisions, which is sufficient for session tracking across reasonable client counts (thousands of concurrent sessions). Unpredictability is not a security requirement since `device_id` only differentiates sessions from the same authenticated endpoint. We use `rand::thread_rng()` (a CSPRNG) for defense-in-depth: it avoids predictable collision patterns, reduces correlation/timing attack surface, and makes accidental collisions less likely in practice.
 
 ### IP Pool Management
 
@@ -600,7 +600,7 @@ graph TB
     style D6 fill:#BBDEFB
 ```
 
-When `network6` is configured, each client receives both an IPv4 and IPv6 address. The IPv6 pool works identically to the IPv4 pool, with each client getting a single /128 address. Unlike IPv4, a /64 network provides an effectively unlimited address space (~18 quintillion addresses), so pool exhaustion is not a practical concern for IPv6.
+When `network6` is configured, each client receives both an IPv4 and IPv6 address. The IPv6 pool works identically to the IPv4 pool, with each client getting a single /128 address. Unlike IPv4, a /64 network provides an effectively unlimited address space (~18.4 quintillion (2^64) addresses), so pool exhaustion is not a practical concern for IPv6.
 
 ### Platform-Specific Details
 

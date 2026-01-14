@@ -132,6 +132,7 @@ impl IpPool {
 }
 
 /// IPv6 address pool for assigning /128 addresses to clients.
+#[derive(Debug)]
 struct Ip6Pool {
     /// Network CIDR (e.g., fd00::/64).
     network: Ipv6Net,
@@ -152,7 +153,21 @@ impl Ip6Pool {
     ///
     /// If `server_ip` is None, defaults to ::1 within the network.
     /// Client IPs start from the address after the server IP.
-    fn new(network: Ipv6Net, server_ip: Option<Ipv6Addr>) -> Self {
+    ///
+    /// Returns an error if the prefix length is >= 127 (/127 or /128), as these
+    /// networks have no usable addresses for client allocation.
+    fn new(network: Ipv6Net, server_ip: Option<Ipv6Addr>) -> VpnResult<Self> {
+        let prefix_len = network.prefix_len();
+
+        // /127 has only 2 addresses (server takes ::1, no room for clients)
+        // /128 is a single address (unusable for server + clients)
+        if prefix_len >= 127 {
+            return Err(VpnError::Config(format!(
+                "IPv6 prefix /{} is too small for VPN pool (need at least /126 for 1 client)",
+                prefix_len
+            )));
+        }
+
         let net_addr: u128 = network.network().into();
 
         // Server gets specified IP or defaults to ::1 within network
@@ -163,21 +178,18 @@ impl Ip6Pool {
         let next_ip = server_ip_u128 + 1;
 
         // Calculate max_ip based on prefix length
-        let host_bits: u32 = 128 - u32::from(network.prefix_len());
-        let max_ip = if host_bits > 127 {
-            u128::MAX
-        } else {
-            net_addr + ((1u128 << host_bits) - 1) - 1 // Exclude last address
-        };
+        let host_bits: u32 = 128 - u32::from(prefix_len);
+        // host_bits is guaranteed > 0 here since prefix_len < 127
+        let max_ip = net_addr + ((1u128 << host_bits) - 1) - 1; // Exclude last address
 
-        Self {
+        Ok(Self {
             network,
             server_ip,
             next_ip,
             max_ip,
             in_use: HashMap::new(),
             released: Vec::new(),
-        }
+        })
     }
 
     /// Get the server's IPv6 address.
@@ -253,9 +265,13 @@ impl VpnServer {
         let ip_pool = Arc::new(RwLock::new(IpPool::new(config.network, config.server_ip)));
 
         // Create IPv6 pool if configured (dual-stack)
-        let ip6_pool = config.network6.map(|network6| {
-            Arc::new(RwLock::new(Ip6Pool::new(network6, config.server_ip6)))
-        });
+        let ip6_pool = match config.network6 {
+            Some(network6) => Some(Arc::new(RwLock::new(Ip6Pool::new(
+                network6,
+                config.server_ip6,
+            )?))),
+            None => None,
+        };
 
         if let Some(ref pool) = ip6_pool {
             let pool_guard = pool.read().await;
@@ -1142,7 +1158,7 @@ mod tests {
     #[test]
     fn test_ip6_pool_allocation() {
         let network: Ipv6Net = "fd00::/120".parse().unwrap();
-        let mut pool = Ip6Pool::new(network, None);
+        let mut pool = Ip6Pool::new(network, None).unwrap();
 
         // Server should get ::1
         assert_eq!(pool.server_ip(), "fd00::1".parse::<Ipv6Addr>().unwrap());
@@ -1172,7 +1188,7 @@ mod tests {
     fn test_ip6_pool_exhaustion() {
         // Use a tiny /126 network (4 addresses: ::0 network, ::1 server, ::2 client, ::3 last)
         let network: Ipv6Net = "fd00::/126".parse().unwrap();
-        let mut pool = Ip6Pool::new(network, None);
+        let mut pool = Ip6Pool::new(network, None).unwrap();
 
         // Server uses ::1, only ::2 available for clients (::3 is excluded as last address)
         let id1 = random_endpoint_id();
@@ -1186,36 +1202,32 @@ mod tests {
     }
 
     #[test]
-    fn test_ip6_pool_exhaustion_slash127() {
-        // /127 network has only 2 addresses: ::0 (network) and ::1 (server)
-        // No addresses available for clients
+    fn test_ip6_pool_rejects_slash127() {
+        // /127 network has only 2 addresses - too small for server + clients
         let network: Ipv6Net = "fd00::/127".parse().unwrap();
-        let mut pool = Ip6Pool::new(network, None);
+        let result = Ip6Pool::new(network, None);
 
-        // Server takes ::1, leaving no addresses for clients
-        // (::0 is excluded as it would be < next_ip which starts at ::2)
-        assert_eq!(pool.server_ip(), "fd00::1".parse::<Ipv6Addr>().unwrap());
-
-        let id1 = random_endpoint_id();
-        let ip1 = pool.allocate(id1, 1);
-        assert!(ip1.is_none()); // No client addresses available in /127
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, VpnError::Config(_)),
+            "Expected Config error, got {:?}",
+            err
+        );
     }
 
     #[test]
-    fn test_ip6_pool_exhaustion_slash128() {
-        // /128 is a single-host network (just ::0)
-        // Server gets ::1 which is technically outside the /128 range
-        // No client addresses available
+    fn test_ip6_pool_rejects_slash128() {
+        // /128 is a single-address network - unusable for VPN pool
         let network: Ipv6Net = "fd00::/128".parse().unwrap();
-        let mut pool = Ip6Pool::new(network, None);
+        let result = Ip6Pool::new(network, None);
 
-        // Server IP is ::1 (outside the strict /128 but follows the convention)
-        assert_eq!(pool.server_ip(), "fd00::1".parse::<Ipv6Addr>().unwrap());
-
-        let id1 = random_endpoint_id();
-        let ip1 = pool.allocate(id1, 1);
-        // /128 has no usable client addresses - the max_ip calculation
-        // results in underflow (net_addr + 0 - 1), making allocation fail
-        assert!(ip1.is_none());
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, VpnError::Config(_)),
+            "Expected Config error, got {:?}",
+            err
+        );
     }
 }
