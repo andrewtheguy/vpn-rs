@@ -461,8 +461,9 @@ impl VpnServer {
         // Spawn dedicated TUN writer task that owns TunWriter exclusively.
         // All clients send validated packets through the channel; this task
         // performs the actual writes without any mutex contention.
+        // Store JoinHandle for graceful shutdown.
         let tun_writer_stats = self.stats.clone();
-        tokio::spawn(async move {
+        let tun_writer_handle = tokio::spawn(async move {
             log::info!("TUN writer task started");
             while let Some(packet) = tun_write_rx.recv().await {
                 if let Err(e) = tun_writer.write_all(&packet).await {
@@ -479,8 +480,9 @@ impl VpnServer {
         let server = Arc::new(self);
 
         // Spawn TUN reader task (reads from TUN, routes to clients)
+        // Store JoinHandle for graceful shutdown.
         let server_tun = server.clone();
-        tokio::spawn(async move {
+        let tun_reader_handle = tokio::spawn(async move {
             if let Err(e) = server_tun.run_tun_reader(tun_reader).await {
                 log::error!("TUN reader error: {}", e);
             }
@@ -505,6 +507,22 @@ impl VpnServer {
             }
         }
 
+        // Graceful shutdown: drop channel sender to signal TUN writer to exit,
+        // then await both tasks to ensure clean termination.
+        log::info!("Shutting down TUN tasks...");
+        drop(tun_write_tx);
+
+        // Abort TUN reader (it's blocked on TUN read, won't exit on its own)
+        tun_reader_handle.abort();
+
+        // Wait for TUN writer to drain any remaining packets and exit
+        if let Err(e) = tun_writer_handle.await {
+            if !e.is_cancelled() {
+                log::warn!("TUN writer task panicked: {}", e);
+            }
+        }
+
+        log::info!("TUN tasks shutdown complete");
         Ok(())
     }
 
