@@ -1,11 +1,9 @@
 //! VPN server implementation.
 //!
 //! The VPN server listens for incoming client connections via iroh,
-//! performs WireGuard key exchange, assigns IP addresses, and manages
-//! WireGuard tunnels for each connected client.
-//!
-//! WireGuard packets are tunneled through the iroh QUIC connection to handle
-//! NAT traversal automatically.
+//! assigns IP addresses from a pool, and manages direct IP-over-QUIC
+//! tunnels for each connected client. IP packets are framed and sent
+//! directly over the encrypted iroh QUIC connection.
 
 use crate::config::VpnServerConfig;
 use crate::device::{TunConfig, TunDevice, TunWriter};
@@ -14,8 +12,6 @@ use crate::signaling::{
     frame_ip_packet, read_message, write_message, DataMessageType, VpnHandshake,
     VpnHandshakeResponse, MAX_HANDSHAKE_SIZE,
 };
-// Removed WgTunnel, WgTunnelBuilder import
-// use crate::tunnel::{PacketResult, WgTunnel, WgTunnelBuilder};
 use ipnet::{Ipv4Net, Ipv6Net};
 use iroh::endpoint::SendStream;
 use iroh::{Endpoint, EndpointId};
@@ -231,8 +227,6 @@ impl Ip6Pool {
 pub struct VpnServer {
     /// Server configuration.
     config: VpnServerConfig,
-    // Removed keypair
-    // keypair: WgKeyPair,
     /// IPv4 address pool.
     ip_pool: Arc<RwLock<IpPool>>,
     /// IPv6 address pool (None if IPv4-only mode).
@@ -254,13 +248,7 @@ pub struct VpnServer {
 
 impl VpnServer {
     /// Create a new VPN server.
-    ///
-    /// WireGuard keypair is always ephemeral (generated fresh each server start).
-    /// This allows clients to use ephemeral keys without conflicts.
     pub async fn new(config: VpnServerConfig) -> VpnResult<Self> {
-        // No WG keypair needed
-        // let keypair = WgKeyPair::generate();
-
         // Create IPv4 pool
         let ip_pool = Arc::new(RwLock::new(IpPool::new(config.network, config.server_ip)));
 
@@ -276,7 +264,6 @@ impl VpnServer {
 
         Ok(Self {
             config,
-            // keypair,
             ip_pool,
             ip6_pool,
             clients: Arc::new(RwLock::new(HashMap::new())),
@@ -521,18 +508,6 @@ impl VpnServer {
         let network = pool.network();
         drop(pool);
 
-        // Create WireGuard tunnel for this client - REMOVED
-        /* let peer_public_key = client_wg_public_key.to_public_key();
-        let dummy_endpoint: SocketAddr = "127.0.0.1:51820".parse().unwrap();
-        let tunnel = WgTunnelBuilder::new()
-            .keypair(self.keypair.clone())
-            .peer_public_key(peer_public_key)
-            .peer_endpoint(dummy_endpoint)
-            .keepalive_secs(Some(self.config.keepalive_secs))
-            .build()?;
-
-        let tunnel = Arc::new(Mutex::new(tunnel)); */
-
         // Send response - include IPv6 info if allocated
         let response = if let Some(ip6) = assigned_ip6 {
             let ip6_pool = self.ip6_pool.as_ref().unwrap().read().await;
@@ -572,7 +547,7 @@ impl VpnServer {
             );
         }
 
-        // Accept data stream for WireGuard packets
+        // Accept data stream for IP packets
         let (wg_send, wg_recv) = connection
             .accept_bi()
             .await
@@ -587,15 +562,12 @@ impl VpnServer {
         let session_id = self.next_session_id.fetch_add(1, Ordering::Relaxed);
 
         // Store client state (including send stream for TUN handler to use)
-        // Store client state (including send stream for TUN handler to use)
         let client_state = ClientState {
             session_id,
             assigned_ip,
             assigned_ip6,
-            // wg_public_key: peer_public_key, // Removed
             device_id,
             endpoint_id: remote_id,
-            // tunnel: tunnel.clone(), // Removed
             send_stream: wg_send.clone(),
         };
 
@@ -738,16 +710,12 @@ impl VpnServer {
 
     /// Handle client data stream.
     async fn handle_client_data(
-        // tunnel: Arc<Mutex<WgTunnel>>,
         wg_send: Arc<Mutex<SendStream>>,
         mut wg_recv: iroh::endpoint::RecvStream,
         assigned_ip: Ipv4Addr,
         assigned_ip6: Option<Ipv6Addr>,
         tun_writer: Arc<Mutex<TunWriter>>,
     ) -> VpnResult<()> {
-        // let tunnel_inbound = tunnel.clone();
-        // let tunnel_timers = tunnel.clone();
-        // let send_inbound = wg_send.clone();
         let send_heartbeat = wg_send.clone();
 
         // Spawn inbound task (iroh stream -> TUN)
@@ -872,16 +840,8 @@ impl VpnServer {
             }
         });
 
-        // Timer task is now just a placeholder/cleanup since we don't have WG timers
-        let timer_handle = tokio::spawn(async move {
-            std::future::pending::<()>().await;
-        });
-
-        // Wait for either task to complete
-        tokio::select! {
-            _ = inbound_handle => {}
-            _ = timer_handle => {}
-        }
+        // Wait for inbound task to complete (client disconnection)
+        let _ = inbound_handle.await;
 
         Ok(())
     }
@@ -958,12 +918,6 @@ impl VpnServer {
                 continue;
             }
             log::trace!("Sent {} bytes to client {} dev {}", packet.len(), endpoint_id, device_id);
-            // Ignore logic for encryption below
-            /*
-            // Encrypt packet with client's WireGuard tunnel
-            let mut tunnel = client.tunnel.lock().await;
-            match tunnel.encapsulate(packet) { ... }
-            */
         }
 
         Ok(())
