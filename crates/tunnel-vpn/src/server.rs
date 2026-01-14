@@ -1110,6 +1110,14 @@ impl VpnServer {
                 }
             };
 
+            // Clear buffer and ensure capacity before framing.
+            // This prevents partial/garbage data from a previous failed frame_ip_packet
+            // from corrupting the next frame.
+            write_buf.clear();
+            if write_buf.capacity() < frame_capacity {
+                write_buf.reserve(frame_capacity);
+            }
+
             // Frame packet for transmission (writes into write_buf)
             if let Err(e) = frame_ip_packet(&mut write_buf, packet) {
                 log::warn!(
@@ -1118,6 +1126,7 @@ impl VpnServer {
                     device_id,
                     e
                 );
+                write_buf.clear(); // Discard any partial data written before error
                 continue;
             }
 
@@ -1125,11 +1134,6 @@ impl VpnServer {
             // split().freeze() creates a Bytes that references the allocation.
             // The BytesMut is left empty with no capacity.
             let bytes = write_buf.split().freeze();
-
-            // Restore capacity for next packet. Since the Bytes still references
-            // the old allocation (until client's writer consumes it), this allocates
-            // new memory. With MTU-sized buffers (~1.5KB), this is fast.
-            write_buf.reserve(frame_capacity);
 
             // Send via channel - try non-blocking first
             match packet_tx.try_send(bytes) {
