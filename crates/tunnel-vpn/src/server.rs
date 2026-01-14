@@ -1049,9 +1049,9 @@ impl VpnServer {
     /// Run the TUN reader - reads packets from TUN and routes to clients.
     ///
     /// Memory note: Each packet requires a small allocation (~MTU + 5 bytes for framing).
-    /// After split().freeze(), the Bytes holds the allocation until consumed by the client's
-    /// writer task. We size the buffer to MTU (not MAX_IP_PACKET_SIZE) to keep allocations
-    /// small (~1.5KB). The allocator typically serves these from thread-local caches.
+    /// We allocate a fresh BytesMut per packet and freeze() it for the channel.
+    /// Buffer size is MTU-based (~1.5KB), and allocations are typically served from
+    /// thread-local caches, making them fast.
     async fn run_tun_reader(&self, mut tun_reader: crate::device::TunReader) -> VpnResult<()> {
         log::info!("TUN reader started");
 
@@ -1060,7 +1060,6 @@ impl VpnServer {
 
         // Frame capacity: 1 byte type + 4 byte length + packet data (up to buffer_size/MTU)
         let frame_capacity = 1 + 4 + buffer_size;
-        let mut write_buf = BytesMut::with_capacity(frame_capacity);
 
         loop {
             // Read packet from TUN device
@@ -1114,13 +1113,9 @@ impl VpnServer {
                 }
             };
 
-            // Clear buffer and ensure capacity before framing.
-            // This prevents partial/garbage data from a previous failed frame_ip_packet
-            // from corrupting the next frame.
-            write_buf.clear();
-            if write_buf.capacity() < frame_capacity {
-                write_buf.reserve(frame_capacity);
-            }
+            // Allocate fresh buffer for this packet.
+            // Small allocations (~1.5KB) are served from thread-local caches.
+            let mut write_buf = BytesMut::with_capacity(frame_capacity);
 
             // Frame packet for transmission (writes into write_buf)
             if let Err(e) = frame_ip_packet(&mut write_buf, packet) {
@@ -1130,14 +1125,11 @@ impl VpnServer {
                     device_id,
                     e
                 );
-                write_buf.clear(); // Discard any partial data written before error
                 continue;
             }
 
-            // Freeze into Bytes for zero-copy send to client's writer task.
-            // split().freeze() creates a Bytes that references the allocation.
-            // The BytesMut is left empty with no capacity.
-            let bytes = write_buf.split().freeze();
+            // Freeze into Bytes for send to client's writer task.
+            let bytes = write_buf.freeze();
 
             // Send via channel - try non-blocking first
             match packet_tx.try_send(bytes) {
@@ -1717,8 +1709,6 @@ mod tests {
 
     #[test]
     fn test_stats_backpressure_and_drop_simulation() {
-        use tokio::sync::mpsc;
-
         // Simulate the backpressure/drop logic from run_tun_reader
         let stats = VpnServerStats::new();
 
@@ -1796,7 +1786,6 @@ mod tests {
 
     #[test]
     fn test_stats_concurrent_increments() {
-        use std::sync::Arc;
         use std::thread;
 
         // Test that atomic counters work correctly under concurrent access

@@ -305,38 +305,30 @@ impl VpnClient {
         // Returns error reason if task exits due to an error.
         //
         // Memory note: Each packet requires a small allocation (~MTU + 5 bytes for framing).
-        // After split().freeze(), the Bytes holds the allocation until consumed by the writer.
-        // We size the buffer to MTU (not MAX_IP_PACKET_SIZE) to keep allocations small (~1.5KB).
-        // The allocator typically serves these from thread-local caches, making them fast.
+        // We allocate a fresh BytesMut per packet and freeze() it for the channel.
+        // Buffer size is MTU-based (~1.5KB), and allocations are typically served from
+        // thread-local caches, making them fast.
         let mut outbound_handle: tokio::task::JoinHandle<Option<String>> = tokio::spawn(async move {
             let mut read_buf = vec![0u8; buffer_size];
             // Frame capacity: 1 byte type + 4 byte length + packet data (up to buffer_size/MTU)
             let frame_capacity = 1 + 4 + buffer_size;
-            let mut write_buf = BytesMut::with_capacity(frame_capacity);
             loop {
                 match tun_reader.read(&mut read_buf).await {
                     Ok(n) if n > 0 => {
                         let packet = &read_buf[..n];
 
-                        // Clear buffer and ensure capacity before framing.
-                        // This prevents partial/garbage data from a previous failed frame_ip_packet
-                        // from corrupting the next frame.
-                        write_buf.clear();
-                        if write_buf.capacity() < frame_capacity {
-                            write_buf.reserve(frame_capacity);
-                        }
+                        // Allocate fresh buffer for this packet.
+                        // Small allocations (~1.5KB) are served from thread-local caches.
+                        let mut write_buf = BytesMut::with_capacity(frame_capacity);
 
                         // Frame IP packet for transmission (writes into write_buf)
                         if let Err(e) = frame_ip_packet(&mut write_buf, packet) {
                             log::warn!("Failed to frame packet: {}", e);
-                            write_buf.clear(); // Discard any partial data written before error
                             continue;
                         }
 
-                        // Freeze into Bytes for zero-copy send to writer task.
-                        // split().freeze() creates a Bytes that references the allocation.
-                        // The BytesMut is left empty with no capacity.
-                        let bytes = write_buf.split().freeze();
+                        // Freeze into Bytes for send to writer task.
+                        let bytes = write_buf.freeze();
 
                         // Send via channel to writer task (blocking send to apply backpressure)
                         if outbound_tx.send(bytes).await.is_err() {
