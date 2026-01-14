@@ -302,47 +302,35 @@ impl VpnClient {
         // Spawn outbound task (TUN -> frame IP packet -> channel -> writer task)
         // Returns error reason if task exits due to an error.
         //
-        // Memory optimization: Uses double-buffering with two pre-allocated BytesMut buffers
-        // to avoid per-packet allocations. While one buffer is being sent through the channel,
-        // the other is ready for the next packet. This eliminates the reserve() call after
-        // each split().freeze() that would otherwise allocate new memory.
+        // Memory note: Each packet requires a small allocation (~MTU + 5 bytes for framing).
+        // After split().freeze(), the Bytes holds the allocation until consumed by the writer.
+        // We size the buffer to MTU (not MAX_IP_PACKET_SIZE) to keep allocations small (~1.5KB).
+        // The allocator typically serves these from thread-local caches, making them fast.
         let mut outbound_handle: tokio::task::JoinHandle<Option<String>> = tokio::spawn(async move {
             let mut read_buf = vec![0u8; buffer_size];
-            // Pre-allocate two buffers for double-buffering (avoids per-packet allocation)
-            let frame_capacity = 1 + 4 + MAX_IP_PACKET_SIZE;
-            let mut write_buf_a = BytesMut::with_capacity(frame_capacity);
-            let mut write_buf_b = BytesMut::with_capacity(frame_capacity);
-            let mut use_buf_a = true;
+            // Frame capacity: 1 byte type + 4 byte length + packet data (up to buffer_size/MTU)
+            let frame_capacity = 1 + 4 + buffer_size;
+            let mut write_buf = BytesMut::with_capacity(frame_capacity);
             loop {
                 match tun_reader.read(&mut read_buf).await {
                     Ok(n) if n > 0 => {
                         let packet = &read_buf[..n];
 
-                        // Select the current buffer (alternates between A and B)
-                        let write_buf = if use_buf_a {
-                            &mut write_buf_a
-                        } else {
-                            &mut write_buf_b
-                        };
-
                         // Frame IP packet for transmission (writes into write_buf)
-                        if let Err(e) = frame_ip_packet(write_buf, packet) {
+                        if let Err(e) = frame_ip_packet(&mut write_buf, packet) {
                             log::warn!("Failed to frame packet: {}", e);
                             continue;
                         }
 
-                        // Freeze into Bytes for zero-copy send.
-                        // After split(), the BytesMut is empty but retains its allocation
-                        // if we use unsplit() later, but we use double-buffering instead.
+                        // Freeze into Bytes for zero-copy send to writer task.
+                        // split().freeze() creates a Bytes that references the allocation.
+                        // The BytesMut is left empty with no capacity.
                         let bytes = write_buf.split().freeze();
 
-                        // Switch to the other buffer for the next packet.
-                        // The previous buffer's allocation is retained (capacity preserved
-                        // due to BytesMut's internal behavior after split on pre-allocated buffer).
-                        // However, split() leaves capacity at 0, so we restore it.
-                        // Since we alternate buffers, the "other" buffer already has capacity.
+                        // Restore capacity for next packet. Since the Bytes still references
+                        // the old allocation (until writer consumes it), this allocates new
+                        // memory. With MTU-sized buffers (~1.5KB), this is fast.
                         write_buf.reserve(frame_capacity);
-                        use_buf_a = !use_buf_a;
 
                         // Send via channel to writer task (blocking send to apply backpressure)
                         if outbound_tx.send(bytes).await.is_err() {

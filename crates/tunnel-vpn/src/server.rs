@@ -1044,25 +1044,19 @@ impl VpnServer {
 
     /// Run the TUN reader - reads packets from TUN and routes to clients.
     ///
-    /// Memory optimization: Uses a ring buffer pool of pre-allocated BytesMut buffers
-    /// to avoid per-packet allocations. The pool size is tuned for typical packet
-    /// processing latency - buffers cycle through: frame -> send -> consume -> reuse.
+    /// Memory note: Each packet requires a small allocation (~MTU + 5 bytes for framing).
+    /// After split().freeze(), the Bytes holds the allocation until consumed by the client's
+    /// writer task. We size the buffer to MTU (not MAX_IP_PACKET_SIZE) to keep allocations
+    /// small (~1.5KB). The allocator typically serves these from thread-local caches.
     async fn run_tun_reader(&self, mut tun_reader: crate::device::TunReader) -> VpnResult<()> {
         log::info!("TUN reader started");
 
         let buffer_size = tun_reader.buffer_size();
         let mut buf = vec![0u8; buffer_size];
 
-        // Ring buffer pool for framing: pre-allocate buffers to avoid per-packet allocation.
-        // Pool size of 8 handles typical async send latency while keeping memory bounded.
-        // When a buffer is sent, it's consumed by the receiver; we reuse the slot with
-        // a fresh buffer only when needed (lazy re-allocation within the pool).
-        const RING_BUFFER_POOL_SIZE: usize = 8;
+        // Frame capacity: 1 byte type + 4 byte length + packet data (up to buffer_size/MTU)
         let frame_capacity = 1 + 4 + buffer_size;
-        let mut buffer_pool: Vec<BytesMut> = (0..RING_BUFFER_POOL_SIZE)
-            .map(|_| BytesMut::with_capacity(frame_capacity))
-            .collect();
-        let mut pool_index: usize = 0;
+        let mut write_buf = BytesMut::with_capacity(frame_capacity);
 
         loop {
             // Read packet from TUN device
@@ -1116,18 +1110,8 @@ impl VpnServer {
                 }
             };
 
-            // Get buffer from pool (round-robin). If the buffer was consumed (split),
-            // its capacity is 0 and we restore it. This amortizes allocation cost.
-            let write_buf = &mut buffer_pool[pool_index];
-            if write_buf.capacity() < frame_capacity {
-                // Buffer was consumed by previous send; restore capacity.
-                // This happens once per buffer after first use, then the reserve
-                // becomes a no-op due to BytesMut's capacity reuse after clear().
-                write_buf.reserve(frame_capacity);
-            }
-
-            // Frame packet and enqueue for the client's writer task
-            if let Err(e) = frame_ip_packet(write_buf, packet) {
+            // Frame packet for transmission (writes into write_buf)
+            if let Err(e) = frame_ip_packet(&mut write_buf, packet) {
                 log::warn!(
                     "Failed to frame packet for {} dev {}: {}",
                     endpoint_id,
@@ -1137,13 +1121,15 @@ impl VpnServer {
                 continue;
             }
 
-            // Freeze into Bytes for zero-copy send.
-            // After split(), the BytesMut has 0 capacity but the pool slot remains.
-            // Next iteration will restore capacity if needed (amortized allocation).
+            // Freeze into Bytes for zero-copy send to client's writer task.
+            // split().freeze() creates a Bytes that references the allocation.
+            // The BytesMut is left empty with no capacity.
             let bytes = write_buf.split().freeze();
 
-            // Advance to next buffer in the ring (allows previous buffer to be consumed)
-            pool_index = (pool_index + 1) % RING_BUFFER_POOL_SIZE;
+            // Restore capacity for next packet. Since the Bytes still references
+            // the old allocation (until client's writer consumes it), this allocates
+            // new memory. With MTU-sized buffers (~1.5KB), this is fast.
+            write_buf.reserve(frame_capacity);
 
             // Send via channel - try non-blocking first
             match packet_tx.try_send(bytes) {
