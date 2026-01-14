@@ -1183,17 +1183,14 @@ enum PacketIp {
 // =============================================================================
 // Optimized packet parsing functions
 //
-// These functions use unsafe pointer operations to eliminate per-byte bounds
-// checks after validating packet length once. This is safe because:
-// 1. We validate minimum packet length before any unsafe access
-// 2. IP header offsets are fixed by protocol specification
-// 3. All reads are within the validated buffer bounds
+// These functions use safe slice-to-array conversions after validating packet
+// length once. The compiler optimizes away redundant bounds checks when it can
+// prove the slice is in bounds.
 //
 // Performance optimizations:
 // - Single length check combines empty check + minimum header validation
 // - Version byte is extracted once and reused
-// - IPv4 addresses read as u32 via ptr::read_unaligned (single memory op)
-// - IPv6 addresses read as two u64s via ptr::read_unaligned (two memory ops)
+// - try_into() for fixed-size arrays is optimized by LLVM
 // - Fast-path for IPv4 (most common) checked first
 // =============================================================================
 
@@ -1221,14 +1218,12 @@ fn extract_source_ip(packet: &[u8]) -> Option<PacketIp> {
         return None;
     }
 
-    // Cache version byte to avoid repeated indexing.
-    // SAFETY: len >= 20, so index 0 is valid.
+    // Cache version byte to avoid repeated indexing (len >= 20 verified above).
     let version = packet[0] >> 4;
 
     if version == IP_VERSION_4 {
-        // IPv4: source address at bytes 12-15.
-        // SAFETY: len >= 20, so bytes 12-15 are valid.
-        let src = unsafe { read_ipv4_addr_unchecked(packet, 12) };
+        // IPv4: source address at bytes 12-15 (len >= 20 verified above).
+        let src = read_ipv4_addr(packet, 12);
         return Some(PacketIp::V4(src));
     }
 
@@ -1237,9 +1232,8 @@ fn extract_source_ip(packet: &[u8]) -> Option<PacketIp> {
         if len < IPV6_MIN_HEADER {
             return None;
         }
-        // IPv6: source address at bytes 8-23.
-        // SAFETY: len >= 40, so bytes 8-23 are valid.
-        let src = unsafe { read_ipv6_addr_unchecked(packet, 8) };
+        // IPv6: source address at bytes 8-23 (len >= 40 verified above).
+        let src = read_ipv6_addr(packet, 8);
         return Some(PacketIp::V6(src));
     }
 
@@ -1248,7 +1242,7 @@ fn extract_source_ip(packet: &[u8]) -> Option<PacketIp> {
 
 /// Extract destination IP address from an IP packet (IPv4 or IPv6).
 ///
-/// Optimized for the hot path with minimal bounds checks and direct pointer reads.
+/// Optimized for the hot path with early length checks before address reads.
 #[inline]
 fn extract_dest_ip(packet: &[u8]) -> Option<PacketIp> {
     // Fast-path: check for IPv4 first (most common case).
@@ -1258,14 +1252,12 @@ fn extract_dest_ip(packet: &[u8]) -> Option<PacketIp> {
         return None;
     }
 
-    // Cache version byte to avoid repeated indexing.
-    // SAFETY: len >= 20, so index 0 is valid.
+    // Cache version byte to avoid repeated indexing (len >= 20 verified above).
     let version = packet[0] >> 4;
 
     if version == IP_VERSION_4 {
-        // IPv4: destination address at bytes 16-19.
-        // SAFETY: len >= 20, so bytes 16-19 are valid.
-        let dest = unsafe { read_ipv4_addr_unchecked(packet, 16) };
+        // IPv4: destination address at bytes 16-19 (len >= 20 verified above).
+        let dest = read_ipv4_addr(packet, 16);
         return Some(PacketIp::V4(dest));
     }
 
@@ -1274,37 +1266,41 @@ fn extract_dest_ip(packet: &[u8]) -> Option<PacketIp> {
         if len < IPV6_MIN_HEADER {
             return None;
         }
-        // IPv6: destination address at bytes 24-39.
-        // SAFETY: len >= 40, so bytes 24-39 are valid.
-        let dest = unsafe { read_ipv6_addr_unchecked(packet, 24) };
+        // IPv6: destination address at bytes 24-39 (len >= 40 verified above).
+        let dest = read_ipv6_addr(packet, 24);
         return Some(PacketIp::V6(dest));
     }
 
     None
 }
 
-/// Read an IPv4 address from a packet at the given offset without bounds checks.
+/// Read an IPv4 address from a packet at the given offset.
 ///
-/// # Safety
-/// Caller must ensure `packet.len() >= offset + 4`.
+/// # Panics
+/// Panics if `packet.len() < offset + 4`. Callers should verify bounds first.
 #[inline(always)]
-unsafe fn read_ipv4_addr_unchecked(packet: &[u8], offset: usize) -> Ipv4Addr {
-    // Read 4 bytes as a single u32 operation.
-    // Network byte order is big-endian, Ipv4Addr::from expects big-endian bytes.
-    let ptr = packet.as_ptr().add(offset) as *const [u8; 4];
-    Ipv4Addr::from(std::ptr::read_unaligned(ptr))
+fn read_ipv4_addr(packet: &[u8], offset: usize) -> Ipv4Addr {
+    // Convert slice to fixed-size array. The try_into().unwrap() pattern is
+    // optimized by the compiler when bounds are provably valid (which they are
+    // after our length checks). This generates the same code as unsafe pointer
+    // reads but with memory safety guarantees.
+    let bytes: [u8; 4] = packet[offset..offset + 4]
+        .try_into()
+        .expect("IPv4 address read: bounds already verified");
+    Ipv4Addr::from(bytes)
 }
 
-/// Read an IPv6 address from a packet at the given offset without bounds checks.
+/// Read an IPv6 address from a packet at the given offset.
 ///
-/// # Safety
-/// Caller must ensure `packet.len() >= offset + 16`.
+/// # Panics
+/// Panics if `packet.len() < offset + 16`. Callers should verify bounds first.
 #[inline(always)]
-unsafe fn read_ipv6_addr_unchecked(packet: &[u8], offset: usize) -> Ipv6Addr {
-    // Read 16 bytes as a single operation.
-    // Ipv6Addr::from expects big-endian bytes (network order).
-    let ptr = packet.as_ptr().add(offset) as *const [u8; 16];
-    Ipv6Addr::from(std::ptr::read_unaligned(ptr))
+fn read_ipv6_addr(packet: &[u8], offset: usize) -> Ipv6Addr {
+    // Convert slice to fixed-size array. Same optimization applies as IPv4.
+    let bytes: [u8; 16] = packet[offset..offset + 16]
+        .try_into()
+        .expect("IPv6 address read: bounds already verified");
+    Ipv6Addr::from(bytes)
 }
 
 #[cfg(test)]
