@@ -22,7 +22,7 @@ use std::num::NonZeroU32;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::Mutex;
+use tokio::sync::mpsc;
 
 /// Maximum IP packet size (MTU + overhead).
 const MAX_IP_PACKET_SIZE: usize = 65536;
@@ -32,6 +32,10 @@ const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
 
 /// Heartbeat timeout (max time to wait for pong before triggering reconnection).
 const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Channel buffer size for outbound packets.
+/// Sized to handle bursts without blocking the TUN reader.
+const OUTBOUND_CHANNEL_SIZE: usize = 256;
 
 /// VPN client instance.
 pub struct VpnClient {
@@ -260,12 +264,23 @@ impl VpnClient {
         let (mut tun_reader, mut tun_writer) = tun_device.split()?;
         let buffer_size = tun_reader.buffer_size();
 
-        // Wrap data_send in Arc<Mutex> for sharing between outbound and heartbeat tasks
-        let data_send = Arc::new(Mutex::new(data_send));
-        // data_recv is only used by inbound task, so no wrapping needed
+        // Create channel for outbound data to decouple packet production from stream writes.
+        // The writer task owns the SendStream and performs actual I/O, eliminating
+        // per-packet mutex overhead from the TUN reader and heartbeat tasks.
+        let (outbound_tx, mut outbound_rx) = mpsc::channel::<Vec<u8>>(OUTBOUND_CHANNEL_SIZE);
+        let outbound_tx_heartbeat = outbound_tx.clone();
 
-        // Clone for tasks
-        let send_outbound = data_send.clone();
+        // Spawn dedicated writer task that owns the SendStream
+        let mut writer_handle = tokio::spawn(async move {
+            let mut data_send = data_send;
+            while let Some(data) = outbound_rx.recv().await {
+                if let Err(e) = data_send.write_all(&data).await {
+                    log::warn!("Failed to write to QUIC stream: {}", e);
+                    break;
+                }
+            }
+            log::trace!("Writer task exiting");
+        });
 
         // Track last heartbeat pong received (as millis since start_time for atomic access)
         let start_time = Instant::now();
@@ -273,7 +288,7 @@ impl VpnClient {
         let last_pong_inbound = last_pong.clone();
         let last_pong_heartbeat = last_pong.clone();
 
-        // Spawn outbound task (TUN -> frame IP packet -> QUIC stream)
+        // Spawn outbound task (TUN -> frame IP packet -> channel -> writer task)
         let mut outbound_handle = tokio::spawn(async move {
             let mut read_buf = vec![0u8; buffer_size];
             let mut write_buf = Vec::with_capacity(1 + 4 + MAX_IP_PACKET_SIZE);
@@ -288,12 +303,9 @@ impl VpnClient {
                             continue;
                         }
 
-                        let mut send = send_outbound.lock().await;
-                        if let Err(e) = send.write_all(&write_buf).await {
-                            log::warn!(
-                                "Failed to write outbound IP packet from client to server over QUIC: {}",
-                                e
-                            );
+                        // Send via channel to writer task (blocking send to apply backpressure)
+                        if outbound_tx.send(write_buf.clone()).await.is_err() {
+                            log::warn!("Outbound channel closed");
                             break;
                         }
                     }
@@ -401,8 +413,7 @@ impl VpnClient {
             }
         });
 
-        // Spawn heartbeat task (sends pings, checks for timeout)
-        let send_heartbeat = data_send.clone();
+        // Spawn heartbeat task (sends pings via channel, checks for timeout)
         let mut heartbeat_handle = tokio::spawn(async move {
             let heartbeat_start = start_time;
             loop {
@@ -422,13 +433,10 @@ impl VpnClient {
                     break;
                 }
 
-                // Send ping
-                let mut send = send_heartbeat.lock().await;
-                if let Err(e) = send
-                    .write_all(&[DataMessageType::HeartbeatPing.as_byte()])
-                    .await
-                {
-                    log::warn!("Failed to send heartbeat ping: {}", e);
+                // Send ping via channel to writer task
+                let ping = vec![DataMessageType::HeartbeatPing.as_byte()];
+                if outbound_tx_heartbeat.send(ping).await.is_err() {
+                    log::warn!("Failed to send heartbeat ping: channel closed");
                     break;
                 }
                 log::trace!("Heartbeat ping sent");
@@ -438,13 +446,16 @@ impl VpnClient {
         // Wait for any task to complete (or error), then clean up all tasks
         let (first_task, first_result, remaining) = tokio::select! {
             result = &mut outbound_handle => {
-                ("outbound", result, vec![("inbound", inbound_handle), ("heartbeat", heartbeat_handle)])
+                ("outbound", result, vec![("inbound", inbound_handle), ("heartbeat", heartbeat_handle), ("writer", writer_handle)])
             }
             result = &mut inbound_handle => {
-                ("inbound", result, vec![("outbound", outbound_handle), ("heartbeat", heartbeat_handle)])
+                ("inbound", result, vec![("outbound", outbound_handle), ("heartbeat", heartbeat_handle), ("writer", writer_handle)])
             }
             result = &mut heartbeat_handle => {
-                ("heartbeat", result, vec![("outbound", outbound_handle), ("inbound", inbound_handle)])
+                ("heartbeat", result, vec![("outbound", outbound_handle), ("inbound", inbound_handle), ("writer", writer_handle)])
+            }
+            result = &mut writer_handle => {
+                ("writer", result, vec![("outbound", outbound_handle), ("inbound", inbound_handle), ("heartbeat", heartbeat_handle)])
             }
         };
 
