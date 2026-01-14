@@ -63,8 +63,10 @@ pub struct ServerInfo {
 impl VpnClient {
     /// Create a new VPN client.
     ///
-    /// Device ID is always generated fresh each session using CSPRNG.
-    /// This allows multiple clients to connect without conflicts.
+    /// Acquires a single-instance lock (only one VPN client per process) and
+    /// generates a random `device_id` (u64) for session identification.
+    /// The device_id allows the server to distinguish multiple sessions from
+    /// the same iroh endpoint.
     pub fn new(config: VpnClientConfig) -> VpnResult<Self> {
         // Acquire single-instance lock
         let lock = VpnLock::acquire()?;
@@ -137,13 +139,11 @@ impl VpnClient {
             };
 
         // Open data stream for IP packets
-        let (wg_send, wg_recv) = connection.open_bi().await.map_err(|e| {
+        let (data_send, data_recv) = connection.open_bi().await.map_err(|e| {
             VpnError::Signaling(format!("Failed to open data stream: {}", e))
         })?;
 
-        log::info!("Data stream opened");
-
-        // No WireGuard tunnel setup needed. We send raw IP packets framed over QUIC.
+        log::info!("VPN data stream opened");
 
         log::info!("VPN tunnel established!");
         log::info!("  TUN device: {}", tun_device.name());
@@ -153,7 +153,7 @@ impl VpnClient {
         }
 
         // Run the VPN packet loop (tunneled over iroh)
-        self.run_vpn_loop(tun_device, wg_send, wg_recv).await
+        self.run_vpn_loop(tun_device, data_send, data_recv).await
     }
 
     /// Perform VPN handshake with the server.
@@ -251,19 +251,19 @@ impl VpnClient {
     async fn run_vpn_loop(
         &self,
         tun_device: TunDevice,
-        wg_send: SendStream,
-        wg_recv: RecvStream,
+        data_send: SendStream,
+        data_recv: RecvStream,
     ) -> VpnResult<()> {
         // Split TUN device
         let (mut tun_reader, mut tun_writer) = tun_device.split()?;
         let buffer_size = tun_reader.buffer_size();
 
         // Wrap streams in Arc<Mutex> for sharing
-        let wg_send = Arc::new(Mutex::new(wg_send));
-        let wg_recv = Arc::new(Mutex::new(wg_recv));
+        let data_send = Arc::new(Mutex::new(data_send));
+        let data_recv = Arc::new(Mutex::new(data_recv));
 
         // Clone for tasks
-        let send_outbound = wg_send.clone();
+        let send_outbound = data_send.clone();
 
         // Track last heartbeat pong received (as millis since start_time for atomic access)
         let start_time = Instant::now();
@@ -308,7 +308,7 @@ impl VpnClient {
             let mut len_buf = [0u8; 4];
             let mut data_buf = vec![0u8; MAX_IP_PACKET_SIZE];
             loop {
-                let mut recv = wg_recv.lock().await;
+                let mut recv = data_recv.lock().await;
                 // Read message type
                 match recv.read_exact(&mut type_buf).await {
                     Ok(()) => {}
@@ -381,7 +381,7 @@ impl VpnClient {
         });
 
         // Spawn heartbeat task (sends pings, checks for timeout)
-        let send_heartbeat = wg_send.clone();
+        let send_heartbeat = data_send.clone();
         let mut heartbeat_handle = tokio::spawn(async move {
             let heartbeat_start = start_time;
             loop {
