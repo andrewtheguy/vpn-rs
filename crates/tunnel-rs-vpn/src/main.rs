@@ -63,11 +63,11 @@ enum Command {
         #[arg(long)]
         server_ip6: Option<String>,
 
-        /// MTU for VPN packets (default: 1420, valid range: 576-1500)
+        /// MTU for VPN packets (default: 1440, valid range: 576-1500)
         #[arg(long, value_parser = clap::value_parser!(u16).range(576..=1500))]
         mtu: Option<u16>,
 
-        /// WireGuard keepalive interval in seconds (default: 25, valid range: 10-300)
+        /// Keepalive interval in seconds (default: 25, valid range: 10-300)
         #[arg(long, value_parser = clap::value_parser!(u16).range(10..=300))]
         keepalive_secs: Option<u16>,
 
@@ -105,11 +105,11 @@ enum Command {
         #[arg(short = 'n', long)]
         server_node_id: Option<String>,
 
-        /// MTU for VPN packets (default: 1420, valid range: 576-1500)
+        /// MTU for VPN packets (default: 1440, valid range: 576-1500)
         #[arg(long, value_parser = clap::value_parser!(u16).range(576..=1500))]
         mtu: Option<u16>,
 
-        /// WireGuard keepalive interval in seconds (default: 25, valid range: 10-300)
+        /// Keepalive interval in seconds (default: 25, valid range: 10-300)
         #[arg(long, value_parser = clap::value_parser!(u16).range(10..=300))]
         keepalive_secs: Option<u16>,
 

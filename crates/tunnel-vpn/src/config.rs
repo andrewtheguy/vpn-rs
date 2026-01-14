@@ -5,8 +5,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::net::{Ipv4Addr, Ipv6Addr};
 
-/// Default MTU for VPN tunnel (1500 - 80 bytes overhead for QUIC/TLS).
-pub const DEFAULT_MTU: u16 = 1420;
+/// Default MTU for VPN tunnel (1500 - 60 bytes overhead for QUIC/TLS + framing).
+pub const DEFAULT_MTU: u16 = 1440;
 
 /// Default keepalive interval in seconds.
 pub const DEFAULT_KEEPALIVE_SECS: u16 = 25;

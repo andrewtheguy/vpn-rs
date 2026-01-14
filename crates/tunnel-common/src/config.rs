@@ -134,7 +134,7 @@ pub struct NostrConfig {
 /// Shared VPN iroh configuration fields (used by both server and client).
 #[derive(Deserialize, Default, Clone)]
 pub struct VpnIrohSharedConfig {
-    /// MTU for VPN packets (576-1500, default: 1420)
+    /// MTU for VPN packets (576-1500, default: 1440)
     pub mtu: Option<u16>,
     /// Keepalive/heartbeat interval in seconds (10-300, default: 25)
     pub keepalive_secs: Option<u16>,
@@ -1146,8 +1146,8 @@ pub fn default_nostr_relays() -> &'static [&'static str] {
 // VPN Config Builders
 // ============================================================================
 
-/// Default MTU for VPN packets.
-pub const DEFAULT_VPN_MTU: u16 = 1420;
+/// Default MTU for VPN packets (1500 - 60 bytes for QUIC/TLS + framing overhead).
+pub const DEFAULT_VPN_MTU: u16 = 1440;
 
 /// Default keepalive/heartbeat interval in seconds.
 pub const DEFAULT_VPN_KEEPALIVE_SECS: u16 = 25;
