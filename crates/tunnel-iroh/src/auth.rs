@@ -450,7 +450,7 @@ mod tests {
     fn test_load_from_file_with_comments() {
         let mut file = NamedTempFile::new().unwrap();
         writeln!(file, "# This is a comment").unwrap();
-        writeln!(file, "").unwrap();
+        writeln!(file).unwrap();
         writeln!(file, "  # Another comment with leading space").unwrap();
 
         let result = load_auth_tokens_from_file(file.path()).unwrap();
@@ -492,7 +492,7 @@ mod tests {
 
         let mut file = NamedTempFile::new().unwrap();
         writeln!(file, "# My auth token").unwrap();
-        writeln!(file, "").unwrap();
+        writeln!(file).unwrap();
         writeln!(file, "{}  # comment", token_a).unwrap();
         writeln!(file, "{}", token_b).unwrap(); // ignored
 

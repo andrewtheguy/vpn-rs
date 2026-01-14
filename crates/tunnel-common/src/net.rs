@@ -565,7 +565,7 @@ mod tests {
     #[test]
     fn test_mixed_loopback_non_loopback_not_treated_as_loopback() {
         // If there's a mix, it's not pure loopback
-        let addrs = vec![
+        let addrs = [
             SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 8080),
             SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)), 8080),
         ];
