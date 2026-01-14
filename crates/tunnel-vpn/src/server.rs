@@ -6,7 +6,7 @@
 //! directly over the encrypted iroh QUIC connection.
 
 use crate::config::VpnServerConfig;
-use crate::device::{TunConfig, TunDevice, TunWriter};
+use crate::device::{TunConfig, TunDevice};
 use crate::error::{VpnError, VpnResult};
 use crate::signaling::{
     frame_ip_packet, read_message, write_message, DataMessageType, VpnHandshake,
@@ -20,7 +20,7 @@ use std::collections::HashMap;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
-use tokio::sync::{mpsc, oneshot, Mutex, RwLock};
+use tokio::sync::{mpsc, oneshot, RwLock};
 
 /// Maximum IP packet size.
 const MAX_IP_PACKET_SIZE: usize = 65536;
@@ -29,6 +29,11 @@ const MAX_IP_PACKET_SIZE: usize = 65536;
 /// Large enough to handle bursts; behavior when full depends on
 /// `VpnServerConfig::drop_on_full` (drop packets vs. apply backpressure).
 const CLIENT_PACKET_CHANNEL_SIZE: usize = 1024;
+
+/// Channel buffer size for the server-wide TUN writer task.
+/// All clients send validated packets through this channel to a single writer task,
+/// eliminating mutex contention. Sized to handle aggregate traffic from all clients.
+const TUN_WRITER_CHANNEL_SIZE: usize = 4096;
 
 /// State for a connected VPN client.
 struct ClientState {
@@ -373,8 +378,26 @@ impl VpnServer {
 
         // Take TUN device and split it
         let tun_device = self.tun_device.take().expect("TUN device not set up");
-        let (tun_reader, tun_writer) = tun_device.split()?;
-        let tun_writer = Arc::new(Mutex::new(tun_writer));
+        let (tun_reader, mut tun_writer) = tun_device.split()?;
+
+        // Create channel for TUN writes from all clients.
+        // This replaces the Arc<Mutex<TunWriter>> with a dedicated writer task,
+        // eliminating mutex contention in the hot path.
+        let (tun_write_tx, mut tun_write_rx) = mpsc::channel::<Bytes>(TUN_WRITER_CHANNEL_SIZE);
+
+        // Spawn dedicated TUN writer task that owns TunWriter exclusively.
+        // All clients send validated packets through the channel; this task
+        // performs the actual writes without any mutex contention.
+        tokio::spawn(async move {
+            log::info!("TUN writer task started");
+            while let Some(packet) = tun_write_rx.recv().await {
+                if let Err(e) = tun_writer.write_all(&packet).await {
+                    log::warn!("Failed to write to TUN: {}", e);
+                    // Continue processing - individual write failures shouldn't stop the writer
+                }
+            }
+            log::info!("TUN writer task exiting (channel closed)");
+        });
 
         let server = Arc::new(self);
 
@@ -391,9 +414,9 @@ impl VpnServer {
             match endpoint.accept().await {
                 Some(incoming) => {
                     let server = server.clone();
-                    let tun_writer = tun_writer.clone();
+                    let tun_write_tx = tun_write_tx.clone();
                     tokio::spawn(async move {
-                        if let Err(e) = server.handle_connection(incoming, tun_writer).await {
+                        if let Err(e) = server.handle_connection(incoming, tun_write_tx).await {
                             log::error!("Connection error: {}", e);
                         }
                     });
@@ -412,7 +435,7 @@ impl VpnServer {
     async fn handle_connection(
         &self,
         incoming: iroh::endpoint::Incoming,
-        tun_writer: Arc<Mutex<TunWriter>>,
+        tun_write_tx: mpsc::Sender<Bytes>,
     ) -> VpnResult<()> {
         let connection = incoming
             .await
@@ -487,7 +510,7 @@ impl VpnServer {
                 &mut send,
                 remote_id,
                 connection,
-                tun_writer,
+                tun_write_tx,
                 handshake.device_id,
             )
             .await;
@@ -504,7 +527,7 @@ impl VpnServer {
         send: &mut iroh::endpoint::SendStream,
         remote_id: EndpointId,
         connection: iroh::endpoint::Connection,
-        tun_writer: Arc<Mutex<TunWriter>>,
+        tun_write_tx: mpsc::Sender<Bytes>,
         device_id: u64,
     ) -> VpnResult<()> {
         // Allocate IPv4 for client (required)
@@ -668,7 +691,7 @@ impl VpnServer {
             data_recv,
             assigned_ip,
             assigned_ip6,
-            tun_writer,
+            tun_write_tx,
             writer_error_rx,
         )
         .await;
@@ -727,15 +750,18 @@ impl VpnServer {
     /// It exits when either:
     /// - The client disconnects (inbound stream closes)
     /// - The writer task fails (error received via writer_error_rx)
+    ///
+    /// TUN writes are sent through the `tun_write_tx` channel to a dedicated writer task,
+    /// eliminating mutex contention. Backpressure is applied when the channel is full.
     async fn handle_client_data(
         packet_tx: mpsc::Sender<Bytes>,
         mut data_recv: iroh::endpoint::RecvStream,
         assigned_ip: Ipv4Addr,
         assigned_ip6: Option<Ipv6Addr>,
-        tun_writer: Arc<Mutex<TunWriter>>,
+        tun_write_tx: mpsc::Sender<Bytes>,
         writer_error_rx: oneshot::Receiver<String>,
     ) -> VpnResult<()> {
-        // Spawn inbound task (QUIC stream -> TUN)
+        // Spawn inbound task (QUIC stream -> TUN via channel)
         let mut inbound_handle = tokio::spawn(async move {
             let mut type_buf = [0u8; 1];
             let mut len_buf = [0u8; 4];
@@ -873,16 +899,37 @@ impl VpnServer {
                     continue;
                 }
 
-                // Write validated packet to TUN
-                let mut writer = tun_writer.lock().await;
-                if let Err(e) = writer.write_all(packet).await {
-                    log::warn!("Failed to write to server TUN: {}", e);
+                // Send validated packet to TUN writer task via channel.
+                // This eliminates mutex contention - the channel handles synchronization.
+                // Copy into Bytes since data_buf is reused for the next packet.
+                let packet_bytes = Bytes::copy_from_slice(packet);
+
+                // Try non-blocking send first to avoid blocking on slow TUN writes
+                match tun_write_tx.try_send(packet_bytes) {
+                    Ok(()) => {
+                        log::trace!(
+                            "Sent {} bytes to TUN from client {}",
+                            packet.len(),
+                            assigned_ip
+                        );
+                    }
+                    Err(mpsc::error::TrySendError::Full(data)) => {
+                        // Channel full - apply backpressure by blocking until space available.
+                        // This naturally rate-limits fast clients when TUN writes are slow.
+                        log::debug!(
+                            "TUN write channel full, applying backpressure for client {}",
+                            assigned_ip
+                        );
+                        if tun_write_tx.send(data).await.is_err() {
+                            log::warn!("TUN write channel closed for client {}", assigned_ip);
+                            break;
+                        }
+                    }
+                    Err(mpsc::error::TrySendError::Closed(_)) => {
+                        log::warn!("TUN write channel closed for client {}", assigned_ip);
+                        break;
+                    }
                 }
-                log::trace!(
-                    "Wrote {} bytes to TUN from client {}",
-                    packet.len(),
-                    assigned_ip
-                );
             }
         });
 
