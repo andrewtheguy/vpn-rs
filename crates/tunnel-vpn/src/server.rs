@@ -618,9 +618,8 @@ impl VpnServer {
         log::info!("Client {} disconnected", remote_id);
 
         // Cleanup - use session_id to detect stale cleanup from rapid reconnection.
-        // Only remove entries if they still belong to this specific connection, and
-        // ensure that clients, IPv4 mappings, and IPv6 mappings are updated atomically
-        // with respect to each other to avoid races with rapid reconnects.
+        // Check-before-remove: verify session_id matches before removing anything.
+        // If a newer connection replaced us, do nothing - that connection owns the resources.
         let mut endpoint_to_release = None;
         let mut release_ipv6 = false;
         {
@@ -628,70 +627,36 @@ impl VpnServer {
             let mut ip_map = ip_to_endpoint.write().await;
             let mut ip6_map = ip6_to_endpoint.write().await;
 
-            let removed_client = clients_map.remove(&client_key);
-            // We don't remove IP mappings here strictly by key if we assume IPs are unique
-            // But let's check.
-            // Actually, we should check if the currently mapped (Endpoint, Device) for this IP is us.
-            
-            // Check IP mapping
-            let ip_belongs_to_us = if let Some((ep, dev)) = ip_map.get(&assigned_ip) {
-                 *ep == remote_id && *dev == device_id
-            } else {
-                false
-            };
+            // Check if client entry still belongs to this session before removing
+            let should_cleanup = clients_map
+                .get(&client_key)
+                .map(|state| state.session_id == session_id)
+                .unwrap_or(false);
 
-            if ip_belongs_to_us {
-                // Only remove if it points to us
-                 ip_map.remove(&assigned_ip);
-            }
+            if should_cleanup {
+                // Remove client state (we know it belongs to this session)
+                if let Some(client_state) = clients_map.remove(&client_key) {
+                    endpoint_to_release = Some((remote_id, device_id));
+                    release_ipv6 = client_state.assigned_ip6.is_some();
+                }
 
-            match (removed_client, ip_belongs_to_us) {
-                // Both entries existed and belonged to us
-                (Some(client_state), true) => {
-                    if client_state.session_id == session_id {
-                        // Belongs to this session; remember endpoint for IP release
-                        // (We need strict cleanup logic here)
-                        endpoint_to_release = Some((remote_id, device_id));
-                        release_ipv6 = client_state.assigned_ip6.is_some();
-                        
-                        // Clean up IPv6 mapping
-                        if let Some(ip6) = assigned_ip6 {
-                            if let Some((ep6, dev6)) = ip6_map.get(&ip6) {
-                                if *ep6 == remote_id && *dev6 == device_id {
-                                    ip6_map.remove(&ip6);
-                                }
-                            }
-                        }
-                    } else {
-                        // The removed client state belonged to a different session (e.g. newer one)?
-                        // Wait, if we removed it from clients_map using client_key, and client_key matches...
-                        // If session_id mismatches, it means we removed a NEWER session (if session IDs increase).
-                        // Or we removed an OLDER session?
-                        // Actually, if we just overwrote it in insert, then remove here returns the current one.
-                        // If current state's session_id != our session_id, it means someone else replaced us.
-                        // So we should PUT IT BACK.
-                        clients_map.insert(client_key, client_state);
-                        
-                        // And if we removed IP mapping but it wasn't ours... wait, we checked ip_belongs_to_us.
-                        // If ip_belongs_to_us was true, it means IP map pointed to (remote_id, device_id).
-                        // Since (remote_id, device_id) is unique key, checking session_id on client_state is enough to know if it's THIS session.
-                        // If client_state.session_id != session_id, then it is NOT this session, so we should restore everything.
-                        
-                        // Restore IP map
-                        ip_map.insert(assigned_ip, (remote_id, device_id));
+                // Remove IPv4 mapping if it points to us
+                if let Some((ep, dev)) = ip_map.get(&assigned_ip) {
+                    if *ep == remote_id && *dev == device_id {
+                        ip_map.remove(&assigned_ip);
                     }
                 }
-                (Some(client_state), false) => {
-                     // Client state existed but IP mapping didn't point to us? Weird.
-                     // Check session id.
-                     if client_state.session_id != session_id {
-                         clients_map.insert(client_key, client_state);
-                     }
-                }
-                (None, _) => {
-                    // Client state already gone. Nothing to do.
+
+                // Remove IPv6 mapping if it points to us
+                if let Some(ip6) = assigned_ip6 {
+                    if let Some((ep6, dev6)) = ip6_map.get(&ip6) {
+                        if *ep6 == remote_id && *dev6 == device_id {
+                            ip6_map.remove(&ip6);
+                        }
+                    }
                 }
             }
+            // If session_id doesn't match or client already gone, do nothing
         }
 
         if let Some((endpoint_id, dev_id)) = endpoint_to_release {
