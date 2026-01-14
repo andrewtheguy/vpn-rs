@@ -41,7 +41,9 @@ const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(30);
 /// latency under congestion. The value 1024 matches the server's default
 /// client channel size for symmetric buffering.
 ///
-/// Memory impact: ~1024 * ~1500 bytes (typical MTU) = ~1.5 MB worst case.
+/// Memory impact (typical): ~1024 * ~1500 bytes (standard MTU) = ~1.5 MB.
+/// Memory impact (max): ~1024 * ~65KB (MAX_IP_PACKET_SIZE) = ~64 MB if jumbo packets allowed.
+/// Actual memory depends on the TUN device's configured MTU (usually 1440-1500 bytes).
 /// Latency impact: At 100 Mbps, a full 1024-packet buffer adds ~120ms latency.
 const OUTBOUND_CHANNEL_SIZE: usize = 1024;
 

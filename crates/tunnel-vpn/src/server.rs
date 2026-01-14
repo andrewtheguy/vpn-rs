@@ -461,10 +461,14 @@ impl VpnServer {
         // Spawn dedicated TUN writer task that owns TunWriter exclusively.
         // All clients send validated packets through the channel; this task
         // performs the actual writes without any mutex contention.
+        let tun_writer_stats = self.stats.clone();
         tokio::spawn(async move {
             log::info!("TUN writer task started");
             while let Some(packet) = tun_write_rx.recv().await {
                 if let Err(e) = tun_writer.write_all(&packet).await {
+                    tun_writer_stats
+                        .packets_tun_write_failed
+                        .fetch_add(1, Ordering::Relaxed);
                     log::warn!("Failed to write to TUN: {}", e);
                     // Continue processing - individual write failures shouldn't stop the writer
                 }
