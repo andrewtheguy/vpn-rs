@@ -25,15 +25,10 @@ use tokio::sync::{mpsc, oneshot, RwLock};
 /// Maximum IP packet size.
 const MAX_IP_PACKET_SIZE: usize = 65536;
 
-/// Channel buffer size for outbound packets per client.
-/// Large enough to handle bursts; behavior when full depends on
-/// `VpnServerConfig::drop_on_full` (drop packets vs. apply backpressure).
-const CLIENT_PACKET_CHANNEL_SIZE: usize = 1024;
-
-/// Channel buffer size for the server-wide TUN writer task.
-/// All clients send validated packets through this channel to a single writer task,
-/// eliminating mutex contention. Sized to handle aggregate traffic from all clients.
-const TUN_WRITER_CHANNEL_SIZE: usize = 4096;
+// Channel buffer sizes are now configurable via VpnServerConfig:
+// - client_channel_size: per-client outbound buffer (default 1024)
+// - tun_writer_channel_size: aggregate TUN writer buffer (default 4096)
+// See config.rs for detailed documentation on tradeoffs.
 
 /// State for a connected VPN client.
 struct ClientState {
@@ -383,7 +378,13 @@ impl VpnServer {
         // Create channel for TUN writes from all clients.
         // This replaces the Arc<Mutex<TunWriter>> with a dedicated writer task,
         // eliminating mutex contention in the hot path.
-        let (tun_write_tx, mut tun_write_rx) = mpsc::channel::<Bytes>(TUN_WRITER_CHANNEL_SIZE);
+        // Channel size is configurable via VpnServerConfig::tun_writer_channel_size.
+        let (tun_write_tx, mut tun_write_rx) =
+            mpsc::channel::<Bytes>(self.config.tun_writer_channel_size);
+        log::debug!(
+            "TUN writer channel size: {}",
+            self.config.tun_writer_channel_size
+        );
 
         // Spawn dedicated TUN writer task that owns TunWriter exclusively.
         // All clients send validated packets through the channel; this task
@@ -605,7 +606,8 @@ impl VpnServer {
         // The writer task owns the SendStream and performs actual I/O, decoupling
         // packet production from stream writes to reduce locking overhead.
         // Uses Bytes for zero-copy sends (freeze BytesMut instead of cloning Vec).
-        let (packet_tx, mut packet_rx) = mpsc::channel::<Bytes>(CLIENT_PACKET_CHANNEL_SIZE);
+        // Channel size is configurable via VpnServerConfig::client_channel_size.
+        let (packet_tx, mut packet_rx) = mpsc::channel::<Bytes>(self.config.client_channel_size);
 
         // Create oneshot channel for writer error signaling.
         // When writer fails, it sends the error through this channel to trigger

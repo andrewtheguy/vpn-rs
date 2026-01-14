@@ -341,6 +341,10 @@ async fn run_vpn_server(resolved: ResolvedVpnServerConfig) -> Result<()> {
         max_clients: 254,
         auth_tokens: Some(valid_tokens),
         drop_on_full: resolved.drop_on_full,
+        // Channel buffer sizes use defaults; could be exposed in TOML config if needed.
+        // See tunnel-vpn::config for documentation on tradeoffs.
+        client_channel_size: 1024,
+        tun_writer_channel_size: 4096,
     };
 
     // Create iroh endpoint for signaling.

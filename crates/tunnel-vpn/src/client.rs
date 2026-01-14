@@ -35,8 +35,15 @@ const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
 const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Channel buffer size for outbound packets.
-/// Sized to handle bursts without blocking the TUN reader.
-const OUTBOUND_CHANNEL_SIZE: usize = 256;
+///
+/// Sized to handle bursts without blocking the TUN reader. Larger buffers
+/// improve throughput for bursty traffic but increase memory usage and
+/// latency under congestion. The value 1024 matches the server's default
+/// client channel size for symmetric buffering.
+///
+/// Memory impact: ~1024 * ~1500 bytes (typical MTU) = ~1.5 MB worst case.
+/// Latency impact: At 100 Mbps, a full 1024-packet buffer adds ~120ms latency.
+const OUTBOUND_CHANNEL_SIZE: usize = 1024;
 
 /// VPN client instance.
 pub struct VpnClient {
