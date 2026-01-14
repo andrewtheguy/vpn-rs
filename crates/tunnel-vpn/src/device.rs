@@ -414,11 +414,7 @@ fn handle_route_add_output<R: Route>(
 }
 
 /// Handle the output of a route remove command (generic, best-effort).
-fn handle_route_remove_output<R: Route>(
-    output: std::process::Output,
-    route: &R,
-    tun_name: &str,
-) {
+fn handle_route_remove_output<R: Route>(output: std::process::Output, route: &R, tun_name: &str) {
     if output.status.success() {
         log::info!("Removed {} {} via {}", R::LABEL, route, tun_name);
     } else {
@@ -578,10 +574,18 @@ pub async fn add_routes(tun_name: &str, routes: &[Ipv4Net]) -> VpnResult<RouteGu
     for route in routes {
         if let Err(e) = add_route(tun_name, route).await {
             // Rollback previously added routes
-            log::warn!("Failed to add route {}, rolling back {} route(s)", route, added.len());
+            log::warn!(
+                "Failed to add route {}, rolling back {} route(s)",
+                route,
+                added.len()
+            );
             for added_route in added.iter().rev() {
                 if let Err(rollback_err) = remove_route(tun_name, added_route).await {
-                    log::warn!("Rollback failed for route {}: {}", added_route, rollback_err);
+                    log::warn!(
+                        "Rollback failed for route {}: {}",
+                        added_route,
+                        rollback_err
+                    );
                 }
             }
             return Err(e);
@@ -630,7 +634,11 @@ impl Drop for RouteGuard {
         if self.routes.is_empty() {
             return;
         }
-        log::info!("Cleaning up {} route(s) via {}", self.routes.len(), self.tun_name);
+        log::info!(
+            "Cleaning up {} route(s) via {}",
+            self.routes.len(),
+            self.tun_name
+        );
         for route in self.routes.iter().rev() {
             remove_route_sync(&self.tun_name, route);
         }

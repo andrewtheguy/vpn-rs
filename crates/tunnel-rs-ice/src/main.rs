@@ -318,7 +318,11 @@ fn resolve_server_config(
         Ok((load_server_config(Some(&path))?, true))
     } else if default_config {
         let path = dirs::home_dir()
-            .map(|home| home.join(".config").join("tunnel-rs").join("server_ice.toml"))
+            .map(|home| {
+                home.join(".config")
+                    .join("tunnel-rs")
+                    .join("server_ice.toml")
+            })
             .ok_or_else(|| {
                 anyhow::anyhow!(
                     "Could not find default config path. Use -c to specify a config file."
@@ -343,7 +347,11 @@ fn resolve_client_config(
         Ok((load_client_config(Some(&path))?, true))
     } else if default_config {
         let path = dirs::home_dir()
-            .map(|home| home.join(".config").join("tunnel-rs").join("client_ice.toml"))
+            .map(|home| {
+                home.join(".config")
+                    .join("tunnel-rs")
+                    .join("client_ice.toml")
+            })
             .ok_or_else(|| {
                 anyhow::anyhow!(
                     "Could not find default config path. Use -c to specify a config file."
@@ -565,10 +573,7 @@ async fn main() -> Result<()> {
                     })
                     .await
                 }
-                _ => anyhow::bail!(
-                    "Invalid mode '{}'. Use: manual or nostr",
-                    effective_mode
-                ),
+                _ => anyhow::bail!("Invalid mode '{}'. Use: manual or nostr", effective_mode),
             }
         }
         Command::Client {
@@ -781,10 +786,7 @@ async fn main() -> Result<()> {
                         .await
                     }
                 }
-                _ => anyhow::bail!(
-                    "Invalid mode '{}'. Use: manual or nostr",
-                    effective_mode
-                ),
+                _ => anyhow::bail!("Invalid mode '{}'. Use: manual or nostr", effective_mode),
             }
         }
         Command::ShowNpub { nsec_file } => secret::show_npub(expand_tilde(&nsec_file)),

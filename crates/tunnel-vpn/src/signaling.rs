@@ -91,11 +91,7 @@ pub struct VpnHandshakeResponse {
 
 impl VpnHandshakeResponse {
     /// Create an accepted response (IPv4 only).
-    pub fn accepted(
-        assigned_ip: Ipv4Addr,
-        network: Ipv4Net,
-        server_ip: Ipv4Addr,
-    ) -> Self {
+    pub fn accepted(assigned_ip: Ipv4Addr, network: Ipv4Net, server_ip: Ipv4Addr) -> Self {
         Self {
             version: VPN_PROTOCOL_VERSION,
             accepted: true,

@@ -286,10 +286,7 @@ pub fn load_auth_token_from_file(path: &Path) -> Result<String> {
         }
     }
 
-    anyhow::bail!(
-        "No valid token found in file: {}",
-        path.display()
-    )
+    anyhow::bail!("No valid token found in file: {}", path.display())
 }
 
 /// Check if a token is in the valid tokens set.
@@ -339,14 +336,20 @@ mod tests {
     fn test_validate_token_too_short() {
         let result = validate_token("ishort");
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("exactly 18 characters"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("exactly 18 characters"));
     }
 
     #[test]
     fn test_validate_token_too_long() {
         let result = validate_token("ithisistoolongtokenXX");
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("exactly 18 characters"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("exactly 18 characters"));
     }
 
     #[test]
@@ -354,14 +357,20 @@ mod tests {
         // Valid length but wrong prefix
         let result = validate_token("xABCDEF1234567890Y");
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("must start with 'i'"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("must start with 'i'"));
     }
 
     #[test]
     fn test_validate_token_invalid_chars() {
         let result = validate_token("iabc@def#123$456!X");
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("invalid character"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("invalid character"));
     }
 
     #[test]

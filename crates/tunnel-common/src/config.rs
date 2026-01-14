@@ -412,7 +412,6 @@ fn validate_mtu(mtu: u16, section: &str) -> Result<()> {
     Ok(())
 }
 
-
 /// Validate IPv4 network CIDR and optional server IP within network.
 fn validate_vpn_network(
     network: &str,
@@ -595,9 +594,7 @@ impl ServerConfig {
                 }
                 // Validate auth_tokens mutual exclusion
                 if iroh.auth_tokens.is_some() && iroh.auth_tokens_file.is_some() {
-                    anyhow::bail!(
-                        "[iroh] Use only one of 'auth_tokens' or 'auth_tokens_file'."
-                    );
+                    anyhow::bail!("[iroh] Use only one of 'auth_tokens' or 'auth_tokens_file'.");
                 }
                 // Reject client-only fields (auth_token is for clients)
                 if iroh.auth_token.is_some() || iroh.auth_token_file.is_some() {
@@ -846,18 +843,18 @@ impl VpnServerConfig {
     /// - Validates server_ip is within network if specified
     /// - Validates MTU range
     pub fn validate(&self) -> Result<()> {
-        let role = self.role.context(
-            "Config file missing required 'role' field. Add: role = \"vpnserver\"",
-        )?;
+        let role = self
+            .role
+            .context("Config file missing required 'role' field. Add: role = \"vpnserver\"")?;
         if role != Role::VpnServer {
             anyhow::bail!(
                 "Config file has wrong role for VPN server. Expected role = \"vpnserver\""
             );
         }
 
-        let mode = self.mode.context(
-            "Config file missing required 'mode' field. Add: mode = \"iroh\"",
-        )?;
+        let mode = self
+            .mode
+            .context("Config file missing required 'mode' field. Add: mode = \"iroh\"")?;
         if mode != Mode::Iroh {
             anyhow::bail!(
                 "Config file has mode = \"{}\", but VPN only supports iroh mode",
@@ -867,14 +864,9 @@ impl VpnServerConfig {
 
         if let Some(ref iroh) = self.iroh {
             // Validate auth_tokens mutual exclusion
-            let has_inline_tokens = iroh
-                .auth_tokens
-                .as_ref()
-                .is_some_and(|t| !t.is_empty());
+            let has_inline_tokens = iroh.auth_tokens.as_ref().is_some_and(|t| !t.is_empty());
             if has_inline_tokens && iroh.auth_tokens_file.is_some() {
-                anyhow::bail!(
-                    "[iroh] Use only one of 'auth_tokens' or 'auth_tokens_file'."
-                );
+                anyhow::bail!("[iroh] Use only one of 'auth_tokens' or 'auth_tokens_file'.");
             }
 
             // Require network for VPN server
@@ -918,18 +910,18 @@ impl VpnClientConfig {
     /// - Validates routes CIDR format
     /// - Validates MTU range
     pub fn validate(&self) -> Result<()> {
-        let role = self.role.context(
-            "Config file missing required 'role' field. Add: role = \"vpnclient\"",
-        )?;
+        let role = self
+            .role
+            .context("Config file missing required 'role' field. Add: role = \"vpnclient\"")?;
         if role != Role::VpnClient {
             anyhow::bail!(
                 "Config file has wrong role for VPN client. Expected role = \"vpnclient\""
             );
         }
 
-        let mode = self.mode.context(
-            "Config file missing required 'mode' field. Add: mode = \"iroh\"",
-        )?;
+        let mode = self
+            .mode
+            .context("Config file missing required 'mode' field. Add: mode = \"iroh\"")?;
         if mode != Mode::Iroh {
             anyhow::bail!(
                 "Config file has mode = \"{}\", but VPN only supports iroh mode",
@@ -940,24 +932,19 @@ impl VpnClientConfig {
         if let Some(ref iroh) = self.iroh {
             // Require server_node_id for VPN client
             if iroh.server_node_id.is_none() {
-                anyhow::bail!(
-                    "[iroh] 'server_node_id' is required for VPN client configuration."
-                );
+                anyhow::bail!("[iroh] 'server_node_id' is required for VPN client configuration.");
             }
 
             // Validate auth_token mutual exclusion
             if iroh.auth_token.is_some() && iroh.auth_token_file.is_some() {
-                anyhow::bail!(
-                    "[iroh] Use only one of 'auth_token' or 'auth_token_file'."
-                );
+                anyhow::bail!("[iroh] Use only one of 'auth_token' or 'auth_token_file'.");
             }
 
             // Validate routes: valid CIDR format (optional - VPN subnet routed by default)
             if let Some(ref routes) = iroh.routes {
                 for route in routes {
-                    validate_cidr(route).with_context(|| {
-                        format!("[iroh] Invalid route CIDR '{}'", route)
-                    })?;
+                    validate_cidr(route)
+                        .with_context(|| format!("[iroh] Invalid route CIDR '{}'", route))?;
                 }
             }
 
@@ -1054,12 +1041,20 @@ pub fn load_client_config(path: Option<&Path>) -> Result<ClientConfig> {
 
 /// Resolve the default VPN server config path (~/.config/tunnel-rs/vpn_server.toml).
 fn default_vpn_server_config_path() -> Option<PathBuf> {
-    dirs::home_dir().map(|home| home.join(".config").join("tunnel-rs").join("vpn_server.toml"))
+    dirs::home_dir().map(|home| {
+        home.join(".config")
+            .join("tunnel-rs")
+            .join("vpn_server.toml")
+    })
 }
 
 /// Resolve the default VPN client config path (~/.config/tunnel-rs/vpn_client.toml).
 fn default_vpn_client_config_path() -> Option<PathBuf> {
-    dirs::home_dir().map(|home| home.join(".config").join("tunnel-rs").join("vpn_client.toml"))
+    dirs::home_dir().map(|home| {
+        home.join(".config")
+            .join("tunnel-rs")
+            .join("vpn_client.toml")
+    })
 }
 
 /// Load VPN server configuration from an explicit path, or from default location.

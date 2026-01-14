@@ -195,7 +195,8 @@ pub async fn run_nostr_tcp_client(config: NostrClientConfig) -> Result<()> {
 
     // Create and initialize signaling
     let relay_list = relays_to_option(config.relays);
-    let signaling = init_signaling(&config.nsec, &config.peer_npub, relay_list, &config.source).await?;
+    let signaling =
+        init_signaling(&config.nsec, &config.peer_npub, relay_list, &config.source).await?;
 
     // Generate session ID to filter stale events
     let session_id = generate_session_id();
@@ -389,7 +390,8 @@ pub async fn run_nostr_udp_client(config: NostrClientConfig) -> Result<()> {
 
     // Create and initialize signaling
     let relay_list = relays_to_option(config.relays);
-    let signaling = init_signaling(&config.nsec, &config.peer_npub, relay_list, &config.source).await?;
+    let signaling =
+        init_signaling(&config.nsec, &config.peer_npub, relay_list, &config.source).await?;
 
     // Generate session ID to filter stale events
     let session_id = generate_session_id();
