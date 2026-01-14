@@ -167,6 +167,11 @@ pub struct VpnServerIrohConfig {
     pub auth_tokens: Option<Vec<String>>,
     /// Path to file containing authentication tokens
     pub auth_tokens_file: Option<PathBuf>,
+    /// Drop packets when a client's buffer is full (default: true).
+    /// - `true`: Drop packets for slow clients (avoids head-of-line blocking)
+    /// - `false`: Apply backpressure (blocks TUN reader until space available)
+    #[serde(default = "default_drop_on_full")]
+    pub drop_on_full: bool,
     /// Shared configuration fields
     #[serde(flatten)]
     pub shared: VpnIrohSharedConfig,
@@ -1001,6 +1006,11 @@ fn load_config<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T> {
         .with_context(|| format!("Failed to parse config file: {}", path.display()))
 }
 
+/// Default value for `drop_on_full` in VPN server config.
+fn default_drop_on_full() -> bool {
+    true
+}
+
 /// Resolve the default server config path (~/.config/tunnel-rs/server.toml).
 fn default_server_config_path() -> Option<PathBuf> {
     dirs::home_dir().map(|home| home.join(".config").join("tunnel-rs").join("server.toml"))
@@ -1132,6 +1142,7 @@ pub struct ResolvedVpnServerConfig {
     pub dns_server: Option<String>,
     pub auth_tokens: Vec<String>,
     pub auth_tokens_file: Option<PathBuf>,
+    pub drop_on_full: bool,
 }
 
 /// Builder for VPN server configuration with layered overrides.
@@ -1179,6 +1190,7 @@ pub struct VpnServerConfigBuilder {
     dns_server: Option<String>,
     auth_tokens: Option<Vec<String>>,
     auth_tokens_file: Option<PathBuf>,
+    drop_on_full: Option<bool>,
 }
 
 impl VpnServerConfigBuilder {
@@ -1192,6 +1204,7 @@ impl VpnServerConfigBuilder {
         self.mtu = Some(DEFAULT_VPN_MTU);
         self.relay_urls = Some(vec![]);
         self.auth_tokens = Some(vec![]);
+        self.drop_on_full = Some(true);
         self
     }
 
@@ -1236,6 +1249,8 @@ impl VpnServerConfigBuilder {
             if cfg.auth_tokens_file.is_some() {
                 self.auth_tokens_file = cfg.auth_tokens_file.clone();
             }
+            // drop_on_full: always set from config (has serde default)
+            self.drop_on_full = Some(cfg.drop_on_full);
         }
         self
     }
@@ -1340,6 +1355,7 @@ impl VpnServerConfigBuilder {
             dns_server: self.dns_server,
             auth_tokens: self.auth_tokens.unwrap_or_default(),
             auth_tokens_file: self.auth_tokens_file,
+            drop_on_full: self.drop_on_full.unwrap_or(true),
         })
     }
 }

@@ -39,55 +39,18 @@ struct Args {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Run as VPN server (accepts connections and assigns IPs)
+    /// Run as VPN server (accepts connections and assigns IPs).
+    ///
+    /// Requires a config file. Use -c to specify a path or --default-config for
+    /// ~/.config/tunnel-rs/vpn_server.toml. See vpn_server.toml.example for format.
     Server {
-        /// Config file path
+        /// Config file path (required unless --default-config is used)
         #[arg(short = 'c', long)]
         config: Option<PathBuf>,
 
         /// Use default config path (~/.config/tunnel-rs/vpn_server.toml)
         #[arg(long)]
         default_config: bool,
-
-        /// VPN network CIDR (e.g., 10.0.0.0/24)
-        #[arg(short, long)]
-        network: Option<String>,
-
-        /// Server's VPN IP address (gateway). Defaults to first IP in network.
-        #[arg(long)]
-        server_ip: Option<String>,
-
-        /// IPv6 VPN network CIDR (e.g., fd00::/64). Optional for dual-stack.
-        #[arg(long)]
-        network6: Option<String>,
-
-        /// Server's IPv6 VPN address (gateway). Defaults to first IP in network6.
-        #[arg(long)]
-        server_ip6: Option<String>,
-
-        /// MTU for VPN packets (default: 1440, valid range: 576-1500)
-        #[arg(long, value_parser = clap::value_parser!(u16).range(576..=1500))]
-        mtu: Option<u16>,
-
-        /// Path to secret key file for persistent iroh identity (same EndpointId across restarts)
-        #[arg(long)]
-        secret_file: Option<PathBuf>,
-
-        /// Custom relay server URL(s) for failover
-        #[arg(long = "relay-url")]
-        relay_urls: Vec<String>,
-
-        /// Custom DNS server URL for peer discovery
-        #[arg(long)]
-        dns_server: Option<String>,
-
-        /// Authentication tokens (repeatable). Clients must provide one of these to connect.
-        #[arg(long = "auth-tokens", value_name = "TOKEN")]
-        auth_tokens: Vec<String>,
-
-        /// Path to file containing authentication tokens (one per line, # comments allowed).
-        #[arg(long, value_name = "FILE")]
-        auth_tokens_file: Option<PathBuf>,
     },
     /// Run as VPN client (connects to server and establishes tunnel)
     Client {
@@ -222,41 +185,27 @@ async fn main() -> Result<()> {
         Command::Server {
             config,
             default_config,
-            network,
-            server_ip,
-            network6,
-            server_ip6,
-            mtu,
-            secret_file,
-            relay_urls,
-            dns_server,
-            auth_tokens,
-            auth_tokens_file,
         } => {
-            // Load config file if specified
-            let (cfg, from_file) = resolve_server_config(config, default_config)?;
-            if from_file {
-                if let Some(ref c) = cfg {
-                    c.validate()?;
-                }
+            // Config file is required for VPN server
+            if config.is_none() && !default_config {
+                anyhow::bail!(
+                    "VPN server requires a config file.\n\
+                     Use -c <FILE> or --default-config (~/.config/tunnel-rs/vpn_server.toml)\n\
+                     See vpn_server.toml.example for format."
+                );
             }
 
-            // Build resolved config: defaults -> config file -> CLI
+            // Load and validate config file
+            let (cfg, _from_file) = resolve_server_config(config, default_config)?;
+            let cfg = cfg.ok_or_else(|| {
+                anyhow::anyhow!("Failed to load config file")
+            })?;
+            cfg.validate()?;
+
+            // Build resolved config from config file only (no CLI overrides)
             let resolved = VpnServerConfigBuilder::new()
                 .apply_defaults()
-                .apply_config(cfg.as_ref().and_then(|c| c.iroh()))
-                .apply_cli(
-                    network,
-                    server_ip,
-                    network6,
-                    server_ip6,
-                    mtu,
-                    secret_file.map(|p| expand_tilde(&p)),
-                    relay_urls,
-                    dns_server,
-                    auth_tokens,
-                    auth_tokens_file.map(|p| expand_tilde(&p)),
-                )
+                .apply_config(cfg.iroh())
                 .build()?;
 
             run_vpn_server(resolved).await
@@ -371,7 +320,7 @@ async fn run_vpn_server(resolved: ResolvedVpnServerConfig) -> Result<()> {
         anyhow::bail!(
             "VPN server requires at least one authentication token.\n\
              Generate one with: tunnel-rs-vpn generate-token\n\
-             Then start server with: tunnel-rs-vpn server --auth-tokens <TOKEN>"
+             Then add to config file: auth_tokens = [\"<TOKEN>\"]"
         );
     }
 
@@ -393,7 +342,7 @@ async fn run_vpn_server(resolved: ResolvedVpnServerConfig) -> Result<()> {
         mtu: resolved.mtu,
         max_clients: 254,
         auth_tokens: Some(valid_tokens),
-        drop_on_full: true, // Drop packets for slow clients to avoid head-of-line blocking
+        drop_on_full: resolved.drop_on_full,
     };
 
     // Create iroh endpoint for signaling.
