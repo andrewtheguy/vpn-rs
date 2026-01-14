@@ -1128,10 +1128,21 @@ sudo tunnel-rs-vpn client \
 **Advantages over traditional WireGuard:**
 | Feature | WireGuard | tunnel-rs VPN |
 |---------|-----------|---------------|
-| Identity | Static keypair per device | Dynamic `device_id` (auto-generated) |
+| Identity | Static keypair per device | Ephemeral `device_id` (per session) |
 | Config conflict | Same keypair = conflict | Each session unique via `device_id` |
 | NAT traversal | Manual endpoint config | Automatic via iroh |
 | IP assignment | Static in config | Dynamic from server |
+
+### About `device_id`
+
+The `device_id` is a random 64-bit integer generated fresh each time the VPN client starts (ephemeral per session). It is used purely for **session tracking** on the server, not for security or access control.
+
+- **Format**: Random `u64` (displayed as 16 hex characters in logs, e.g., `a1b2c3d4e5f67890`)
+- **Lifecycle**: Generated at client startup using CSPRNG; not persisted across restarts
+- **Purpose**: Allows multiple VPN sessions from the same iroh endpoint (the server keys clients by `(EndpointId, device_id)`)
+- **Security**: Authentication relies on iroh's cryptographic EndpointId + auth tokens, not on device_id unpredictability
+
+This differs from WireGuard where a static public key identifies each device and conflicts arise if the same key is used from multiple locations.
 
 ## Single Instance Lock
 
