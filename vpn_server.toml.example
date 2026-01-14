@@ -48,6 +48,24 @@ mtu = 1420
 # keepalive_secs = 25
 
 # ============================================================================
+# Channel Buffer Sizes
+# ============================================================================
+# These control packet buffering between tasks. Valid range: 1-65536.
+
+# Per-client outbound packet buffer (default: 1024)
+# Controls how many packets can be queued for each client before backpressure/drops.
+# Memory impact: client_channel_size * ~1500 bytes * connected_clients
+# - 1024 (default): ~1.5 MB per client worst case
+# client_channel_size = 1024
+
+# TUN writer aggregate buffer (default: 512)
+# Shared buffer for all client -> TUN traffic. Lower values bound memory usage.
+# Memory impact: tun_writer_channel_size * ~1500 bytes
+# - 512 (default): ~750 KB worst case (safe for memory-constrained hosts)
+# - 2048-4096: Better burst tolerance for high-bandwidth servers
+# tun_writer_channel_size = 512
+
+# ============================================================================
 # Backpressure Behavior
 # ============================================================================
 
