@@ -601,8 +601,12 @@ impl VpnServer {
         let ip6_to_endpoint = self.ip6_to_endpoint.clone();
 
         // Run client handler (blocks until client disconnects)
+        // Note: data_send is passed as heartbeat_send since it's only used for
+        // heartbeat responses in handle_client_data (outbound traffic goes via
+        // ClientState.send_stream in run_tun_reader)
+        let heartbeat_send = data_send;
         let result = Self::handle_client_data(
-            data_send,
+            heartbeat_send,
             data_recv,
             assigned_ip,
             assigned_ip6,
@@ -674,13 +678,13 @@ impl VpnServer {
 
     /// Handle client data stream.
     async fn handle_client_data(
-        data_send: Arc<Mutex<SendStream>>,
+        heartbeat_send: Arc<Mutex<SendStream>>,
         mut data_recv: iroh::endpoint::RecvStream,
         assigned_ip: Ipv4Addr,
         assigned_ip6: Option<Ipv6Addr>,
         tun_writer: Arc<Mutex<TunWriter>>,
     ) -> VpnResult<()> {
-        let send_heartbeat = data_send.clone();
+        let send_heartbeat = heartbeat_send.clone();
 
         // Spawn inbound task (QUIC stream -> TUN)
         let inbound_handle = tokio::spawn(async move {
