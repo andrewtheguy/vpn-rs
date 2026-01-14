@@ -787,21 +787,30 @@ impl VpnServer {
                         }
                     }
                     Some(PacketIp::V6(src_ip)) => {
-                        match assigned_ip6 {
-                            Some(expected_ip6) if src_ip == expected_ip6 => true,
-                            Some(expected_ip6) => {
-                                log::warn!(
-                                    "IPv6 spoofing attempt from client {}: expected source {}, got {}",
-                                    assigned_ip, expected_ip6, src_ip
-                                );
-                                false
-                            }
-                            None => {
-                                log::warn!(
-                                    "IPv6 packet from client {} without assigned IPv6 address, source: {}",
-                                    assigned_ip, src_ip
-                                );
-                                false
+                        // Silently drop link-local packets (fe80::/10) - these are normal
+                        // OS traffic (neighbor discovery, etc.) that shouldn't be forwarded
+                        let src_bytes = src_ip.octets();
+                        let is_link_local = src_bytes[0] == 0xfe && (src_bytes[1] & 0xc0) == 0x80;
+                        if is_link_local {
+                            log::trace!("Dropping link-local IPv6 packet from client {}: {}", assigned_ip, src_ip);
+                            false
+                        } else {
+                            match assigned_ip6 {
+                                Some(expected_ip6) if src_ip == expected_ip6 => true,
+                                Some(expected_ip6) => {
+                                    log::warn!(
+                                        "IPv6 spoofing attempt from client {}: expected source {}, got {}",
+                                        assigned_ip, expected_ip6, src_ip
+                                    );
+                                    false
+                                }
+                                None => {
+                                    log::warn!(
+                                        "IPv6 packet from client {} without assigned IPv6 address, source: {}",
+                                        assigned_ip, src_ip
+                                    );
+                                    false
+                                }
                             }
                         }
                     }
