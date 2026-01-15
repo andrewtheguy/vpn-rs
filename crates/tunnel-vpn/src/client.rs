@@ -355,7 +355,9 @@ impl VpnClient {
             let mut data_recv = data_recv;
             let mut type_buf = [0u8; 1];
             let mut len_buf = [0u8; 4];
-            let mut data_buf = vec![0u8; MAX_IP_PACKET_SIZE];
+            // SAFETY: Buffer is overwritten by read_exact(&mut data_buf[..len]), and only
+            // the written portion (&data_buf[..len]) is accessed. Skips zeroing overhead.
+            let mut data_buf = unsafe { uninitialized_vec(MAX_IP_PACKET_SIZE) };
             let mut consecutive_tun_failures = 0u32;
             loop {
                 // Read message type
