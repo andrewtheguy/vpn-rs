@@ -5,6 +5,7 @@
 //! tunnels for each connected client. IP packets are framed and sent
 //! directly over the encrypted iroh QUIC connection.
 
+use crate::buffer::{as_mut_byte_slice, uninitialized_vec};
 use crate::config::VpnServerConfig;
 use crate::device::{TunConfig, TunDevice};
 use crate::error::{VpnError, VpnResult};
@@ -1073,11 +1074,14 @@ impl VpnServer {
         log::info!("TUN reader started");
 
         let buffer_size = tun_reader.buffer_size();
-        let mut buf = vec![0u8; buffer_size];
+        let mut buf = uninitialized_vec(buffer_size);
+        // SAFETY: Buffer is immediately overwritten by tun_reader.read(), and only
+        // the written portion (&buf_slice[..n]) is accessed. Skips zeroing overhead.
+        let buf_slice = unsafe { as_mut_byte_slice(&mut buf) };
 
         loop {
             // Read packet from TUN device
-            let n = match tun_reader.read(&mut buf).await {
+            let n = match tun_reader.read(buf_slice).await {
                 Ok(n) if n > 0 => n,
                 Ok(_) => continue,
                 Err(e) => {
@@ -1086,7 +1090,7 @@ impl VpnServer {
                 }
             };
 
-            let packet = &buf[..n];
+            let packet = &buf_slice[..n];
             self.stats.tun_packets_read.fetch_add(1, Ordering::Relaxed);
 
             // Extract destination IP from packet (IPv4 or IPv6)

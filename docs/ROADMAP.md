@@ -198,6 +198,30 @@ Built-in monitoring for connection latency, throughput, packet loss, and uptime.
 
 ---
 
+#### VPN Performance Optimizations
+
+**Status:** Partial (quick wins implemented)
+
+Performance improvements inspired by [quincy-rs/quincy](https://github.com/quincy-rs/quincy), a QUIC-based VPN implementation.
+
+**Implemented:**
+- LTO release profile with strip, fat LTO, single codegen unit
+- jemalloc allocator (optional feature on tunnel-rs-vpn)
+- Uninitialized TUN read buffers (unsafe optimization to skip buffer zeroing)
+
+**Future Improvements:**
+
+| Improvement | Impact | Complexity | Notes |
+|------------|--------|------------|-------|
+| Batch TUN I/O (GSO/GRO) | High | High | Requires switching to `tun_rs` crate for Linux batch operations |
+| Socket buffer tuning | Low | Low | Configure larger send/recv buffers at iroh/quinn level |
+| Congestion controller | Low | Low | Expose BBR/Cubic/NewReno selection via quinn config |
+
+**Batch TUN I/O Details:**
+The `tun_rs` crate supports `recv_multiple`/`send_multiple` with Linux GSO/GRO offload, reducing syscall overhead by batching up to 64 packets per syscall. Current `tun` crate (v0.8) only supports single-packet operations.
+
+---
+
 #### Multi-path Support
 
 **Status:** Idea

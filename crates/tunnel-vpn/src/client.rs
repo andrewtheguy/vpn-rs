@@ -5,6 +5,7 @@
 //! IP-over-QUIC tunnel. IP packets are framed and sent directly over the
 //! encrypted iroh QUIC connection for automatic NAT traversal.
 
+use crate::buffer::{as_mut_byte_slice, uninitialized_vec};
 use crate::config::VpnClientConfig;
 use crate::device::{add_routes, add_routes6, Route6Guard, RouteGuard, TunConfig, TunDevice};
 use crate::error::{VpnError, VpnResult};
@@ -308,11 +309,14 @@ impl VpnClient {
         // We allocate based on actual packet size to avoid over-allocation for small packets.
         // Most allocations are small and served from thread-local caches, making them fast.
         let mut outbound_handle: tokio::task::JoinHandle<Option<String>> = tokio::spawn(async move {
-            let mut read_buf = vec![0u8; buffer_size];
+            let mut read_buf = uninitialized_vec(buffer_size);
+            // SAFETY: Buffer is immediately overwritten by tun_reader.read(), and only
+            // the written portion (&read_slice[..n]) is accessed. Skips zeroing overhead.
+            let read_slice = unsafe { as_mut_byte_slice(&mut read_buf) };
             loop {
-                match tun_reader.read(&mut read_buf).await {
+                match tun_reader.read(read_slice).await {
                     Ok(n) if n > 0 => {
-                        let packet = &read_buf[..n];
+                        let packet = &read_slice[..n];
 
                         // Allocate buffer sized to actual packet (1 byte type + 4 byte length + packet).
                         // Avoids over-allocation for small packets; allocator serves from thread-local caches.
@@ -352,7 +356,10 @@ impl VpnClient {
             let mut data_recv = data_recv;
             let mut type_buf = [0u8; 1];
             let mut len_buf = [0u8; 4];
-            let mut data_buf = vec![0u8; MAX_IP_PACKET_SIZE];
+            let mut data_buf = uninitialized_vec(MAX_IP_PACKET_SIZE);
+            // SAFETY: Buffer is overwritten by read_exact(&mut data_slice[..len]), and only
+            // the written portion (&data_slice[..len]) is accessed. Skips zeroing overhead.
+            let data_slice = unsafe { as_mut_byte_slice(&mut data_buf) };
             let mut consecutive_tun_failures = 0u32;
             loop {
                 // Read message type
@@ -407,7 +414,7 @@ impl VpnClient {
                 }
 
                 // Read packet data
-                match data_recv.read_exact(&mut data_buf[..len]).await {
+                match data_recv.read_exact(&mut data_slice[..len]).await {
                     Ok(()) => {}
                     Err(e) => {
                         log::error!("Failed to read IP packet: {}", e);
@@ -415,7 +422,7 @@ impl VpnClient {
                     }
                 }
 
-                let packet = &data_buf[..len];
+                let packet = &data_slice[..len];
                 // Directly write to TUN (packet is already decrypted/raw IP)
                 if let Err(e) = tun_writer.write_all(packet).await {
                     consecutive_tun_failures += 1;

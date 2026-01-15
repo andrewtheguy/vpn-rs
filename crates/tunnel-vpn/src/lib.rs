@@ -25,6 +25,7 @@
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 compile_error!("tunnel-vpn only supports Linux and macOS");
 
+pub mod buffer;
 pub mod client;
 pub mod config;
 pub mod device;
