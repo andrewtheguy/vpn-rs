@@ -183,7 +183,10 @@ fn resolve_client_config(
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    env_logger::Builder::from_env(
+        env_logger::Env::default().default_filter_or("info,iroh=warn,tracing=warn"),
+    )
+    .init();
 
     let args = Args::parse();
 
@@ -330,11 +333,15 @@ async fn run_vpn_server(resolved: ResolvedVpnServerConfig) -> Result<()> {
 
     log::info!("Loaded {} authentication token(s)", valid_tokens.len());
 
-    // Load secret key for persistent iroh identity (optional)
+    // Load secret key for persistent iroh identity (required for server)
     let secret_key = if let Some(ref path) = resolved.secret_file {
-        Some(load_secret(path).context("Failed to load secret key")?)
+        load_secret(path).context("Failed to load secret key")?
     } else {
-        None
+        anyhow::bail!(
+            "VPN server requires a secret key file for persistent identity.\n\
+             Generate one with: tunnel-rs-vpn generate-server-key -o <FILE>\n\
+             Then add to config file: secret_file = \"<FILE>\""
+        );
     };
 
     // Create VPN server config
@@ -358,7 +365,7 @@ async fn run_vpn_server(resolved: ResolvedVpnServerConfig) -> Result<()> {
     let endpoint = create_server_endpoint(
         &resolved.relay_urls,
         false, // relay_only - direct P2P preferred for VPN performance
-        secret_key,
+        Some(secret_key),
         resolved.dns_server.as_deref(),
         VPN_ALPN,
     )
