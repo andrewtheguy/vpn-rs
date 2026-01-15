@@ -35,7 +35,8 @@
       "Bash(wc:*)",
       "Bash(cargo test:*)",
       "Bash(cargo check:*)",
-      "Bash(cargo clippy:*)"
+      "Bash(cargo clippy:*)",
+      "mcp__github__get_file_contents"
     ]
   }
 }

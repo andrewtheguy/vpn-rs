@@ -4,6 +4,10 @@ version.workspace = true
 edition = "2021"
 description = "WireGuard-based VPN tunnel via iroh P2P"
 
+[features]
+default = ["jemalloc"]
+jemalloc = ["dep:tikv-jemallocator"]
+
 [dependencies]
 tunnel-common = { path = "../tunnel-common" }
 tunnel-iroh = { path = "../tunnel-iroh" }
@@ -14,3 +18,7 @@ anyhow = "1"
 log = "0.4"
 env_logger = "0.11"
 ipnet = "2"
+
+# Performance: jemalloc allocator for better multi-threaded allocation
+[target.'cfg(not(target_env = "musl"))'.dependencies]
+tikv-jemallocator = { version = "0.6", optional = true }

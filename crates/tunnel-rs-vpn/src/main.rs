@@ -6,6 +6,12 @@
 #[cfg(not(unix))]
 compile_error!("tunnel-rs-vpn only supports Linux and macOS");
 
+// Use jemalloc for better multi-threaded allocation performance.
+// Enabled by default, can be disabled with --no-default-features.
+#[cfg(all(feature = "jemalloc", not(target_env = "musl")))]
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use ipnet::{Ipv4Net, Ipv6Net};
