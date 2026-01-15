@@ -10,6 +10,7 @@ use std::path::PathBuf;
 
 use tunnel_common::config::{
     expand_tilde, load_client_config, load_server_config, ClientConfig, ServerConfig,
+    TransportTuning,
 };
 use tunnel_iroh::iroh_mode::endpoint::{
     load_secret, load_secret_from_string, secret_to_endpoint_id,
@@ -464,6 +465,7 @@ async fn main() -> Result<()> {
                 relay_only,
                 dns_server,
                 auth_tokens,
+                transport: TransportTuning::default(),
             })
             .await
         }
@@ -545,6 +547,7 @@ async fn main() -> Result<()> {
                 relay_only,
                 dns_server,
                 auth_token,
+                transport: TransportTuning::default(),
             })
             .await
         }
