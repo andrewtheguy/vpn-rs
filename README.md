@@ -996,6 +996,8 @@ Native direct TUN-based VPN mode for full network tunneling. Unlike port forward
 
 > **Note:** VPN mode is only available on Linux and macOS. It requires root/sudo privileges to create TUN devices and configure routes.
 
+> **Similar Project:** This VPN mode is conceptually similar to [quincy](https://github.com/quincy-rs/quincy), a VPN implementation using the QUIC protocol. The key difference is that tunnel-rs uses iroh's NAT traversal infrastructure, so **no open port is required on the server** — connections work through NAT/firewalls without manual port forwarding.
+
 ## Architecture
 
 ```
