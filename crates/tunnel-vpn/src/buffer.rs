@@ -1,31 +1,23 @@
 //! Buffer utilities for high-performance packet I/O.
 //!
-//! This module provides unsafe buffer allocation helpers that skip
+//! This module provides buffer allocation helpers using `MaybeUninit` to skip
 //! zeroing overhead for buffers that will be immediately overwritten.
 
-/// Allocate an uninitialized byte vector of the specified capacity.
+use std::mem::MaybeUninit;
+
+/// Allocate an uninitialized byte buffer of the specified capacity.
 ///
-/// This is an unsafe optimization that skips the zeroing overhead of `vec![0u8; size]`.
-/// The returned Vec has length equal to capacity, but the contents are uninitialized.
+/// Returns a `Vec<MaybeUninit<u8>>` where all bytes are uninitialized.
+/// This is type-safe because `MaybeUninit<u8>` explicitly represents
+/// that the bytes may contain uninitialized memory.
 ///
-/// # Safety
-///
-/// The caller MUST ensure that:
-/// 1. The buffer is completely overwritten before any of its contents are read
-/// 2. Only the portion that was actually written to is accessed (e.g., `&buf[..n]` after a read)
-///
-/// This is safe for TUN read operations because:
-/// - `read()` writes data into the buffer before returning
-/// - Only `&buf[..n]` (the written portion) is ever accessed
-/// - The uninitialized portion beyond `n` is never read
-///
-/// # Example
+/// # Usage
 ///
 /// ```ignore
-/// // Safe usage - buffer is overwritten before reading
-/// let mut buf = unsafe { uninitialized_vec(1500) };
-/// let n = tun_reader.read(&mut buf).await?;
-/// let packet = &buf[..n];  // Only access written portion
+/// let mut buf = uninitialized_vec(1500);
+/// let slice = unsafe { as_mut_byte_slice(&mut buf) };
+/// let n = tun_reader.read(slice).await?;
+/// let packet = &slice[..n];  // Only access written portion
 /// ```
 ///
 /// # Performance
@@ -33,14 +25,31 @@
 /// For high packet rates (1M+ pps), avoiding zeroing can reduce CPU overhead
 /// significantly since each packet requires a buffer allocation.
 #[inline]
-#[allow(clippy::uninit_vec)]
-pub unsafe fn uninitialized_vec(capacity: usize) -> Vec<u8> {
+pub fn uninitialized_vec(capacity: usize) -> Vec<MaybeUninit<u8>> {
     let mut buf = Vec::with_capacity(capacity);
-    // SAFETY: Caller must ensure buffer is written before reading.
-    // set_len() marks the buffer as having `capacity` bytes, but they
-    // contain uninitialized memory until overwritten.
-    buf.set_len(capacity);
+    // MaybeUninit::uninit() returns uninitialized memory.
+    // resize_with extends the Vec to capacity, filling with uninitialized values.
+    // This avoids the unsafe set_len() by using the safe resize_with API.
+    buf.resize_with(capacity, MaybeUninit::uninit);
     buf
+}
+
+/// Convert a MaybeUninit buffer to a mutable byte slice for I/O operations.
+///
+/// # Safety
+///
+/// The caller MUST ensure that:
+/// 1. Only the portion written to is subsequently read (e.g., `&slice[..n]` after read returns `n`)
+/// 2. The unwritten portion is never read
+///
+/// This is safe for read operations because:
+/// - `read()` writes data into the buffer before returning
+/// - Only the written portion (`&buf[..n]`) is accessed afterward
+#[inline]
+pub unsafe fn as_mut_byte_slice(buf: &mut [MaybeUninit<u8>]) -> &mut [u8] {
+    // SAFETY: MaybeUninit<u8> has the same memory layout as u8.
+    // The caller ensures only written bytes are read.
+    std::slice::from_raw_parts_mut(buf.as_mut_ptr().cast::<u8>(), buf.len())
 }
 
 #[cfg(test)]
@@ -49,18 +58,27 @@ mod tests {
 
     #[test]
     fn test_uninitialized_vec_capacity() {
-        let buf = unsafe { uninitialized_vec(1500) };
+        let buf = uninitialized_vec(1500);
         assert_eq!(buf.len(), 1500);
         assert!(buf.capacity() >= 1500);
     }
 
     #[test]
+    fn test_uninitialized_vec_zero_capacity() {
+        let buf = uninitialized_vec(0);
+        assert_eq!(buf.len(), 0);
+        assert_eq!(buf.capacity(), 0);
+    }
+
+    #[test]
     fn test_uninitialized_vec_write_then_read() {
-        let mut buf = unsafe { uninitialized_vec(100) };
+        let mut buf = uninitialized_vec(100);
+        // Convert to byte slice for writing
+        let slice = unsafe { as_mut_byte_slice(&mut buf) };
         // Simulate a read operation that writes data
         let data = b"hello world";
-        buf[..data.len()].copy_from_slice(data);
+        slice[..data.len()].copy_from_slice(data);
         // Only access the written portion
-        assert_eq!(&buf[..data.len()], data);
+        assert_eq!(&slice[..data.len()], data);
     }
 }
