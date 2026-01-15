@@ -49,6 +49,7 @@ pub fn uninitialized_vec(capacity: usize) -> Vec<MaybeUninit<u8>> {
 pub unsafe fn as_mut_byte_slice(buf: &mut [MaybeUninit<u8>]) -> &mut [u8] {
     // SAFETY: MaybeUninit<u8> has the same memory layout as u8.
     // The caller ensures only written bytes are read.
+    // Note: MaybeUninit::slice_as_mut_ptr is unstable, so we use as_mut_ptr().cast().
     std::slice::from_raw_parts_mut(buf.as_mut_ptr().cast::<u8>(), buf.len())
 }
 
