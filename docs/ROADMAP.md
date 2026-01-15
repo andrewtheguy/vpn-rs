@@ -207,13 +207,13 @@ Performance improvements inspired by [quincy-rs/quincy](https://github.com/quinc
 **Implemented:**
 - LTO release profile with strip, fat LTO, single codegen unit
 - jemalloc allocator (optional feature on tunnel-rs-vpn)
+- Uninitialized TUN read buffers (unsafe optimization to skip buffer zeroing)
 
 **Future Improvements:**
 
 | Improvement | Impact | Complexity | Notes |
 |------------|--------|------------|-------|
 | Batch TUN I/O (GSO/GRO) | High | High | Requires switching to `tun_rs` crate for Linux batch operations |
-| Uninitialized buffers | Medium | Medium | Unsafe optimization to skip buffer zeroing in TUN read paths |
 | Socket buffer tuning | Low | Low | Configure larger send/recv buffers at iroh/quinn level |
 | Congestion controller | Low | Low | Expose BBR/Cubic/NewReno selection via quinn config |
 

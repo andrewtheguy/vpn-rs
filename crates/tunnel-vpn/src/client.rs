@@ -5,6 +5,7 @@
 //! IP-over-QUIC tunnel. IP packets are framed and sent directly over the
 //! encrypted iroh QUIC connection for automatic NAT traversal.
 
+use crate::buffer::uninitialized_vec;
 use crate::config::VpnClientConfig;
 use crate::device::{add_routes, add_routes6, Route6Guard, RouteGuard, TunConfig, TunDevice};
 use crate::error::{VpnError, VpnResult};
@@ -308,7 +309,9 @@ impl VpnClient {
         // We allocate based on actual packet size to avoid over-allocation for small packets.
         // Most allocations are small and served from thread-local caches, making them fast.
         let mut outbound_handle: tokio::task::JoinHandle<Option<String>> = tokio::spawn(async move {
-            let mut read_buf = vec![0u8; buffer_size];
+            // SAFETY: Buffer is immediately overwritten by tun_reader.read(), and only
+            // the written portion (&read_buf[..n]) is accessed. Skips zeroing overhead.
+            let mut read_buf = unsafe { uninitialized_vec(buffer_size) };
             loop {
                 match tun_reader.read(&mut read_buf).await {
                     Ok(n) if n > 0 => {
