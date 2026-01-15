@@ -11,7 +11,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.60-dev"
+version = "0.1.60"
 
 [profile.release]
 strip = true
