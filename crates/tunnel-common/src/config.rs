@@ -295,7 +295,7 @@ pub const DEFAULT_SEND_WINDOW: u32 = 2 * 1024 * 1024;
 /// Transport tuning configuration for QUIC connections.
 ///
 /// These settings affect performance and memory usage of the QUIC transport layer.
-#[derive(Deserialize, Default, Clone, Debug)]
+#[derive(Deserialize, Default, Clone, Debug, PartialEq)]
 pub struct TransportTuning {
     /// Congestion controller algorithm (default: cubic).
     /// Options: cubic, bbr, newreno
@@ -489,6 +489,46 @@ fn validate_channel_size(size: usize, field_name: &str, section: &str) -> Result
             field_name,
             size
         );
+    }
+    Ok(())
+}
+
+/// Minimum QUIC window size (1 KB).
+const MIN_WINDOW_SIZE: u32 = 1024;
+
+/// Maximum QUIC window size (16 MB).
+const MAX_WINDOW_SIZE: u32 = 16 * 1024 * 1024;
+
+/// Validate QUIC window size is within acceptable range (1024-16777216 bytes).
+fn validate_window_size(size: u32, field_name: &str, section: &str) -> Result<()> {
+    if size < MIN_WINDOW_SIZE {
+        anyhow::bail!(
+            "[{}] {} value {} is below minimum of {} bytes (1KB)",
+            section,
+            field_name,
+            size,
+            MIN_WINDOW_SIZE
+        );
+    }
+    if size > MAX_WINDOW_SIZE {
+        anyhow::bail!(
+            "[{}] {} value {} exceeds maximum of {} bytes (16MB)",
+            section,
+            field_name,
+            size,
+            MAX_WINDOW_SIZE
+        );
+    }
+    Ok(())
+}
+
+/// Validate TransportTuning window sizes if specified.
+fn validate_transport_tuning(tuning: &TransportTuning, section: &str) -> Result<()> {
+    if let Some(recv) = tuning.receive_window {
+        validate_window_size(recv, "receive_window", section)?;
+    }
+    if let Some(send) = tuning.send_window {
+        validate_window_size(send, "send_window", section)?;
     }
     Ok(())
 }
@@ -1299,6 +1339,9 @@ impl ResolvedVpnServerConfig {
             .unwrap_or(DEFAULT_TUN_WRITER_CHANNEL_SIZE);
         validate_channel_size(tun_writer_channel_size, "tun_writer_channel_size", "config")?;
 
+        // Validate transport tuning window sizes
+        validate_transport_tuning(&cfg.shared.transport, "iroh.transport")?;
+
         Ok(Self {
             network,
             server_ip: cfg.server_ip.clone(),
@@ -1409,8 +1452,10 @@ impl VpnClientConfigBuilder {
             if cfg.max_reconnect_attempts.is_some() {
                 self.max_reconnect_attempts = cfg.max_reconnect_attempts;
             }
-            // Transport tuning from config
-            self.transport = Some(cfg.shared.transport.clone());
+            // Transport tuning: only override if config differs from default
+            if cfg.shared.transport != TransportTuning::default() {
+                self.transport = Some(cfg.shared.transport.clone());
+            }
         }
         self
     }
@@ -1504,6 +1549,11 @@ impl VpnClientConfigBuilder {
                 "Cannot specify both auth_token and auth_token_file.\n\
                  Use --auth-token <TOKEN> or --auth-token-file <FILE>, not both."
             );
+        }
+
+        // Validate transport tuning window sizes if configured
+        if let Some(ref transport) = self.transport {
+            validate_transport_tuning(transport, "iroh.transport")?;
         }
 
         Ok(ResolvedVpnClientConfig {

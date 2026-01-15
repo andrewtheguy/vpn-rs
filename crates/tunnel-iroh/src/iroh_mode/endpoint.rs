@@ -197,13 +197,15 @@ pub fn create_endpoint_builder(
         let send_window = tuning.send_window.unwrap_or(DEFAULT_SEND_WINDOW);
         transport_config.send_window(send_window.into());
 
-        if tuning.receive_window.is_some() || tuning.send_window.is_some() {
-            info!(
-                "Transport windows: receive={}KB, send={}KB",
-                receive_window / 1024,
-                send_window / 1024
-            );
-        }
+        let recv_source = if tuning.receive_window.is_none() { "default" } else { "config" };
+        let send_source = if tuning.send_window.is_none() { "default" } else { "config" };
+        info!(
+            "Transport windows: receive={}KB ({}), send={}KB ({})",
+            receive_window / 1024,
+            recv_source,
+            send_window / 1024,
+            send_source
+        );
     }
 
     let mut builder = Endpoint::empty_builder(relay_mode).transport_config(transport_config);
