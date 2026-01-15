@@ -523,7 +523,7 @@ fn validate_window_size(size: u32, field_name: &str, section: &str) -> Result<()
 }
 
 /// Validate TransportTuning window sizes if specified.
-fn validate_transport_tuning(tuning: &TransportTuning, section: &str) -> Result<()> {
+pub fn validate_transport_tuning(tuning: &TransportTuning, section: &str) -> Result<()> {
     if let Some(recv) = tuning.receive_window {
         validate_window_size(recv, "receive_window", section)?;
     }
