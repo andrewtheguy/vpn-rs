@@ -64,6 +64,9 @@ pub struct IrohConfig {
     /// SOCKS5 proxy URL for relay connections (e.g., socks5://127.0.0.1:9050).
     /// Required when using .onion relay URLs with Tor.
     pub socks5_proxy: Option<String>,
+    /// Transport layer tuning (congestion control, buffer sizes).
+    #[serde(default)]
+    pub transport: TransportTuning,
 }
 
 /// manual mode configuration.
@@ -143,6 +146,9 @@ pub struct VpnIrohSharedConfig {
     pub relay_urls: Option<Vec<String>>,
     /// Custom DNS server URL for peer discovery
     pub dns_server: Option<String>,
+    /// Transport layer tuning (congestion control, buffer sizes).
+    #[serde(default)]
+    pub transport: TransportTuning,
 }
 
 /// VPN server iroh configuration (TOML section: `[iroh]` in vpn_server.toml).
@@ -257,6 +263,54 @@ impl Mode {
             Mode::Nostr => "nostr",
         }
     }
+}
+
+/// Congestion controller algorithm selection.
+///
+/// Controls how the QUIC connection manages congestion and adjusts sending rates.
+/// Default is Cubic, which is the most widely tested algorithm.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum CongestionController {
+    /// CUBIC - Default. Loss-based congestion control, widely deployed.
+    /// Best for general internet conditions.
+    #[default]
+    Cubic,
+    /// BBR (Bottleneck Bandwidth and RTT) - Model-based congestion control.
+    /// May perform better on high-bandwidth, high-latency links.
+    /// Experimental - may not be fair to Cubic/NewReno flows.
+    Bbr,
+    /// NewReno - Classic TCP-like congestion control.
+    /// Most conservative, good for compatibility.
+    #[serde(alias = "new_reno")]
+    NewReno,
+}
+
+/// Default QUIC receive window size (2 MB).
+pub const DEFAULT_RECEIVE_WINDOW: u32 = 2 * 1024 * 1024;
+
+/// Default QUIC send window size (2 MB).
+pub const DEFAULT_SEND_WINDOW: u32 = 2 * 1024 * 1024;
+
+/// Transport tuning configuration for QUIC connections.
+///
+/// These settings affect performance and memory usage of the QUIC transport layer.
+#[derive(Deserialize, Default, Clone, Debug, PartialEq)]
+pub struct TransportTuning {
+    /// Congestion controller algorithm (default: cubic).
+    /// Options: cubic, bbr, newreno
+    #[serde(default)]
+    pub congestion_controller: CongestionController,
+
+    /// QUIC receive window size in bytes (default: 2097152 = 2MB).
+    /// Controls flow control - larger values allow more in-flight data.
+    /// Valid range: 1024 to 16777216 (16MB).
+    pub receive_window: Option<u32>,
+
+    /// QUIC send window size in bytes (default: 2097152 = 2MB).
+    /// Controls how much data can be sent before acknowledgment.
+    /// Valid range: 1024 to 16777216 (16MB).
+    pub send_window: Option<u32>,
 }
 
 fn parse_expected_mode(expected_mode: &str) -> Result<Mode> {
@@ -435,6 +489,46 @@ fn validate_channel_size(size: usize, field_name: &str, section: &str) -> Result
             field_name,
             size
         );
+    }
+    Ok(())
+}
+
+/// Minimum QUIC window size (1 KB).
+const MIN_WINDOW_SIZE: u32 = 1024;
+
+/// Maximum QUIC window size (16 MB).
+const MAX_WINDOW_SIZE: u32 = 16 * 1024 * 1024;
+
+/// Validate QUIC window size is within acceptable range (1024-16777216 bytes).
+fn validate_window_size(size: u32, field_name: &str, section: &str) -> Result<()> {
+    if size < MIN_WINDOW_SIZE {
+        anyhow::bail!(
+            "[{}] {} value {} is below minimum of {} bytes (1KB)",
+            section,
+            field_name,
+            size,
+            MIN_WINDOW_SIZE
+        );
+    }
+    if size > MAX_WINDOW_SIZE {
+        anyhow::bail!(
+            "[{}] {} value {} exceeds maximum of {} bytes (16MB)",
+            section,
+            field_name,
+            size,
+            MAX_WINDOW_SIZE
+        );
+    }
+    Ok(())
+}
+
+/// Validate TransportTuning window sizes if specified.
+pub fn validate_transport_tuning(tuning: &TransportTuning, section: &str) -> Result<()> {
+    if let Some(recv) = tuning.receive_window {
+        validate_window_size(recv, "receive_window", section)?;
+    }
+    if let Some(send) = tuning.send_window {
+        validate_window_size(send, "send_window", section)?;
     }
     Ok(())
 }
@@ -1193,6 +1287,7 @@ pub struct ResolvedVpnServerConfig {
     pub drop_on_full: bool,
     pub client_channel_size: usize,
     pub tun_writer_channel_size: usize,
+    pub transport: TransportTuning,
 }
 
 impl ResolvedVpnServerConfig {
@@ -1244,6 +1339,9 @@ impl ResolvedVpnServerConfig {
             .unwrap_or(DEFAULT_TUN_WRITER_CHANNEL_SIZE);
         validate_channel_size(tun_writer_channel_size, "tun_writer_channel_size", "config")?;
 
+        // Validate transport tuning window sizes
+        validate_transport_tuning(&cfg.shared.transport, "iroh.transport")?;
+
         Ok(Self {
             network,
             server_ip: cfg.server_ip.clone(),
@@ -1258,6 +1356,7 @@ impl ResolvedVpnServerConfig {
             drop_on_full: cfg.drop_on_full,
             client_channel_size,
             tun_writer_channel_size,
+            transport: cfg.shared.transport.clone(),
         })
     }
 }
@@ -1275,6 +1374,7 @@ pub struct ResolvedVpnClientConfig {
     pub dns_server: Option<String>,
     pub auto_reconnect: bool,
     pub max_reconnect_attempts: Option<NonZeroU32>,
+    pub transport: TransportTuning,
 }
 
 /// Builder for VPN client configuration with layered overrides.
@@ -1290,6 +1390,7 @@ pub struct VpnClientConfigBuilder {
     dns_server: Option<String>,
     auto_reconnect: Option<bool>,
     max_reconnect_attempts: Option<NonZeroU32>,
+    transport: Option<TransportTuning>,
 }
 
 impl VpnClientConfigBuilder {
@@ -1350,6 +1451,10 @@ impl VpnClientConfigBuilder {
             }
             if cfg.max_reconnect_attempts.is_some() {
                 self.max_reconnect_attempts = cfg.max_reconnect_attempts;
+            }
+            // Transport tuning: only override if config differs from default
+            if cfg.shared.transport != TransportTuning::default() {
+                self.transport = Some(cfg.shared.transport.clone());
             }
         }
         self
@@ -1446,6 +1551,11 @@ impl VpnClientConfigBuilder {
             );
         }
 
+        // Validate transport tuning window sizes if configured
+        if let Some(ref transport) = self.transport {
+            validate_transport_tuning(transport, "iroh.transport")?;
+        }
+
         Ok(ResolvedVpnClientConfig {
             server_node_id,
             mtu,
@@ -1457,6 +1567,7 @@ impl VpnClientConfigBuilder {
             dns_server: self.dns_server,
             auto_reconnect: self.auto_reconnect.unwrap_or(true),
             max_reconnect_attempts: self.max_reconnect_attempts,
+            transport: self.transport.unwrap_or_default(),
         })
     }
 }

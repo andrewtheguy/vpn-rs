@@ -9,7 +9,8 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
 use tunnel_common::config::{
-    expand_tilde, load_client_config, load_server_config, ClientConfig, ServerConfig,
+    expand_tilde, load_client_config, load_server_config, validate_transport_tuning,
+    ClientConfig, ServerConfig, TransportTuning,
 };
 use tunnel_iroh::iroh_mode::endpoint::{
     load_secret, load_secret_from_string, secret_to_endpoint_id,
@@ -189,6 +190,7 @@ struct ServerIrohParams {
     socks5_proxy: Option<String>,
     auth_tokens: Vec<String>,
     auth_tokens_file: Option<PathBuf>,
+    transport: TransportTuning,
 }
 
 /// Resolve iroh server parameters from CLI and config.
@@ -250,6 +252,7 @@ fn resolve_server_iroh_params(
             auth_tokens.clone()
         },
         auth_tokens_file: auth_tokens_file.clone().or(cfg.auth_tokens_file.clone()),
+        transport: cfg.transport.clone(),
     }
 }
 
@@ -264,6 +267,7 @@ struct ClientIrohParams {
     socks5_proxy: Option<String>,
     auth_token: Option<String>,
     auth_token_file: Option<PathBuf>,
+    transport: TransportTuning,
 }
 
 /// Resolve iroh client parameters from CLI and config.
@@ -309,6 +313,7 @@ fn resolve_client_iroh_params(
         socks5_proxy: socks5_proxy.clone().or(cfg.socks5_proxy.clone()),
         auth_token,
         auth_token_file,
+        transport: cfg.transport.clone(),
     }
 }
 
@@ -423,6 +428,7 @@ async fn main() -> Result<()> {
                 socks5_proxy,
                 auth_tokens,
                 auth_tokens_file,
+                transport,
             } = resolve_server_iroh_params(&command, iroh_cfg);
 
             #[cfg(feature = "test-utils")]
@@ -449,6 +455,9 @@ async fn main() -> Result<()> {
 
             log::info!("Auth tokens: {} token(s) configured", auth_tokens.len());
 
+            // Validate transport tuning window sizes
+            validate_transport_tuning(&transport, "iroh.transport")?;
+
             validate_socks5_proxy_if_present(&socks5_proxy).await?;
 
             // Set up SOCKS5 bridges for .onion relay URLs
@@ -464,6 +473,7 @@ async fn main() -> Result<()> {
                 relay_only,
                 dns_server,
                 auth_tokens,
+                transport,
             })
             .await
         }
@@ -488,6 +498,7 @@ async fn main() -> Result<()> {
                 socks5_proxy,
                 auth_token,
                 auth_token_file,
+                transport,
             } = resolve_client_iroh_params(&command, iroh_cfg);
 
             #[cfg(feature = "test-utils")]
@@ -532,6 +543,9 @@ async fn main() -> Result<()> {
                 "Invalid auth token format. Generate a valid token with: tunnel-rs generate-token",
             )?;
 
+            // Validate transport tuning window sizes
+            validate_transport_tuning(&transport, "iroh.transport")?;
+
             validate_socks5_proxy_if_present(&socks5_proxy).await?;
 
             let (relay_urls, _relay_bridges) =
@@ -545,6 +559,7 @@ async fn main() -> Result<()> {
                 relay_only,
                 dns_server,
                 auth_token,
+                transport,
             })
             .await
         }

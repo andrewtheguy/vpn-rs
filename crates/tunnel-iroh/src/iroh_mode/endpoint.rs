@@ -10,12 +10,17 @@ use iroh::{
         mdns::MdnsDiscovery,
         pkarr::{PkarrPublisher, PkarrResolver},
     },
-    endpoint::Builder as EndpointBuilder,
+    endpoint::{Builder as EndpointBuilder, ControllerFactory},
     Endpoint, EndpointAddr, EndpointId, RelayMap, RelayMode, RelayUrl, SecretKey, Watcher,
 };
+use iroh_quinn_proto::congestion::{BbrConfig, CubicConfig, NewRenoConfig};
 use log::{info, warn};
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
+use tunnel_common::config::{
+    CongestionController, TransportTuning, DEFAULT_RECEIVE_WINDOW, DEFAULT_SEND_WINDOW,
+};
 use url::Url;
 
 /// ALPN for all iroh modes (client requests source)
@@ -48,6 +53,17 @@ pub const QUIC_KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(15);
 /// 5 minutes is generous for tunnels where the underlying TCP/UDP connection
 /// may have long idle periods between bursts of activity.
 pub const QUIC_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// Create a congestion controller factory based on the selected algorithm.
+fn create_congestion_controller_factory(
+    controller: CongestionController,
+) -> Arc<dyn ControllerFactory + Send + Sync> {
+    match controller {
+        CongestionController::Cubic => Arc::new(CubicConfig::default()),
+        CongestionController::Bbr => Arc::new(BbrConfig::default()),
+        CongestionController::NewReno => Arc::new(NewRenoConfig::default()),
+    }
+}
 
 /// Load secret key from file (base64 encoded).
 pub fn load_secret(path: &Path) -> Result<SecretKey> {
@@ -139,11 +155,13 @@ pub fn print_relay_status(relay_urls: &[String], relay_only: bool, using_custom_
 /// * `relay_only` - If true, only use relay connections (no direct P2P). Only effective with 'test-utils' feature.
 /// * `dns_server` - Optional custom DNS server URL (e.g., "https://dns.example.com")
 /// * `secret_key` - Optional secret key (required for publishing to custom DNS server)
+/// * `transport_tuning` - Optional transport layer tuning (congestion control, buffer sizes)
 pub fn create_endpoint_builder(
     relay_mode: RelayMode,
     relay_only: bool,
     dns_server: Option<&str>,
     secret_key: Option<&SecretKey>,
+    transport_tuning: Option<&TransportTuning>,
 ) -> Result<EndpointBuilder> {
     // relay_only is only meaningful with test-utils feature
     #[cfg(not(feature = "test-utils"))]
@@ -163,6 +181,32 @@ pub fn create_endpoint_builder(
         .context("converting QUIC_IDLE_TIMEOUT to IdleTimeout")?;
     transport_config.max_idle_timeout(Some(idle_timeout));
     transport_config.keep_alive_interval(Some(QUIC_KEEP_ALIVE_INTERVAL));
+
+    // Apply transport tuning if provided
+    if let Some(tuning) = transport_tuning {
+        // Set congestion controller
+        let factory = create_congestion_controller_factory(tuning.congestion_controller);
+        transport_config.congestion_controller_factory(factory);
+        info!("Using {:?} congestion controller", tuning.congestion_controller);
+
+        // Set receive window (flow control)
+        let receive_window = tuning.receive_window.unwrap_or(DEFAULT_RECEIVE_WINDOW);
+        transport_config.receive_window(receive_window.into());
+
+        // Set send window
+        let send_window = tuning.send_window.unwrap_or(DEFAULT_SEND_WINDOW);
+        transport_config.send_window(send_window.into());
+
+        let recv_source = if tuning.receive_window.is_none() { "default" } else { "config" };
+        let send_source = if tuning.send_window.is_none() { "default" } else { "config" };
+        info!(
+            "Transport windows: receive={}KB ({}), send={}KB ({})",
+            receive_window / 1024,
+            recv_source,
+            send_window / 1024,
+            send_source
+        );
+    }
 
     let mut builder = Endpoint::empty_builder(relay_mode).transport_config(transport_config);
 
@@ -208,13 +252,15 @@ pub async fn create_server_endpoint(
     secret: Option<SecretKey>,
     dns_server: Option<&str>,
     alpn: &[u8],
+    transport_tuning: Option<&TransportTuning>,
 ) -> Result<Endpoint> {
     let relay_mode = parse_relay_mode(relay_urls)?;
     let using_custom_relay = !matches!(relay_mode, RelayMode::Default);
     print_relay_status(relay_urls, relay_only, using_custom_relay);
 
-    let mut builder = create_endpoint_builder(relay_mode, relay_only, dns_server, secret.as_ref())?
-        .alpns(vec![alpn.to_vec()]);
+    let mut builder =
+        create_endpoint_builder(relay_mode, relay_only, dns_server, secret.as_ref(), transport_tuning)?
+            .alpns(vec![alpn.to_vec()]);
 
     if let Some(secret) = secret {
         builder = builder.secret_key(secret);
@@ -248,12 +294,13 @@ pub async fn create_client_endpoint(
     relay_only: bool,
     dns_server: Option<&str>,
     secret_key: Option<&SecretKey>,
+    transport_tuning: Option<&TransportTuning>,
 ) -> Result<Endpoint> {
     let relay_mode = parse_relay_mode(relay_urls)?;
     let using_custom_relay = !matches!(relay_mode, RelayMode::Default);
     print_relay_status(relay_urls, relay_only, using_custom_relay);
 
-    let mut builder = create_endpoint_builder(relay_mode, relay_only, dns_server, secret_key)?;
+    let mut builder = create_endpoint_builder(relay_mode, relay_only, dns_server, secret_key, transport_tuning)?;
 
     // Set the secret key for persistent identity (used for authentication)
     if let Some(secret) = secret_key {

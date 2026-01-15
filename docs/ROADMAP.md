@@ -208,14 +208,28 @@ Performance improvements inspired by [quincy-rs/quincy](https://github.com/quinc
 - LTO release profile with strip, fat LTO, single codegen unit
 - jemalloc allocator (optional feature on tunnel-rs-vpn)
 - Uninitialized TUN read buffers (unsafe optimization to skip buffer zeroing)
+- **QUIC transport tuning** - Configurable congestion controller (Cubic/BBR/NewReno) and window sizes
 
 **Future Improvements:**
 
 | Improvement | Impact | Complexity | Notes |
 |------------|--------|------------|-------|
 | Batch TUN I/O (GSO/GRO) | High | High | Requires switching to `tun_rs` crate for Linux batch operations |
-| Socket buffer tuning | Low | Low | Configure larger send/recv buffers at iroh/quinn level |
-| Congestion controller | Low | Low | Expose BBR/Cubic/NewReno selection via quinn config |
+
+**QUIC Transport Tuning (Implemented):**
+
+Configure congestion control algorithm and QUIC flow control windows via `[iroh.transport]`:
+
+```toml
+[iroh.transport]
+congestion_controller = "cubic"  # cubic (default), bbr, newreno
+receive_window = 2097152         # 2MB default (valid: 1KB-16MB)
+send_window = 2097152            # 2MB default (valid: 1KB-16MB)
+```
+
+- **Cubic** (default): Loss-based, widely deployed, best for general internet
+- **BBR**: Model-based, may perform better on high-bandwidth/high-latency links
+- **NewReno**: Classic TCP-like, most conservative
 
 **Batch TUN I/O Details:**
 The `tun_rs` crate supports `recv_multiple`/`send_multiple` with Linux GSO/GRO offload, reducing syscall overhead by batching up to 64 packets per syscall. Current `tun` crate (v0.8) only supports single-packet operations.

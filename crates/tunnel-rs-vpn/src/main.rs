@@ -368,6 +368,7 @@ async fn run_vpn_server(resolved: ResolvedVpnServerConfig) -> Result<()> {
         Some(secret_key),
         resolved.dns_server.as_deref(),
         VPN_ALPN,
+        Some(&resolved.transport),
     )
     .await
     .context("Failed to create iroh endpoint")?;
@@ -450,6 +451,7 @@ async fn run_vpn_client(resolved: ResolvedVpnClientConfig) -> Result<()> {
         false, // relay_only - direct P2P preferred for VPN performance
         resolved.dns_server.as_deref(),
         None, // No persistent secret key - ephemeral
+        Some(&resolved.transport),
     )
     .await
     .context("Failed to create iroh endpoint")?;

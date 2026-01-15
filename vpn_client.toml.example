@@ -100,3 +100,26 @@ routes = [
 # Must match server's dns_server configuration
 # NOTE: URL must include the /pkarr path
 # dns_server = "https://dns.example.com/pkarr"
+
+# ============================================================================
+# Transport Tuning (Optional)
+# ============================================================================
+# Fine-tune QUIC transport layer for performance optimization.
+# All values have sensible defaults - only configure if needed.
+
+[iroh.transport]
+# Congestion controller algorithm (default: cubic)
+# - cubic: Loss-based, widely deployed, best for general internet
+# - bbr: Model-based, may perform better on high-bandwidth/high-latency links
+# - newreno: Classic TCP-like, most conservative
+# congestion_controller = "cubic"
+
+# QUIC receive window in bytes (default: 2097152 = 2MB)
+# Controls flow control - larger values allow more in-flight data
+# Valid range: 1024 (1KB) to 16777216 (16MB)
+# receive_window = 2097152
+
+# QUIC send window in bytes (default: 2097152 = 2MB)
+# Controls how much data can be sent before acknowledgment
+# Valid range: 1024 (1KB) to 16777216 (16MB)
+# send_window = 2097152

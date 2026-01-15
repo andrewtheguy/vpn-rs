@@ -4,15 +4,17 @@
 //! Clients can request specific sources (tcp://host:port or udp://host:port),
 //! and servers validate requests against allowed CIDR lists.
 
-use anyhow::{Context, Result};
-use iroh::{EndpointId, SecretKey};
 use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+
+use anyhow::{Context, Result};
+use iroh::{EndpointId, SecretKey};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::sync::Mutex;
 use tokio::task::JoinSet;
+use tunnel_common::config::TransportTuning;
 
 /// Configuration for the multi-source server.
 pub struct MultiSourceServerConfig {
@@ -32,6 +34,8 @@ pub struct MultiSourceServerConfig {
     pub dns_server: Option<String>,
     /// Set of valid authentication tokens. **Sensitive field - redacted in Debug output.**
     pub auth_tokens: HashSet<String>,
+    /// Transport layer tuning (congestion control, buffer sizes).
+    pub transport: TransportTuning,
 }
 
 impl std::fmt::Debug for MultiSourceServerConfig {
@@ -48,6 +52,7 @@ impl std::fmt::Debug for MultiSourceServerConfig {
                 "auth_tokens",
                 &format!("[{} tokens]", self.auth_tokens.len()),
             )
+            .field("transport", &self.transport)
             .finish()
     }
 }
@@ -68,6 +73,8 @@ pub struct MultiSourceClientConfig {
     pub dns_server: Option<String>,
     /// Authentication token for server access. **Sensitive field - redacted in Debug output.**
     pub auth_token: String,
+    /// Transport layer tuning (congestion control, buffer sizes).
+    pub transport: TransportTuning,
 }
 
 impl std::fmt::Debug for MultiSourceClientConfig {
@@ -80,6 +87,7 @@ impl std::fmt::Debug for MultiSourceClientConfig {
             .field("relay_only", &self.relay_only)
             .field("dns_server", &self.dns_server)
             .field("auth_token", &"[REDACTED]")
+            .field("transport", &self.transport)
             .finish()
     }
 }
@@ -164,6 +172,7 @@ pub async fn run_multi_source_server(config: MultiSourceServerConfig) -> Result<
         config.secret,
         config.dns_server.as_deref(),
         MULTI_ALPN,
+        Some(&config.transport),
     )
     .await?;
 
@@ -560,6 +569,7 @@ pub async fn run_multi_source_client(config: MultiSourceClientConfig) -> Result<
         relay_only,
         config.dns_server.as_deref(),
         None,
+        Some(&config.transport),
     )
     .await?;
 
