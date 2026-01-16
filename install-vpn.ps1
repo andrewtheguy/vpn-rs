@@ -322,9 +322,16 @@ function Install-Binary {
 
         Print-Info "Binary installed successfully to $finalPath"
 
-        # Add to PATH if not already there
+        # Add to PATH if not already there (case-insensitive exact match)
         $userPath = [System.Environment]::GetEnvironmentVariable("Path", "User")
-        if ($userPath -notlike "*$installDir*") {
+        $normalizedInstallDir = $installDir.TrimEnd('\', '/')
+        $currentPaths = @()
+        if ($userPath) {
+            $currentPaths = $userPath -split ';' | ForEach-Object { $_.Trim().TrimEnd('\', '/') } | Where-Object { $_ -ne '' }
+        }
+        $isInPath = $currentPaths -contains $normalizedInstallDir
+
+        if (-not $isInPath) {
             Print-Warn "$installDir is not in your PATH"
             Print-Warn "Adding to user PATH..."
 
@@ -481,9 +488,8 @@ function Start-Installation {
 
 # Main execution
 function Main {
-    # Handle help flags - check both parameter and ReleaseTag value
-    if ($args -contains "--help" -or $args -contains "-h" -or $args -contains "-?" -or $args -contains "/?" -or $args -contains "/h" -or
-        $ReleaseTag -eq "--help" -or $ReleaseTag -eq "-h" -or $ReleaseTag -eq "-?" -or $ReleaseTag -eq "/?" -or $ReleaseTag -eq "/h") {
+    # Handle help flags via ReleaseTag parameter
+    if ($ReleaseTag -eq "--help" -or $ReleaseTag -eq "-h" -or $ReleaseTag -eq "-?" -or $ReleaseTag -eq "/?" -or $ReleaseTag -eq "/h") {
         Show-Usage
         exit 0
     }

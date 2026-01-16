@@ -47,9 +47,8 @@ Tunnel-rs enables you to forward TCP and UDP traffic between machines without re
 |------|-------------|
 | Forward a specific port (SSH, HTTP, database) | Port Forwarding (iroh mode) |
 | Access UDP services (WireGuard, DNS, game servers) | Port Forwarding (iroh mode) |
-| Route all traffic through tunnel | VPN Mode |
-| Access an entire remote subnet | VPN Mode |
-| Route all traffic through tunnel (Windows) | VPN Mode (requires admin) |
+| Route all traffic through tunnel | VPN Mode (requires root/admin) |
+| Access an entire remote subnet | VPN Mode (requires root/admin) |
 | No root/admin privileges available | Port Forwarding |
 | Decentralized signaling (no iroh dependency) | Port Forwarding (nostr mode) |
 | Offline/LAN-only operation | Port Forwarding (manual mode) |
@@ -159,11 +158,14 @@ irm https://andrewtheguy.github.io/tunnel-rs/install-vpn.ps1 | iex
 ```
 
 > **Windows Requirements:**
+>
+> The installer script does **not** require Administrator privileges. However, **running `tunnel-rs-vpn.exe` requires Administrator** for TUN device creation.
+>
 > 1. Download WinTun driver from https://www.wintun.net/ (official WireGuard project)
 > 2. Extract the zip and copy `wintun/bin/amd64/wintun.dll` to:
 >    - The same directory as `tunnel-rs-vpn.exe` (default: `%LOCALAPPDATA%\Programs\tunnel-rs\`), OR
 >    - Any directory in the system PATH
-> 3. Run as Administrator (required for TUN device creation)
+> 3. **Run `tunnel-rs-vpn.exe` as Administrator:** Right-click PowerShell or Command Prompt → "Run as administrator", then execute the VPN command
 >
 > **Troubleshooting:** If you see `Failed to create TUN device: LoadLibraryExW failed`, the `wintun.dll` is missing or not in a valid DLL search path.
 
