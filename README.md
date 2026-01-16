@@ -48,9 +48,9 @@ Tunnel-rs enables you to forward TCP and UDP traffic—or tunnel entire networks
 | Forward a specific port (SSH, HTTP, database) | Port Forwarding (iroh mode) | `tunnel-rs` |
 | Access UDP services (WireGuard, DNS, game servers) | Port Forwarding (iroh mode) | `tunnel-rs` |
 | Alternative to `kubectl port-forward` with UDP support | Port Forwarding (iroh mode) | `tunnel-rs` |
+| No root/admin privileges available | Port Forwarding (iroh mode) | `tunnel-rs` |
 | Route all traffic through tunnel | VPN Mode (requires root/admin) | `tunnel-rs-vpn` |
 | Access an entire remote subnet | VPN Mode (requires root/admin) | `tunnel-rs-vpn` |
-| No root/admin privileges available | Port Forwarding (iroh mode) | `tunnel-rs` |
 
 ### Alternative Modes (Niche Use Cases)
 
