@@ -71,17 +71,10 @@ impl VpnLock {
 
     /// Get the path to the lock file.
     fn lock_path() -> PathBuf {
-        // Windows: use %TEMP% or %TMP%
+        // Windows: use system temp directory (handles %TEMP%/%TMP% with proper fallbacks)
         #[cfg(target_os = "windows")]
         {
-            if let Ok(temp) = std::env::var("TEMP") {
-                return PathBuf::from(temp).join(LOCK_FILE_NAME);
-            }
-            if let Ok(tmp) = std::env::var("TMP") {
-                return PathBuf::from(tmp).join(LOCK_FILE_NAME);
-            }
-            // Fallback to current directory on Windows
-            return PathBuf::from(".").join(LOCK_FILE_NAME);
+            return std::env::temp_dir().join(LOCK_FILE_NAME);
         }
 
         // Unix: use XDG runtime dir on Linux, TMPDIR on macOS, or /tmp as fallback

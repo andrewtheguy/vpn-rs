@@ -117,9 +117,11 @@ Install with custom release tag:
 ```bash
 # Linux/macOS
 curl -sSL https://andrewtheguy.github.io/tunnel-rs/install.sh | bash -s <RELEASE_TAG>
+```
 
+```powershell
 # Windows
-irm https://andrewtheguy.github.io/tunnel-rs/install.ps1 | iex -Args <RELEASE_TAG>
+& ([scriptblock]::Create((irm https://andrewtheguy.github.io/tunnel-rs/install.ps1))) <RELEASE_TAG>
 ```
 
 By default the installer pulls the latest **stable** release. Use `--prerelease` for the newest prerelease, or pass an explicit tag to pin to a specific build:
@@ -134,10 +136,10 @@ curl -sSL https://andrewtheguy.github.io/tunnel-rs/install.sh | bash -s 20251210
 
 ```powershell
 # Windows - latest prerelease
-irm https://andrewtheguy.github.io/tunnel-rs/install.ps1 | iex -Args -PreRelease
+& ([scriptblock]::Create((irm https://andrewtheguy.github.io/tunnel-rs/install.ps1))) -PreRelease
 
 # Windows - pin to specific tag
-irm https://andrewtheguy.github.io/tunnel-rs/install.ps1 | iex -Args 20251210172710
+& ([scriptblock]::Create((irm https://andrewtheguy.github.io/tunnel-rs/install.ps1))) 20251210172710
 ```
 
 </details>
@@ -171,9 +173,11 @@ Install with custom release tag:
 ```bash
 # Linux/macOS
 curl -sSL https://andrewtheguy.github.io/tunnel-rs/install-vpn.sh | sudo bash -s <RELEASE_TAG>
+```
 
+```powershell
 # Windows
-irm https://andrewtheguy.github.io/tunnel-rs/install-vpn.ps1 | iex -Args <RELEASE_TAG>
+& ([scriptblock]::Create((irm https://andrewtheguy.github.io/tunnel-rs/install-vpn.ps1))) <RELEASE_TAG>
 ```
 
 Latest prerelease:
@@ -184,7 +188,7 @@ curl -sSL https://andrewtheguy.github.io/tunnel-rs/install-vpn.sh | sudo bash -s
 
 ```powershell
 # Windows
-irm https://andrewtheguy.github.io/tunnel-rs/install-vpn.ps1 | iex -Args -PreRelease
+& ([scriptblock]::Create((irm https://andrewtheguy.github.io/tunnel-rs/install-vpn.ps1))) -PreRelease
 ```
 
 </details>

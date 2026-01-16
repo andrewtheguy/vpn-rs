@@ -10,7 +10,7 @@ tunnel-rs currently supports four operational modes:
 - **nostr**: Full ICE with automated Nostr relay signaling and receiver-requested sources
 - **manual**: Full ICE with manual signaling (single-target)
 
-Port forwarding modes (iroh, nostr, manual) support TCP and UDP tunneling with end-to-end encryption via QUIC/TLS 1.3. VPN mode provides full network tunneling with WireGuard encryption on top of iroh's QUIC transport.
+Port forwarding modes (iroh, nostr, manual) support TCP and UDP tunneling with end-to-end encryption via QUIC/TLS 1.3. VPN mode provides full network tunneling with direct IP-over-QUIC tunneling using iroh's TLS 1.3 encrypted transport.
 
 ---
 
