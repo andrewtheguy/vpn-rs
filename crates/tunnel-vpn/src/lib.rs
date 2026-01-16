@@ -11,7 +11,7 @@
 //!
 //! # Platform Support
 //!
-//! This crate only supports Linux and macOS for now.
+//! This crate supports Linux, macOS, and Windows.
 //!
 //! # Architecture
 //!
@@ -22,8 +22,8 @@
 //! └─────────────────────────────────────────────────────────────┘
 //! ```
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-compile_error!("tunnel-vpn only supports Linux and macOS");
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+compile_error!("tunnel-vpn only supports Linux, macOS, and Windows");
 
 pub mod buffer;
 pub mod client;
