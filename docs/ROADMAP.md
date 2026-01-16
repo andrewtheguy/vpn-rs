@@ -6,7 +6,7 @@ This document outlines planned features and improvements for tunnel-rs.
 
 tunnel-rs currently supports four operational modes:
 - **iroh**: Persistent identity with automatic discovery, relay fallback, and receiver-requested sources
-- **vpn**: Native WireGuard-based VPN with automatic IP assignment (Linux/macOS)
+- **vpn**: Native TUN-based VPN with automatic IP assignment (Linux/macOS/Windows)
 - **nostr**: Full ICE with automated Nostr relay signaling and receiver-requested sources
 - **manual**: Full ICE with manual signaling (single-target)
 

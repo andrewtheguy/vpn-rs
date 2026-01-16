@@ -16,7 +16,7 @@ Tunnel-rs enables you to forward TCP and UDP traffic between machines without re
 - **Flexible signaling** — Automated discovery (iroh), decentralized (Nostr), or manual exchange
 - **Offline/LAN support** — manual mode works without internet
 
-**VPN Mode Features (Linux/macOS only):**
+**VPN Mode Features (Linux/macOS/Windows):**
 - **Full network tunneling** — Route entire subnets, not just individual ports
 - **Direct IP-over-QUIC** — High performance direct tunneling with TLS 1.3 encryption
 - **Automatic IP assignment** — No manual keypair or IP management
@@ -49,7 +49,7 @@ Tunnel-rs enables you to forward TCP and UDP traffic between machines without re
 | Access UDP services (WireGuard, DNS, game servers) | Port Forwarding (iroh mode) |
 | Route all traffic through tunnel | VPN Mode |
 | Access an entire remote subnet | VPN Mode |
-| Windows support needed | Port Forwarding |
+| Route all traffic through tunnel (Windows) | VPN Mode (requires admin) |
 | No root/admin privileges available | Port Forwarding |
 | Decentralized signaling (no iroh dependency) | Port Forwarding (nostr mode) |
 | Offline/LAN-only operation | Port Forwarding (manual mode) |
@@ -61,7 +61,7 @@ tunnel-rs provides multiple modes for establishing tunnels. **Use `iroh` mode** 
 **Binary layout:**
 - `tunnel-rs`: Port forwarding with iroh mode
 - `tunnel-rs-ice`: Port forwarding with manual and nostr modes
-- `tunnel-rs-vpn`: VPN mode (Linux/macOS only)
+- `tunnel-rs-vpn`: VPN mode (Linux/macOS/Windows)
 
 ### Port Forwarding Modes
 
@@ -75,7 +75,7 @@ tunnel-rs provides multiple modes for establishing tunnels. **Use `iroh` mode** 
 
 | Mode | NAT Traversal | Discovery | Platform | External Dependency |
 |------|---------------|-----------|----------|---------------------|
-| **vpn** | Best (relay fallback) | Automatic | Linux/macOS only | iroh relay infrastructure |
+| **vpn** | Best (relay fallback) | Automatic | Linux/macOS/Windows | iroh relay infrastructure |
 
 > See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for detailed diagrams and technical deep-dives.
 
@@ -144,23 +144,41 @@ irm https://andrewtheguy.github.io/tunnel-rs/install.ps1 | iex -Args 20251210172
 
 ### VPN Mode (`tunnel-rs-vpn`)
 
-> **Linux/macOS only.** VPN mode requires root privileges and is not available on Windows.
+> VPN mode requires root/admin privileges to create TUN devices and configure routes.
 
+**Linux & macOS:**
 ```bash
 curl -sSL https://andrewtheguy.github.io/tunnel-rs/install-vpn.sh | sudo bash
 ```
+
+**Windows:**
+```powershell
+irm https://andrewtheguy.github.io/tunnel-rs/install-vpn.ps1 | iex
+```
+
+> **Windows Note:** You also need `wintun.dll` from https://www.wintun.net/ placed in the same directory as the executable. Run as Administrator.
 
 <details>
 <summary>Advanced installation options</summary>
 
 Install with custom release tag:
 ```bash
+# Linux/macOS
 curl -sSL https://andrewtheguy.github.io/tunnel-rs/install-vpn.sh | sudo bash -s <RELEASE_TAG>
+
+# Windows
+irm https://andrewtheguy.github.io/tunnel-rs/install-vpn.ps1 | iex -Args <RELEASE_TAG>
 ```
 
 Latest prerelease:
 ```bash
+# Linux/macOS
 curl -sSL https://andrewtheguy.github.io/tunnel-rs/install-vpn.sh | sudo bash -s -- --prerelease
+```
+
+```powershell
+# Windows
+irm https://andrewtheguy.github.io/tunnel-rs/install-vpn.ps1 | iex -Args -PreRelease
 ```
 
 </details>
@@ -174,7 +192,7 @@ cargo install --path . -p tunnel-rs
 # Port forwarding (nostr/manual modes)
 cargo install --path . -p tunnel-rs-ice
 
-# VPN mode (Linux/macOS only, requires root to run)
+# VPN mode (requires root/admin to run)
 cargo install --path . -p tunnel-rs-vpn
 ```
 
@@ -990,11 +1008,11 @@ For `manual`, use separate instances for each tunnel:
 
 # VPN Mode
 
-Full network tunneling with Direct QUIC encryption. Linux/macOS only, requires root.
+Full network tunneling with Direct QUIC encryption. Requires root/admin privileges.
 
 Native direct TUN-based VPN mode for full network tunneling. Unlike port forwarding modes, VPN mode creates a TUN device and routes IP traffic directly through the encrypted Iroh QUIC connection, eliminating double encryption overhead.
 
-> **Note:** VPN mode is only available on Linux and macOS. It requires root/sudo privileges to create TUN devices and configure routes.
+> **Note:** VPN mode requires root/admin privileges to create TUN devices and configure routes. On Windows, you also need `wintun.dll` from https://www.wintun.net/ in the executable directory.
 
 > **Similar Project:** This VPN mode is conceptually similar to [quincy](https://github.com/quincy-rs/quincy), a VPN implementation using the QUIC protocol. The key difference is that tunnel-rs uses iroh's NAT traversal infrastructure, so **no open port is required on the server** — connections work through NAT/firewalls without manual port forwarding.
 
