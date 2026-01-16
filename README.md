@@ -167,7 +167,7 @@ irm https://andrewtheguy.github.io/tunnel-rs/install-vpn.ps1 | iex
 > [!NOTE]
 > **Windows Requirements:**
 >
-> The installer script does **not** require Administrator privileges. However, **running `tunnel-rs-vpn.exe` requires Administrator** for TUN device creation.
+> **Running `tunnel-rs-vpn.exe` requires Administrator** for TUN device creation.
 >
 > 1. Download WinTun driver from https://www.wintun.net/ (official WireGuard project)
 > 2. Extract the zip and copy `wintun/bin/amd64/wintun.dll` to:
