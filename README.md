@@ -20,15 +20,12 @@ Tunnel-rs enables you to forward TCP and UDP traffic—or tunnel entire networks
 - **Offline/LAN support** — manual mode works without internet
 
 **VPN Mode Features**
-- **Full network tunneling** — Route entire subnets, not just individual ports
 - **Direct IP-over-QUIC** — High performance direct tunneling with TLS 1.3 encryption
 - **Automatic IP assignment** — No manual keypair or IP management
-- **Split tunneling** — Route only specific networks through the VPN
 
 **Common Features:**
 - **No publicly accessible IPs or port forwarding required** — Automatic NAT hole punching
 - **Minimal configuration** — Automatic peer discovery using simple, shareable identities
-- **High performance** — Optimized for low latency using QUIC stream multiplexing
 
 **Common Use Cases:**
 - **SSH access** to machines behind NAT/firewalls
