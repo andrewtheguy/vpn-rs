@@ -43,16 +43,27 @@ For fully independent operation, you can self-host both iroh's relay and DNS ser
 
 ```bash
 cargo install iroh-relay
-iroh-relay --config relay.toml
+iroh-relay --config relay.toml --dev  # --dev for local testing
 ```
 
 Example `relay.toml`:
 ```toml
-[relay]
-http_bind_addr = "0.0.0.0:80"
-tls_bind_addr = "0.0.0.0:443"
-hostname = "relay.example.com"
+# Enable QUIC address discovery
+enable_quic_addr_discovery = true
+
+# TLS configuration (required for production)
+[tls]
+cert_mode = "Manual"
+manual_cert_path = "/etc/letsencrypt/live/relay.example.com/fullchain.pem"
+manual_key_path = "/etc/letsencrypt/live/relay.example.com/privkey.pem"
+
+# Alternative: use Let's Encrypt automatic certificates
+# [tls]
+# cert_mode = "LetsEncrypt"
+# hostname = "relay.example.com"
 ```
+
+> **Note:** With `--dev`, the relay runs HTTP on port 3340 and QUIC on port 7824. For production, configure TLS and use a reverse proxy or direct HTTPS binding.
 
 ### Running iroh-dns-server
 
@@ -60,6 +71,39 @@ hostname = "relay.example.com"
 cargo install iroh-dns-server
 iroh-dns-server --config dns.toml
 ```
+
+Example `dns.toml`:
+```toml
+# Rate limiting for pkarr PUT requests
+pkarr_put_rate_limit = "smart"
+
+# HTTP server for pkarr API (development)
+[http]
+port = 8080
+bind_addr = "0.0.0.0"
+
+# HTTPS server (production)
+[https]
+port = 443
+domains = ["dns.example.com"]
+cert_mode = "lets_encrypt"
+letsencrypt_prod = true
+
+# DNS server configuration
+[dns]
+port = 53
+default_ttl = 30
+origins = ["dns.example.com", "."]
+rr_a = "203.0.113.10"  # Your server's public IP
+rr_ns = "ns1.dns.example.com."
+default_soa = "ns1.dns.example.com hostmaster.dns.example.com 0 10800 3600 604800 3600"
+
+# Mainline DHT fallback (optional)
+[mainline]
+enabled = false
+```
+
+> **Note:** The iroh-dns-server provides the `/pkarr` HTTP endpoint used by tunnel-rs for peer discovery. Refer to the [iroh-dns-server source](https://github.com/n0-computer/iroh/tree/main/iroh-dns-server) for the latest configuration options.
 
 ### Using Your Infrastructure
 
@@ -84,14 +128,41 @@ tunnel-rs client \
 
 ## VPN Mode with Self-Hosted Infrastructure
 
-The same `--relay-url` and `--dns-server` options work with VPN mode:
+The same relay and DNS options work with VPN mode. Configure them in `vpn_server.toml`:
 
+Example `vpn_server.toml` with self-hosted infrastructure:
+```toml
+role = "vpnserver"
+mode = "iroh"
+
+[iroh]
+# VPN network configuration
+network = "10.0.0.0/24"
+
+# Server identity (for persistent EndpointId)
+secret_file = "./vpn-server.key"
+
+# Authentication
+auth_tokens = ["iXXXXXXXXXXXXXXXXX"]  # Replace with real token
+
+# Self-hosted relay server(s)
+relay_urls = [
+    "https://relay.example.com",
+    "https://relay-backup.example.com",  # Optional failover
+]
+
+# Self-hosted DNS server for peer discovery
+# NOTE: URL must include the /pkarr path
+dns_server = "https://dns.example.com/pkarr"
+```
+
+Start the VPN server:
 ```bash
-# VPN Server
 sudo tunnel-rs-vpn server -c vpn_server.toml
-# (configure relay_urls and dns_server in vpn_server.toml)
+```
 
-# VPN Client
+VPN client with self-hosted infrastructure:
+```bash
 sudo tunnel-rs-vpn client \
   --server-node-id <ID> \
   --relay-url https://relay.example.com \
