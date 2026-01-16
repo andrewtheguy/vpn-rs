@@ -345,6 +345,7 @@ impl Route for Ipv4Net {
             "route".into(),
             format!("prefix={}", self),
             format!("interface={}", tun_name),
+            "nexthop=0.0.0.0".into(),
             "store=active".into(),
         ]
     }
@@ -357,6 +358,7 @@ impl Route for Ipv4Net {
             "route".into(),
             format!("prefix={}", self),
             format!("interface={}", tun_name),
+            "nexthop=0.0.0.0".into(),
         ]
     }
 }
@@ -414,6 +416,7 @@ impl Route for Ipv6Net {
             "route".into(),
             format!("prefix={}", self),
             format!("interface={}", tun_name),
+            "nexthop=::".into(),
             "store=active".into(),
         ]
     }
@@ -426,6 +429,7 @@ impl Route for Ipv6Net {
             "route".into(),
             format!("prefix={}", self),
             format!("interface={}", tun_name),
+            "nexthop=::".into(),
         ]
     }
 }
