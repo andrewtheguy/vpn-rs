@@ -15,7 +15,7 @@ use tunnel_common::config::{
 use tunnel_iroh::iroh_mode::endpoint::{
     load_secret, load_secret_from_string, secret_to_endpoint_id,
 };
-use tunnel_iroh::{auth, iroh_mode, secret, socks5_bridge};
+use tunnel_iroh::{auth, iroh_mode, secret};
 
 #[derive(Parser)]
 #[command(name = "tunnel-rs")]
@@ -74,12 +74,6 @@ enum Command {
         #[arg(long)]
         dns_server: Option<String>,
 
-        /// [Experimental] SOCKS5 proxy for relay connections (required for .onion URLs).
-        /// Tor support is experimental and might not work reliably.
-        /// E.g., socks5://127.0.0.1:9050 for Tor
-        #[arg(long)]
-        socks5_proxy: Option<String>,
-
         /// Authentication tokens (repeatable). Clients must provide one of these tokens to connect.
         /// Required for authentication. Use with --auth-tokens-file for file-based config.
         #[arg(long = "auth-tokens", value_name = "TOKEN")]
@@ -126,12 +120,6 @@ enum Command {
         /// Custom DNS server URL for peer discovery
         #[arg(long)]
         dns_server: Option<String>,
-
-        /// [Experimental] SOCKS5 proxy for relay connections (required for .onion URLs).
-        /// Tor support is experimental and might not work reliably.
-        /// E.g., socks5://127.0.0.1:9050 for Tor
-        #[arg(long)]
-        socks5_proxy: Option<String>,
 
         /// Authentication token to send to server
         #[arg(long)]
@@ -187,7 +175,6 @@ struct ServerIrohParams {
     secret_file: Option<PathBuf>,
     relay_urls: Vec<String>,
     dns_server: Option<String>,
-    socks5_proxy: Option<String>,
     auth_tokens: Vec<String>,
     auth_tokens_file: Option<PathBuf>,
     transport: TransportTuning,
@@ -210,7 +197,6 @@ fn resolve_server_iroh_params(
         secret_file,
         relay_urls,
         dns_server,
-        socks5_proxy,
         auth_tokens,
         auth_tokens_file,
         ..
@@ -245,7 +231,6 @@ fn resolve_server_iroh_params(
             relay_urls.clone()
         },
         dns_server: dns_server.clone().or(cfg.dns_server.clone()),
-        socks5_proxy: socks5_proxy.clone().or(cfg.socks5_proxy.clone()),
         auth_tokens: if auth_tokens.is_empty() {
             cfg.auth_tokens.clone().unwrap_or_default()
         } else {
@@ -264,7 +249,6 @@ struct ClientIrohParams {
     target: Option<String>,
     relay_urls: Vec<String>,
     dns_server: Option<String>,
-    socks5_proxy: Option<String>,
     auth_token: Option<String>,
     auth_token_file: Option<PathBuf>,
     transport: TransportTuning,
@@ -284,7 +268,6 @@ fn resolve_client_iroh_params(
         target,
         relay_urls,
         dns_server,
-        socks5_proxy,
         auth_token,
         auth_token_file,
         ..
@@ -310,7 +293,6 @@ fn resolve_client_iroh_params(
             relay_urls.clone()
         },
         dns_server: dns_server.clone().or(cfg.dns_server.clone()),
-        socks5_proxy: socks5_proxy.clone().or(cfg.socks5_proxy.clone()),
         auth_token,
         auth_token_file,
         transport: cfg.transport.clone(),
@@ -387,14 +369,6 @@ fn resolve_client_config(
     }
 }
 
-/// Validate that the SOCKS5 proxy is a Tor proxy, if one is specified.
-async fn validate_socks5_proxy_if_present(socks5_proxy: &Option<String>) -> Result<()> {
-    if let Some(ref proxy) = socks5_proxy {
-        socks5_bridge::validate_tor_proxy(proxy).await?;
-    }
-    Ok(())
-}
-
 #[tokio::main]
 async fn main() -> Result<()> {
     let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn"))
@@ -425,7 +399,6 @@ async fn main() -> Result<()> {
                 secret_file,
                 relay_urls,
                 dns_server,
-                socks5_proxy,
                 auth_tokens,
                 auth_tokens_file,
                 transport,
@@ -458,12 +431,6 @@ async fn main() -> Result<()> {
             // Validate transport tuning window sizes
             validate_transport_tuning(&transport, "iroh.transport")?;
 
-            validate_socks5_proxy_if_present(&socks5_proxy).await?;
-
-            // Set up SOCKS5 bridges for .onion relay URLs
-            let (relay_urls, _relay_bridges) =
-                socks5_bridge::setup_relay_bridges(relay_urls, socks5_proxy.as_deref()).await?;
-
             iroh_mode::run_multi_source_server(iroh_mode::MultiSourceServerConfig {
                 allowed_tcp,
                 allowed_udp,
@@ -495,7 +462,6 @@ async fn main() -> Result<()> {
                 target,
                 relay_urls,
                 dns_server,
-                socks5_proxy,
                 auth_token,
                 auth_token_file,
                 transport,
@@ -545,11 +511,6 @@ async fn main() -> Result<()> {
 
             // Validate transport tuning window sizes
             validate_transport_tuning(&transport, "iroh.transport")?;
-
-            validate_socks5_proxy_if_present(&socks5_proxy).await?;
-
-            let (relay_urls, _relay_bridges) =
-                socks5_bridge::setup_relay_bridges(relay_urls, socks5_proxy.as_deref()).await?;
 
             iroh_mode::run_multi_source_client(iroh_mode::MultiSourceClientConfig {
                 node_id: server_node_id,
