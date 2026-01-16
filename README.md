@@ -16,7 +16,7 @@ Tunnel-rs enables you to forward TCP and UDP traffic between machines without re
 - **Flexible signaling** — Automated discovery (iroh), decentralized (Nostr), or manual exchange
 - **Offline/LAN support** — manual mode works without internet
 
-**VPN Mode Features (Linux/macOS/Windows):**
+**VPN Mode Features**
 - **Full network tunneling** — Route entire subnets, not just individual ports
 - **Direct IP-over-QUIC** — High performance direct tunneling with TLS 1.3 encryption
 - **Automatic IP assignment** — No manual keypair or IP management
@@ -60,7 +60,7 @@ tunnel-rs provides multiple modes for establishing tunnels. **Use `iroh` mode** 
 **Binary layout:**
 - `tunnel-rs`: Port forwarding with iroh mode
 - `tunnel-rs-ice`: Port forwarding with manual and nostr modes
-- `tunnel-rs-vpn`: VPN mode (Linux/macOS/Windows)
+- `tunnel-rs-vpn`: VPN mode
 
 ### Port Forwarding Modes
 

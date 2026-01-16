@@ -24,7 +24,7 @@ tunnel-rs is a P2P TCP/UDP port forwarding tool that supports multiple distinct 
 
 Binary layout:
 - `tunnel-rs`: iroh mode (port forwarding)
-- `tunnel-rs-vpn`: VPN mode (Linux/macOS/Windows)
+- `tunnel-rs-vpn`: VPN mode
 - `tunnel-rs-ice`: manual and nostr modes
 
 > **Design Goal:** The project's primary goal is to provide a convenient way to connect to different networks for development or homelab purposes without the hassle and security risk of opening a port. It is **not** meant for production setups or designed to be performant at scale.
