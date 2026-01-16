@@ -238,6 +238,108 @@ Access services running in Docker or Kubernetes remotely — without opening por
 
 ---
 
+# Common Configuration
+
+These settings apply to both Port Forwarding (`tunnel-rs`) and VPN (`tunnel-rs-vpn`) modes using iroh.
+
+## Persistent Server Identity
+
+By default, a new EndpointId is generated each run. For long-running setups, use persistent identity for the **server**:
+
+```bash
+# Generate key and output EndpointId
+tunnel-rs generate-server-key --output ./server.key
+
+# Show EndpointId for existing key
+tunnel-rs show-server-id --secret-file ./server.key
+```
+
+Then reference the key in your server config or CLI:
+
+```bash
+# Port forwarding
+tunnel-rs server --secret-file ./server.key --allowed-tcp 127.0.0.0/8 --auth-tokens "$AUTH_TOKEN"
+
+# VPN (in vpn_server.toml)
+# secret_file = "./server.key"
+```
+
+> **Note:** Clients use ephemeral identities by default. Only the server needs a persistent key to maintain a stable EndpointId that clients can connect to.
+
+## Authentication
+
+Iroh mode requires authentication using pre-shared tokens. Clients must provide a valid token to connect.
+
+**Token Format:**
+- Exactly 18 characters
+- Starts with `i` (for iroh)
+- Ends with a [Luhn mod N](https://en.wikipedia.org/wiki/Luhn_mod_N_algorithm) checksum character
+- Middle 16 characters: `A-Za-z0-9` and `-` `_` `.` (period is valid but rare in generated tokens)
+
+The checksum detects all single-character typos and adjacent transpositions (same algorithm family as credit cards).
+
+Generate tokens with: `tunnel-rs generate-token`
+
+### Token Management
+
+```bash
+# Generate a valid token
+AUTH_TOKEN=$(tunnel-rs generate-token)
+echo $AUTH_TOKEN  # Share this with authorized clients
+
+# Generate multiple tokens
+tunnel-rs generate-token -c 5
+```
+
+### Multiple Tokens (Server)
+
+```bash
+# Multiple --auth-tokens flags
+tunnel-rs server \
+  --allowed-tcp 127.0.0.0/8 \
+  --auth-tokens "token-for-alice" \
+  --auth-tokens "token-for-bob"
+
+# Or use a file (one token per line, # comments allowed)
+tunnel-rs server \
+  --allowed-tcp 127.0.0.0/8 \
+  --auth-tokens-file /etc/tunnel-rs/auth_tokens.txt
+```
+
+**Example `auth_tokens.txt`:**
+```text
+# Alice's token (generate with: tunnel-rs generate-token)
+iXXXXXXXXXXXXXXXXX
+
+# Bob's token
+iYYYYYYYYYYYYYYYYY
+```
+
+### Configuration File
+
+**Server** (`server.toml` or `vpn_server.toml`):
+```toml
+[iroh]
+auth_tokens = [
+    "iXXXXXXXXXXXXXXXXX",  # Alice
+    "iYYYYYYYYYYYYYYYYY",  # Bob
+]
+# Or use: auth_tokens_file = "/etc/tunnel-rs/auth_tokens.txt"
+```
+
+**Client** (`client.toml` or CLI):
+```toml
+[iroh]
+auth_token = "iXXXXXXXXXXXXXXXXX"
+# Or use: auth_token_file = "~/.config/tunnel-rs/token.txt"
+```
+
+## Self-Hosting
+
+For custom relay servers, DNS discovery, or fully independent operation without public infrastructure, see [docs/SELF-HOSTING.md](docs/SELF-HOSTING.md).
+
+---
+
 # Port Forwarding
 
 Forward specific TCP/UDP ports between machines. Cross-platform (Linux, macOS, Windows), no root required.
@@ -486,119 +588,6 @@ tunnel-rs client --default-config
 # Load from custom path
 tunnel-rs client -c ./my-client.toml
 ```
-
-## Persistent Server Identity
-
-By default, a new EndpointId is generated each run. For long-running setups, use persistent identity for the **server**:
-
-```bash
-# Generate key and output EndpointId
-tunnel-rs generate-server-key --output ./server.key
-
-# Show EndpointId for existing key
-tunnel-rs show-server-id --secret-file ./server.key
-```
-
-Then use the key for the server:
-
-```bash
-tunnel-rs server --allowed-tcp 127.0.0.0/8 --secret-file ./server.key --auth-tokens "$AUTH_TOKEN"
-```
-
-> **Note:** Clients use ephemeral identities by default. Only the server needs a persistent key to maintain a stable EndpointId that clients can connect to.
-
-## Authentication
-
-Iroh mode requires authentication using pre-shared tokens. Clients must provide a valid token to connect.
-
-**Token Format:**
-- Exactly 18 characters
-- Starts with `i` (for iroh)
-- Ends with a [Luhn mod N](https://en.wikipedia.org/wiki/Luhn_mod_N_algorithm) checksum character
-- Middle 16 characters: `A-Za-z0-9` and `-` `_` `.` (period is valid but rare in generated tokens)
-
-The checksum detects all single-character typos and adjacent transpositions (same algorithm family as credit cards).
-
-Generate tokens with: `tunnel-rs generate-token`
-
-### Setup Workflow
-
-1. **Generate a server key:**
-   ```bash
-   tunnel-rs generate-server-key --output ./server.key
-   ```
-
-2. **Create authentication tokens:**
-   ```bash
-   # Generate a valid token
-   AUTH_TOKEN=$(tunnel-rs generate-token)
-   echo $AUTH_TOKEN  # Share this with authorized clients
-
-   # Generate multiple tokens
-   tunnel-rs generate-token -c 5
-   ```
-
-3. **Start server with auth tokens:**
-   ```bash
-   tunnel-rs server \
-     --secret-file ./server.key \
-     --allowed-tcp 127.0.0.0/8 \
-     --auth-tokens "$AUTH_TOKEN"
-   ```
-
-4. **Start client with auth token:**
-   ```bash
-   tunnel-rs client \
-     --server-node-id <SERVER_ENDPOINT_ID> \
-     --source tcp://127.0.0.1:22 \
-     --target 127.0.0.1:2222 \
-     --auth-token "$AUTH_TOKEN"
-   ```
-
-### Multiple Tokens
-
-```bash
-# Multiple --auth-tokens flags
-tunnel-rs server \
-  --allowed-tcp 127.0.0.0/8 \
-  --auth-tokens "token-for-alice" \
-  --auth-tokens "token-for-bob"
-
-# Or use a file (one token per line, # comments allowed)
-tunnel-rs server \
-  --allowed-tcp 127.0.0.0/8 \
-  --auth-tokens-file /etc/tunnel-rs/auth_tokens.txt
-```
-
-**Example `auth_tokens.txt`:**
-```text
-# Alice's token (generate with: tunnel-rs generate-token)
-iXXXXXXXXXXXXXXXXX
-
-# Bob's token
-iYYYYYYYYYYYYYYYYY
-```
-
-### Configuration File
-
-In `server.toml`:
-
-```toml
-[iroh]
-# Inline list (tokens must be exactly 18 characters)
-# Generate with: tunnel-rs generate-token
-auth_tokens = [
-    "iXXXXXXXXXXXXXXXXX",  # Alice
-    "iYYYYYYYYYYYYYYYYY",  # Bob
-]
-
-# Or use a file
-# auth_tokens_file = "/etc/tunnel-rs/auth_tokens.txt"
-```
-
-## Self-Hosting
-
-For custom relay servers, DNS discovery, or fully independent operation without public infrastructure, see [docs/SELF-HOSTING.md](docs/SELF-HOSTING.md).
 
 ---
 
