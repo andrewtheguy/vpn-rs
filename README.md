@@ -156,7 +156,13 @@ curl -sSL https://andrewtheguy.github.io/tunnel-rs/install-vpn.sh | sudo bash
 irm https://andrewtheguy.github.io/tunnel-rs/install-vpn.ps1 | iex
 ```
 
-> **Windows Note:** You also need `wintun.dll` from https://www.wintun.net/ placed in the same directory as the executable. Run as Administrator.
+> **Windows Requirements:**
+> 1. Download WinTun driver from https://www.wintun.net/ (click "Download Wintun")
+> 2. Extract the zip and copy `wintun/bin/amd64/wintun.dll` to the same directory as `tunnel-rs-vpn.exe`
+>    - Default install location: `%LOCALAPPDATA%\Programs\tunnel-rs\`
+> 3. Run as Administrator (required for TUN device creation)
+>
+> **Troubleshooting:** If you see `Failed to create TUN device: LoadLibraryExW failed`, the `wintun.dll` is missing or in the wrong directory.
 
 <details>
 <summary>Advanced installation options</summary>
@@ -1012,7 +1018,21 @@ Full network tunneling with Direct QUIC encryption. Requires root/admin privileg
 
 Native direct TUN-based VPN mode for full network tunneling. Unlike port forwarding modes, VPN mode creates a TUN device and routes IP traffic directly through the encrypted Iroh QUIC connection, eliminating double encryption overhead.
 
-> **Note:** VPN mode requires root/admin privileges to create TUN devices and configure routes. On Windows, you also need `wintun.dll` from https://www.wintun.net/ in the executable directory.
+> **Note:** VPN mode requires root/admin privileges to create TUN devices and configure routes.
+
+<details>
+<summary><b>Windows Setup: WinTun Driver Required</b></summary>
+
+Windows VPN mode requires the WinTun driver DLL:
+
+1. Download from https://www.wintun.net/ (click "Download Wintun")
+2. Extract the zip file
+3. Copy `wintun/bin/amd64/wintun.dll` to the same directory as `tunnel-rs-vpn.exe`
+4. Run as Administrator
+
+If you see `Failed to create TUN device: LoadLibraryExW failed`, the DLL is missing or in the wrong location.
+
+</details>
 
 > **Similar Project:** This VPN mode is conceptually similar to [quincy](https://github.com/quincy-rs/quincy), a VPN implementation using the QUIC protocol. The key difference is that tunnel-rs uses iroh's NAT traversal infrastructure, so **no open port is required on the server** — connections work through NAT/firewalls without manual port forwarding.
 
