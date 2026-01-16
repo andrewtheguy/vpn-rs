@@ -256,12 +256,19 @@ tunnel-rs show-server-id --secret-file ./server.key
 
 Then reference the key in your server config or CLI:
 
+**CLI** (both modes):
 ```bash
 # Port forwarding
 tunnel-rs server --secret-file ./server.key --allowed-tcp 127.0.0.0/8 --auth-tokens "$AUTH_TOKEN"
 
-# VPN (in vpn_server.toml)
-# secret_file = "./server.key"
+# VPN
+sudo tunnel-rs-vpn server --secret-file ./server.key -c vpn_server.toml
+```
+
+**Config file** (both modes - in `server.toml` or `vpn_server.toml`):
+```toml
+[iroh]
+secret_file = "./server.key"
 ```
 
 > **Note:** Clients use ephemeral identities by default. Only the server needs a persistent key to maintain a stable EndpointId that clients can connect to.
