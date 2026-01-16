@@ -43,15 +43,21 @@ Tunnel-rs enables you to forward TCP and UDP traffic—or tunnel entire networks
 
 ## Which Should I Use?
 
-| Need | Recommended |
-|------|-------------|
-| Forward a specific port (SSH, HTTP, database) | Port Forwarding (iroh mode) |
-| Access UDP services (WireGuard, DNS, game servers) | Port Forwarding (iroh mode) |
-| Route all traffic through tunnel | VPN Mode (requires root/admin) |
-| Access an entire remote subnet | VPN Mode (requires root/admin) |
-| No root/admin privileges available | Port Forwarding |
-| Decentralized signaling (no iroh dependency) | Port Forwarding (nostr mode) |
-| Offline/LAN-only operation | Port Forwarding (manual mode) |
+| Need | Recommended | Binary |
+|------|-------------|--------|
+| Forward a specific port (SSH, HTTP, database) | Port Forwarding (iroh mode) | `tunnel-rs` |
+| Access UDP services (WireGuard, DNS, game servers) | Port Forwarding (iroh mode) | `tunnel-rs` |
+| Alternative to `kubectl port-forward` with UDP support | Port Forwarding (iroh mode) | `tunnel-rs` |
+| Route all traffic through tunnel | VPN Mode (requires root/admin) | `tunnel-rs-vpn` |
+| Access an entire remote subnet | VPN Mode (requires root/admin) | `tunnel-rs-vpn` |
+| No root/admin privileges available | Port Forwarding (iroh mode) | `tunnel-rs` |
+
+### Alternative Modes (Niche Use Cases)
+
+| Need | Recommended | Binary |
+|------|-------------|--------|
+| Decentralized signaling (no iroh dependency) | Port Forwarding (nostr mode) | `tunnel-rs-ice` |
+| Offline/LAN-only operation | Port Forwarding (manual mode) | `tunnel-rs-ice` |
 
 ## Overview
 
