@@ -7,7 +7,7 @@
 # Or set $env:RELEASE_TAG environment variable
 #
 # Note: VPN mode requires Administrator privileges to run (creates TUN devices)
-# The wintun.dll driver must be downloaded separately from https://www.wintun.net/
+# The wintun.dll driver must be downloaded separately from https://www.wintun.net/ (official WireGuard project)
 
 param(
     [Parameter(Position = 0)]
@@ -261,13 +261,14 @@ function Download-Only {
     Print-Info "Binary saved to: $outputFile"
     Print-Warn ""
     Print-Warn "IMPORTANT: Before running, you must manually install the WinTun driver:"
-    Print-Warn "  1. Download wintun.zip from https://www.wintun.net/"
+    Print-Warn "  1. Download wintun.zip from https://www.wintun.net/ (official WireGuard project)"
     Print-Warn "  2. Extract the zip file"
     Print-Warn "  3. Copy wintun\bin\amd64\wintun.dll to: $(Get-Location)"
+    Print-Warn "     (or any directory in the system PATH)"
     Print-Warn "  4. Run as Administrator"
     Print-Warn ""
     Print-Warn "If you see 'Failed to create TUN device: LoadLibraryExW failed',"
-    Print-Warn "the wintun.dll is missing or in the wrong directory."
+    Print-Warn "the wintun.dll is missing or not in a valid DLL search path."
 }
 
 # Download binary to temporary location, test it, and install
@@ -343,13 +344,14 @@ function Install-Binary {
 
         Print-Warn ""
         Print-Warn "IMPORTANT: Before running, you must manually install the WinTun driver:"
-        Print-Warn "  1. Download wintun.zip from https://www.wintun.net/"
+        Print-Warn "  1. Download wintun.zip from https://www.wintun.net/ (official WireGuard project)"
         Print-Warn "  2. Extract the zip file"
         Print-Warn "  3. Copy wintun\bin\amd64\wintun.dll to: $installDir"
+        Print-Warn "     (or any directory in the system PATH)"
         Print-Warn "  4. Run as Administrator"
         Print-Warn ""
         Print-Warn "If you see 'Failed to create TUN device: LoadLibraryExW failed',"
-        Print-Warn "the wintun.dll is missing or in the wrong directory."
+        Print-Warn "the wintun.dll is missing or not in a valid DLL search path."
     }
     finally {
         # Clean up temp directory
@@ -392,10 +394,11 @@ Supported platforms: Windows (amd64)
 Note: VPN mode requires Administrator privileges to run (creates TUN devices).
 
 IMPORTANT: You must manually download and install the WinTun driver:
-  1. Download wintun.zip from https://www.wintun.net/
+  1. Download wintun.zip from https://www.wintun.net/ (official WireGuard project)
   2. Extract and copy wintun\bin\amd64\wintun.dll to the executable directory
+     (or any directory in the system PATH)
 
-If you see 'Failed to create TUN device: LoadLibraryExW failed', wintun.dll is missing.
+If you see 'Failed to create TUN device: LoadLibraryExW failed', wintun.dll is missing or not in a valid DLL search path.
 "@
 }
 

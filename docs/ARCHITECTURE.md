@@ -418,7 +418,7 @@ graph TB
 
 VPN mode provides full network tunneling using direct IP-over-QUIC. Unlike port forwarding modes, VPN mode creates a TUN device and routes IP traffic directly through the encrypted Iroh QUIC connection. This eliminates double encryption overhead while maintaining strong security via TLS 1.3.
 
-> **Note:** VPN mode requires root/admin privileges. On Windows, you also need `wintun.dll` from https://www.wintun.net/ — download the zip, extract, and copy `wintun/bin/amd64/wintun.dll` to the same directory as the executable.
+> **Note:** VPN mode requires root/admin privileges. On Windows, you also need `wintun.dll` from https://www.wintun.net/ (official WireGuard project) — download the zip, extract, and copy `wintun/bin/amd64/wintun.dll` to the same directory as the executable (or any directory in the system PATH).
 
 ### Architecture Overview
 

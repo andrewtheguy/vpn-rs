@@ -159,12 +159,13 @@ irm https://andrewtheguy.github.io/tunnel-rs/install-vpn.ps1 | iex
 ```
 
 > **Windows Requirements:**
-> 1. Download WinTun driver from https://www.wintun.net/ (click "Download Wintun")
-> 2. Extract the zip and copy `wintun/bin/amd64/wintun.dll` to the same directory as `tunnel-rs-vpn.exe`
->    - Default install location: `%LOCALAPPDATA%\Programs\tunnel-rs\`
+> 1. Download WinTun driver from https://www.wintun.net/ (official WireGuard project)
+> 2. Extract the zip and copy `wintun/bin/amd64/wintun.dll` to:
+>    - The same directory as `tunnel-rs-vpn.exe` (default: `%LOCALAPPDATA%\Programs\tunnel-rs\`), OR
+>    - Any directory in the system PATH
 > 3. Run as Administrator (required for TUN device creation)
 >
-> **Troubleshooting:** If you see `Failed to create TUN device: LoadLibraryExW failed`, the `wintun.dll` is missing or in the wrong directory.
+> **Troubleshooting:** If you see `Failed to create TUN device: LoadLibraryExW failed`, the `wintun.dll` is missing or not in a valid DLL search path.
 
 <details>
 <summary>Advanced installation options</summary>
@@ -1027,14 +1028,13 @@ Native direct TUN-based VPN mode for full network tunneling. Unlike port forward
 <details>
 <summary><b>Windows Setup: WinTun Driver Required</b></summary>
 
-Windows VPN mode requires the WinTun driver DLL:
+Windows VPN mode requires the WinTun driver DLL from https://www.wintun.net/ (official WireGuard project):
 
-1. Download from https://www.wintun.net/ (click "Download Wintun")
-2. Extract the zip file
-3. Copy `wintun/bin/amd64/wintun.dll` to the same directory as `tunnel-rs-vpn.exe`
-4. Run as Administrator
+1. Download and extract the zip file
+2. Copy `wintun/bin/amd64/wintun.dll` to the same directory as `tunnel-rs-vpn.exe` (or any directory in the system PATH)
+3. Run as Administrator
 
-If you see `Failed to create TUN device: LoadLibraryExW failed`, the DLL is missing or in the wrong location.
+If you see `Failed to create TUN device: LoadLibraryExW failed`, the DLL is missing or not in a valid DLL search path.
 
 </details>
 
