@@ -2,7 +2,7 @@
 name = "tunnel-vpn"
 version.workspace = true
 edition = "2021"
-description = "WireGuard-based VPN mode for tunnel-rs using boringtun"
+description = "IP-over-QUIC VPN mode for tunnel-rs"
 
 [lib]
 name = "tunnel_vpn"

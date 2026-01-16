@@ -2,7 +2,7 @@
 name = "tunnel-rs-vpn"
 version.workspace = true
 edition = "2021"
-description = "WireGuard-based VPN tunnel via iroh P2P"
+description = "IP-over-QUIC VPN tunnel via iroh P2P"
 
 [features]
 default = ["jemalloc"]

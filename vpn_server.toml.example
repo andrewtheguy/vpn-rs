@@ -44,7 +44,7 @@ network = "10.0.0.0/24"
 # Lower values may help with fragmentation issues
 mtu = 1420
 
-# WireGuard keepalive interval in seconds (10-300, default: 25)
+# QUIC keepalive interval in seconds (10-300, default: 25)
 # keepalive_secs = 25
 
 # ============================================================================

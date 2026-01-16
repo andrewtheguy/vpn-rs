@@ -40,7 +40,7 @@ auth_token = "iXXXXXXXXXXXXXXXXX"  # Replace with real token from generate-token
 # Lower values may help with fragmentation issues
 mtu = 1420
 
-# WireGuard keepalive interval in seconds (10-300, default: 25)
+# QUIC keepalive interval in seconds (10-300, default: 25)
 # Lower values keep NAT mappings alive but increase overhead
 keepalive_secs = 25
 
