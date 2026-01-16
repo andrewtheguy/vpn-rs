@@ -9,6 +9,7 @@ on:
       - 'install.sh'
       - 'install.ps1'
       - 'install-vpn.sh'
+      - 'install-vpn.ps1'
 
   # Allows you to run this workflow manually from the Actions tab
   workflow_dispatch:
@@ -41,6 +42,7 @@ jobs:
           cp install.sh _pages/
           cp install.ps1 _pages/
           cp install-vpn.sh _pages/
+          cp install-vpn.ps1 _pages/
 
       - name: Setup Pages
         uses: actions/configure-pages@v5
