@@ -24,7 +24,7 @@ tunnel-rs is a P2P TCP/UDP port forwarding tool that supports multiple distinct 
 
 Binary layout:
 - `tunnel-rs`: iroh mode (port forwarding)
-- `tunnel-rs-vpn`: VPN mode (Linux/macOS)
+- `tunnel-rs-vpn`: VPN mode
 - `tunnel-rs-ice`: manual and nostr modes
 
 > **Design Goal:** The project's primary goal is to provide a convenient way to connect to different networks for development or homelab purposes without the hassle and security risk of opening a port. It is **not** meant for production setups or designed to be performant at scale.
@@ -418,7 +418,7 @@ graph TB
 
 VPN mode provides full network tunneling using direct IP-over-QUIC. Unlike port forwarding modes, VPN mode creates a TUN device and routes IP traffic directly through the encrypted Iroh QUIC connection. This eliminates double encryption overhead while maintaining strong security via TLS 1.3.
 
-> **Note:** VPN mode is only available on Linux and macOS. It requires root/sudo privileges.
+> **Note:** VPN mode requires root/admin privileges. On Windows, you also need `wintun.dll` from https://www.wintun.net/ (official WireGuard project) — download the zip, extract, and copy `wintun/bin/amd64/wintun.dll` to the same directory as the executable (or any directory in the system PATH).
 
 ### Architecture Overview
 
@@ -1831,7 +1831,7 @@ graph TB
 | Mode | Multi-Session | Dynamic Source | Encryption | Platform |
 |------|---------------|----------------|------------|----------|
 | `iroh` | **Yes** | **Yes** | QUIC/TLS 1.3 | Linux, macOS, Windows |
-| `vpn` | **Yes** | N/A (full tunnel) | QUIC (TLS 1.3) | Linux, macOS |
+| `vpn` | **Yes** | N/A (full tunnel) | QUIC (TLS 1.3) | Linux, macOS, Windows |
 | `nostr` | **Yes** | **Yes** | QUIC/TLS 1.3 | Linux, macOS, Windows |
 | `manual` | No | **Yes** | QUIC/TLS 1.3 | Linux, macOS, Windows |
 

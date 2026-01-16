@@ -216,9 +216,13 @@ impl TunWriter {
 /// Used for idempotent route/address operations. Handles various error formats:
 /// - Linux iproute2: "RTNETLINK answers: File exists"
 /// - macOS route: "route: writing to routing socket: File exists"
+/// - Windows netsh: "The object already exists" or "Element already exists"
 fn is_already_exists_error(stderr: &str) -> bool {
     let lower = stderr.to_lowercase();
-    lower.contains("file exists") || lower.contains("eexist")
+    lower.contains("file exists")
+        || lower.contains("eexist")
+        || lower.contains("object already exists")
+        || lower.contains("element already exists")
 }
 
 // ============================================================================
@@ -278,6 +282,12 @@ pub trait Route: std::fmt::Display + Copy {
 
     /// Build command args for removing a route on Linux.
     fn linux_delete_args(&self, tun_name: &str) -> Vec<String>;
+
+    /// Build command args for adding a route on Windows.
+    fn windows_add_args(&self, tun_name: &str) -> Vec<String>;
+
+    /// Build command args for removing a route on Windows.
+    fn windows_delete_args(&self, tun_name: &str) -> Vec<String>;
 }
 
 impl Route for Ipv4Net {
@@ -326,6 +336,31 @@ impl Route for Ipv4Net {
             tun_name.into(),
         ]
     }
+
+    fn windows_add_args(&self, tun_name: &str) -> Vec<String> {
+        vec![
+            "interface".into(),
+            "ipv4".into(),
+            "add".into(),
+            "route".into(),
+            format!("prefix={}", self),
+            format!("interface={}", tun_name),
+            "nexthop=0.0.0.0".into(),
+            "store=active".into(),
+        ]
+    }
+
+    fn windows_delete_args(&self, tun_name: &str) -> Vec<String> {
+        vec![
+            "interface".into(),
+            "ipv4".into(),
+            "delete".into(),
+            "route".into(),
+            format!("prefix={}", self),
+            format!("interface={}", tun_name),
+            "nexthop=0.0.0.0".into(),
+        ]
+    }
 }
 
 impl Route for Ipv6Net {
@@ -370,6 +405,31 @@ impl Route for Ipv6Net {
             self.to_string(),
             "dev".into(),
             tun_name.into(),
+        ]
+    }
+
+    fn windows_add_args(&self, tun_name: &str) -> Vec<String> {
+        vec![
+            "interface".into(),
+            "ipv6".into(),
+            "add".into(),
+            "route".into(),
+            format!("prefix={}", self),
+            format!("interface={}", tun_name),
+            "nexthop=::".into(),
+            "store=active".into(),
+        ]
+    }
+
+    fn windows_delete_args(&self, tun_name: &str) -> Vec<String> {
+        vec![
+            "interface".into(),
+            "ipv6".into(),
+            "delete".into(),
+            "route".into(),
+            format!("prefix={}", self),
+            format!("interface={}", tun_name),
+            "nexthop=::".into(),
         ]
     }
 }
@@ -453,7 +513,20 @@ async fn add_route_generic<R: Route>(tun_name: &str, route: &R) -> VpnResult<()>
         handle_route_add_output(output, route, tun_name)
     }
 
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(target_os = "windows")]
+    {
+        let args = route.windows_add_args(tun_name);
+        let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+        let output = Command::new("netsh")
+            .args(&args_ref)
+            .output()
+            .await
+            .map_err(|e| VpnError::TunDevice(format!("Failed to execute netsh command: {}", e)))?;
+
+        handle_route_add_output(output, route, tun_name)
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     {
         let _ = (tun_name, route);
         Err(VpnError::TunDevice(
@@ -492,7 +565,20 @@ async fn remove_route_generic<R: Route>(tun_name: &str, route: &R) -> VpnResult<
         handle_route_remove_output(output, route, tun_name);
     }
 
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(target_os = "windows")]
+    {
+        let args = route.windows_delete_args(tun_name);
+        let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+        let output = Command::new("netsh")
+            .args(&args_ref)
+            .output()
+            .await
+            .map_err(|e| VpnError::TunDevice(format!("Failed to execute netsh command: {}", e)))?;
+
+        handle_route_remove_output(output, route, tun_name);
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     {
         let _ = (tun_name, route);
     }
@@ -542,7 +628,27 @@ fn remove_route_sync_generic<R: Route>(tun_name: &str, route: &R) {
         }
     }
 
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(target_os = "windows")]
+    {
+        let args = route.windows_delete_args(tun_name);
+        let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+        let result = std::process::Command::new("netsh").args(&args_ref).output();
+
+        match result {
+            Ok(output) if output.status.success() => {
+                log::info!("Removed {} {} via {}", R::LABEL, route, tun_name);
+            }
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                log::warn!("Failed to remove {} {}: {}", R::LABEL, route, stderr);
+            }
+            Err(e) => {
+                log::warn!("Failed to execute netsh route delete command: {}", e);
+            }
+        }
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     {
         let _ = (tun_name, route);
     }
@@ -711,8 +817,44 @@ fn configure_tun_ipv6(tun_name: &str, addr: Ipv6Addr, prefix_len: u8) -> VpnResu
     Ok(())
 }
 
+/// Configure IPv6 address on TUN device (Windows).
+#[cfg(target_os = "windows")]
+fn configure_tun_ipv6(tun_name: &str, addr: Ipv6Addr, prefix_len: u8) -> VpnResult<()> {
+    let output = std::process::Command::new("netsh")
+        .args([
+            "interface",
+            "ipv6",
+            "add",
+            "address",
+            &format!("interface={}", tun_name),
+            &format!("address={}/{}", addr, prefix_len),
+        ])
+        .output()
+        .map_err(|e| VpnError::TunDevice(format!("Failed to configure IPv6: {}", e)))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        // Treat "address already exists" as idempotent success
+        if is_already_exists_error(&stderr) {
+            log::warn!(
+                "IPv6 address {}/{} already exists on {} (treating as success)",
+                addr,
+                prefix_len,
+                tun_name
+            );
+            return Ok(());
+        }
+        return Err(VpnError::TunDevice(format!(
+            "IPv6 configuration failed: {}",
+            stderr.trim()
+        )));
+    }
+
+    Ok(())
+}
+
 /// Configure IPv6 address on TUN device (unsupported platform stub).
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 fn configure_tun_ipv6(_tun_name: &str, _addr: Ipv6Addr, _prefix_len: u8) -> VpnResult<()> {
     Err(VpnError::TunDevice(
         "IPv6 configuration not supported on this platform".into(),

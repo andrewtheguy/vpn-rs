@@ -6,86 +6,17 @@ This document outlines planned features and improvements for tunnel-rs.
 
 tunnel-rs currently supports four operational modes:
 - **iroh**: Persistent identity with automatic discovery, relay fallback, and receiver-requested sources
-- **vpn**: Native WireGuard-based VPN with automatic IP assignment (Linux/macOS)
+- **vpn**: Native TUN-based VPN with automatic IP assignment (Linux/macOS/Windows)
 - **nostr**: Full ICE with automated Nostr relay signaling and receiver-requested sources
 - **manual**: Full ICE with manual signaling (single-target)
 
-Port forwarding modes (iroh, nostr, manual) support TCP and UDP tunneling with end-to-end encryption via QUIC/TLS 1.3. VPN mode provides full network tunneling with WireGuard encryption on top of iroh's QUIC transport.
+Port forwarding modes (iroh, nostr, manual) support TCP and UDP tunneling with end-to-end encryption via QUIC/TLS 1.3. VPN mode provides full network access via direct IP-over-QUIC using iroh's TLS 1.3 transport.
 
 ---
 
 ## Planned Features
 
-### High Priority
-
-#### Receiver-Requested Source (iroh and nostr modes)
-
-**Status:** Implemented
-
-Both `iroh` and `nostr` modes support receiver-requested sources, similar to SSH's `-R` flag for reverse tunnels. Senders restrict allowed networks via `--allowed-tcp` / `--allowed-udp` flags or config file.
-
-**Usage (iroh mode):**
-```bash
-# Server: allow networks via CIDR
-tunnel-rs server \
-  --allowed-tcp 127.0.0.0/8 \
-  --allowed-tcp 192.168.0.0/16 \
-  --allowed-udp 10.0.0.0/8
-
-# Client: request a specific source
-tunnel-rs client \
-  --server-node-id <sender-node-id> \
-  --source tcp://127.0.0.1:22 \
-  --target 127.0.0.1:2222
-```
-
-**Usage (nostr mode):**
-```bash
-# Server: allow networks via CIDR
-tunnel-rs-ice server nostr --nsec-file ./server.nsec \
-  --peer-npub npub1receiver... \
-  --allowed-tcp 127.0.0.0/8 \
-  --allowed-udp 10.0.0.0/8
-
-# Client: request a specific source
-tunnel-rs-ice client nostr --nsec-file ./receiver.nsec \
-  --peer-npub npub1sender... \
-  --source tcp://127.0.0.1:22 \
-  --target 127.0.0.1:2222
-```
-
-**Network Patterns (CIDR):**
-- IPv4: `127.0.0.0/8`, `192.168.0.0/16`, `10.0.0.0/8`
-- IPv6: `::1/128`, `fe80::/10`
-
-**Use Cases:**
-- SSH-style reverse tunneling: receiver requests `tcp://127.0.0.1:22`
-- Dynamic service access without sender reconfiguration
-- Multi-service tunneling from a single sender
-
----
-
 ### Medium Priority
-
-#### Multi-Session and Dynamic Source Support
-
-**Status:** Implemented
-
-| Mode | Multi-Session | Dynamic Source |
-|------|---------------|----------------|
-| `iroh` | **Yes** - use `--max-sessions` (default: 100) | **Yes** - receiver specifies `--source` |
-| `nostr` | **Yes** - use `--max-sessions` (default: 10) | **Yes** - receiver specifies `--source` |
-| `manual` | No | No |
-
-**Multi-Session** = Multiple concurrent connections to the same sender
-**Dynamic Source** = Receiver specifies which service to tunnel (iroh and nostr modes)
-
-**Implementation Details:**
-- Each session gets independent ICE/QUIC stack
-- Session IDs prevent cross-session interference
-- Automatic cleanup when receivers disconnect
-
----
 
 #### Multi-Source/Target per Client
 

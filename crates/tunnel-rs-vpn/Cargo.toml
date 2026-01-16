@@ -2,7 +2,7 @@
 name = "tunnel-rs-vpn"
 version.workspace = true
 edition = "2021"
-description = "WireGuard-based VPN tunnel via iroh P2P"
+description = "IP-over-QUIC VPN tunnel via iroh P2P"
 
 [features]
 default = ["jemalloc"]
@@ -20,5 +20,6 @@ env_logger = "0.11"
 ipnet = "2"
 
 # Performance: jemalloc allocator for better multi-threaded allocation
-[target.'cfg(not(target_env = "musl"))'.dependencies]
+# Exclude musl (static linking issues) and Windows (not supported)
+[target.'cfg(all(not(target_env = "musl"), not(target_os = "windows")))'.dependencies]
 tikv-jemallocator = { version = "0.6", optional = true }

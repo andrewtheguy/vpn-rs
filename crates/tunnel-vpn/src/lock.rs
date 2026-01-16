@@ -5,10 +5,10 @@
 //!
 //! # Platform Support
 //!
-//! This module only supports Linux and macOS.
+//! This module supports Linux, macOS, and Windows.
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-compile_error!("VPN lock is only supported on Linux and macOS");
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+compile_error!("VPN lock is only supported on Linux, macOS, and Windows");
 
 use crate::error::{VpnError, VpnResult};
 use fs2::FileExt;
@@ -71,14 +71,23 @@ impl VpnLock {
 
     /// Get the path to the lock file.
     fn lock_path() -> PathBuf {
-        // Use XDG runtime dir on Linux, or /tmp as fallback
-        if let Ok(runtime_dir) = std::env::var("XDG_RUNTIME_DIR") {
-            PathBuf::from(runtime_dir).join(LOCK_FILE_NAME)
-        } else if let Ok(tmpdir) = std::env::var("TMPDIR") {
-            // macOS uses TMPDIR
-            PathBuf::from(tmpdir).join(LOCK_FILE_NAME)
-        } else {
-            PathBuf::from("/tmp").join(LOCK_FILE_NAME)
+        // Windows: use system temp directory (handles %TEMP%/%TMP% with proper fallbacks)
+        #[cfg(target_os = "windows")]
+        {
+            return std::env::temp_dir().join(LOCK_FILE_NAME);
+        }
+
+        // Unix: use XDG runtime dir on Linux, TMPDIR on macOS, or /tmp as fallback
+        #[cfg(not(target_os = "windows"))]
+        {
+            if let Ok(runtime_dir) = std::env::var("XDG_RUNTIME_DIR") {
+                PathBuf::from(runtime_dir).join(LOCK_FILE_NAME)
+            } else if let Ok(tmpdir) = std::env::var("TMPDIR") {
+                // macOS uses TMPDIR
+                PathBuf::from(tmpdir).join(LOCK_FILE_NAME)
+            } else {
+                PathBuf::from("/tmp").join(LOCK_FILE_NAME)
+            }
         }
     }
 
