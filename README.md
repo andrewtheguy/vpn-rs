@@ -164,7 +164,7 @@ curl -sSL https://andrewtheguy.github.io/tunnel-rs/install-vpn.sh | sudo bash
 ```powershell
 irm https://andrewtheguy.github.io/tunnel-rs/install-vpn.ps1 | iex
 ```
-
+> [!NOTE]
 > **Windows Requirements:**
 >
 > The installer script does **not** require Administrator privileges. However, **running `tunnel-rs-vpn.exe` requires Administrator** for TUN device creation.
