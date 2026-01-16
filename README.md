@@ -7,6 +7,9 @@ Tunnel-rs enables you to forward TCP and UDP traffic—or tunnel entire networks
 > [!IMPORTANT]
 > **Project Goal:** This tool provides a convenient way to connect to different networks for **development or homelab purposes** without the hassle and security risk of opening a port. It is **not** meant for production setups or designed to be performant at scale.
 
+> [!TIP]
+> **Looking for a GUI?** Check out [tunnel-rs-manager](https://github.com/andrewtheguy/tunnel-rs-manager), a companion desktop application for managing tunnel-rs connections.
+
 **Port Forwarding Features:**
 - **Full TCP and UDP support** — Seamlessly tunnel any TCP or UDP traffic
 - **Cross-platform** — Works on Linux, macOS, and Windows
