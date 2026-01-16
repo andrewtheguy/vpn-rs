@@ -165,9 +165,7 @@ curl -sSL https://andrewtheguy.github.io/tunnel-rs/install-vpn.sh | sudo bash
 irm https://andrewtheguy.github.io/tunnel-rs/install-vpn.ps1 | iex
 ```
 > [!NOTE]
-> **Windows Requirements:**
->
-> **Running `tunnel-rs-vpn.exe` requires Administrator** for TUN device creation.
+> **Windows Requirements:** Running `tunnel-rs-vpn.exe` requires the **WinTun driver** and **Administrator privileges** for TUN device creation.
 >
 > 1. Download WinTun driver from https://www.wintun.net/ (official WireGuard project)
 > 2. Extract the zip and copy `wintun/bin/amd64/wintun.dll` to:
