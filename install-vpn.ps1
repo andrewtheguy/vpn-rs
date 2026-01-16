@@ -260,10 +260,14 @@ function Download-Only {
 
     Print-Info "Binary saved to: $outputFile"
     Print-Warn ""
-    Print-Warn "IMPORTANT: VPN mode requires:"
-    Print-Warn "  1. Administrator privileges to run"
-    Print-Warn "  2. wintun.dll in the same directory as the executable"
-    Print-Warn "     Download from: https://www.wintun.net/"
+    Print-Warn "IMPORTANT: Before running, you must manually install the WinTun driver:"
+    Print-Warn "  1. Download wintun.zip from https://www.wintun.net/"
+    Print-Warn "  2. Extract the zip file"
+    Print-Warn "  3. Copy wintun\bin\amd64\wintun.dll to: $(Get-Location)"
+    Print-Warn "  4. Run as Administrator"
+    Print-Warn ""
+    Print-Warn "If you see 'Failed to create TUN device: LoadLibraryExW failed',"
+    Print-Warn "the wintun.dll is missing or in the wrong directory."
 }
 
 # Download binary to temporary location, test it, and install
@@ -338,10 +342,14 @@ function Install-Binary {
         }
 
         Print-Warn ""
-        Print-Warn "IMPORTANT: VPN mode requires:"
-        Print-Warn "  1. Administrator privileges to run"
-        Print-Warn "  2. wintun.dll in the same directory as the executable ($installDir)"
-        Print-Warn "     Download from: https://www.wintun.net/"
+        Print-Warn "IMPORTANT: Before running, you must manually install the WinTun driver:"
+        Print-Warn "  1. Download wintun.zip from https://www.wintun.net/"
+        Print-Warn "  2. Extract the zip file"
+        Print-Warn "  3. Copy wintun\bin\amd64\wintun.dll to: $installDir"
+        Print-Warn "  4. Run as Administrator"
+        Print-Warn ""
+        Print-Warn "If you see 'Failed to create TUN device: LoadLibraryExW failed',"
+        Print-Warn "the wintun.dll is missing or in the wrong directory."
     }
     finally {
         # Clean up temp directory
@@ -382,7 +390,12 @@ Examples:
 Supported platforms: Windows (amd64)
 
 Note: VPN mode requires Administrator privileges to run (creates TUN devices).
-      You also need wintun.dll from https://www.wintun.net/ in the executable directory.
+
+IMPORTANT: You must manually download and install the WinTun driver:
+  1. Download wintun.zip from https://www.wintun.net/
+  2. Extract and copy wintun\bin\amd64\wintun.dll to the executable directory
+
+If you see 'Failed to create TUN device: LoadLibraryExW failed', wintun.dll is missing.
 "@
 }
 
