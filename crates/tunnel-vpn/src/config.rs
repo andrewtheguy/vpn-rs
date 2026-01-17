@@ -102,6 +102,19 @@ impl Nat64Config {
     }
 }
 
+impl From<tunnel_common::config::Nat64Config> for Nat64Config {
+    fn from(cfg: tunnel_common::config::Nat64Config) -> Self {
+        Self {
+            enabled: cfg.enabled,
+            source_ip: cfg.source_ip,
+            port_range: cfg.port_range,
+            tcp_timeout_secs: cfg.tcp_timeout_secs,
+            udp_timeout_secs: cfg.udp_timeout_secs,
+            icmp_timeout_secs: cfg.icmp_timeout_secs,
+        }
+    }
+}
+
 /// VPN server configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VpnServerConfig {

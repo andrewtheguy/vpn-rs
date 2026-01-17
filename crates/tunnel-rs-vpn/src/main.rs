@@ -348,14 +348,7 @@ async fn run_vpn_server(resolved: ResolvedVpnServerConfig) -> Result<()> {
     };
 
     // Convert NAT64 config from tunnel_common to tunnel_vpn types
-    let nat64 = resolved.nat64.map(|cfg| tunnel_vpn::config::Nat64Config {
-        enabled: cfg.enabled,
-        port_range: cfg.port_range,
-        tcp_timeout_secs: cfg.tcp_timeout_secs,
-        udp_timeout_secs: cfg.udp_timeout_secs,
-        icmp_timeout_secs: cfg.icmp_timeout_secs,
-        source_ip: cfg.source_ip,
-    });
+    let nat64: Option<tunnel_vpn::config::Nat64Config> = resolved.nat64.map(Into::into);
 
     // Create VPN server config
     let config = VpnServerConfig {
