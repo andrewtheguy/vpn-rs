@@ -107,7 +107,19 @@ struct PortAllocator {
 }
 
 impl PortAllocator {
+    /// Create a new port allocator with the given range.
+    ///
+    /// # Panics
+    ///
+    /// Panics in debug builds if `end < start`. In release builds, this would
+    /// cause underflow in `range_size` computation, leading to incorrect behavior.
     fn new(start: u16, end: u16) -> Self {
+        debug_assert!(
+            end >= start,
+            "PortAllocator: end ({}) must be >= start ({})",
+            end,
+            start
+        );
         Self {
             start,
             end,
@@ -266,12 +278,15 @@ impl Nat64StateTable {
                                 last_activity: now,
                             };
 
-                            // Insert the forward key reference into reverse map
-                            reverse_vacant.insert(forward_key.clone());
-
-                            // Insert the entry into forward map
-                            // (we hold the vacant entry, so this is safe)
+                            // Insert the entry into forward map first.
+                            // This ensures we don't have orphan reverse entries if a
+                            // panic occurs between insertions.
                             vacant.insert(entry);
+
+                            // Now insert the forward key reference into reverse map.
+                            // If this panics, the forward entry exists but has no reverse
+                            // mapping, which is safer than the reverse case.
+                            reverse_vacant.insert(forward_key.clone());
 
                             return Ok(translated_port);
                         }

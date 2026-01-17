@@ -47,7 +47,23 @@ pub fn compute_checksum(data: &[u8]) -> u16 {
 /// Compute IPv4 header checksum.
 ///
 /// The checksum field in the header should be set to 0 before calling this.
+///
+/// # Panics
+///
+/// Panics in debug builds if `header.len() < 20` (minimum IPv4 header size)
+/// or if `header.len()` is not a multiple of 4 (IPv4 header length must be
+/// a multiple of 4 bytes as specified by the IHL field).
 pub fn ipv4_header_checksum(header: &[u8]) -> u16 {
+    debug_assert!(
+        header.len() >= 20,
+        "IPv4 header must be at least 20 bytes, got {}",
+        header.len()
+    );
+    debug_assert!(
+        header.len().is_multiple_of(4),
+        "IPv4 header length must be a multiple of 4 bytes, got {}",
+        header.len()
+    );
     compute_checksum(header)
 }
 
@@ -129,6 +145,17 @@ pub fn update_checksum_32(old_checksum: u16, old_value: u32, new_value: u32) -> 
 ///
 /// This adjusts the checksum to account for the pseudo-header change
 /// from IPv6 to IPv4 format.
+///
+/// # UDP Zero-Checksum Handling
+///
+/// In IPv6, UDP checksum is **mandatory** and should never be 0x0000. However,
+/// if `old_checksum == 0x0000` and `protocol == 17` (UDP), this function returns
+/// 0x0000 to preserve the "no checksum" semantics for IPv4 UDP, where a zero
+/// checksum indicates that no checksum was computed (optional per RFC 768).
+///
+/// This handles edge cases where an invalid IPv6 UDP packet with zero checksum
+/// is being translated - the semantically closest IPv4 representation is also
+/// "no checksum".
 pub fn adjust_checksum_6to4(
     old_checksum: u16,
     src6: Ipv6Addr,
@@ -138,6 +165,15 @@ pub fn adjust_checksum_6to4(
     protocol: u8,
     payload_len: u16,
 ) -> u16 {
+    // UDP zero-checksum special case: In IPv4 UDP, 0x0000 means "no checksum".
+    // In IPv6 UDP, checksum is mandatory and 0x0000 is invalid. If we receive
+    // an invalid IPv6 UDP packet with zero checksum, preserve it as "no checksum"
+    // in the translated IPv4 packet.
+    const UDP_PROTOCOL: u8 = 17;
+    if protocol == UDP_PROTOCOL && old_checksum == 0 {
+        return 0;
+    }
+
     // Calculate old (IPv6) pseudo-header sum
     let old_pseudo = ipv6_pseudo_header_sum(src6, dst6, protocol, payload_len as u32);
 
@@ -422,5 +458,29 @@ mod tests {
         let result5 = adjust_checksum_4to6(original, src4, dst4, src6, dst6, protocol, payload_len);
 
         assert_eq!(result4, result5);
+    }
+
+    #[test]
+    fn test_adjust_checksum_6to4_udp_zero_checksum() {
+        // Test that UDP zero-checksum is preserved (means "no checksum" in IPv4)
+        let src6: Ipv6Addr = "fd00::2".parse().unwrap();
+        let dst6: Ipv6Addr = "64:ff9b::8.8.8.8".parse().unwrap();
+        let src4 = Ipv4Addr::new(10, 0, 0, 1);
+        let dst4 = Ipv4Addr::new(8, 8, 8, 8);
+        let udp_protocol = 17;
+        let tcp_protocol = 6;
+        let payload_len: u16 = 100;
+
+        // UDP with zero checksum should return zero (preserves "no checksum" semantics)
+        let result = adjust_checksum_6to4(0x0000, src6, dst6, src4, dst4, udp_protocol, payload_len);
+        assert_eq!(result, 0x0000, "UDP zero checksum should be preserved");
+
+        // TCP with zero checksum should NOT return zero (TCP checksum is always required)
+        let result = adjust_checksum_6to4(0x0000, src6, dst6, src4, dst4, tcp_protocol, payload_len);
+        assert_ne!(result, 0x0000, "TCP zero checksum should be adjusted, not preserved");
+
+        // UDP with non-zero checksum should be adjusted normally
+        let result = adjust_checksum_6to4(0x1234, src6, dst6, src4, dst4, udp_protocol, payload_len);
+        assert_ne!(result, 0x1234, "UDP non-zero checksum should be adjusted");
     }
 }
