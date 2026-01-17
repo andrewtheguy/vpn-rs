@@ -596,6 +596,50 @@ fn validate_vpn_network6(
     Ok(net)
 }
 
+/// Validate VPN server network configuration.
+///
+/// This is a shared helper that validates:
+/// - At least one of network (IPv4) or network6 (IPv6) is configured
+/// - server_ip is not orphaned without network
+/// - server_ip6 is not orphaned without network6
+/// - Network CIDRs are valid and server IPs are within their respective networks
+fn validate_vpn_networks(
+    network: Option<&str>,
+    server_ip: Option<&str>,
+    network6: Option<&str>,
+    server_ip6: Option<&str>,
+    section: &str,
+) -> Result<()> {
+    // Require at least one of network (IPv4) or network6 (IPv6)
+    if network.is_none() && network6.is_none() {
+        anyhow::bail!(
+            "[{}] At least one of 'network' (IPv4) or 'network6' (IPv6) is required for VPN server configuration.",
+            section
+        );
+    }
+
+    // Validate IPv4: server_ip requires network
+    if server_ip.is_some() && network.is_none() {
+        anyhow::bail!("[{}] 'server_ip' requires 'network' to be set.", section);
+    }
+    if let Some(net) = network {
+        validate_vpn_network(net, server_ip, section)?;
+    }
+
+    // Validate IPv6: server_ip6 requires network6
+    if server_ip6.is_some() && network6.is_none() {
+        anyhow::bail!(
+            "[{}] 'server_ip6' requires 'network6' to be set.",
+            section
+        );
+    }
+    if let Some(net6) = network6 {
+        validate_vpn_network6(net6, server_ip6, section)?;
+    }
+
+    Ok(())
+}
+
 // ============================================================================
 // Config Accessor Methods
 // ============================================================================
@@ -898,30 +942,14 @@ impl VpnServerConfig {
                 anyhow::bail!("[iroh] Use only one of 'auth_tokens' or 'auth_tokens_file'.");
             }
 
-            // Require at least one of network (IPv4) or network6 (IPv6)
-            if iroh.network.is_none() && iroh.network6.is_none() {
-                anyhow::bail!(
-                    "[iroh] At least one of 'network' (IPv4) or 'network6' (IPv6) is required for VPN server configuration."
-                );
-            }
-
-            // Validate IPv4 network CIDR and server_ip
-            // Ensure server_ip is not orphaned without network
-            if iroh.server_ip.is_some() && iroh.network.is_none() {
-                anyhow::bail!("[iroh] 'server_ip' requires 'network' to be set.");
-            }
-            if let Some(ref network) = iroh.network {
-                validate_vpn_network(network, iroh.server_ip.as_deref(), "iroh")?;
-            }
-
-            // Validate IPv6 network CIDR and server_ip6
-            // Ensure server_ip6 is not orphaned without network6
-            if iroh.server_ip6.is_some() && iroh.network6.is_none() {
-                anyhow::bail!("[iroh] 'server_ip6' requires 'network6' to be set.");
-            }
-            if let Some(ref network6) = iroh.network6 {
-                validate_vpn_network6(network6, iroh.server_ip6.as_deref(), "iroh")?;
-            }
+            // Validate network configuration (presence, containment, format)
+            validate_vpn_networks(
+                iroh.network.as_deref(),
+                iroh.server_ip.as_deref(),
+                iroh.network6.as_deref(),
+                iroh.server_ip6.as_deref(),
+                "iroh",
+            )?;
 
             // Validate MTU range
             if let Some(mtu) = iroh.shared.mtu {
@@ -1209,37 +1237,14 @@ pub struct ResolvedVpnServerConfig {
 impl ResolvedVpnServerConfig {
     /// Create resolved config from TOML config, applying defaults for missing values.
     pub fn from_config(cfg: &VpnServerIrohConfig) -> Result<Self> {
-        // Validate that at least one network is configured
-        if cfg.network.is_none() && cfg.network6.is_none() {
-            anyhow::bail!(
-                "At least one of 'network' (IPv4) or 'network6' (IPv6) is required.\n\
-                 In config: network = \"10.0.0.0/24\" or network6 = \"fd00::/64\""
-            );
-        }
-
-        // Validate IPv4 network CIDR format (optional)
-        // Ensure server_ip is not orphaned without network
-        if cfg.server_ip.is_some() && cfg.network.is_none() {
-            anyhow::bail!(
-                "'server_ip' requires 'network' to be set.\n\
-                 In config: network = \"10.0.0.0/24\""
-            );
-        }
-        if let Some(ref network) = cfg.network {
-            validate_vpn_network(network, cfg.server_ip.as_deref(), "config")?;
-        }
-
-        // Validate IPv6 network CIDR format (optional)
-        // Ensure server_ip6 is not orphaned without network6
-        if cfg.server_ip6.is_some() && cfg.network6.is_none() {
-            anyhow::bail!(
-                "'server_ip6' requires 'network6' to be set.\n\
-                 In config: network6 = \"fd00::/64\""
-            );
-        }
-        if let Some(ref network6) = cfg.network6 {
-            validate_vpn_network6(network6, cfg.server_ip6.as_deref(), "config")?;
-        }
+        // Validate network configuration (presence, containment, format)
+        validate_vpn_networks(
+            cfg.network.as_deref(),
+            cfg.server_ip.as_deref(),
+            cfg.network6.as_deref(),
+            cfg.server_ip6.as_deref(),
+            "config",
+        )?;
 
         // Apply defaults for optional fields
         let mtu = cfg.shared.mtu.unwrap_or(DEFAULT_VPN_MTU);

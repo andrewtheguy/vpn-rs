@@ -213,9 +213,29 @@ impl VpnServerConfig {
             return Err("'server_ip' requires 'network' to be set".to_string());
         }
 
+        // server_ip must be within network
+        if let (Some(server_ip), Some(network)) = (self.server_ip, self.network) {
+            if !network.contains(&server_ip) {
+                return Err(format!(
+                    "'server_ip' {} is not within 'network' {}",
+                    server_ip, network
+                ));
+            }
+        }
+
         // server_ip6 requires network6
         if self.server_ip6.is_some() && self.network6.is_none() {
             return Err("'server_ip6' requires 'network6' to be set".to_string());
+        }
+
+        // server_ip6 must be within network6
+        if let (Some(server_ip6), Some(network6)) = (self.server_ip6, self.network6) {
+            if !network6.contains(&server_ip6) {
+                return Err(format!(
+                    "'server_ip6' {} is not within 'network6' {}",
+                    server_ip6, network6
+                ));
+            }
         }
 
         // NAT64 requires network6 (only makes sense for IPv6-capable networks)
@@ -261,6 +281,27 @@ impl Default for VpnClientConfig {
             routes: vec![],
             routes6: vec![],
         }
+    }
+}
+
+impl VpnClientConfig {
+    /// Validate the VPN client configuration.
+    ///
+    /// Returns an error if:
+    /// - `server_node_id` is empty
+    /// - Both `routes` and `routes6` are empty (at least one route required)
+    pub fn validate(&self) -> Result<(), String> {
+        if self.server_node_id.is_empty() {
+            return Err("'server_node_id' is required and cannot be empty".to_string());
+        }
+
+        if self.routes.is_empty() && self.routes6.is_empty() {
+            return Err(
+                "At least one route is required: 'routes' (IPv4) or 'routes6' (IPv6)".to_string(),
+            );
+        }
+
+        Ok(())
     }
 }
 
