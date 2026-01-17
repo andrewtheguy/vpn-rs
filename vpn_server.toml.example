@@ -126,6 +126,22 @@ auth_tokens = ["iXXXXXXXXXXXXXXXXX"]  # Replace with real token from generate-to
 # auth_tokens_file = "./vpn-tokens.txt"
 
 # ============================================================================
+# Security Settings
+# ============================================================================
+
+# Disable source IP spoofing checks (default: false)
+#
+# When false (default): Only packets with source IPs that don't belong to
+# other connected clients are allowed. This prevents inter-client spoofing
+# while allowing clients to use their own public IP addresses (useful for
+# dual-stack scenarios where clients have native IPv6).
+#
+# When true: All source IP validation is disabled. Use with caution as this
+# allows clients to send packets with arbitrary source addresses.
+#
+# disable_spoofing_check = false
+
+# ============================================================================
 # Relay and Discovery (Optional)
 # ============================================================================
 
