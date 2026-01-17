@@ -604,6 +604,32 @@ graph TB
 
 When `network6` is configured, each client receives both an IPv4 and IPv6 address. The IPv6 pool works identically to the IPv4 pool, with each client getting a single /128 address. Unlike IPv4, a /64 network provides an effectively unlimited address space (~18.4 quintillion (2^64) addresses), so pool exhaustion is not a practical concern for IPv6. If `network` is omitted, the IPv4 pool is not created and the server runs IPv6-only; NAT64 (experimental) can be enabled to reach IPv4 destinations.
 
+### NAT64 (Experimental)
+
+NAT64 allows IPv6-only VPN clients to reach IPv4 destinations by translating IPv6 packets
+destined for the well-known NAT64 prefix `64:ff9b::/96` into IPv4 and performing NAPT.
+This is intended for IPv6-only server deployments where `network6` is set and `network`
+is omitted. NAT64 requires an IPv4 source address for translated packets, provided by
+either the VPN IPv4 network (when configured) or an explicit `nat64.source_ip`.
+
+```mermaid
+sequenceDiagram
+    participant C as Client (IPv6)
+    participant S as Server
+    participant V4 as IPv4 Dest
+
+    C->>S: IPv6 packet to 64:ff9b::/96
+    S->>S: Translate IPv6->IPv4 + NAPT
+    S->>V4: IPv4 packet (src = nat64.source_ip)
+    V4-->>S: IPv4 response
+    S-->>C: IPv6 response (translated)
+```
+
+**Limitations (current):**
+- ICMP error translation is not implemented.
+- IPv6 extension headers are not parsed.
+- Fragmentation handling and PMTU discovery are not implemented.
+
 ### Platform-Specific Details
 
 | Platform | TUN Device | Route Configuration | Privileges |
