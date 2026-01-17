@@ -144,6 +144,13 @@ impl Nat64Translator {
         // Translate based on protocol
         // TTL is decremented per RFC 6146 Section 4
         let ttl = hop_limit.saturating_sub(1);
+
+        // Drop packet if TTL would be 0 (RFC 6146: must not forward with TTL=0)
+        // In a full implementation, we would send ICMPv6 Time Exceeded back to source.
+        if ttl == 0 {
+            return Err(VpnError::Nat64("Hop limit expired (would be 0 after decrement)".into()));
+        }
+
         match protocol {
             Nat64Protocol::Tcp => {
                 self.translate_tcp_6to4(src_ip6, dst_ip4, payload, payload_length as u16, ttl)
@@ -221,6 +228,13 @@ impl Nat64Translator {
         // Translate based on protocol
         // Hop limit is decremented per RFC 6146 Section 4
         let hop_limit = ttl.saturating_sub(1);
+
+        // Drop packet if hop limit would be 0 (RFC 6146: must not forward with hop_limit=0)
+        // In a full implementation, we would send ICMP Time Exceeded back to source.
+        if hop_limit == 0 {
+            return Err(VpnError::Nat64("TTL expired (would be 0 after decrement)".into()));
+        }
+
         match nat64_protocol {
             Nat64Protocol::Tcp => self.translate_tcp_4to6(src_ip4, payload, payload_length, hop_limit),
             Nat64Protocol::Udp => self.translate_udp_4to6(src_ip4, payload, payload_length, hop_limit),
