@@ -87,7 +87,10 @@ impl VpnError {
     pub fn is_recoverable(&self) -> bool {
         matches!(
             self,
-            VpnError::ConnectionLost(_) | VpnError::Network(_) | VpnError::Signaling(_)
+            VpnError::ConnectionLost(_)
+                | VpnError::Network(_)
+                | VpnError::Signaling(_)
+                | VpnError::Nat64PortExhausted
         )
     }
 }

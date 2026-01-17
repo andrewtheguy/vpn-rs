@@ -54,12 +54,12 @@ pub fn compute_checksum(data: &[u8]) -> u16 {
 /// or if `header.len()` is not a multiple of 4 (IPv4 header length must be
 /// a multiple of 4 bytes as specified by the IHL field).
 pub fn ipv4_header_checksum(header: &[u8]) -> u16 {
-    debug_assert!(
+    assert!(
         header.len() >= 20,
         "IPv4 header must be at least 20 bytes, got {}",
         header.len()
     );
-    debug_assert!(
+    assert!(
         header.len().is_multiple_of(4),
         "IPv4 header length must be a multiple of 4 bytes, got {}",
         header.len()
@@ -236,7 +236,12 @@ pub fn adjust_checksum_4to6(
     // HC' = ~(~HC + ~old + new)
     // Note: invert old_folded as u16 before casting to u32 to avoid 32-bit complement
     let sum = hc + (!old_folded) as u32 + new_folded;
-    Some(!fold_checksum(sum))
+    let adjusted = !fold_checksum(sum);
+    if protocol == UDP_PROTOCOL && adjusted == 0 {
+        Some(0xFFFF)
+    } else {
+        Some(adjusted)
+    }
 }
 
 #[cfg(test)]

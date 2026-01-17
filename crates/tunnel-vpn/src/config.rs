@@ -280,8 +280,8 @@ impl VpnServerConfig {
                             .to_string(),
                     );
                 }
+                nat64.validate()?;
             }
-            nat64.validate()?;
         }
 
         Ok(())

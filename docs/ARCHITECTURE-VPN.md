@@ -225,7 +225,7 @@ sequenceDiagram
 |----------|------------|---------------------|------------|
 | Linux | `/dev/net/tun` | `ip route add` | CAP_NET_ADMIN or root |
 | macOS | `utunX` | `route add` | root |
-
+| Windows | `wintun.dll` | `route add` | Administrator |
 ### Security Model
 
 ```mermaid
@@ -315,7 +315,7 @@ graph TB
 
 **Application-Level Heartbeat Protocol:**
 
-Heartbeats and IP packets are multiplexed on the same bidirectional QUIC stream (the "data stream" opened after handshake). All messages are prefixed with a 1-byte type discriminator defined in `DataMessageType` (`crates/tunnel-vpn/src/signaling.rs:174`):
+Heartbeats and IP packets are multiplexed on the same bidirectional QUIC stream (the "data stream" opened after handshake). All messages are prefixed with a 1-byte type discriminator defined in `DataMessageType` in `crates/tunnel-vpn/src/signaling.rs`:
 
 ```
 Data channel message framing:
@@ -378,4 +378,3 @@ sequenceDiagram
 - Counter reset: Resets to 0 after successful tunnel operation
 
 ---
-

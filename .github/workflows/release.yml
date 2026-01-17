@@ -277,6 +277,11 @@ jobs:
             ${{ env.GHCR_IMAGE }}:${TAG}-arm64
           docker manifest push ${{ env.GHCR_IMAGE }}:${TAG}
 
+      - name: Create and push latest multi-arch manifest
+        if: needs.setup.outputs.is_prerelease == 'false'
+        run: |
+          TAG=${{ needs.setup.outputs.release_tag }}
+
           docker manifest create ${{ env.GHCR_IMAGE }}:latest \
             ${{ env.GHCR_IMAGE }}:${TAG}-amd64 \
             ${{ env.GHCR_IMAGE }}:${TAG}-arm64

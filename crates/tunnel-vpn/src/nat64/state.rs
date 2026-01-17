@@ -168,7 +168,7 @@ impl PortAllocator {
                         return Some(current);
                     }
                     // Port was out of range (shouldn't happen normally).
-                    debug_assert!(
+                    assert!(
                         false,
                         "PortAllocator::next_candidate: current {} outside {}..={} (attempts={})",
                         current,
