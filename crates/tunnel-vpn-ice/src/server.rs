@@ -9,12 +9,13 @@ use crate::error::{VpnIceError, VpnIceResult};
 use bytes::{Bytes, BytesMut};
 use ipnet::{Ipv4Net, Ipv6Net};
 use std::collections::{HashMap, HashSet};
-use std::net::{Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
+use etherparse::{Ipv4HeaderSlice, Ipv6HeaderSlice};
 use quinn::{RecvStream, SendStream};
 use tunnel_ice::signaling::{
     ManualOffer, ManualRequest, NostrSignaling, SignalingError, MANUAL_SIGNAL_VERSION,
@@ -640,6 +641,9 @@ impl VpnIceServer {
         // Filter packets to only those destined for this client
         let inbound_short_id = short_id.clone();
         let outbound_tx_pong = outbound_tx.clone();
+        let inbound_client_ip = client_ip;
+        let inbound_client_ip6 = client_ip6;
+        let inbound_disable_spoofing_check = self.config.disable_spoofing_check;
         let mut inbound_handle: tokio::task::JoinHandle<Option<String>> = tokio::spawn(async move {
             const MAX_TUN_WRITE_FAILURES: u32 = 10;
             let mut data_recv = data_recv;
@@ -706,6 +710,37 @@ impl VpnIceServer {
                 }
 
                 let packet = &data_slice[..len];
+                if !inbound_disable_spoofing_check {
+                    match extract_source_ip(packet) {
+                        Some(IpAddr::V4(src)) => {
+                            if inbound_client_ip != Some(src) {
+                                log::warn!(
+                                    "[{}] Dropping spoofed IPv4 packet: source {} not assigned",
+                                    inbound_short_id,
+                                    src
+                                );
+                                continue;
+                            }
+                        }
+                        Some(IpAddr::V6(src)) => {
+                            if inbound_client_ip6 != Some(src) {
+                                log::warn!(
+                                    "[{}] Dropping spoofed IPv6 packet: source {} not assigned",
+                                    inbound_short_id,
+                                    src
+                                );
+                                continue;
+                            }
+                        }
+                        None => {
+                            log::warn!(
+                                "[{}] Dropping packet with unparseable IP header",
+                                inbound_short_id
+                            );
+                            continue;
+                        }
+                    }
+                }
                 if let Err(e) = tun_writer.write_all(packet).await {
                     consecutive_tun_failures += 1;
                     if consecutive_tun_failures >= MAX_TUN_WRITE_FAILURES {
@@ -864,6 +899,22 @@ fn default_server_ip6(net: Ipv6Net) -> Ipv6Addr {
         segments[6],
         segments[7].saturating_add(1),
     )
+}
+
+fn extract_source_ip(packet: &[u8]) -> Option<IpAddr> {
+    if packet.is_empty() {
+        return None;
+    }
+    let version = packet[0] >> 4;
+    match version {
+        4 => Ipv4HeaderSlice::from_slice(packet)
+            .ok()
+            .map(|hdr| IpAddr::V4(hdr.source_addr())),
+        6 => Ipv6HeaderSlice::from_slice(packet)
+            .ok()
+            .map(|hdr| IpAddr::V6(hdr.source_addr())),
+        _ => None,
+    }
 }
 
 /// Result of VPN handshake.

@@ -150,6 +150,7 @@ struct NostrServerSection {
     peer_npub: Option<String>,
     relays: Option<Vec<String>>,
     stun_servers: Option<Vec<String>>,
+    disable_spoofing_check: Option<bool>,
 }
 
 fn load_client_config(path: &std::path::Path) -> Result<TomlClientConfig> {
@@ -432,6 +433,7 @@ async fn run_vpn_server(config_path: &std::path::Path) -> Result<()> {
         relays: nostr.relays,
         stun_servers: nostr.stun_servers.unwrap_or_else(default_stun_servers),
         nat64: None, // NAT64 not yet supported in ICE mode
+        disable_spoofing_check: nostr.disable_spoofing_check.unwrap_or(false),
     };
 
     server_config

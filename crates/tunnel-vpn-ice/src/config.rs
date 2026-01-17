@@ -71,6 +71,16 @@ pub struct VpnIceServerConfig {
     /// NAT64 configuration (optional, for IPv6-only with IPv4 access).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub nat64: Option<tunnel_vpn::config::Nat64Config>,
+
+    /// Disable inter-client IP spoofing checks (default: false).
+    ///
+    /// When `false` (default): The server rejects packets whose source IP does not
+    /// match the assigned client address. This prevents a client from spoofing.
+    ///
+    /// When `true`: All source IP validation is disabled. Any source IP is accepted,
+    /// which may allow clients to spoof other clients' addresses. Use with caution.
+    #[serde(default)]
+    pub disable_spoofing_check: bool,
 }
 
 impl fmt::Debug for VpnIceServerConfig {
@@ -89,6 +99,7 @@ impl fmt::Debug for VpnIceServerConfig {
             .field("relays", &self.relays)
             .field("stun_servers", &self.stun_servers)
             .field("nat64", &self.nat64)
+            .field("disable_spoofing_check", &self.disable_spoofing_check)
             .finish()
     }
 }
@@ -265,6 +276,7 @@ mod tests {
             relays: None,
             stun_servers: default_stun_servers(),
             nat64: None,
+            disable_spoofing_check: false,
         };
         assert!(config.validate().is_err());
     }
@@ -284,6 +296,7 @@ mod tests {
             relays: None,
             stun_servers: default_stun_servers(),
             nat64: None,
+            disable_spoofing_check: false,
         };
         assert!(config.validate().is_err());
     }
@@ -303,6 +316,7 @@ mod tests {
             relays: None,
             stun_servers: default_stun_servers(),
             nat64: None,
+            disable_spoofing_check: false,
         };
         assert!(config.validate().is_err());
     }
@@ -322,6 +336,7 @@ mod tests {
             relays: None,
             stun_servers: default_stun_servers(),
             nat64: None,
+            disable_spoofing_check: false,
         };
         assert!(config.validate().is_ok());
     }
@@ -373,6 +388,7 @@ mod tests {
             relays: None,
             stun_servers: default_stun_servers(),
             nat64: None,
+            disable_spoofing_check: false,
         };
         assert!(server_config.validate().is_err());
 
