@@ -1189,7 +1189,8 @@ impl VpnServer {
                 }
 
                 // Check for NAT64 translation (IPv6 -> IPv4)
-                let packet_bytes = if let Some(ref nat64) = nat64 {
+                let mut packet_bytes = Cow::Borrowed(packet);
+                if let Some(ref nat64) = nat64 {
                     // Check if this is an IPv6 packet destined for NAT64 prefix
                     if packet.len() >= 40 && (packet[0] >> 4) == 6 {
                         // Extract destination IPv6 address
@@ -1202,7 +1203,7 @@ impl VpnServer {
                             match nat64.translate_6to4(packet) {
                                 Ok(ipv4_packet) => {
                                     stats.packets_nat64_6to4.fetch_add(1, Ordering::Relaxed);
-                                    Bytes::from(ipv4_packet)
+                                    packet_bytes = Cow::Owned(ipv4_packet);
                                 }
                                 Err(e) => {
                                     log::debug!(
@@ -1213,17 +1214,13 @@ impl VpnServer {
                                     continue;
                                 }
                             }
-                        } else {
-                            // Not a NAT64 packet, pass through
-                            Bytes::copy_from_slice(packet)
                         }
-                    } else {
-                        // IPv4 or other, pass through
-                        Bytes::copy_from_slice(packet)
                     }
-                } else {
-                    // NAT64 not enabled, pass through
-                    Bytes::copy_from_slice(packet)
+                }
+
+                let packet_bytes = match packet_bytes {
+                    Cow::Borrowed(packet) => Bytes::copy_from_slice(packet),
+                    Cow::Owned(packet) => Bytes::from(packet),
                 };
 
                 // Try non-blocking send first to avoid blocking on slow TUN writes
