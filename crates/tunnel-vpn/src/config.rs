@@ -236,15 +236,15 @@ pub struct VpnServerConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub nat64: Option<Nat64Config>,
 
-    /// Disable source IP spoofing checks (default: false).
+    /// Disable inter-client IP spoofing checks (default: false).
     ///
-    /// When `false` (default): Only packets with source IPs that don't belong to
-    /// other connected clients are allowed. This prevents inter-client spoofing
-    /// while allowing clients to use their own public IP addresses (useful for
-    /// dual-stack scenarios).
+    /// When `false` (default): The server rejects packets whose source IP matches
+    /// another client's assigned VPN IP. This prevents one client from impersonating
+    /// another. Packets with non-VPN source IPs (e.g., a client's public IPv6) are
+    /// still allowed, supporting dual-stack scenarios.
     ///
-    /// When `true`: All source IP validation is disabled. Use with caution as this
-    /// allows clients to send packets with arbitrary source addresses.
+    /// When `true`: All source IP validation is disabled. Any source IP is accepted,
+    /// which may allow clients to spoof other clients' addresses. Use with caution.
     #[serde(default)]
     pub disable_spoofing_check: bool,
 }
