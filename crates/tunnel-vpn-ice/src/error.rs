@@ -89,6 +89,7 @@ impl From<tunnel_vpn::error::VpnError> for VpnIceError {
             VpnError::Nat64UnsupportedProtocol(proto) => {
                 VpnIceError::Internal(format!("NAT64 unsupported protocol: {}", proto))
             }
+            // VpnError is #[non_exhaustive], so we must retain a wildcard arm for forward compatibility.
             other => VpnIceError::Internal(other.to_string()),
         }
     }

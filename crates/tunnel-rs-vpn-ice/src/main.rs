@@ -250,7 +250,7 @@ async fn main() -> Result<()> {
                 .or_else(|| nostr_section.and_then(|s| s.nsec.clone()));
             let final_nsec_file = nsec_file
                 .map(|p| expand_tilde(&p))
-                .or_else(|| nostr_section.and_then(|s| s.nsec_file.clone()));
+                .or_else(|| nostr_section.and_then(|s| s.nsec_file.as_ref().map(|p| expand_tilde(p))));
 
             // Resolve peer_npub
             let final_peer_npub = peer_npub
@@ -346,6 +346,8 @@ async fn main() -> Result<()> {
                     .with_context(|| format!("Failed to write to {}", expanded.display()))?;
                 #[cfg(not(unix))]
                 {
+                    // Note: read-only on Windows only prevents modification, not reading.
+                    // Users should ensure the file is in a directory with appropriate ACLs.
                     let perms = std::fs::Permissions::from_readonly(true);
                     std::fs::set_permissions(&expanded, perms).with_context(|| {
                         format!("Failed to set permissions on {}", expanded.display())
