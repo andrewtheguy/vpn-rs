@@ -567,8 +567,10 @@ mod tests {
 
     #[test]
     fn test_validate_nat64_port_range_invalid() {
-        let mut nat64 = Nat64Config::default();
-        nat64.port_range = (100, 50);
+        let nat64 = Nat64Config {
+            port_range: (100, 50),
+            ..Default::default()
+        };
         let result = nat64.validate();
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("port_range start"));
@@ -576,8 +578,10 @@ mod tests {
 
     #[test]
     fn test_validate_nat64_port_zero_start_invalid() {
-        let mut nat64 = Nat64Config::default();
-        nat64.port_range = (0, 100);
+        let nat64 = Nat64Config {
+            port_range: (0, 100),
+            ..Default::default()
+        };
         let result = nat64.validate();
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("port_range start must be > 0"));
@@ -585,10 +589,12 @@ mod tests {
 
     #[test]
     fn test_validate_nat64_zero_timeouts_invalid() {
-        let mut nat64 = Nat64Config::default();
-        nat64.tcp_timeout_secs = 0;
-        nat64.udp_timeout_secs = 0;
-        nat64.icmp_timeout_secs = 0;
+        let nat64 = Nat64Config {
+            tcp_timeout_secs: 0,
+            udp_timeout_secs: 0,
+            icmp_timeout_secs: 0,
+            ..Default::default()
+        };
         let result = nat64.validate();
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -608,16 +614,20 @@ mod tests {
 
     #[test]
     fn test_validate_client_ok() {
-        let mut config = VpnClientConfig::default();
-        config.server_node_id = random_server_node_id();
-        config.routes.push("0.0.0.0/0".parse().unwrap());
+        let config = VpnClientConfig {
+            server_node_id: random_server_node_id(),
+            routes: vec!["0.0.0.0/0".parse().unwrap()],
+            ..Default::default()
+        };
         assert!(config.validate().is_ok());
     }
 
     #[test]
     fn test_validate_client_requires_routes() {
-        let mut config = VpnClientConfig::default();
-        config.server_node_id = random_server_node_id();
+        let config = VpnClientConfig {
+            server_node_id: random_server_node_id(),
+            ..Default::default()
+        };
         let result = config.validate();
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("At least one route"));
