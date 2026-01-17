@@ -60,12 +60,36 @@ pub type VpnIceResult<T> = Result<T, VpnIceError>;
 
 impl From<anyhow::Error> for VpnIceError {
     fn from(err: anyhow::Error) -> Self {
-        VpnIceError::Internal(err.to_string())
+        VpnIceError::Internal(format!("{:#}", err))
     }
 }
 
 impl From<tunnel_vpn::error::VpnError> for VpnIceError {
     fn from(err: tunnel_vpn::error::VpnError) -> Self {
-        VpnIceError::Internal(err.to_string())
+        use tunnel_vpn::error::VpnError;
+
+        match err {
+            VpnError::TunDevice(message) => VpnIceError::Tun(message),
+            VpnError::Tunnel(message) => VpnIceError::Internal(message),
+            VpnError::Key(message) => VpnIceError::Internal(message),
+            VpnError::Network(io_err) => VpnIceError::Io(io_err),
+            VpnError::Config(message) => VpnIceError::Config(message),
+            VpnError::Signaling(message) => VpnIceError::Signaling(message),
+            VpnError::AuthenticationFailed(message) => VpnIceError::Auth(message),
+            VpnError::IpAssignment(message) => VpnIceError::Internal(message),
+            VpnError::PeerNotFound(message) => VpnIceError::Signaling(message),
+            VpnError::ConnectionLost(message) => VpnIceError::Internal(message),
+            VpnError::MaxReconnectAttemptsExceeded(value) => {
+                VpnIceError::Internal(value.to_string())
+            }
+            VpnError::Nat64(message) => VpnIceError::Internal(message),
+            VpnError::Nat64PortExhausted => {
+                VpnIceError::Internal("NAT64 port pool exhausted".to_string())
+            }
+            VpnError::Nat64UnsupportedProtocol(proto) => {
+                VpnIceError::Internal(format!("NAT64 unsupported protocol: {}", proto))
+            }
+            other => VpnIceError::Internal(other.to_string()),
+        }
     }
 }
