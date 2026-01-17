@@ -50,7 +50,7 @@ pub fn compute_checksum(data: &[u8]) -> u16 {
 ///
 /// # Panics
 ///
-/// Panics in debug builds if `header.len() < 20` (minimum IPv4 header size)
+/// Panics if `header.len() < 20` (minimum IPv4 header size)
 /// or if `header.len()` is not a multiple of 4 (IPv4 header length must be
 /// a multiple of 4 bytes as specified by the IHL field).
 pub fn ipv4_header_checksum(header: &[u8]) -> u16 {

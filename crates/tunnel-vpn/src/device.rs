@@ -107,8 +107,8 @@ impl TunConfig {
         for (idx, byte) in octets.iter().enumerate() {
             hash = hash.rotate_left(5) ^ (*byte as u16).wrapping_add(idx as u16);
         }
-        let third = (hash as u8).wrapping_add(1).clamp(1, 254); // 1-254
-        let fourth = ((hash >> 8) as u8).wrapping_add(1).clamp(1, 254); // 1-254
+        let third = ((hash as u8) % 254) + 1; // 1-254 (uniform distribution)
+        let fourth = (((hash >> 8) as u8) % 254) + 1; // 1-254 (uniform distribution)
         let placeholder_ip = Ipv4Addr::new(169, 254, third, fourth);
         let placeholder_netmask = Ipv4Addr::new(255, 255, 255, 255);
         Ok(Self {
@@ -935,7 +935,10 @@ pub async fn add_route6_with_src(
     {
         // macOS doesn't support source address in routes the same way
         // Fall back to standard route addition
-        let _ = src;
+        log::debug!(
+            "macOS: ignoring source address {} for IPv6 route {} via {}",
+            src, route, tun_name
+        );
         add_route_generic(tun_name, route).await
     }
 
@@ -984,7 +987,10 @@ pub async fn add_route6_with_src(
     {
         // Windows doesn't support source address in routes the same way
         // Fall back to standard route addition
-        let _ = src;
+        log::debug!(
+            "Windows: ignoring source address {} for IPv6 route {} via {}",
+            src, route, tun_name
+        );
         add_route_generic(tun_name, route).await
     }
 

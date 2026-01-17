@@ -185,6 +185,7 @@ impl Nat64Config {
     /// Returns an error if:
     /// - `port_range.0 > port_range.1` (start port greater than end port)
     /// - `port_range.0 == 0` (port 0 is reserved and cannot be used)
+    /// - Any timeout value is 0 (tcp_timeout_secs, udp_timeout_secs, icmp_timeout_secs)
     pub fn validate(&self) -> Result<()> {
         if self.port_range.0 == 0 {
             anyhow::bail!(

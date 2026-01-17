@@ -71,6 +71,7 @@ impl Nat64Config {
     /// - `port_range.0 > port_range.1` (start port greater than end port)
     /// - `port_range.0 == 0` (port 0 is reserved and cannot be used)
     /// - Any timeout field is 0 (sessions would expire immediately)
+    /// - `source_ip` is unspecified (0.0.0.0), multicast, or broadcast
     pub fn validate(&self) -> Result<(), String> {
         if self.port_range.0 == 0 {
             return Err("NAT64 port_range start must be > 0 (port 0 is reserved)".to_string());
@@ -98,6 +99,27 @@ impl Nat64Config {
                 "NAT64 icmp_timeout_secs must be > 0 (sessions would expire immediately)"
                     .to_string(),
             );
+        }
+        // Validate source_ip if provided
+        if let Some(ip) = self.source_ip {
+            if ip.is_unspecified() {
+                return Err(format!(
+                    "NAT64 source_ip {} is unspecified (0.0.0.0) and cannot be used",
+                    ip
+                ));
+            }
+            if ip.is_multicast() {
+                return Err(format!(
+                    "NAT64 source_ip {} is a multicast address and cannot be used",
+                    ip
+                ));
+            }
+            if ip.is_broadcast() {
+                return Err(format!(
+                    "NAT64 source_ip {} is the broadcast address and cannot be used",
+                    ip
+                ));
+            }
         }
         Ok(())
     }

@@ -633,7 +633,11 @@ mod tests {
         };
 
         if let Some(mut entry) = table.forward.get_mut(&forward_key) {
-            entry.last_activity = Instant::now() - Duration::from_secs(2);
+            // Use checked_sub with fallback to handle fast CI where process may have
+            // just started and Instant::now() is close to the epoch.
+            entry.last_activity = Instant::now()
+                .checked_sub(Duration::from_secs(2))
+                .unwrap_or_else(Instant::now);
         }
 
         let removed = cleanup_single_expired_with_hook(&table, forward_key.clone(), |key| {

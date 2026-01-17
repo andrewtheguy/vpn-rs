@@ -71,6 +71,7 @@ impl VpnError {
     /// - `ConnectionLost` - VPN session ended (server restart, network blip)
     /// - `Network` - I/O errors (connection reset, timeout)
     /// - `Signaling` - iroh connection issues (peer unreachable, relay failure)
+    /// - `Nat64PortExhausted` - NAT64 port pool temporarily exhausted (ports free up)
     ///
     /// **Non-recoverable (permanent):**
     /// - `AuthenticationFailed` - invalid token, server rejected credentials
@@ -82,7 +83,6 @@ impl VpnError {
     /// - `PeerNotFound` - unknown peer
     /// - `MaxReconnectAttemptsExceeded` - retry limit hit
     /// - `Nat64` - NAT64 translation error (malformed packet)
-    /// - `Nat64PortExhausted` - NAT64 port pool exhausted
     /// - `Nat64UnsupportedProtocol` - unsupported protocol for NAT64 translation
     pub fn is_recoverable(&self) -> bool {
         matches!(
