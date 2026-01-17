@@ -1418,6 +1418,7 @@ impl ResolvedVpnServerConfig {
             tun_writer_channel_size,
             transport: cfg.shared.transport.clone(),
             nat64: cfg.nat64.clone(),
+            disable_spoofing_check: cfg.disable_spoofing_check,
         })
     }
 }
