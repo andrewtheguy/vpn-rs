@@ -99,9 +99,10 @@ impl TunConfig {
         // multiple IPv6-only TUN devices exist on the same host.
         let octets = address6.octets();
         // Use last two bytes of IPv6 address for uniqueness, but ensure we stay
-        // in the 169.254.1.0 - 169.254.254.255 range (avoiding .0 and .255).
-        let third = octets[14].wrapping_add(1).max(1); // 1-255, biased toward low values
-        let fourth = octets[15].wrapping_add(1).max(1); // 1-255, biased toward low values
+        // in the 169.254.1.0 - 169.254.254.254 range (avoiding reserved .0/.255 subnets
+        // and network/broadcast addresses).
+        let third = octets[14].wrapping_add(1).clamp(1, 254); // 1-254
+        let fourth = octets[15].wrapping_add(1).clamp(1, 254); // 1-254
         let placeholder_ip = Ipv4Addr::new(169, 254, third, fourth);
         let placeholder_netmask = Ipv4Addr::new(255, 255, 255, 255);
         Ok(Self {
