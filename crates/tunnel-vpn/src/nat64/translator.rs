@@ -181,8 +181,24 @@ impl Nat64Translator {
         let nat64_protocol = Nat64Protocol::from_ipv4_protocol(protocol)
             .ok_or(VpnError::Nat64UnsupportedProtocol(protocol))?;
 
-        // Get payload
-        let payload = &ipv4_packet[ihl..total_length.min(ipv4_packet.len())];
+        // Validate total_length and extract payload
+        // Check for truncated packet (total_length claims more data than we have)
+        if total_length > ipv4_packet.len() {
+            return Err(VpnError::Nat64(format!(
+                "IPv4 packet truncated: total_length {} but buffer is {} bytes",
+                total_length,
+                ipv4_packet.len()
+            )));
+        }
+        // Check that total_length is at least as large as the header
+        if total_length < ihl {
+            return Err(VpnError::Nat64(format!(
+                "IPv4 total_length {} is less than header length {}",
+                total_length, ihl
+            )));
+        }
+
+        let payload = &ipv4_packet[ihl..total_length];
         let payload_length = payload.len() as u16;
 
         // Translate based on protocol
