@@ -500,7 +500,6 @@ mod tests {
         assert_eq!(table.active_mappings(), 1);
 
         // Make the mapping appear expired by setting last_activity to the past
-        // (deterministic, no sleeping required)
         let forward_key = ForwardKey {
             client_ip6,
             client_port: 12345,
@@ -509,11 +508,17 @@ mod tests {
             protocol: Nat64Protocol::Tcp,
         };
         if let Some(mut entry) = table.forward.get_mut(&forward_key) {
-            // Set last_activity to 2 seconds ago (timeout is 1 second)
+            // Try to set last_activity to 2 seconds ago (timeout is 1 second).
+            // Use checked_sub with fallback to handle fast CI where process may have
+            // just started and Instant::now() is close to the epoch.
             entry.last_activity = Instant::now()
                 .checked_sub(Duration::from_secs(2))
-                .expect("process should have been running for at least 2 seconds");
+                .unwrap_or_else(|| Instant::now() - Duration::from_millis(1));
         }
+
+        // Sleep past the timeout to ensure expiry regardless of whether checked_sub
+        // succeeded (entry 2s old) or fell back (entry ~0s old, needs full timeout)
+        std::thread::sleep(Duration::from_millis(1100));
 
         // Cleanup should remove the expired entry
         let removed = table.cleanup_expired();
