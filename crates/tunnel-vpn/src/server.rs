@@ -9,7 +9,7 @@ use crate::buffer::{as_mut_byte_slice, uninitialized_vec};
 use crate::config::VpnServerConfig;
 use crate::device::{TunConfig, TunDevice};
 use crate::error::{VpnError, VpnResult};
-use crate::nat64::{is_nat64_address, Nat64Translator, NAT64_PREFIX_CIDR};
+use crate::nat64::{is_nat64_address, Nat64TranslateResult, Nat64Translator, NAT64_PREFIX_CIDR};
 use crate::signaling::{
     frame_ip_packet, read_message, write_message, DataMessageType, VpnHandshake,
     VpnHandshakeResponse, HEARTBEAT_PONG_BYTE, MAX_HANDSHAKE_SIZE,
@@ -1319,11 +1319,11 @@ impl VpnServer {
                     if packet.len() >= 20 && (packet[0] >> 4) == 4 {
                         // This is an IPv4 packet - try NAT64 reverse translation
                         match nat64.translate_4to6(packet) {
-                            Ok((client_ip6, ipv6_packet)) => {
+                            Ok(Nat64TranslateResult::Translated { client_ip6, packet }) => {
                                 self.stats.packets_nat64_4to6.fetch_add(1, Ordering::Relaxed);
-                                (Cow::Owned(ipv6_packet), Some(client_ip6))
+                                (Cow::Owned(packet), Some(client_ip6))
                             }
-                            Err(VpnError::Nat64NoMapping(_)) => {
+                            Ok(Nat64TranslateResult::NotNat64Packet) => {
                                 // Not a NAT64 response - route normally without allocation
                                 (Cow::Borrowed(packet), None)
                             }

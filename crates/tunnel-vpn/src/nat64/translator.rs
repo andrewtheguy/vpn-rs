@@ -11,6 +11,21 @@ use super::{embed_ipv4_in_nat64, extract_ipv4_from_nat64, is_nat64_address};
 use crate::config::Nat64Config;
 use crate::error::{VpnError, VpnResult};
 use std::net::{Ipv4Addr, Ipv6Addr};
+
+/// Result of an IPv4-to-IPv6 NAT64 translation attempt.
+#[derive(Debug)]
+pub enum Nat64TranslateResult {
+    /// Packet was successfully translated to IPv6.
+    Translated {
+        /// The IPv6 address of the client to route this packet to.
+        client_ip6: Ipv6Addr,
+        /// The translated IPv6 packet.
+        packet: Vec<u8>,
+    },
+    /// Packet is not a NAT64 response (no mapping found or not destined for NAT64).
+    /// This is normal for IPv4 packets that aren't responses to NAT64-translated traffic.
+    NotNat64Packet,
+}
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
@@ -142,9 +157,10 @@ impl Nat64Translator {
 
     /// Translate an IPv4 packet to IPv6.
     ///
-    /// Returns `(destination_client_ip6, translated_ipv6_packet)` if successful.
-    /// The destination is looked up in the NAT64 state table.
-    pub fn translate_4to6(&self, ipv4_packet: &[u8]) -> VpnResult<(Ipv6Addr, Vec<u8>)> {
+    /// Returns `Nat64TranslateResult::Translated` with the destination client IPv6 and
+    /// translated packet if successful, or `Nat64TranslateResult::NotNat64Packet` if
+    /// this packet is not a NAT64 response (no mapping found or not destined for NAT64).
+    pub fn translate_4to6(&self, ipv4_packet: &[u8]) -> VpnResult<Nat64TranslateResult> {
         // Validate minimum IPv4 header size
         if ipv4_packet.len() < IPV4_HEADER_SIZE {
             return Err(VpnError::Nat64("IPv4 packet too short".into()));
@@ -173,12 +189,9 @@ impl Nat64Translator {
         let src_ip4 = Ipv4Addr::from(<[u8; 4]>::try_from(&ipv4_packet[12..16]).unwrap());
         let dst_ip4 = Ipv4Addr::from(<[u8; 4]>::try_from(&ipv4_packet[16..20]).unwrap());
 
-        // Verify this packet is destined for our NAT64 address
+        // If packet is not destined for our NAT64 address, it's not a NAT64 response
         if dst_ip4 != self.server_ip4 {
-            return Err(VpnError::Nat64NoMapping(format!(
-                "IPv4 packet not destined for NAT64: {} != {}",
-                dst_ip4, self.server_ip4
-            )));
+            return Ok(Nat64TranslateResult::NotNat64Packet);
         }
 
         // Get protocol
@@ -431,7 +444,7 @@ impl Nat64Translator {
         tcp_payload: &[u8],
         payload_len: u16,
         hop_limit: u8,
-    ) -> VpnResult<(Ipv6Addr, Vec<u8>)> {
+    ) -> VpnResult<Nat64TranslateResult> {
         use super::checksum::update_checksum_16;
 
         if tcp_payload.len() < TCP_HEADER_MIN_SIZE {
@@ -442,11 +455,14 @@ impl Nat64Translator {
         let dst_port = u16::from_be_bytes([tcp_payload[2], tcp_payload[3]]);
         let old_checksum = u16::from_be_bytes([tcp_payload[16], tcp_payload[17]]);
 
-        // Look up the original client
-        let (client_ip6, client_port) = self
+        // Look up the original client - if no mapping, this isn't a NAT64 response
+        let (client_ip6, client_port) = match self
             .state
             .lookup_reverse(dst_port, src_ip4, src_port, Nat64Protocol::Tcp)
-            .ok_or_else(|| VpnError::Nat64NoMapping("No NAT64 mapping for TCP response".into()))?;
+        {
+            Some(result) => result,
+            None => return Ok(Nat64TranslateResult::NotNat64Packet),
+        };
 
         // Build IPv6 packet
         let src_ip6 = embed_ipv4_in_nat64(src_ip4);
@@ -475,7 +491,10 @@ impl Nat64Translator {
         new_payload[17] = new_checksum as u8;
 
         let packet = self.build_ipv6_packet(src_ip6, dst_ip6, 6, &new_payload, hop_limit);
-        Ok((client_ip6, packet))
+        Ok(Nat64TranslateResult::Translated {
+            client_ip6,
+            packet,
+        })
     }
 
     /// Translate UDP from IPv4 to IPv6.
@@ -485,7 +504,7 @@ impl Nat64Translator {
         udp_payload: &[u8],
         payload_len: u16,
         hop_limit: u8,
-    ) -> VpnResult<(Ipv6Addr, Vec<u8>)> {
+    ) -> VpnResult<Nat64TranslateResult> {
         use super::checksum::update_checksum_16;
 
         if udp_payload.len() < UDP_HEADER_SIZE {
@@ -496,11 +515,14 @@ impl Nat64Translator {
         let dst_port = u16::from_be_bytes([udp_payload[2], udp_payload[3]]);
         let old_checksum = u16::from_be_bytes([udp_payload[6], udp_payload[7]]);
 
-        // Look up the original client
-        let (client_ip6, client_port) = self
+        // Look up the original client - if no mapping, this isn't a NAT64 response
+        let (client_ip6, client_port) = match self
             .state
             .lookup_reverse(dst_port, src_ip4, src_port, Nat64Protocol::Udp)
-            .ok_or_else(|| VpnError::Nat64NoMapping("No NAT64 mapping for UDP response".into()))?;
+        {
+            Some(result) => result,
+            None => return Ok(Nat64TranslateResult::NotNat64Packet),
+        };
 
         // Build IPv6 packet
         let src_ip6 = embed_ipv4_in_nat64(src_ip4);
@@ -536,7 +558,10 @@ impl Nat64Translator {
         new_payload[7] = new_checksum as u8;
 
         let packet = self.build_ipv6_packet(src_ip6, dst_ip6, 17, &new_payload, hop_limit);
-        Ok((client_ip6, packet))
+        Ok(Nat64TranslateResult::Translated {
+            client_ip6,
+            packet,
+        })
     }
 
     /// Translate ICMPv4 to ICMPv6.
@@ -545,7 +570,7 @@ impl Nat64Translator {
         src_ip4: Ipv4Addr,
         icmp_payload: &[u8],
         hop_limit: u8,
-    ) -> VpnResult<(Ipv6Addr, Vec<u8>)> {
+    ) -> VpnResult<Nat64TranslateResult> {
         if icmp_payload.len() < ICMP_HEADER_MIN_SIZE {
             return Err(VpnError::Nat64("ICMPv4 message too short".into()));
         }
@@ -568,11 +593,14 @@ impl Nat64Translator {
         // ICMP identifier is at bytes 4-5
         let translated_id = u16::from_be_bytes([icmp_payload[4], icmp_payload[5]]);
 
-        // Look up the original client
-        let (client_ip6, original_id) = self
+        // Look up the original client - if no mapping, this isn't a NAT64 response
+        let (client_ip6, original_id) = match self
             .state
             .lookup_reverse(translated_id, src_ip4, 0, Nat64Protocol::Icmp)
-            .ok_or_else(|| VpnError::Nat64NoMapping("No NAT64 mapping for ICMP response".into()))?;
+        {
+            Some(result) => result,
+            None => return Ok(Nat64TranslateResult::NotNat64Packet),
+        };
 
         let src_ip6 = embed_ipv4_in_nat64(src_ip4);
         let dst_ip6 = client_ip6;
@@ -591,7 +619,10 @@ impl Nat64Translator {
         icmpv6[3] = checksum as u8;
 
         let packet = self.build_ipv6_packet(src_ip6, dst_ip6, 58, &icmpv6, hop_limit); // ICMPv6 = 58
-        Ok((client_ip6, packet))
+        Ok(Nat64TranslateResult::Translated {
+            client_ip6,
+            packet,
+        })
     }
 
     /// Build an IPv6 packet.
@@ -1085,7 +1116,11 @@ mod tests {
         );
 
         // Step 3: Translate response back to IPv6
-        let (returned_client, ipv6_response) = translator.translate_4to6(&ipv4_response).unwrap();
+        let result = translator.translate_4to6(&ipv4_response).unwrap();
+        let (returned_client, ipv6_response) = match result {
+            Nat64TranslateResult::Translated { client_ip6, packet } => (client_ip6, packet),
+            Nat64TranslateResult::NotNat64Packet => panic!("Expected translated packet"),
+        };
 
         // Verify the response goes to the correct client
         assert_eq!(returned_client, client_ip6);
@@ -1148,7 +1183,11 @@ mod tests {
         );
 
         // Step 3: Translate response back
-        let (returned_client, ipv6_response) = translator.translate_4to6(&ipv4_response).unwrap();
+        let result = translator.translate_4to6(&ipv4_response).unwrap();
+        let (returned_client, ipv6_response) = match result {
+            Nat64TranslateResult::Translated { client_ip6, packet } => (client_ip6, packet),
+            Nat64TranslateResult::NotNat64Packet => panic!("Expected translated packet"),
+        };
 
         assert_eq!(returned_client, client_ip6);
 
@@ -1192,7 +1231,11 @@ mod tests {
         );
 
         // Step 3: Translate response back
-        let (returned_client, ipv6_response) = translator.translate_4to6(&ipv4_response).unwrap();
+        let result = translator.translate_4to6(&ipv4_response).unwrap();
+        let (returned_client, ipv6_response) = match result {
+            Nat64TranslateResult::Translated { client_ip6, packet } => (client_ip6, packet),
+            Nat64TranslateResult::NotNat64Packet => panic!("Expected translated packet"),
+        };
 
         assert_eq!(returned_client, client_ip6);
 
@@ -1494,8 +1537,8 @@ mod tests {
             b"response",
         );
 
-        let result = translator.translate_4to6(&ipv4_packet);
-        assert!(result.is_err());
+        let result = translator.translate_4to6(&ipv4_packet).unwrap();
+        assert!(matches!(result, Nat64TranslateResult::NotNat64Packet));
     }
 
     #[test]
@@ -1503,7 +1546,7 @@ mod tests {
         let server_ip4 = Ipv4Addr::new(10, 0, 0, 1);
         let translator = Nat64Translator::new(&test_config(), server_ip4);
 
-        // No mapping exists, response should fail
+        // No mapping exists - returns NotNat64Packet (not an error)
         let ipv4_packet = build_test_ipv4_udp_packet(
             Ipv4Addr::new(8, 8, 8, 8),
             server_ip4,
@@ -1512,7 +1555,7 @@ mod tests {
             b"response",
         );
 
-        let result = translator.translate_4to6(&ipv4_packet);
-        assert!(result.is_err());
+        let result = translator.translate_4to6(&ipv4_packet).unwrap();
+        assert!(matches!(result, Nat64TranslateResult::NotNat64Packet));
     }
 }

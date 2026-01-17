@@ -35,7 +35,7 @@ mod state;
 mod translator;
 
 pub use state::Nat64StateTable;
-pub use translator::Nat64Translator;
+pub use translator::{Nat64TranslateResult, Nat64Translator};
 
 /// The well-known NAT64 prefix (RFC 6052).
 /// IPv6 addresses in this range embed IPv4 addresses in the last 32 bits.
