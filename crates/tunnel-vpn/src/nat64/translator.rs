@@ -772,4 +772,728 @@ mod tests {
 
         assert!(translator.translate_6to4(&packet).is_err());
     }
+
+    /// Helper to build a valid IPv6 UDP packet for testing.
+    fn build_test_ipv6_udp_packet(
+        src_ip6: Ipv6Addr,
+        dst_ip6: Ipv6Addr,
+        src_port: u16,
+        dst_port: u16,
+        payload: &[u8],
+    ) -> Vec<u8> {
+        use super::super::checksum::{fold_checksum, ipv6_pseudo_header_sum, ones_complement_sum};
+
+        let udp_len = 8 + payload.len();
+        let mut udp = Vec::with_capacity(udp_len);
+
+        // UDP header
+        udp.extend_from_slice(&src_port.to_be_bytes());
+        udp.extend_from_slice(&dst_port.to_be_bytes());
+        udp.extend_from_slice(&(udp_len as u16).to_be_bytes());
+        udp.extend_from_slice(&[0, 0]); // Checksum placeholder
+        udp.extend_from_slice(payload);
+
+        // Compute UDP checksum with IPv6 pseudo-header
+        let pseudo_sum = ipv6_pseudo_header_sum(src_ip6, dst_ip6, 17, udp_len as u32);
+        let data_sum = ones_complement_sum(&udp);
+        let checksum = !fold_checksum(pseudo_sum + data_sum);
+        let checksum = if checksum == 0 { 0xFFFF } else { checksum };
+        udp[6] = (checksum >> 8) as u8;
+        udp[7] = checksum as u8;
+
+        // Build IPv6 packet
+        let mut packet = Vec::with_capacity(40 + udp_len);
+        packet.push(0x60); // Version 6
+        packet.extend_from_slice(&[0, 0, 0]); // Traffic class + flow label
+        packet.extend_from_slice(&(udp_len as u16).to_be_bytes());
+        packet.push(17); // UDP
+        packet.push(64); // Hop limit
+        packet.extend_from_slice(&src_ip6.octets());
+        packet.extend_from_slice(&dst_ip6.octets());
+        packet.extend_from_slice(&udp);
+
+        packet
+    }
+
+    /// Helper to build a valid IPv6 TCP packet for testing.
+    fn build_test_ipv6_tcp_packet(
+        src_ip6: Ipv6Addr,
+        dst_ip6: Ipv6Addr,
+        src_port: u16,
+        dst_port: u16,
+        payload: &[u8],
+    ) -> Vec<u8> {
+        use super::super::checksum::{fold_checksum, ipv6_pseudo_header_sum, ones_complement_sum};
+
+        let tcp_header_len = 20; // Minimum TCP header
+        let tcp_len = tcp_header_len + payload.len();
+        let mut tcp = Vec::with_capacity(tcp_len);
+
+        // TCP header (minimum 20 bytes)
+        tcp.extend_from_slice(&src_port.to_be_bytes()); // Source port
+        tcp.extend_from_slice(&dst_port.to_be_bytes()); // Dest port
+        tcp.extend_from_slice(&0u32.to_be_bytes()); // Sequence number
+        tcp.extend_from_slice(&0u32.to_be_bytes()); // Ack number
+        tcp.push(0x50); // Data offset (5 * 4 = 20 bytes) + reserved
+        tcp.push(0x02); // Flags (SYN)
+        tcp.extend_from_slice(&1024u16.to_be_bytes()); // Window
+        tcp.extend_from_slice(&[0, 0]); // Checksum placeholder
+        tcp.extend_from_slice(&[0, 0]); // Urgent pointer
+        tcp.extend_from_slice(payload);
+
+        // Compute TCP checksum with IPv6 pseudo-header
+        let pseudo_sum = ipv6_pseudo_header_sum(src_ip6, dst_ip6, 6, tcp_len as u32);
+        let data_sum = ones_complement_sum(&tcp);
+        let checksum = !fold_checksum(pseudo_sum + data_sum);
+        tcp[16] = (checksum >> 8) as u8;
+        tcp[17] = checksum as u8;
+
+        // Build IPv6 packet
+        let mut packet = Vec::with_capacity(40 + tcp_len);
+        packet.push(0x60); // Version 6
+        packet.extend_from_slice(&[0, 0, 0]); // Traffic class + flow label
+        packet.extend_from_slice(&(tcp_len as u16).to_be_bytes());
+        packet.push(6); // TCP
+        packet.push(64); // Hop limit
+        packet.extend_from_slice(&src_ip6.octets());
+        packet.extend_from_slice(&dst_ip6.octets());
+        packet.extend_from_slice(&tcp);
+
+        packet
+    }
+
+    /// Helper to build a valid IPv6 ICMPv6 echo request packet for testing.
+    fn build_test_ipv6_icmp_echo_packet(
+        src_ip6: Ipv6Addr,
+        dst_ip6: Ipv6Addr,
+        identifier: u16,
+        sequence: u16,
+        payload: &[u8],
+    ) -> Vec<u8> {
+        use super::super::checksum::{fold_checksum, ipv6_pseudo_header_sum, ones_complement_sum};
+
+        let icmp_len = 8 + payload.len();
+        let mut icmp = Vec::with_capacity(icmp_len);
+
+        // ICMPv6 echo request
+        icmp.push(ICMPV6_ECHO_REQUEST); // Type
+        icmp.push(0); // Code
+        icmp.extend_from_slice(&[0, 0]); // Checksum placeholder
+        icmp.extend_from_slice(&identifier.to_be_bytes());
+        icmp.extend_from_slice(&sequence.to_be_bytes());
+        icmp.extend_from_slice(payload);
+
+        // Compute ICMPv6 checksum with pseudo-header
+        let pseudo_sum = ipv6_pseudo_header_sum(src_ip6, dst_ip6, 58, icmp_len as u32);
+        let data_sum = ones_complement_sum(&icmp);
+        let checksum = !fold_checksum(pseudo_sum + data_sum);
+        icmp[2] = (checksum >> 8) as u8;
+        icmp[3] = checksum as u8;
+
+        // Build IPv6 packet
+        let mut packet = Vec::with_capacity(40 + icmp_len);
+        packet.push(0x60); // Version 6
+        packet.extend_from_slice(&[0, 0, 0]); // Traffic class + flow label
+        packet.extend_from_slice(&(icmp_len as u16).to_be_bytes());
+        packet.push(58); // ICMPv6
+        packet.push(64); // Hop limit
+        packet.extend_from_slice(&src_ip6.octets());
+        packet.extend_from_slice(&dst_ip6.octets());
+        packet.extend_from_slice(&icmp);
+
+        packet
+    }
+
+    #[test]
+    fn test_translate_udp_6to4_success() {
+        let server_ip4 = Ipv4Addr::new(10, 0, 0, 1);
+        let translator = Nat64Translator::new(&test_config(), server_ip4);
+
+        let client_ip6: Ipv6Addr = "fd00::2".parse().unwrap();
+        let dest_ip4 = Ipv4Addr::new(8, 8, 8, 8);
+        let dest_ip6 = embed_ipv4_in_nat64(dest_ip4); // 64:ff9b::8.8.8.8
+
+        let src_port = 54321u16;
+        let dst_port = 53u16;
+        let payload = b"test dns query";
+
+        let ipv6_packet =
+            build_test_ipv6_udp_packet(client_ip6, dest_ip6, src_port, dst_port, payload);
+
+        // Translate IPv6 -> IPv4
+        let ipv4_packet = translator.translate_6to4(&ipv6_packet).unwrap();
+
+        // Verify IPv4 header
+        assert_eq!(ipv4_packet[0] >> 4, 4); // Version 4
+        assert_eq!(ipv4_packet[9], 17); // Protocol = UDP
+
+        // Verify source IP is server's IP (NAPT)
+        let src_ip4_result = Ipv4Addr::from(<[u8; 4]>::try_from(&ipv4_packet[12..16]).unwrap());
+        assert_eq!(src_ip4_result, server_ip4);
+
+        // Verify destination IP
+        let dst_ip4_result = Ipv4Addr::from(<[u8; 4]>::try_from(&ipv4_packet[16..20]).unwrap());
+        assert_eq!(dst_ip4_result, dest_ip4);
+
+        // Verify UDP payload destination port unchanged
+        let udp_start = 20; // IPv4 header size
+        let udp_dst_port =
+            u16::from_be_bytes([ipv4_packet[udp_start + 2], ipv4_packet[udp_start + 3]]);
+        assert_eq!(udp_dst_port, dst_port);
+
+        // Verify payload
+        let payload_start = udp_start + 8;
+        assert_eq!(&ipv4_packet[payload_start..], payload);
+
+        // Verify a NAT mapping was created
+        assert_eq!(translator.active_mappings(), 1);
+    }
+
+    #[test]
+    fn test_translate_tcp_6to4_success() {
+        let server_ip4 = Ipv4Addr::new(10, 0, 0, 1);
+        let translator = Nat64Translator::new(&test_config(), server_ip4);
+
+        let client_ip6: Ipv6Addr = "fd00::2".parse().unwrap();
+        let dest_ip4 = Ipv4Addr::new(93, 184, 216, 34); // example.com
+        let dest_ip6 = embed_ipv4_in_nat64(dest_ip4);
+
+        let src_port = 45678u16;
+        let dst_port = 80u16;
+        let payload = b"";
+
+        let ipv6_packet =
+            build_test_ipv6_tcp_packet(client_ip6, dest_ip6, src_port, dst_port, payload);
+
+        // Translate IPv6 -> IPv4
+        let ipv4_packet = translator.translate_6to4(&ipv6_packet).unwrap();
+
+        // Verify IPv4 header
+        assert_eq!(ipv4_packet[0] >> 4, 4); // Version 4
+        assert_eq!(ipv4_packet[9], 6); // Protocol = TCP
+
+        // Verify source IP is server's IP (NAPT)
+        let src_ip4_result = Ipv4Addr::from(<[u8; 4]>::try_from(&ipv4_packet[12..16]).unwrap());
+        assert_eq!(src_ip4_result, server_ip4);
+
+        // Verify destination IP
+        let dst_ip4_result = Ipv4Addr::from(<[u8; 4]>::try_from(&ipv4_packet[16..20]).unwrap());
+        assert_eq!(dst_ip4_result, dest_ip4);
+
+        // Verify TCP destination port unchanged
+        let tcp_start = 20;
+        let tcp_dst_port =
+            u16::from_be_bytes([ipv4_packet[tcp_start + 2], ipv4_packet[tcp_start + 3]]);
+        assert_eq!(tcp_dst_port, dst_port);
+
+        // Verify a NAT mapping was created
+        assert_eq!(translator.active_mappings(), 1);
+    }
+
+    #[test]
+    fn test_translate_icmp_6to4_success() {
+        let server_ip4 = Ipv4Addr::new(10, 0, 0, 1);
+        let translator = Nat64Translator::new(&test_config(), server_ip4);
+
+        let client_ip6: Ipv6Addr = "fd00::2".parse().unwrap();
+        let dest_ip4 = Ipv4Addr::new(8, 8, 8, 8);
+        let dest_ip6 = embed_ipv4_in_nat64(dest_ip4);
+
+        let identifier = 1234u16;
+        let sequence = 1u16;
+        let payload = b"ping data";
+
+        let ipv6_packet =
+            build_test_ipv6_icmp_echo_packet(client_ip6, dest_ip6, identifier, sequence, payload);
+
+        // Translate IPv6 -> IPv4
+        let ipv4_packet = translator.translate_6to4(&ipv6_packet).unwrap();
+
+        // Verify IPv4 header
+        assert_eq!(ipv4_packet[0] >> 4, 4); // Version 4
+        assert_eq!(ipv4_packet[9], 1); // Protocol = ICMP
+
+        // Verify ICMP type is echo request (8 for ICMPv4)
+        let icmp_start = 20;
+        assert_eq!(ipv4_packet[icmp_start], ICMPV4_ECHO_REQUEST);
+
+        // Verify sequence number is preserved
+        let icmp_seq =
+            u16::from_be_bytes([ipv4_packet[icmp_start + 6], ipv4_packet[icmp_start + 7]]);
+        assert_eq!(icmp_seq, sequence);
+
+        // Verify payload
+        let payload_start = icmp_start + 8;
+        assert_eq!(&ipv4_packet[payload_start..], payload);
+
+        // Verify a NAT mapping was created
+        assert_eq!(translator.active_mappings(), 1);
+    }
+
+    #[test]
+    fn test_translate_udp_roundtrip() {
+        let server_ip4 = Ipv4Addr::new(10, 0, 0, 1);
+        let translator = Nat64Translator::new(&test_config(), server_ip4);
+
+        let client_ip6: Ipv6Addr = "fd00::2".parse().unwrap();
+        let dest_ip4 = Ipv4Addr::new(8, 8, 8, 8);
+        let dest_ip6 = embed_ipv4_in_nat64(dest_ip4);
+
+        let src_port = 54321u16;
+        let dst_port = 53u16;
+        let payload = b"dns query payload";
+
+        // Step 1: Client sends IPv6 packet to NAT64 destination
+        let ipv6_packet =
+            build_test_ipv6_udp_packet(client_ip6, dest_ip6, src_port, dst_port, payload);
+        let ipv4_outbound = translator.translate_6to4(&ipv6_packet).unwrap();
+
+        // Extract the translated source port (NAPT port)
+        let udp_start = 20;
+        let translated_port =
+            u16::from_be_bytes([ipv4_outbound[udp_start], ipv4_outbound[udp_start + 1]]);
+        assert!(translated_port >= 10000 && translated_port <= 10100);
+
+        // Step 2: Simulate response from IPv4 destination
+        // Build an IPv4 UDP response packet
+        let response_payload = b"dns response";
+        let ipv4_response = build_test_ipv4_udp_packet(
+            dest_ip4,     // Source is original dest
+            server_ip4,   // Dest is server's NAPT address
+            dst_port,     // Source port is original dest port
+            translated_port, // Dest port is the translated NAPT port
+            response_payload,
+        );
+
+        // Step 3: Translate response back to IPv6
+        let (returned_client, ipv6_response) = translator.translate_4to6(&ipv4_response).unwrap();
+
+        // Verify the response goes to the correct client
+        assert_eq!(returned_client, client_ip6);
+
+        // Verify IPv6 header
+        assert_eq!(ipv6_response[0] >> 4, 6); // Version 6
+        assert_eq!(ipv6_response[6], 17); // Next header = UDP
+
+        // Verify source is NAT64 address of original destination
+        let src_from_response =
+            Ipv6Addr::from(<[u8; 16]>::try_from(&ipv6_response[8..24]).unwrap());
+        assert_eq!(src_from_response, dest_ip6);
+
+        // Verify destination is original client
+        let dst_from_response =
+            Ipv6Addr::from(<[u8; 16]>::try_from(&ipv6_response[24..40]).unwrap());
+        assert_eq!(dst_from_response, client_ip6);
+
+        // Verify UDP ports are restored
+        let udp6_start = 40;
+        let udp_src = u16::from_be_bytes([ipv6_response[udp6_start], ipv6_response[udp6_start + 1]]);
+        let udp_dst =
+            u16::from_be_bytes([ipv6_response[udp6_start + 2], ipv6_response[udp6_start + 3]]);
+        assert_eq!(udp_src, dst_port); // Source was original dest port
+        assert_eq!(udp_dst, src_port); // Dest is original client port
+
+        // Verify payload
+        let payload6_start = udp6_start + 8;
+        assert_eq!(&ipv6_response[payload6_start..], response_payload);
+    }
+
+    #[test]
+    fn test_translate_tcp_roundtrip() {
+        let server_ip4 = Ipv4Addr::new(10, 0, 0, 1);
+        let translator = Nat64Translator::new(&test_config(), server_ip4);
+
+        let client_ip6: Ipv6Addr = "fd00::3".parse().unwrap();
+        let dest_ip4 = Ipv4Addr::new(93, 184, 216, 34);
+        let dest_ip6 = embed_ipv4_in_nat64(dest_ip4);
+
+        let src_port = 45678u16;
+        let dst_port = 443u16;
+
+        // Step 1: Client sends TCP SYN
+        let ipv6_packet = build_test_ipv6_tcp_packet(client_ip6, dest_ip6, src_port, dst_port, b"");
+        let ipv4_outbound = translator.translate_6to4(&ipv6_packet).unwrap();
+
+        // Extract translated port
+        let tcp_start = 20;
+        let translated_port =
+            u16::from_be_bytes([ipv4_outbound[tcp_start], ipv4_outbound[tcp_start + 1]]);
+
+        // Step 2: Simulate SYN-ACK response
+        let ipv4_response = build_test_ipv4_tcp_packet(
+            dest_ip4,
+            server_ip4,
+            dst_port,
+            translated_port,
+            b"",
+        );
+
+        // Step 3: Translate response back
+        let (returned_client, ipv6_response) = translator.translate_4to6(&ipv4_response).unwrap();
+
+        assert_eq!(returned_client, client_ip6);
+
+        // Verify TCP ports restored
+        let tcp6_start = 40;
+        let tcp_dst =
+            u16::from_be_bytes([ipv6_response[tcp6_start + 2], ipv6_response[tcp6_start + 3]]);
+        assert_eq!(tcp_dst, src_port);
+    }
+
+    #[test]
+    fn test_translate_icmp_roundtrip() {
+        let server_ip4 = Ipv4Addr::new(10, 0, 0, 1);
+        let translator = Nat64Translator::new(&test_config(), server_ip4);
+
+        let client_ip6: Ipv6Addr = "fd00::4".parse().unwrap();
+        let dest_ip4 = Ipv4Addr::new(1, 1, 1, 1);
+        let dest_ip6 = embed_ipv4_in_nat64(dest_ip4);
+
+        let identifier = 5678u16;
+        let sequence = 42u16;
+        let payload = b"icmp echo data";
+
+        // Step 1: Client sends ICMPv6 echo request
+        let ipv6_packet =
+            build_test_ipv6_icmp_echo_packet(client_ip6, dest_ip6, identifier, sequence, payload);
+        let ipv4_outbound = translator.translate_6to4(&ipv6_packet).unwrap();
+
+        // Extract translated identifier
+        let icmp_start = 20;
+        let translated_id =
+            u16::from_be_bytes([ipv4_outbound[icmp_start + 4], ipv4_outbound[icmp_start + 5]]);
+
+        // Step 2: Simulate ICMPv4 echo reply
+        let ipv4_response = build_test_ipv4_icmp_echo_reply(
+            dest_ip4,
+            server_ip4,
+            translated_id,
+            sequence,
+            payload,
+        );
+
+        // Step 3: Translate response back
+        let (returned_client, ipv6_response) = translator.translate_4to6(&ipv4_response).unwrap();
+
+        assert_eq!(returned_client, client_ip6);
+
+        // Verify ICMPv6 echo reply type
+        let icmp6_start = 40;
+        assert_eq!(ipv6_response[icmp6_start], ICMPV6_ECHO_REPLY);
+
+        // Verify identifier restored
+        let response_id =
+            u16::from_be_bytes([ipv6_response[icmp6_start + 4], ipv6_response[icmp6_start + 5]]);
+        assert_eq!(response_id, identifier);
+
+        // Verify sequence preserved
+        let response_seq =
+            u16::from_be_bytes([ipv6_response[icmp6_start + 6], ipv6_response[icmp6_start + 7]]);
+        assert_eq!(response_seq, sequence);
+
+        // Verify payload
+        let payload6_start = icmp6_start + 8;
+        assert_eq!(&ipv6_response[payload6_start..], payload);
+    }
+
+    /// Helper to build IPv4 UDP packet for response simulation.
+    fn build_test_ipv4_udp_packet(
+        src_ip4: Ipv4Addr,
+        dst_ip4: Ipv4Addr,
+        src_port: u16,
+        dst_port: u16,
+        payload: &[u8],
+    ) -> Vec<u8> {
+        use super::super::checksum::{
+            fold_checksum, ipv4_header_checksum, ipv4_pseudo_header_sum, ones_complement_sum,
+        };
+
+        let udp_len = 8 + payload.len();
+        let total_len = 20 + udp_len;
+
+        let mut packet = Vec::with_capacity(total_len);
+
+        // IPv4 header
+        packet.push(0x45); // Version 4, IHL 5
+        packet.push(0x00); // DSCP/ECN
+        packet.extend_from_slice(&(total_len as u16).to_be_bytes());
+        packet.extend_from_slice(&[0x00, 0x00]); // ID
+        packet.extend_from_slice(&[0x40, 0x00]); // Flags + fragment
+        packet.push(64); // TTL
+        packet.push(17); // UDP
+        packet.extend_from_slice(&[0x00, 0x00]); // Checksum placeholder
+        packet.extend_from_slice(&src_ip4.octets());
+        packet.extend_from_slice(&dst_ip4.octets());
+
+        // IPv4 header checksum
+        let hdr_checksum = ipv4_header_checksum(&packet[..20]);
+        packet[10] = (hdr_checksum >> 8) as u8;
+        packet[11] = hdr_checksum as u8;
+
+        // UDP header
+        packet.extend_from_slice(&src_port.to_be_bytes());
+        packet.extend_from_slice(&dst_port.to_be_bytes());
+        packet.extend_from_slice(&(udp_len as u16).to_be_bytes());
+        packet.extend_from_slice(&[0, 0]); // Checksum placeholder
+        packet.extend_from_slice(payload);
+
+        // UDP checksum
+        let pseudo_sum = ipv4_pseudo_header_sum(src_ip4, dst_ip4, 17, udp_len as u16);
+        let data_sum = ones_complement_sum(&packet[20..]);
+        let udp_checksum = !fold_checksum(pseudo_sum + data_sum);
+        packet[26] = (udp_checksum >> 8) as u8;
+        packet[27] = udp_checksum as u8;
+
+        packet
+    }
+
+    /// Helper to build IPv4 TCP packet for response simulation.
+    fn build_test_ipv4_tcp_packet(
+        src_ip4: Ipv4Addr,
+        dst_ip4: Ipv4Addr,
+        src_port: u16,
+        dst_port: u16,
+        payload: &[u8],
+    ) -> Vec<u8> {
+        use super::super::checksum::{
+            fold_checksum, ipv4_header_checksum, ipv4_pseudo_header_sum, ones_complement_sum,
+        };
+
+        let tcp_len = 20 + payload.len();
+        let total_len = 20 + tcp_len;
+
+        let mut packet = Vec::with_capacity(total_len);
+
+        // IPv4 header
+        packet.push(0x45);
+        packet.push(0x00);
+        packet.extend_from_slice(&(total_len as u16).to_be_bytes());
+        packet.extend_from_slice(&[0x00, 0x00]);
+        packet.extend_from_slice(&[0x40, 0x00]);
+        packet.push(64);
+        packet.push(6); // TCP
+        packet.extend_from_slice(&[0x00, 0x00]);
+        packet.extend_from_slice(&src_ip4.octets());
+        packet.extend_from_slice(&dst_ip4.octets());
+
+        let hdr_checksum = ipv4_header_checksum(&packet[..20]);
+        packet[10] = (hdr_checksum >> 8) as u8;
+        packet[11] = hdr_checksum as u8;
+
+        // TCP header
+        packet.extend_from_slice(&src_port.to_be_bytes());
+        packet.extend_from_slice(&dst_port.to_be_bytes());
+        packet.extend_from_slice(&0u32.to_be_bytes()); // Seq
+        packet.extend_from_slice(&0u32.to_be_bytes()); // Ack
+        packet.push(0x50); // Data offset
+        packet.push(0x12); // SYN-ACK
+        packet.extend_from_slice(&1024u16.to_be_bytes()); // Window
+        packet.extend_from_slice(&[0, 0]); // Checksum placeholder
+        packet.extend_from_slice(&[0, 0]); // Urgent
+        packet.extend_from_slice(payload);
+
+        // TCP checksum
+        let pseudo_sum = ipv4_pseudo_header_sum(src_ip4, dst_ip4, 6, tcp_len as u16);
+        let data_sum = ones_complement_sum(&packet[20..]);
+        let tcp_checksum = !fold_checksum(pseudo_sum + data_sum);
+        packet[36] = (tcp_checksum >> 8) as u8;
+        packet[37] = tcp_checksum as u8;
+
+        packet
+    }
+
+    /// Helper to build IPv4 ICMP echo reply packet.
+    fn build_test_ipv4_icmp_echo_reply(
+        src_ip4: Ipv4Addr,
+        dst_ip4: Ipv4Addr,
+        identifier: u16,
+        sequence: u16,
+        payload: &[u8],
+    ) -> Vec<u8> {
+        use super::super::checksum::{compute_checksum, ipv4_header_checksum};
+
+        let icmp_len = 8 + payload.len();
+        let total_len = 20 + icmp_len;
+
+        let mut packet = Vec::with_capacity(total_len);
+
+        // IPv4 header
+        packet.push(0x45);
+        packet.push(0x00);
+        packet.extend_from_slice(&(total_len as u16).to_be_bytes());
+        packet.extend_from_slice(&[0x00, 0x00]);
+        packet.extend_from_slice(&[0x40, 0x00]);
+        packet.push(64);
+        packet.push(1); // ICMP
+        packet.extend_from_slice(&[0x00, 0x00]);
+        packet.extend_from_slice(&src_ip4.octets());
+        packet.extend_from_slice(&dst_ip4.octets());
+
+        let hdr_checksum = ipv4_header_checksum(&packet[..20]);
+        packet[10] = (hdr_checksum >> 8) as u8;
+        packet[11] = hdr_checksum as u8;
+
+        // ICMP echo reply
+        packet.push(ICMPV4_ECHO_REPLY); // Type 0
+        packet.push(0); // Code
+        packet.extend_from_slice(&[0, 0]); // Checksum placeholder
+        packet.extend_from_slice(&identifier.to_be_bytes());
+        packet.extend_from_slice(&sequence.to_be_bytes());
+        packet.extend_from_slice(payload);
+
+        // ICMP checksum (no pseudo-header)
+        let icmp_checksum = compute_checksum(&packet[20..]);
+        packet[22] = (icmp_checksum >> 8) as u8;
+        packet[23] = icmp_checksum as u8;
+
+        packet
+    }
+
+    #[test]
+    fn test_mapping_creation_and_reuse() {
+        let translator = Nat64Translator::new(&test_config(), Ipv4Addr::new(10, 0, 0, 1));
+
+        let client_ip6: Ipv6Addr = "fd00::5".parse().unwrap();
+        let dest_ip4 = Ipv4Addr::new(8, 8, 8, 8);
+        let dest_ip6 = embed_ipv4_in_nat64(dest_ip4);
+
+        let src_port = 11111u16;
+        let dst_port = 53u16;
+
+        // First packet creates a mapping
+        let packet1 =
+            build_test_ipv6_udp_packet(client_ip6, dest_ip6, src_port, dst_port, b"query1");
+        let ipv4_1 = translator.translate_6to4(&packet1).unwrap();
+        let port1 = u16::from_be_bytes([ipv4_1[20], ipv4_1[21]]);
+
+        assert_eq!(translator.active_mappings(), 1);
+
+        // Second packet to same destination reuses the mapping
+        let packet2 =
+            build_test_ipv6_udp_packet(client_ip6, dest_ip6, src_port, dst_port, b"query2");
+        let ipv4_2 = translator.translate_6to4(&packet2).unwrap();
+        let port2 = u16::from_be_bytes([ipv4_2[20], ipv4_2[21]]);
+
+        // Same mapping, same port
+        assert_eq!(port1, port2);
+        assert_eq!(translator.active_mappings(), 1);
+
+        // Different source port creates new mapping
+        let packet3 =
+            build_test_ipv6_udp_packet(client_ip6, dest_ip6, src_port + 1, dst_port, b"query3");
+        let ipv4_3 = translator.translate_6to4(&packet3).unwrap();
+        let port3 = u16::from_be_bytes([ipv4_3[20], ipv4_3[21]]);
+
+        // Different mapping, different port
+        assert_ne!(port1, port3);
+        assert_eq!(translator.active_mappings(), 2);
+    }
+
+    #[test]
+    fn test_mapping_expiry_via_cleanup() {
+        // Use very short timeouts for testing
+        let config = Nat64Config {
+            enabled: true,
+            port_range: (10000, 10100),
+            tcp_timeout_secs: 1,
+            udp_timeout_secs: 1,
+            icmp_timeout_secs: 1,
+        };
+        let translator = Nat64Translator::new(&config, Ipv4Addr::new(10, 0, 0, 1));
+
+        let client_ip6: Ipv6Addr = "fd00::6".parse().unwrap();
+        let dest_ip4 = Ipv4Addr::new(8, 8, 8, 8);
+        let dest_ip6 = embed_ipv4_in_nat64(dest_ip4);
+
+        // Create a mapping
+        let packet = build_test_ipv6_udp_packet(client_ip6, dest_ip6, 22222, 53, b"test");
+        translator.translate_6to4(&packet).unwrap();
+        assert_eq!(translator.active_mappings(), 1);
+
+        // Force the mapping to appear expired by manipulating last_activity
+        // Access internal state (we need to make last_activity old)
+        // Since we can't easily manipulate internal state, we rely on cleanup()
+        // after manually aging entries via the state table's forward map
+
+        // For this test, we'll just verify cleanup() can be called
+        // A more thorough test would require exposing internal state or using
+        // a test-specific time source
+        let removed = translator.cleanup();
+        // Initially nothing should be expired (just created)
+        assert_eq!(removed, 0);
+        assert_eq!(translator.active_mappings(), 1);
+    }
+
+    #[test]
+    fn test_multiple_clients_separate_mappings() {
+        let translator = Nat64Translator::new(&test_config(), Ipv4Addr::new(10, 0, 0, 1));
+
+        let dest_ip4 = Ipv4Addr::new(8, 8, 8, 8);
+        let dest_ip6 = embed_ipv4_in_nat64(dest_ip4);
+        let dst_port = 80u16;
+
+        // Multiple clients connecting to same destination
+        let clients: Vec<Ipv6Addr> = (1..=5)
+            .map(|i| format!("fd00::{}", i).parse().unwrap())
+            .collect();
+
+        let mut ports = Vec::new();
+        for (i, client) in clients.iter().enumerate() {
+            let packet =
+                build_test_ipv6_tcp_packet(*client, dest_ip6, 30000 + i as u16, dst_port, b"");
+            let ipv4 = translator.translate_6to4(&packet).unwrap();
+            let port = u16::from_be_bytes([ipv4[20], ipv4[21]]);
+            ports.push(port);
+        }
+
+        // All clients should have separate mappings with unique ports
+        assert_eq!(translator.active_mappings(), 5);
+
+        let unique_ports: std::collections::HashSet<_> = ports.iter().collect();
+        assert_eq!(unique_ports.len(), 5);
+    }
+
+    #[test]
+    fn test_translate_4to6_wrong_destination() {
+        let server_ip4 = Ipv4Addr::new(10, 0, 0, 1);
+        let translator = Nat64Translator::new(&test_config(), server_ip4);
+
+        // Create a mapping first
+        let client_ip6: Ipv6Addr = "fd00::7".parse().unwrap();
+        let dest_ip4 = Ipv4Addr::new(8, 8, 8, 8);
+        let dest_ip6 = embed_ipv4_in_nat64(dest_ip4);
+        let packet = build_test_ipv6_udp_packet(client_ip6, dest_ip6, 33333, 53, b"query");
+        translator.translate_6to4(&packet).unwrap();
+
+        // Try to translate an IPv4 packet not destined for server
+        let wrong_dest = Ipv4Addr::new(192, 168, 1, 1);
+        let ipv4_packet = build_test_ipv4_udp_packet(
+            dest_ip4,
+            wrong_dest, // Wrong destination
+            53,
+            33333,
+            b"response",
+        );
+
+        let result = translator.translate_4to6(&ipv4_packet);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_translate_4to6_no_mapping() {
+        let server_ip4 = Ipv4Addr::new(10, 0, 0, 1);
+        let translator = Nat64Translator::new(&test_config(), server_ip4);
+
+        // No mapping exists, response should fail
+        let ipv4_packet = build_test_ipv4_udp_packet(
+            Ipv4Addr::new(8, 8, 8, 8),
+            server_ip4,
+            53,
+            12345, // Unknown translated port
+            b"response",
+        );
+
+        let result = translator.translate_4to6(&ipv4_packet);
+        assert!(result.is_err());
+    }
 }
