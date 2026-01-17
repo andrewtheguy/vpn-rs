@@ -437,6 +437,53 @@ mod tests {
         }
     }
 
+    fn cleanup_single_expired_with_hook<F>(
+        table: &Nat64StateTable,
+        forward_key: ForwardKey,
+        mut hook: F,
+    ) -> usize
+    where
+        F: FnMut(&ForwardKey),
+    {
+        let now = Instant::now();
+        let mut removed = 0;
+
+        let reverse_key = match table.forward.get(&forward_key) {
+            Some(entry) => {
+                let timeout = table.timeout_for_protocol(entry.protocol);
+                if now.duration_since(entry.last_activity) > timeout {
+                    Some(ReverseKey {
+                        translated_port: entry.translated_port,
+                        src_ip4: entry.dest_ip4,
+                        src_port: entry.dest_port,
+                        protocol: entry.protocol,
+                    })
+                } else {
+                    None
+                }
+            }
+            None => None,
+        };
+
+        if let Some(reverse_key) = reverse_key {
+            table.reverse.remove(&reverse_key);
+            hook(&forward_key);
+
+            let maybe_removed = table.forward.remove_if(&forward_key, |_key, entry| {
+                let timeout = table.timeout_for_protocol(entry.protocol);
+                now.duration_since(entry.last_activity) > timeout
+            });
+
+            if maybe_removed.is_some() {
+                removed += 1;
+            } else {
+                table.reverse.insert(reverse_key, forward_key);
+            }
+        }
+
+        removed
+    }
+
     #[test]
     fn test_create_mapping() {
         let table = Nat64StateTable::new(&test_config());
@@ -563,6 +610,49 @@ mod tests {
         let removed = table.cleanup_expired();
         assert_eq!(removed, 1);
         assert_eq!(table.active_mappings(), 0);
+    }
+
+    #[test]
+    fn test_cleanup_expired_restores_reverse_on_refresh() {
+        let table = Nat64StateTable::new(&test_config());
+
+        let client_ip6: Ipv6Addr = "fd00::2".parse().unwrap();
+        let dest_ip4 = Ipv4Addr::new(8, 8, 8, 8);
+
+        let translated_port = table
+            .get_or_create_mapping(client_ip6, 12345, dest_ip4, 80, Nat64Protocol::Tcp)
+            .unwrap();
+
+        let forward_key = ForwardKey {
+            client_ip6,
+            client_port: 12345,
+            dest_ip4,
+            dest_port: 80,
+            protocol: Nat64Protocol::Tcp,
+        };
+
+        if let Some(mut entry) = table.forward.get_mut(&forward_key) {
+            entry.last_activity = Instant::now()
+                .checked_sub(Duration::from_secs(2))
+                .unwrap_or_else(|| Instant::now() - Duration::from_millis(1));
+        }
+
+        let removed = cleanup_single_expired_with_hook(&table, forward_key.clone(), |key| {
+            if let Some(mut entry) = table.forward.get_mut(key) {
+                entry.last_activity = Instant::now();
+            }
+        });
+
+        assert_eq!(removed, 0);
+        assert_eq!(table.active_mappings(), 1);
+
+        let reverse_key = ReverseKey {
+            translated_port,
+            src_ip4: dest_ip4,
+            src_port: 80,
+            protocol: Nat64Protocol::Tcp,
+        };
+        assert!(table.reverse.contains_key(&reverse_key));
     }
 
     #[test]

@@ -1,6 +1,7 @@
 //! VPN configuration types.
 
 use ipnet::{Ipv4Net, Ipv6Net};
+use iroh::EndpointId;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::net::{Ipv4Addr, Ipv6Addr};
@@ -331,6 +332,9 @@ impl VpnClientConfig {
         if self.server_node_id.is_empty() {
             return Err("'server_node_id' is required and cannot be empty".to_string());
         }
+        if self.server_node_id.parse::<EndpointId>().is_err() {
+            return Err("'server_node_id' is not a valid iroh node ID".to_string());
+        }
 
         if self.routes.is_empty() && self.routes6.is_empty() {
             return Err(
@@ -395,6 +399,7 @@ fn default_nat64_icmp_timeout() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rand::RngCore;
 
     fn minimal_server_config() -> VpnServerConfig {
         VpnServerConfig {
@@ -410,6 +415,13 @@ mod tests {
             tun_writer_channel_size: 512,
             nat64: None,
         }
+    }
+
+    fn random_server_node_id() -> String {
+        let mut bytes = [0u8; 32];
+        rand::rngs::OsRng.fill_bytes(&mut bytes);
+        let secret = iroh::SecretKey::from_bytes(&bytes);
+        secret.public().to_string()
     }
 
     #[test]
@@ -551,5 +563,55 @@ mod tests {
         let result = config.validate();
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("not within 'network6'"));
+    }
+
+    #[test]
+    fn test_validate_nat64_port_range_invalid() {
+        let mut nat64 = Nat64Config::default();
+        nat64.port_range = (100, 50);
+        let result = nat64.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("port_range start"));
+    }
+
+    #[test]
+    fn test_validate_nat64_port_zero_start_invalid() {
+        let mut nat64 = Nat64Config::default();
+        nat64.port_range = (0, 100);
+        let result = nat64.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("port_range start must be > 0"));
+    }
+
+    #[test]
+    fn test_validate_nat64_zero_timeouts_invalid() {
+        let mut nat64 = Nat64Config::default();
+        nat64.tcp_timeout_secs = 0;
+        nat64.udp_timeout_secs = 0;
+        nat64.icmp_timeout_secs = 0;
+        let result = nat64.validate();
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("timeout"));
+    }
+
+    #[test]
+    fn test_validate_client_requires_server_node_id() {
+        let mut config = VpnClientConfig::default();
+        config.routes.push("0.0.0.0/0".parse().unwrap());
+        let result = config.validate();
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .contains("'server_node_id' is required"));
+    }
+
+    #[test]
+    fn test_validate_client_requires_routes() {
+        let mut config = VpnClientConfig::default();
+        config.server_node_id = random_server_node_id();
+        let result = config.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("At least one route"));
     }
 }
