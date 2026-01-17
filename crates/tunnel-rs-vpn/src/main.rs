@@ -357,6 +357,7 @@ async fn run_vpn_server(resolved: ResolvedVpnServerConfig) -> Result<()> {
         drop_on_full: resolved.drop_on_full,
         client_channel_size: resolved.client_channel_size,
         tun_writer_channel_size: resolved.tun_writer_channel_size,
+        nat64: None, // NAT64 not yet exposed via CLI; configure via config file
     };
 
     // Create iroh endpoint for signaling.
