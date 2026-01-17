@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
-use etherparse::{Ipv4HeaderSlice, Ipv6HeaderSlice};
+use etherparse::{Ipv4Header, Ipv4HeaderSlice, Ipv6Header, Ipv6HeaderSlice};
 use quinn::{RecvStream, SendStream};
 use tunnel_ice::signaling::{
     ManualOffer, ManualRequest, NostrSignaling, SignalingError, MANUAL_SIGNAL_VERSION,
@@ -920,30 +920,24 @@ struct HandshakeResult {
 
 /// Check if an IP packet is destined for the given IPv4 address.
 fn is_packet_for_ip(packet: &[u8], client_ip: Ipv4Addr) -> bool {
-    if packet.len() < 20 {
+    if packet.is_empty() || (packet[0] >> 4) != 4 {
         return false;
     }
-    let version = packet[0] >> 4;
-    if version != 4 {
-        return false;
-    }
-    // Destination IP is at bytes 16-19
-    let dest_ip = Ipv4Addr::new(packet[16], packet[17], packet[18], packet[19]);
-    dest_ip == client_ip
+    let (header, _) = match Ipv4Header::from_slice(packet) {
+        Ok(value) => value,
+        Err(_) => return false,
+    };
+    header.destination == client_ip.octets()
 }
 
 /// Check if an IP packet is destined for the given IPv6 address.
 fn is_packet_for_ipv6(packet: &[u8], client_ip: Ipv6Addr) -> bool {
-    if packet.len() < 40 {
+    if packet.is_empty() || (packet[0] >> 4) != 6 {
         return false;
     }
-    let version = packet[0] >> 4;
-    if version != 6 {
-        return false;
-    }
-    // Destination IPv6 is at bytes 24-39
-    let mut dest_bytes = [0u8; 16];
-    dest_bytes.copy_from_slice(&packet[24..40]);
-    let dest_ip = Ipv6Addr::from(dest_bytes);
-    dest_ip == client_ip
+    let (header, _) = match Ipv6Header::from_slice(packet) {
+        Ok(value) => value,
+        Err(_) => return false,
+    };
+    header.destination == client_ip.octets()
 }
