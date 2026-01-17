@@ -148,11 +148,12 @@ pub fn adjust_checksum_6to4(
     // Adjust checksum: subtract old pseudo-header, add new pseudo-header
     // Using ones' complement arithmetic
     let hc = !old_checksum as u32;
-    let old_folded = fold_checksum(old_pseudo) as u32;
+    let old_folded = fold_checksum(old_pseudo); // Keep as u16 for proper inversion
     let new_folded = fold_checksum(new_pseudo) as u32;
 
     // HC' = ~(~HC + ~old + new)
-    let sum = hc + !old_folded as u32 + new_folded;
+    // Note: invert old_folded as u16 before casting to u32 to avoid 32-bit complement
+    let sum = hc + (!old_folded) as u32 + new_folded;
     !fold_checksum(sum)
 }
 
@@ -178,11 +179,12 @@ pub fn adjust_checksum_4to6(
 
     // Adjust checksum: subtract old pseudo-header, add new pseudo-header
     let hc = !old_checksum as u32;
-    let old_folded = fold_checksum(old_pseudo) as u32;
+    let old_folded = fold_checksum(old_pseudo); // Keep as u16 for proper inversion
     let new_folded = fold_checksum(new_pseudo) as u32;
 
     // HC' = ~(~HC + ~old + new)
-    let sum = hc + !old_folded as u32 + new_folded;
+    // Note: invert old_folded as u16 before casting to u32 to avoid 32-bit complement
+    let sum = hc + (!old_folded) as u32 + new_folded;
     !fold_checksum(sum)
 }
 

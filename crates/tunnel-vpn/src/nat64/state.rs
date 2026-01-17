@@ -115,35 +115,49 @@ impl PortAllocator {
         }
     }
 
-    /// Try to allocate a port, checking if it's in use.
-    /// Returns None if all ports are exhausted (after full cycle).
-    fn allocate<F>(&self, is_in_use: F) -> Option<u16>
-    where
-        F: Fn(u16) -> bool,
-    {
+    /// Get the next candidate port, advancing the counter.
+    /// Returns None if we've cycled through all ports.
+    /// The caller is responsible for checking if the port is actually usable
+    /// and retrying if not.
+    fn next_candidate(&self, attempts: &mut usize) -> Option<u16> {
         let range_size = (self.end - self.start + 1) as usize;
 
-        for _ in 0..range_size {
-            let port = self.next.fetch_add(1, Ordering::Relaxed);
-
-            // Wrap around if needed
-            if port > self.end {
-                // Try to reset, but another thread might beat us
-                let _ = self.next.compare_exchange(
-                    port + 1,
-                    self.start,
-                    Ordering::Relaxed,
-                    Ordering::Relaxed,
-                );
-                continue;
-            }
-
-            if !is_in_use(port) {
-                return Some(port);
-            }
+        if *attempts >= range_size {
+            return None; // Exhausted all ports
         }
 
-        None // All ports in use
+        loop {
+            let current = self.next.load(Ordering::Relaxed);
+
+            // Calculate next value with proper wrap-around (no overflow)
+            let next_val = if current >= self.end {
+                self.start
+            } else {
+                current.wrapping_add(1)
+            };
+
+            // Try to atomically advance the counter
+            match self.next.compare_exchange_weak(
+                current,
+                next_val,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => {
+                    // Successfully claimed this port candidate
+                    // Only count as attempt if port is in valid range
+                    if current >= self.start && current <= self.end {
+                        *attempts += 1;
+                        return Some(current);
+                    }
+                    // Port was out of range (shouldn't happen normally), retry
+                }
+                Err(_) => {
+                    // Another thread beat us, retry
+                    continue;
+                }
+            }
+        }
     }
 }
 
@@ -196,6 +210,8 @@ impl Nat64StateTable {
         dest_port: u16,
         protocol: Nat64Protocol,
     ) -> VpnResult<u16> {
+        use dashmap::mapref::entry::Entry;
+
         let forward_key = ForwardKey {
             client_ip6,
             client_port,
@@ -204,49 +220,65 @@ impl Nat64StateTable {
             protocol,
         };
 
-        // Check if mapping already exists
-        if let Some(mut entry) = self.forward.get_mut(&forward_key) {
-            entry.last_activity = Instant::now();
-            return Ok(entry.translated_port);
+        // Use entry API for atomic check-and-insert on the forward map
+        match self.forward.entry(forward_key.clone()) {
+            Entry::Occupied(mut occupied) => {
+                // Mapping already exists, update last_activity and return
+                occupied.get_mut().last_activity = Instant::now();
+                Ok(occupied.get().translated_port)
+            }
+            Entry::Vacant(vacant) => {
+                // Need to allocate a new port and insert atomically
+                let now = Instant::now();
+                let mut attempts: usize = 0;
+
+                // Retry loop: allocate port and try to insert into reverse map
+                loop {
+                    let translated_port = self
+                        .port_allocator
+                        .next_candidate(&mut attempts)
+                        .ok_or(VpnError::Nat64PortExhausted)?;
+
+                    let reverse_key = ReverseKey {
+                        translated_port,
+                        src_ip4: dest_ip4,
+                        src_port: dest_port,
+                        protocol,
+                    };
+
+                    // Try to atomically insert into reverse map
+                    // Use entry API to avoid TOCTOU race
+                    match self.reverse.entry(reverse_key) {
+                        Entry::Occupied(_) => {
+                            // Port already in use for this (dest_ip4, dest_port, protocol),
+                            // try next port
+                            continue;
+                        }
+                        Entry::Vacant(reverse_vacant) => {
+                            // Successfully claimed this port in reverse map
+                            let entry = Nat64Entry {
+                                client_ip6,
+                                client_port,
+                                translated_port,
+                                dest_ip4,
+                                dest_port,
+                                protocol,
+                                last_activity: now,
+                            };
+
+                            // Insert the forward key reference into reverse map
+                            reverse_vacant.insert(forward_key.clone());
+
+                            // Insert the entry into forward map
+                            // (we hold the vacant entry, so this is safe)
+                            vacant.insert(entry);
+
+                            return Ok(translated_port);
+                        }
+                    }
+                }
+            }
         }
-
-        // Allocate a new port
-        let translated_port = self
-            .port_allocator
-            .allocate(|port| {
-                let reverse_key = ReverseKey {
-                    translated_port: port,
-                    src_ip4: dest_ip4,
-                    src_port: dest_port,
-                    protocol,
-                };
-                self.reverse.contains_key(&reverse_key)
-            })
-            .ok_or(VpnError::Nat64PortExhausted)?;
-
-        let now = Instant::now();
-        let entry = Nat64Entry {
-            client_ip6,
-            client_port,
-            translated_port,
-            dest_ip4,
-            dest_port,
-            protocol,
-            last_activity: now,
-        };
-
-        let reverse_key = ReverseKey {
-            translated_port,
-            src_ip4: dest_ip4,
-            src_port: dest_port,
-            protocol,
-        };
-
-        // Insert into both maps
-        self.forward.insert(forward_key.clone(), entry);
-        self.reverse.insert(reverse_key, forward_key);
-
-        Ok(translated_port)
     }
 
     /// Look up the client information for an inbound (IPv4 -> IPv6) response.
@@ -285,8 +317,9 @@ impl Nat64StateTable {
         let now = Instant::now();
         let mut removed = 0;
 
-        // Collect expired forward keys
-        let expired_keys: Vec<ForwardKey> = self
+        // Collect candidate expired forward keys (snapshot)
+        // Note: entries may be refreshed between collection and removal
+        let candidate_keys: Vec<ForwardKey> = self
             .forward
             .iter()
             .filter(|entry| {
@@ -302,9 +335,19 @@ impl Nat64StateTable {
             })
             .collect();
 
-        // Remove expired entries from both maps
-        for forward_key in expired_keys {
-            if let Some((_, entry)) = self.forward.remove(&forward_key) {
+        // Remove entries only if they are still expired (re-check before removal)
+        // This handles the race where get_or_create_mapping or lookup_reverse
+        // refreshed the entry between collection and removal
+        for forward_key in candidate_keys {
+            // Use remove_if for atomic conditional removal:
+            // only remove if the entry is still expired
+            let maybe_removed = self.forward.remove_if(&forward_key, |_key, entry| {
+                let timeout = self.timeout_for_protocol(entry.protocol);
+                now.duration_since(entry.last_activity) > timeout
+            });
+
+            if let Some((_, entry)) = maybe_removed {
+                // Entry was expired and removed, also remove from reverse map
                 let reverse_key = ReverseKey {
                     translated_port: entry.translated_port,
                     src_ip4: entry.dest_ip4,
