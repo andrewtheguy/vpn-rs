@@ -473,7 +473,7 @@ mod tests {
     fn test_cleanup_expired() {
         let table = Nat64StateTable::new(&test_config());
 
-        let client_ip6 = "fd00::2".parse().unwrap();
+        let client_ip6: Ipv6Addr = "fd00::2".parse().unwrap();
         let dest_ip4 = Ipv4Addr::new(8, 8, 8, 8);
 
         // Create a mapping
@@ -483,12 +483,158 @@ mod tests {
 
         assert_eq!(table.active_mappings(), 1);
 
-        // Wait for timeout (1 second in test config)
-        std::thread::sleep(Duration::from_millis(1100));
+        // Make the mapping appear expired by setting last_activity to the past
+        // (deterministic, no sleeping required)
+        let forward_key = ForwardKey {
+            client_ip6,
+            client_port: 12345,
+            dest_ip4,
+            dest_port: 80,
+            protocol: Nat64Protocol::Tcp,
+        };
+        if let Some(mut entry) = table.forward.get_mut(&forward_key) {
+            // Set last_activity to 2 seconds ago (timeout is 1 second)
+            entry.last_activity = Instant::now()
+                .checked_sub(Duration::from_secs(2))
+                .expect("process should have been running for at least 2 seconds");
+        }
 
         // Cleanup should remove the expired entry
         let removed = table.cleanup_expired();
         assert_eq!(removed, 1);
         assert_eq!(table.active_mappings(), 0);
+    }
+
+    #[test]
+    fn test_port_exhaustion() {
+        // Use a small port range for testing exhaustion
+        let config = Nat64Config {
+            enabled: true,
+            port_range: (10000, 10100), // 101 ports
+            tcp_timeout_secs: 300,
+            udp_timeout_secs: 30,
+            icmp_timeout_secs: 30,
+        };
+        let table = Nat64StateTable::new(&config);
+
+        let client_ip6: Ipv6Addr = "fd00::2".parse().unwrap();
+        let dest_ip4 = Ipv4Addr::new(8, 8, 8, 8);
+
+        // Allocate all 101 ports (10000..=10100)
+        let port_range_size = 101;
+        for i in 0..port_range_size {
+            let result = table.get_or_create_mapping(
+                client_ip6,
+                (1000 + i) as u16, // Different client port for each connection
+                dest_ip4,
+                80,
+                Nat64Protocol::Tcp,
+            );
+            assert!(
+                result.is_ok(),
+                "mapping {} should succeed, got {:?}",
+                i,
+                result
+            );
+        }
+
+        assert_eq!(table.active_mappings(), port_range_size);
+
+        // Next allocation should fail with port exhaustion
+        let result = table.get_or_create_mapping(
+            client_ip6,
+            2000, // New client port
+            dest_ip4,
+            80,
+            Nat64Protocol::Tcp,
+        );
+        assert!(
+            matches!(result, Err(VpnError::Nat64PortExhausted)),
+            "expected Nat64PortExhausted, got {:?}",
+            result
+        );
+
+        // Active mappings should still be at max
+        assert_eq!(table.active_mappings(), port_range_size);
+    }
+
+    #[test]
+    fn test_concurrent_mappings() {
+        use std::collections::HashSet;
+        use std::sync::Arc;
+        use std::thread;
+
+        let config = Nat64Config {
+            enabled: true,
+            port_range: (20000, 20999), // 1000 ports for concurrency test
+            tcp_timeout_secs: 300,
+            udp_timeout_secs: 30,
+            icmp_timeout_secs: 30,
+        };
+        let table = Arc::new(Nat64StateTable::new(&config));
+
+        let num_threads = 10;
+        let mappings_per_thread = 50;
+        let total_mappings = num_threads * mappings_per_thread;
+
+        // Spawn threads that create mappings concurrently
+        let handles: Vec<_> = (0..num_threads)
+            .map(|thread_id| {
+                let table = Arc::clone(&table);
+                thread::spawn(move || {
+                    let mut ports = Vec::new();
+                    // Each thread uses a different client IPv6 to avoid key collisions
+                    let client_ip6: Ipv6Addr =
+                        format!("fd00::{:x}", thread_id + 1).parse().unwrap();
+                    let dest_ip4 = Ipv4Addr::new(8, 8, 8, 8);
+
+                    for i in 0..mappings_per_thread {
+                        let client_port = (3000 + i) as u16;
+                        let result = table.get_or_create_mapping(
+                            client_ip6,
+                            client_port,
+                            dest_ip4,
+                            80,
+                            Nat64Protocol::Tcp,
+                        );
+                        match result {
+                            Ok(port) => ports.push(port),
+                            Err(e) => panic!(
+                                "thread {} mapping {} failed: {:?}",
+                                thread_id, i, e
+                            ),
+                        }
+                    }
+                    ports
+                })
+            })
+            .collect();
+
+        // Collect all allocated ports from all threads
+        let mut all_ports = Vec::new();
+        for handle in handles {
+            let ports = handle.join().expect("thread should not panic");
+            all_ports.extend(ports);
+        }
+
+        // Verify total number of mappings
+        assert_eq!(table.active_mappings(), total_mappings);
+
+        // Verify all allocated ports are unique
+        let unique_ports: HashSet<u16> = all_ports.iter().copied().collect();
+        assert_eq!(
+            unique_ports.len(),
+            total_mappings,
+            "all translated ports should be unique"
+        );
+
+        // Verify all ports are within the configured range
+        for port in &all_ports {
+            assert!(
+                *port >= 20000 && *port <= 20999,
+                "port {} should be in range 20000-20999",
+                port
+            );
+        }
     }
 }
