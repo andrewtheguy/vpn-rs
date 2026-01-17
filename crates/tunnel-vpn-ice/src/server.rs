@@ -105,7 +105,7 @@ impl SimpleIpPool {
 struct SimpleIp6Pool {
     network: Ipv6Net,
     server_ip: Ipv6Addr,
-    next_suffix: u64,
+    next_suffix: u128,
 }
 
 impl SimpleIp6Pool {
@@ -120,26 +120,38 @@ impl SimpleIp6Pool {
         Self {
             network,
             server_ip: server,
-            next_suffix: 2, // Start from ::2 (::1 is server)
+            next_suffix: 1, // Start from ::1 and skip server IP as needed.
         }
     }
 
     fn allocate(&mut self) -> Option<Ipv6Addr> {
         let base = self.network.network();
-        let segments = base.segments();
+        let base_u128 = u128::from(base);
+        let host_bits = 128u32.saturating_sub(self.network.prefix_len() as u32);
+        let max_offset = if host_bits >= 128 {
+            u128::MAX
+        } else {
+            (1u128 << host_bits).saturating_sub(1)
+        };
+        let max_attempts = max_offset.saturating_add(1);
+        let mut attempts = 0u128;
 
-        // Simple allocation: increment suffix, skipping the server IP if needed.
-        loop {
-            let ip = Ipv6Addr::new(
-                segments[0], segments[1], segments[2], segments[3],
-                segments[4], segments[5], segments[6],
-                (segments[7] as u64 + self.next_suffix) as u16,
-            );
-            self.next_suffix += 1;
+        while attempts < max_attempts {
+            if self.next_suffix >= max_attempts {
+                return None;
+            }
+            let offset = self.next_suffix;
+            self.next_suffix = self.next_suffix.saturating_add(1);
+            attempts = attempts.saturating_add(1);
+
+            let addr_u128 = base_u128.checked_add(offset)?;
+            let ip = Ipv6Addr::from(addr_u128);
             if ip != self.server_ip {
                 return Some(ip);
             }
         }
+
+        None
     }
 
 
@@ -174,17 +186,15 @@ impl VpnIceServer {
         log::info!("===========================");
 
         // Initialize IP pools
-        let mut ip_pool = if let Some(network) = self.config.network {
-            Some(SimpleIpPool::new(network, self.config.server_ip))
-        } else {
-            None
-        };
+        let mut ip_pool =
+            self.config
+                .network
+                .map(|network| SimpleIpPool::new(network, self.config.server_ip));
 
-        let mut ip6_pool = if let Some(network6) = self.config.network6 {
-            Some(SimpleIp6Pool::new(network6, self.config.server_ip6))
-        } else {
-            None
-        };
+        let mut ip6_pool =
+            self.config
+                .network6
+                .map(|network6| SimpleIp6Pool::new(network6, self.config.server_ip6));
 
         // Initialize Nostr signaling
         let relay_list = self.config.relays.clone();
@@ -416,15 +426,15 @@ impl VpnIceServer {
 
         // Run VPN loop
         let result = self
-            .run_vpn_loop(
-                &short_id,
+            .run_vpn_loop(RunVpnLoopParams {
+                short_id: short_id.clone(),
                 tun_device,
                 data_send,
                 data_recv,
-                handshake_result.assigned_ip,
-                handshake_result.assigned_ip6,
-                ice_disconnect_rx.clone(),
-            )
+                client_ip: handshake_result.assigned_ip,
+                client_ip6: handshake_result.assigned_ip6,
+                ice_disconnect_rx: ice_disconnect_rx.clone(),
+            })
             .await;
 
         // Cleanup
@@ -621,16 +631,16 @@ impl VpnIceServer {
     }
 
     /// Run the VPN packet processing loop for a client.
-    async fn run_vpn_loop(
-        &self,
-        short_id: &str,
-        tun_device: TunDevice,
-        data_send: quinn::SendStream,
-        data_recv: quinn::RecvStream,
-        client_ip: Option<Ipv4Addr>,
-        client_ip6: Option<Ipv6Addr>,
-        mut ice_disconnect_rx: tokio::sync::watch::Receiver<bool>,
-    ) -> VpnIceResult<()> {
+    async fn run_vpn_loop(&self, params: RunVpnLoopParams) -> VpnIceResult<()> {
+        let RunVpnLoopParams {
+            short_id,
+            tun_device,
+            data_send,
+            data_recv,
+            client_ip,
+            client_ip6,
+            mut ice_disconnect_rx,
+        } = params;
         let (mut tun_reader, mut tun_writer) = tun_device
             .split()
             .map_err(|e| VpnIceError::Tun(e.to_string()))?;
@@ -658,7 +668,7 @@ impl VpnIceServer {
 
         // Inbound task (QUIC -> TUN)
         // Filter packets to only those destined for this client
-        let inbound_short_id = short_id.to_string();
+        let inbound_short_id = short_id.clone();
         let outbound_tx_pong = outbound_tx.clone();
         let mut inbound_handle: tokio::task::JoinHandle<Option<String>> = tokio::spawn(async move {
             const MAX_TUN_WRITE_FAILURES: u32 = 10;
@@ -693,8 +703,8 @@ impl VpnIceServer {
                         last_ping_inbound.store(now, Ordering::Relaxed);
                         // Send Pong
                         let pong = Bytes::copy_from_slice(&[DataMessageType::HeartbeatPong.as_byte()]);
-                        if let Err(_) = outbound_tx_pong.send(pong).await {
-                             return Some("Failed to send Pong".to_string());
+                        if outbound_tx_pong.send(pong).await.is_err() {
+                            return Some("Failed to send Pong".to_string());
                         }
                         continue;
                     }
@@ -741,7 +751,7 @@ impl VpnIceServer {
 
         // Outbound task (TUN -> QUIC)
         // Filter packets from this client's IP
-        let outbound_short_id = short_id.to_string();
+        let outbound_short_id = short_id.clone();
         let outbound_tx_clone = outbound_tx.clone();
         let mut outbound_handle: tokio::task::JoinHandle<Option<String>> = tokio::spawn(async move {
             let mut read_buf = uninitialized_vec(buffer_size);
@@ -786,7 +796,7 @@ impl VpnIceServer {
         });
 
         // Heartbeat checker task (send pong in response to ping, check for timeout)
-        let heartbeat_short_id = short_id.to_string();
+        let heartbeat_short_id = short_id.clone();
         let mut heartbeat_handle: tokio::task::JoinHandle<Option<String>> = tokio::spawn(async move {
             let heartbeat_start = start_time;
             loop {
@@ -811,7 +821,7 @@ impl VpnIceServer {
         });
 
         // ICE disconnect watcher
-        let ice_short_id = short_id.to_string();
+        let ice_short_id = short_id.clone();
         let mut ice_handle: tokio::task::JoinHandle<Option<String>> = tokio::spawn(async move {
             loop {
                 if ice_disconnect_rx.changed().await.is_ok() {
@@ -852,6 +862,16 @@ impl VpnIceServer {
         log::debug!("[{}] VPN loop ended: {}", short_id, reason);
         Err(VpnIceError::Internal(format!("Connection ended: {}", reason)))
     }
+}
+
+struct RunVpnLoopParams {
+    short_id: String,
+    tun_device: TunDevice,
+    data_send: quinn::SendStream,
+    data_recv: quinn::RecvStream,
+    client_ip: Option<Ipv4Addr>,
+    client_ip6: Option<Ipv6Addr>,
+    ice_disconnect_rx: tokio::sync::watch::Receiver<bool>,
 }
 
 /// Result of VPN handshake.

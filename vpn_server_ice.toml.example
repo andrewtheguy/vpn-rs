@@ -26,10 +26,10 @@ network = "10.0.0.0/24"
 # server_ip = "10.0.0.1"
 
 # IPv6 VPN network CIDR (optional, for dual-stack or IPv6-only)
-# network6 = "fd00:vpn::/64"
+# network6 = "fd00:1::/64"
 
 # Server's IPv6 address within the VPN network
-# server_ip6 = "fd00:vpn::1"
+# server_ip6 = "fd00:1::1"
 
 # MTU for TUN device (default: 1420)
 mtu = 1420
@@ -53,7 +53,7 @@ nsec_file = "./server.nsec"
 
 # Authorized client's Nostr public key (npub format)
 # Only connections from this peer will be accepted
-peer_npub = "npub1..."
+# peer_npub = "npub1your_client_public_key_here"
 
 # =============================================================================
 # Signaling and Transport (Optional)

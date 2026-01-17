@@ -105,11 +105,7 @@ impl VpnIceClient {
         log::info!("===========================");
 
         // Initialize Nostr signaling
-        let relay_list = if self.config.relays.is_some() {
-            self.config.relays.clone()
-        } else {
-            None
-        };
+        let relay_list = self.config.relays.clone();
         let signaling = NostrSignaling::new(&nsec, &self.config.peer_npub, relay_list)
             .await
             .map_err(|e| VpnIceError::Signaling(e.to_string()))?;
@@ -337,8 +333,9 @@ impl VpnIceClient {
             .map_err(|e| VpnIceError::Signaling(e.to_string()))?;
 
         log::info!(
-            "Waiting for offer (re-publishing every {}s, max {}s)...",
+            "Waiting for offer (exponential backoff {}s → {}s, max {}s)...",
             REPUBLISH_INTERVAL_SECS,
+            MAX_INTERVAL,
             MAX_WAIT_SECS
         );
 

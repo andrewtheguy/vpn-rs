@@ -4,6 +4,7 @@ use crate::error::VpnIceError;
 use ipnet::{Ipv4Net, Ipv6Net};
 use serde::{Deserialize, Serialize};
 
+use std::fmt;
 use std::net::{Ipv4Addr, Ipv6Addr};
 
 /// Default MTU for VPN tunnel.
@@ -19,7 +20,7 @@ pub fn default_stun_servers() -> Vec<String> {
 }
 
 /// VPN server configuration for ICE/Nostr mode.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct VpnIceServerConfig {
     /// VPN network CIDR (e.g., "10.0.0.0/24"). Optional for IPv6-only mode.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -69,6 +70,26 @@ pub struct VpnIceServerConfig {
     /// NAT64 configuration (optional, for IPv6-only with IPv4 access).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub nat64: Option<tunnel_vpn::config::Nat64Config>,
+}
+
+impl fmt::Debug for VpnIceServerConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let nsec = self.nsec.as_ref().map(|_| "[REDACTED]");
+        f.debug_struct("VpnIceServerConfig")
+            .field("network", &self.network)
+            .field("network6", &self.network6)
+            .field("server_ip", &self.server_ip)
+            .field("server_ip6", &self.server_ip6)
+            .field("mtu", &self.mtu)
+            .field("max_clients", &self.max_clients)
+            .field("nsec", &nsec)
+            .field("nsec_file", &self.nsec_file)
+            .field("peer_npub", &self.peer_npub)
+            .field("relays", &self.relays)
+            .field("stun_servers", &self.stun_servers)
+            .field("nat64", &self.nat64)
+            .finish()
+    }
 }
 
 impl VpnIceServerConfig {

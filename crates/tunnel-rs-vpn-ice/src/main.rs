@@ -16,6 +16,8 @@ use clap::{Parser, Subcommand};
 use ipnet::{Ipv4Net, Ipv6Net};
 use nostr_sdk::prelude::*;
 use serde::Deserialize;
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::path::PathBuf;
 
@@ -329,8 +331,26 @@ async fn main() -> Result<()> {
 
             if let Some(path) = output {
                 let expanded = expand_tilde(&path);
-                std::fs::write(&expanded, format!("{}\n", nsec))
+                let mut options = OpenOptions::new();
+                options.create(true).write(true).truncate(true);
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::OpenOptionsExt;
+                    options.mode(0o600);
+                }
+
+                let mut file = options
+                    .open(&expanded)
                     .with_context(|| format!("Failed to write to {}", expanded.display()))?;
+                file.write_all(format!("{}\n", nsec).as_bytes())
+                    .with_context(|| format!("Failed to write to {}", expanded.display()))?;
+                #[cfg(not(unix))]
+                {
+                    let perms = std::fs::Permissions::from_readonly(true);
+                    std::fs::set_permissions(&expanded, perms).with_context(|| {
+                        format!("Failed to set permissions on {}", expanded.display())
+                    })?;
+                }
                 println!("Private key saved to: {}", expanded.display());
                 println!("Public key (npub): {}", npub);
                 println!("\nShare the npub with your peer, keep the nsec file secret!");

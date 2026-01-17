@@ -801,6 +801,9 @@ Download `tunnel-rs-vpn-ice` from releases or build from source:
 cargo install --path . -p tunnel-rs-vpn-ice
 ```
 
+> [!NOTE]
+> **Windows requirements:** `tunnel-rs-vpn-ice` requires the WinTun driver on Windows. Install/enable the WinTun driver as Administrator, ensure the driver is loaded before starting `tunnel-rs-vpn-ice` (server or client), and run with admin privileges to create the TUN device. The `vpn_server_ice.toml` and `vpn_client_ice.toml` examples assume the driver is present.
+
 ### 2. Generate Nostr Keys
 
 Both server and client need a Nostr identity (nsec/npub).
@@ -848,6 +851,36 @@ sudo tunnel-rs-vpn-ice client -c vpn_client_ice.toml
 ```
 
 **See [`vpn_server_ice.toml.example`](vpn_server_ice.toml.example) and [`vpn_client_ice.toml.example`](vpn_client_ice.toml.example) for full configuration options.**
+
+## CLI Options
+
+### server (tunnel-rs-vpn-ice)
+
+VPN ICE server requires a config file. Use `-c <FILE>` or `--default-config` for `~/.config/tunnel-rs/vpn_server_ice.toml`.
+
+| Option | Description |
+|--------|-------------|
+| `-c, --config <FILE>` | Path to config file (required unless --default-config) |
+| `--default-config` | Use `~/.config/tunnel-rs/vpn_server_ice.toml` |
+
+**Not supported via CLI (configure in `vpn_server_ice.toml`):** `network`, `network6`, `server_ip`, `server_ip6`, `mtu`, `max_clients`, `nsec`/`nsec_file`, `peer_npub`, `relays`, `stun_servers`.
+
+### client (tunnel-rs-vpn-ice)
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `-c, --config <FILE>` | required unless `--default-config` | Path to config file |
+| `--default-config` | `~/.config/tunnel-rs/vpn_client_ice.toml` | Use default config path |
+| `--nsec` | required unless `--nsec-file` | Nostr private key (nsec format) |
+| `--nsec-file` | - | Path to file containing nsec |
+| `--peer-npub` | required | Server's Nostr public key (npub format) |
+| `--relay` | - | Nostr relay URL(s), repeatable (defaults to config if set) |
+| `--stun-server` | `stun.l.google.com:19302`, `stun1.l.google.com:19302`, `stun.services.mozilla.com:3478` | STUN server(s), repeatable (defaults to config if set) |
+| `--mtu` | 1420 | MTU for VPN packets |
+| `--route` | required (at least one route/route6) | IPv4 routes to tunnel (repeatable) |
+| `--route6` | required (at least one route/route6) | IPv6 routes to tunnel (repeatable) |
+
+**Not supported in vpn-ice (iroh-only features):** `--keepalive-secs`, `--auth-token`, `--auth-token-file`, `--auto-reconnect`, `--no-auto-reconnect`, `--max-reconnect-attempts`, `--dns-server`.
 
 ---
 
