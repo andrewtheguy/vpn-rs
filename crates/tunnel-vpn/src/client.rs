@@ -7,7 +7,9 @@
 
 use crate::buffer::{as_mut_byte_slice, uninitialized_vec};
 use crate::config::VpnClientConfig;
-use crate::device::{add_routes, add_routes6, Route6Guard, RouteGuard, TunConfig, TunDevice};
+use crate::device::{
+    add_routes, add_routes6_with_src, Route6Guard, RouteGuard, TunConfig, TunDevice,
+};
 use crate::error::{VpnError, VpnResult};
 use crate::lock::VpnLock;
 use crate::signaling::{
@@ -169,9 +171,22 @@ impl VpnClient {
 
         // Add custom IPv6 routes through the VPN (guard ensures cleanup on drop)
         // Only add IPv6 routes if server provided IPv6 and client has routes6 configured
+        // Use the assigned IPv6 as source to ensure correct source address selection
+        // (important when client has multiple IPv6 addresses, e.g., public + VPN)
         let _route6_guard: Option<Route6Guard> =
-            if server_info.assigned_ip6.is_some() && !self.config.routes6.is_empty() {
-                Some(add_routes6(tun_device.name(), &self.config.routes6).await?)
+            if let Some(assigned_ip6) = server_info.assigned_ip6 {
+                if !self.config.routes6.is_empty() {
+                    Some(
+                        add_routes6_with_src(
+                            tun_device.name(),
+                            &self.config.routes6,
+                            assigned_ip6,
+                        )
+                        .await?,
+                    )
+                } else {
+                    None
+                }
             } else {
                 None
             };

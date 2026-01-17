@@ -919,6 +919,84 @@ pub async fn add_route6(tun_name: &str, route: &Ipv6Net) -> VpnResult<()> {
     add_route_generic(tun_name, route).await
 }
 
+/// Add an IPv6 route with an explicit source address.
+///
+/// This is important when the client has multiple IPv6 addresses (e.g., a real
+/// public IPv6 and a VPN-assigned IPv6). Without specifying the source, the kernel
+/// may select the wrong source address for packets routed through this route.
+///
+/// If the route already exists, this is treated as idempotent success.
+pub async fn add_route6_with_src(
+    tun_name: &str,
+    route: &Ipv6Net,
+    src: Ipv6Addr,
+) -> VpnResult<()> {
+    #[cfg(target_os = "macos")]
+    {
+        // macOS doesn't support source address in routes the same way
+        // Fall back to standard route addition
+        let _ = src;
+        add_route_generic(tun_name, route).await
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let output = Command::new("ip")
+            .args([
+                "-6",
+                "route",
+                "add",
+                &route.to_string(),
+                "dev",
+                tun_name,
+                "src",
+                &src.to_string(),
+            ])
+            .output()
+            .await
+            .map_err(|e| {
+                VpnError::TunDevice(format!("Failed to execute ip route command: {}", e))
+            })?;
+
+        if output.status.success() {
+            log::info!("Added IPv6 route {} via {} src {}", route, tun_name, src);
+            return Ok(());
+        }
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stderr_trimmed = stderr.trim();
+        if is_already_exists_error(&stderr) {
+            log::warn!(
+                "IPv6 route {} already exists (treating as success): {}",
+                route,
+                stderr_trimmed
+            );
+            Ok(())
+        } else {
+            Err(VpnError::TunDevice(format!(
+                "Failed to add IPv6 route {}: {}",
+                route, stderr_trimmed
+            )))
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        // Windows doesn't support source address in routes the same way
+        // Fall back to standard route addition
+        let _ = src;
+        add_route_generic(tun_name, route).await
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    {
+        let _ = (tun_name, route, src);
+        Err(VpnError::TunDevice(
+            "Route management not supported on this platform".into(),
+        ))
+    }
+}
+
 /// Remove an IPv6 route from the system (async version).
 pub async fn remove_route6(tun_name: &str, route: &Ipv6Net) -> VpnResult<()> {
     remove_route_generic(tun_name, route).await
@@ -938,6 +1016,45 @@ pub async fn add_routes6(tun_name: &str, routes: &[Ipv6Net]) -> VpnResult<Route6
 
     for route in routes {
         if let Err(e) = add_route6(tun_name, route).await {
+            // Rollback previously added routes
+            log::warn!(
+                "Failed to add IPv6 route {}, rolling back {} route(s)",
+                route,
+                added.len()
+            );
+            for added_route in added.iter().rev() {
+                if let Err(rollback_err) = remove_route6(tun_name, added_route).await {
+                    log::warn!(
+                        "Rollback failed for IPv6 route {}: {}",
+                        added_route,
+                        rollback_err
+                    );
+                }
+            }
+            return Err(e);
+        }
+        added.push(*route);
+    }
+    Ok(Route6Guard::new(tun_name.to_string(), added))
+}
+
+/// Add multiple IPv6 routes with an explicit source address.
+///
+/// This variant specifies the source address for route selection, which is
+/// important when the client has multiple IPv6 addresses. Without specifying
+/// the source, the kernel may select the wrong source address.
+///
+/// Returns a `Route6Guard` that automatically removes the routes when dropped.
+/// If any route fails to add, previously added routes are rolled back.
+pub async fn add_routes6_with_src(
+    tun_name: &str,
+    routes: &[Ipv6Net],
+    src: Ipv6Addr,
+) -> VpnResult<Route6Guard> {
+    let mut added: Vec<Ipv6Net> = Vec::with_capacity(routes.len());
+
+    for route in routes {
+        if let Err(e) = add_route6_with_src(tun_name, route, src).await {
             // Rollback previously added routes
             log::warn!(
                 "Failed to add IPv6 route {}, rolling back {} route(s)",
