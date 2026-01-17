@@ -117,6 +117,9 @@ impl VpnIceServerConfig {
         if self.nsec.is_none() && self.nsec_file.is_none() {
             return Err("Either 'nsec' or 'nsec_file' is required for Nostr identity".to_string());
         }
+        if self.nsec.is_some() && self.nsec_file.is_some() {
+            return Err("Both 'nsec' and 'nsec_file' are set; they are mutually exclusive".to_string());
+        }
 
         // Peer npub required
         if self.peer_npub.is_empty() {
@@ -128,19 +131,7 @@ impl VpnIceServerConfig {
 
     /// Get the Nostr private key, reading from file if necessary.
     pub fn get_nsec(&self) -> Result<String, VpnIceError> {
-        if let Some(ref nsec) = self.nsec {
-            return Ok(nsec.clone());
-        }
-        if let Some(ref path) = self.nsec_file {
-            let expanded = tunnel_common::config::expand_tilde(std::path::Path::new(path));
-            let content = std::fs::read_to_string(&expanded).map_err(|e| {
-                VpnIceError::Config(format!("Failed to read nsec file '{}': {}", path, e))
-            })?;
-            return Ok(content.trim().to_string());
-        }
-        Err(VpnIceError::Config(
-            "No nsec or nsec_file configured".to_string(),
-        ))
+        read_nsec(&self.nsec, &self.nsec_file)
     }
 }
 
@@ -186,6 +177,9 @@ impl VpnIceClientConfig {
         if self.nsec.is_none() && self.nsec_file.is_none() {
             return Err("Either 'nsec' or 'nsec_file' is required for Nostr identity".to_string());
         }
+        if self.nsec.is_some() && self.nsec_file.is_some() {
+            return Err("Both 'nsec' and 'nsec_file' are set; they are mutually exclusive".to_string());
+        }
 
         // Peer npub required
         if self.peer_npub.is_empty() {
@@ -204,20 +198,24 @@ impl VpnIceClientConfig {
 
     /// Get the Nostr private key, reading from file if necessary.
     pub fn get_nsec(&self) -> Result<String, VpnIceError> {
-        if let Some(ref nsec) = self.nsec {
-            return Ok(nsec.clone());
-        }
-        if let Some(ref path) = self.nsec_file {
-            let expanded = tunnel_common::config::expand_tilde(std::path::Path::new(path));
-            let content = std::fs::read_to_string(&expanded).map_err(|e| {
-                VpnIceError::Config(format!("Failed to read nsec file '{}': {}", path, e))
-            })?;
-            return Ok(content.trim().to_string());
-        }
-        Err(VpnIceError::Config(
-            "No nsec or nsec_file configured".to_string(),
-        ))
+        read_nsec(&self.nsec, &self.nsec_file)
     }
+}
+
+fn read_nsec(nsec: &Option<String>, nsec_file: &Option<String>) -> Result<String, VpnIceError> {
+    if let Some(ref nsec) = nsec {
+        return Ok(nsec.clone());
+    }
+    if let Some(ref path) = nsec_file {
+        let expanded = tunnel_common::config::expand_tilde(std::path::Path::new(path));
+        let content = std::fs::read_to_string(&expanded).map_err(|e| {
+            VpnIceError::Config(format!("Failed to read nsec file '{}': {}", path, e))
+        })?;
+        return Ok(content.trim().to_string());
+    }
+    Err(VpnIceError::Config(
+        "No nsec or nsec_file configured".to_string(),
+    ))
 }
 
 impl Default for VpnIceClientConfig {
@@ -254,6 +252,44 @@ mod tests {
             network6: None,
             server_ip: None,
             server_ip6: None,
+            mtu: DEFAULT_MTU,
+            max_clients: 254,
+            nsec: Some("nsec1test".to_string()),
+            nsec_file: None,
+            peer_npub: "npub1test".to_string(),
+            relays: None,
+            stun_servers: default_stun_servers(),
+            nat64: None,
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_server_config_server_ip_without_network() {
+        let config = VpnIceServerConfig {
+            network: None,
+            network6: Some("fd00::/64".parse().unwrap()),
+            server_ip: Some("10.0.0.1".parse().unwrap()),
+            server_ip6: None,
+            mtu: DEFAULT_MTU,
+            max_clients: 254,
+            nsec: Some("nsec1test".to_string()),
+            nsec_file: None,
+            peer_npub: "npub1test".to_string(),
+            relays: None,
+            stun_servers: default_stun_servers(),
+            nat64: None,
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_server_config_server_ip6_without_network6() {
+        let config = VpnIceServerConfig {
+            network: Some("10.0.0.0/24".parse().unwrap()),
+            network6: None,
+            server_ip: None,
+            server_ip6: Some("fd00::1".parse().unwrap()),
             mtu: DEFAULT_MTU,
             max_clients: 254,
             nsec: Some("nsec1test".to_string()),
@@ -304,5 +340,44 @@ mod tests {
             ..Default::default()
         };
         assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_client_config_empty_peer_npub() {
+        let config = VpnIceClientConfig {
+            nsec: Some("nsec1test".to_string()),
+            peer_npub: String::new(),
+            routes: vec!["10.0.0.0/24".parse().unwrap()],
+            ..Default::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_nsec_and_nsec_file_conflict() {
+        let server_config = VpnIceServerConfig {
+            network: Some("10.0.0.0/24".parse().unwrap()),
+            network6: None,
+            server_ip: None,
+            server_ip6: None,
+            mtu: DEFAULT_MTU,
+            max_clients: 254,
+            nsec: Some("nsec1test".to_string()),
+            nsec_file: Some("nsec.txt".to_string()),
+            peer_npub: "npub1test".to_string(),
+            relays: None,
+            stun_servers: default_stun_servers(),
+            nat64: None,
+        };
+        assert!(server_config.validate().is_err());
+
+        let client_config = VpnIceClientConfig {
+            nsec: Some("nsec1test".to_string()),
+            nsec_file: Some("nsec.txt".to_string()),
+            peer_npub: "npub1test".to_string(),
+            routes: vec!["10.0.0.0/24".parse().unwrap()],
+            ..Default::default()
+        };
+        assert!(client_config.validate().is_err());
     }
 }
