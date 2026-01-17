@@ -455,25 +455,8 @@ impl VpnIceServer {
         ) {
             // Dual-stack
             (Some(net4), Some(net6), server_ip4, server_ip6) => {
-                let ip4 = server_ip4.unwrap_or_else(|| {
-                    let hosts: Vec<_> = net4.hosts().collect();
-                    hosts.first().copied().unwrap_or(Ipv4Addr::new(10, 0, 0, 1))
-                });
-                let ip6 = server_ip6.unwrap_or_else(|| {
-                    // Use network address + 1 as default server IP
-                    let base = net6.network();
-                    let segments = base.segments();
-                    Ipv6Addr::new(
-                        segments[0],
-                        segments[1],
-                        segments[2],
-                        segments[3],
-                        segments[4],
-                        segments[5],
-                        segments[6],
-                        segments[7].saturating_add(1),
-                    )
-                });
+                let ip4 = server_ip4.unwrap_or_else(|| default_server_ip4(net4));
+                let ip6 = server_ip6.unwrap_or_else(|| default_server_ip6(net6));
                 TunConfig::new(ip4, net4.netmask(), ip4)
                     .with_mtu(self.config.mtu)
                     .with_ipv6(ip6, net6.prefix_len())
@@ -481,28 +464,12 @@ impl VpnIceServer {
             }
             // IPv4-only
             (Some(net4), None, server_ip4, _) => {
-                let ip4 = server_ip4.unwrap_or_else(|| {
-                    let hosts: Vec<_> = net4.hosts().collect();
-                    hosts.first().copied().unwrap_or(Ipv4Addr::new(10, 0, 0, 1))
-                });
+                let ip4 = server_ip4.unwrap_or_else(|| default_server_ip4(net4));
                 TunConfig::new(ip4, net4.netmask(), ip4).with_mtu(self.config.mtu)
             }
             // IPv6-only
             (None, Some(net6), _, server_ip6) => {
-                let ip6 = server_ip6.unwrap_or_else(|| {
-                    let base = net6.network();
-                    let segments = base.segments();
-                    Ipv6Addr::new(
-                        segments[0],
-                        segments[1],
-                        segments[2],
-                        segments[3],
-                        segments[4],
-                        segments[5],
-                        segments[6],
-                        segments[7].saturating_add(1),
-                    )
-                });
+                let ip6 = server_ip6.unwrap_or_else(|| default_server_ip6(net6));
                 TunConfig::ipv6_only(ip6, net6.prefix_len(), self.config.mtu)
                     .map_err(|e| VpnIceError::Tun(e.to_string()))?
             }
@@ -570,38 +537,18 @@ impl VpnIceServer {
         ) {
             // Dual-stack
             (Some(ip4), Some(net4), server_ip4, Some(ip6), Some(net6), server_ip6) => {
-                let server4 = server_ip4.unwrap_or_else(|| {
-                    let hosts: Vec<_> = net4.hosts().collect();
-                    hosts.first().copied().unwrap_or(ip4)
-                });
-                let server6 = server_ip6.unwrap_or_else(|| {
-                    let base = net6.network();
-                    let segments = base.segments();
-                    Ipv6Addr::new(
-                        segments[0], segments[1], segments[2], segments[3],
-                        segments[4], segments[5], segments[6], segments[7].saturating_add(1),
-                    )
-                });
+                let server4 = server_ip4.unwrap_or_else(|| default_server_ip4(net4));
+                let server6 = server_ip6.unwrap_or_else(|| default_server_ip6(net6));
                 VpnHandshakeResponse::accepted_dual_stack(ip4, net4, server4, ip6, net6, server6)
             }
             // IPv4-only
             (Some(ip4), Some(net4), server_ip4, None, _, _) => {
-                let server4 = server_ip4.unwrap_or_else(|| {
-                    let hosts: Vec<_> = net4.hosts().collect();
-                    hosts.first().copied().unwrap_or(ip4)
-                });
+                let server4 = server_ip4.unwrap_or_else(|| default_server_ip4(net4));
                 VpnHandshakeResponse::accepted(ip4, net4, server4)
             }
             // IPv6-only
             (None, _, _, Some(ip6), Some(net6), server_ip6) => {
-                let server6 = server_ip6.unwrap_or_else(|| {
-                    let base = net6.network();
-                    let segments = base.segments();
-                    Ipv6Addr::new(
-                        segments[0], segments[1], segments[2], segments[3],
-                        segments[4], segments[5], segments[6], segments[7].saturating_add(1),
-                    )
-                });
+                let server6 = server_ip6.unwrap_or_else(|| default_server_ip6(net6));
                 VpnHandshakeResponse::accepted_ipv6_only(ip6, net6, server6)
             }
             _ => {
@@ -872,6 +819,26 @@ struct RunVpnLoopParams {
     client_ip: Option<Ipv4Addr>,
     client_ip6: Option<Ipv6Addr>,
     ice_disconnect_rx: tokio::sync::watch::Receiver<bool>,
+}
+
+fn default_server_ip4(net: Ipv4Net) -> Ipv4Addr {
+    let hosts: Vec<_> = net.hosts().collect();
+    hosts.first().copied().unwrap_or(Ipv4Addr::new(10, 0, 0, 1))
+}
+
+fn default_server_ip6(net: Ipv6Net) -> Ipv6Addr {
+    let base = net.network();
+    let segments = base.segments();
+    Ipv6Addr::new(
+        segments[0],
+        segments[1],
+        segments[2],
+        segments[3],
+        segments[4],
+        segments[5],
+        segments[6],
+        segments[7].saturating_add(1),
+    )
 }
 
 /// Result of VPN handshake.
