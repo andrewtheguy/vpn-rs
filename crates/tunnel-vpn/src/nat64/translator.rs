@@ -537,7 +537,9 @@ impl Nat64Translator {
             6, // TCP
             payload_len,
         )
-        .expect("TCP checksum adjustment should always succeed");
+        .ok_or_else(|| {
+            VpnError::Nat64("TCP checksum adjustment failed (zero checksum)".into())
+        })?;
 
         // Also adjust checksum for destination port change (dst_port -> client_port)
         let new_checksum = update_checksum_16(checksum_after_pseudo, dst_port, client_port);

@@ -198,6 +198,15 @@ impl Nat64Config {
                 self.port_range.1
             );
         }
+        if self.tcp_timeout_secs == 0 {
+            anyhow::bail!("[nat64] tcp_timeout_secs must be > 0");
+        }
+        if self.udp_timeout_secs == 0 {
+            anyhow::bail!("[nat64] udp_timeout_secs must be > 0");
+        }
+        if self.icmp_timeout_secs == 0 {
+            anyhow::bail!("[nat64] icmp_timeout_secs must be > 0");
+        }
         Ok(())
     }
 }

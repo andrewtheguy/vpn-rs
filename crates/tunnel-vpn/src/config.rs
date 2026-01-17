@@ -607,6 +607,14 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_client_ok() {
+        let mut config = VpnClientConfig::default();
+        config.server_node_id = random_server_node_id();
+        config.routes.push("0.0.0.0/0".parse().unwrap());
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
     fn test_validate_client_requires_routes() {
         let mut config = VpnClientConfig::default();
         config.server_node_id = random_server_node_id();

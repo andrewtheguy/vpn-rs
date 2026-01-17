@@ -58,7 +58,7 @@ network = "10.0.0.0/24"
 
 # MTU for VPN packets (576-1500, default: 1420)
 # Lower values may help with fragmentation issues
-mtu = 1420
+# mtu = 1420
 
 # QUIC keepalive interval in seconds (10-300, default: 25)
 # keepalive_secs = 25

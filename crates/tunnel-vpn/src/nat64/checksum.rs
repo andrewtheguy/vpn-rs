@@ -189,7 +189,12 @@ pub fn adjust_checksum_6to4(
     // HC' = ~(~HC + ~old + new)
     // Note: invert old_folded as u16 before casting to u32 to avoid 32-bit complement
     let sum = hc + (!old_folded) as u32 + new_folded;
-    !fold_checksum(sum)
+    let adjusted = !fold_checksum(sum);
+    if protocol == UDP_PROTOCOL && old_checksum != 0 && adjusted == 0 {
+        0xFFFF
+    } else {
+        adjusted
+    }
 }
 
 /// Adjust TCP/UDP checksum for IPv4-to-IPv6 translation.

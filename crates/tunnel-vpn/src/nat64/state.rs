@@ -363,13 +363,7 @@ impl Nat64StateTable {
                 let timeout = self.timeout_for_protocol(entry.protocol);
                 now.duration_since(entry.last_activity) > timeout
             })
-            .map(|entry| ForwardKey {
-                client_ip6: entry.client_ip6,
-                client_port: entry.client_port,
-                dest_ip4: entry.dest_ip4,
-                dest_port: entry.dest_port,
-                protocol: entry.protocol,
-            })
+            .map(|entry| entry.key().clone())
             .collect();
 
         // Remove entries only if they are still expired (re-check before removal)
@@ -408,7 +402,7 @@ impl Nat64StateTable {
                     removed += 1;
                 } else {
                     // Forward entry was refreshed; restore reverse mapping.
-                    self.reverse.insert(reverse_key, forward_key);
+                    self.reverse.entry(reverse_key).or_insert(forward_key);
                 }
             }
         }
