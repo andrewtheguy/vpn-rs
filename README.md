@@ -467,7 +467,7 @@ tunnel-rs client \
 | `--secret-file` | - | Path to secret key file for persistent server identity |
 | `--relay-url` | public | Custom relay server URL(s), repeatable |
 | `--relay-only` | false | Force all traffic through relay (requires `test-utils` feature) |
-| `--dns-server` | public | Custom DNS server URL for peer discovery |
+| `--dns-server` | public | Custom DNS server URL, or "none" to disable DNS discovery |
 
 ### client
 
@@ -487,7 +487,7 @@ tunnel-rs client \
 | `--auth-token-file` | - | Path to file containing authentication token |
 | `--relay-url` | public | Custom relay server URL(s), repeatable |
 | `--relay-only` | false | Force all traffic through relay (requires `test-utils` feature) |
-| `--dns-server` | public | Custom DNS server URL for peer discovery |
+| `--dns-server` | public | Custom DNS server URL, or "none" to disable DNS discovery |
 
 ## Configuration Files
 
@@ -730,7 +730,7 @@ See [`vpn_server.toml.example`](vpn_server.toml.example) for all available confi
 | `--mtu` | 1420 | MTU for VPN packets |
 | `--keepalive-secs` | 25 | Keepalive interval |
 | `--relay-url` | public | Custom relay server URL(s), repeatable |
-| `--dns-server` | public | Custom DNS server URL for peer discovery |
+| `--dns-server` | public | Custom DNS server URL, or "none" to disable DNS discovery |
 | `--auth-token` | required | Authentication token |
 | `--auth-token-file` | - | Path to file containing token |
 | `--route` | - | Additional CIDRs to route through VPN (repeatable) |
