@@ -11,9 +11,8 @@ use super::{embed_ipv4_in_nat64, extract_ipv4_from_nat64, is_nat64_address};
 use crate::config::Nat64Config;
 use crate::error::{VpnError, VpnResult};
 use std::net::{Ipv4Addr, Ipv6Addr};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
-use tokio::sync::RwLock;
 
 /// IPv4 header size (without options).
 const IPV4_HEADER_SIZE: usize = 20;
