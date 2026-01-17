@@ -121,7 +121,7 @@ struct TomlClientConfig {
 #[derive(Debug, Deserialize)]
 struct NostrClientSection {
     nsec: Option<String>,
-    nsec_file: Option<String>,
+    nsec_file: Option<PathBuf>,
     peer_npub: Option<String>,
     relays: Option<Vec<String>>,
     stun_servers: Option<Vec<String>>,
@@ -146,7 +146,7 @@ struct NostrServerSection {
     mtu: Option<u16>,
     max_clients: Option<usize>,
     nsec: Option<String>,
-    nsec_file: Option<String>,
+    nsec_file: Option<PathBuf>,
     peer_npub: Option<String>,
     relays: Option<Vec<String>>,
     stun_servers: Option<Vec<String>>,
@@ -249,7 +249,7 @@ async fn main() -> Result<()> {
             let final_nsec = nsec
                 .or_else(|| nostr_section.and_then(|s| s.nsec.clone()));
             let final_nsec_file = nsec_file
-                .map(|p| expand_tilde(&p).to_string_lossy().to_string())
+                .map(|p| expand_tilde(&p))
                 .or_else(|| nostr_section.and_then(|s| s.nsec_file.clone()));
 
             // Resolve peer_npub

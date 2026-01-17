@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use std::fmt;
 use std::net::{Ipv4Addr, Ipv6Addr};
+use std::path::PathBuf;
 
 /// Default MTU for VPN tunnel.
 pub const DEFAULT_MTU: u16 = 1420;
@@ -53,7 +54,7 @@ pub struct VpnIceServerConfig {
 
     /// Path to file containing Nostr private key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub nsec_file: Option<String>,
+    pub nsec_file: Option<PathBuf>,
 
     /// Authorized client's Nostr public key (npub format).
     /// Currently supports single-peer VPN connections.
@@ -144,7 +145,7 @@ pub struct VpnIceClientConfig {
 
     /// Path to file containing Nostr private key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub nsec_file: Option<String>,
+    pub nsec_file: Option<PathBuf>,
 
     /// Server's Nostr public key (npub format).
     pub peer_npub: String,
@@ -202,14 +203,18 @@ impl VpnIceClientConfig {
     }
 }
 
-fn read_nsec(nsec: &Option<String>, nsec_file: &Option<String>) -> Result<String, VpnIceError> {
+fn read_nsec(nsec: &Option<String>, nsec_file: &Option<PathBuf>) -> Result<String, VpnIceError> {
     if let Some(ref nsec) = nsec {
         return Ok(nsec.clone());
     }
     if let Some(ref path) = nsec_file {
-        let expanded = tunnel_common::config::expand_tilde(std::path::Path::new(path));
+        let expanded = tunnel_common::config::expand_tilde(path.as_path());
         let content = std::fs::read_to_string(&expanded).map_err(|e| {
-            VpnIceError::Config(format!("Failed to read nsec file '{}': {}", path, e))
+            VpnIceError::Config(format!(
+                "Failed to read nsec file '{}': {}",
+                path.display(),
+                e
+            ))
         })?;
         return Ok(content.trim().to_string());
     }
@@ -363,7 +368,7 @@ mod tests {
             mtu: DEFAULT_MTU,
             max_clients: 254,
             nsec: Some("nsec1test".to_string()),
-            nsec_file: Some("nsec.txt".to_string()),
+            nsec_file: Some(PathBuf::from("nsec.txt")),
             peer_npub: "npub1test".to_string(),
             relays: None,
             stun_servers: default_stun_servers(),
@@ -373,7 +378,7 @@ mod tests {
 
         let client_config = VpnIceClientConfig {
             nsec: Some("nsec1test".to_string()),
-            nsec_file: Some("nsec.txt".to_string()),
+            nsec_file: Some(PathBuf::from("nsec.txt")),
             peer_npub: "npub1test".to_string(),
             routes: vec!["10.0.0.0/24".parse().unwrap()],
             ..Default::default()
