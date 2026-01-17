@@ -22,7 +22,7 @@ Port forwarding modes (iroh, nostr, manual) support TCP and UDP tunneling with e
 
 **Status:** Experimental / Partial
 
-NAT64 basic translation is implemented for TCP, UDP, and ICMP echo (ping). It is **experimental** and intended primarily for IPv6-only VPN deployments that need IPv4 reachability. The table below shows the implementation status for each NAT64 feature:
+NAT64 basic translation is implemented for TCP, UDP, and ICMP echo (ping). It is **experimental** and intended primarily for IPv6-only VPN deployments (also **experimental**) that need IPv4 reachability. The table below shows the implementation status for each NAT64 feature:
 
 | Feature | Status | Notes |
 |---------|--------|-------|

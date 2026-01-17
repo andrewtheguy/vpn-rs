@@ -670,7 +670,7 @@ auth_tokens = ["<YOUR_AUTH_TOKEN>"]  # Replace with token from step 1
 ```
 
 Notes:
-- The IPv4 VPN network is optional; you can run IPv6-only by setting `network6 = "fd00::/64"` instead (needs dns_server = "none" or your custom iroh DNS server that supports IPv6 because the default dns.iroh.link server does not support IPv6).
+- The IPv4 VPN network is optional; you can run IPv6-only by setting `network6 = "fd00::/64"` instead (needs `dns_server = "none"` or your custom iroh DNS server that supports IPv6 because the default dns.iroh.link server does not support IPv6). **IPv6-only mode is experimental.**
 - Preliminary NAT64 support is available but **experimental** (not fully tested, may have stability or compatibility limitations).
 
 ### 3. Start VPN Server
