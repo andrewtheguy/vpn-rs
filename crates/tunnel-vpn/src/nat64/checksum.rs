@@ -275,4 +275,152 @@ mod tests {
         let sum = ipv6_pseudo_header_sum(src, dst, next_header, length);
         assert!(sum > 0);
     }
+
+    /// Helper to check ones' complement equivalence.
+    /// In ones' complement, 0x0000 and 0xFFFF are both representations of zero.
+    fn ones_complement_eq(a: u16, b: u16) -> bool {
+        // Normalize: treat 0xFFFF as 0x0000 (both are zero in ones' complement)
+        let norm_a = if a == 0xFFFF { 0x0000 } else { a };
+        let norm_b = if b == 0xFFFF { 0x0000 } else { b };
+        norm_a == norm_b
+    }
+
+    #[test]
+    fn test_adjust_checksum_6to4_then_4to6_roundtrip() {
+        // Test that applying 6to4 then 4to6 returns the original checksum
+        let src6: Ipv6Addr = "fd00::2".parse().unwrap();
+        let dst6: Ipv6Addr = "64:ff9b::8.8.8.8".parse().unwrap();
+        let src4 = Ipv4Addr::new(10, 0, 0, 1); // NAT64 server IP
+        let dst4 = Ipv4Addr::new(8, 8, 8, 8); // Extracted from NAT64 address
+        let protocol = 6; // TCP
+        let payload_len: u16 = 40;
+
+        // Test various original checksum values including edge cases
+        // Note: 0x0000 and 0xFFFF are equivalent in ones' complement (both are zero)
+        let test_checksums: [u16; 8] = [
+            0x0000, // Zero (edge case)
+            0xFFFF, // All ones / negative zero (edge case)
+            0x0001, // Minimal non-zero
+            0xFFFE, // Near max
+            0x1234, // Arbitrary value
+            0xABCD, // Another arbitrary value
+            0x8000, // High bit set
+            0x5A5A, // Alternating pattern
+        ];
+
+        for original in test_checksums {
+            // Apply 6to4 translation (IPv6 -> IPv4)
+            let after_6to4 = adjust_checksum_6to4(
+                original, src6, dst6, src4, dst4, protocol, payload_len,
+            );
+
+            // Apply 4to6 translation (IPv4 -> IPv6) - reverse direction
+            // Note: In the reverse direction, src4 becomes the source, dst4 is where we came from
+            // and we're going back to src6/dst6
+            let after_4to6 = adjust_checksum_4to6(
+                after_6to4, src4, dst4, src6, dst6, protocol, payload_len,
+            );
+
+            assert!(
+                ones_complement_eq(after_4to6, original),
+                "Round-trip 6to4->4to6 failed for original checksum 0x{:04X}: \
+                 6to4 gave 0x{:04X}, 4to6 gave 0x{:04X}",
+                original, after_6to4, after_4to6
+            );
+        }
+    }
+
+    #[test]
+    fn test_adjust_checksum_4to6_then_6to4_roundtrip() {
+        // Test the reverse direction: 4to6 then 6to4 returns original
+        let src4 = Ipv4Addr::new(8, 8, 8, 8); // External IPv4 source
+        let dst4 = Ipv4Addr::new(10, 0, 0, 1); // NAT64 server IP (was destination)
+        let src6: Ipv6Addr = "64:ff9b::8.8.8.8".parse().unwrap(); // NAT64-embedded source
+        let dst6: Ipv6Addr = "fd00::2".parse().unwrap(); // Client IPv6
+        let protocol = 17; // UDP
+        let payload_len: u16 = 100;
+
+        let test_checksums: [u16; 8] = [
+            0x0000, 0xFFFF, 0x0001, 0xFFFE, 0x1234, 0xABCD, 0x8000, 0x5A5A,
+        ];
+
+        for original in test_checksums {
+            // Apply 4to6 translation (IPv4 -> IPv6)
+            let after_4to6 = adjust_checksum_4to6(
+                original, src4, dst4, src6, dst6, protocol, payload_len,
+            );
+
+            // Apply 6to4 translation (IPv6 -> IPv4) - reverse direction
+            let after_6to4 = adjust_checksum_6to4(
+                after_4to6, src6, dst6, src4, dst4, protocol, payload_len,
+            );
+
+            assert!(
+                ones_complement_eq(after_6to4, original),
+                "Round-trip 4to6->6to4 failed for original checksum 0x{:04X}: \
+                 4to6 gave 0x{:04X}, 6to4 gave 0x{:04X}",
+                original, after_4to6, after_6to4
+            );
+        }
+    }
+
+    #[test]
+    fn test_adjust_checksum_with_different_protocols_and_lengths() {
+        // Test round-trip with different protocol numbers and payload lengths
+        let src6: Ipv6Addr = "2001:db8::1".parse().unwrap();
+        let dst6: Ipv6Addr = "64:ff9b::192.0.2.1".parse().unwrap();
+        let src4 = Ipv4Addr::new(203, 0, 113, 1);
+        let dst4 = Ipv4Addr::new(192, 0, 2, 1);
+
+        let test_cases: [(u8, u16); 6] = [
+            (6, 20),    // TCP, minimum header
+            (6, 1460),  // TCP, full segment
+            (17, 8),    // UDP, minimum
+            (17, 512),  // UDP, DNS-sized
+            (17, 1472), // UDP, max without fragmentation
+            (6, 60),    // TCP with options
+        ];
+
+        let original: u16 = 0x9ABC;
+
+        for (protocol, payload_len) in test_cases {
+            let after_6to4 = adjust_checksum_6to4(
+                original, src6, dst6, src4, dst4, protocol, payload_len,
+            );
+            let after_4to6 = adjust_checksum_4to6(
+                after_6to4, src4, dst4, src6, dst6, protocol, payload_len,
+            );
+
+            assert_eq!(
+                after_4to6, original,
+                "Round-trip failed for protocol {} with payload_len {}: \
+                 original=0x{:04X}, after_6to4=0x{:04X}, after_4to6=0x{:04X}",
+                protocol, payload_len, original, after_6to4, after_4to6
+            );
+        }
+    }
+
+    #[test]
+    fn test_adjust_checksum_deterministic() {
+        // Verify that the same inputs always produce the same output
+        let src6: Ipv6Addr = "fd00::100".parse().unwrap();
+        let dst6: Ipv6Addr = "64:ff9b::1.2.3.4".parse().unwrap();
+        let src4 = Ipv4Addr::new(10, 1, 1, 1);
+        let dst4 = Ipv4Addr::new(1, 2, 3, 4);
+        let protocol = 6;
+        let payload_len: u16 = 200;
+        let original: u16 = 0xBEEF;
+
+        let result1 = adjust_checksum_6to4(original, src6, dst6, src4, dst4, protocol, payload_len);
+        let result2 = adjust_checksum_6to4(original, src6, dst6, src4, dst4, protocol, payload_len);
+        let result3 = adjust_checksum_6to4(original, src6, dst6, src4, dst4, protocol, payload_len);
+
+        assert_eq!(result1, result2);
+        assert_eq!(result2, result3);
+
+        let result4 = adjust_checksum_4to6(original, src4, dst4, src6, dst6, protocol, payload_len);
+        let result5 = adjust_checksum_4to6(original, src4, dst4, src6, dst6, protocol, payload_len);
+
+        assert_eq!(result4, result5);
+    }
 }
