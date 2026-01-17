@@ -172,7 +172,7 @@ impl Nat64Translator {
 
         // Verify this packet is destined for our NAT64 address
         if dst_ip4 != self.server_ip4 {
-            return Err(VpnError::Nat64(format!(
+            return Err(VpnError::Nat64NoMapping(format!(
                 "IPv4 packet not destined for NAT64: {} != {}",
                 dst_ip4, self.server_ip4
             )));
@@ -443,7 +443,7 @@ impl Nat64Translator {
         let (client_ip6, client_port) = self
             .state
             .lookup_reverse(dst_port, src_ip4, src_port, Nat64Protocol::Tcp)
-            .ok_or_else(|| VpnError::Nat64("No NAT64 mapping for TCP response".into()))?;
+            .ok_or_else(|| VpnError::Nat64NoMapping("No NAT64 mapping for TCP response".into()))?;
 
         // Build IPv6 packet
         let src_ip6 = embed_ipv4_in_nat64(src_ip4);
@@ -497,7 +497,7 @@ impl Nat64Translator {
         let (client_ip6, client_port) = self
             .state
             .lookup_reverse(dst_port, src_ip4, src_port, Nat64Protocol::Udp)
-            .ok_or_else(|| VpnError::Nat64("No NAT64 mapping for UDP response".into()))?;
+            .ok_or_else(|| VpnError::Nat64NoMapping("No NAT64 mapping for UDP response".into()))?;
 
         // Build IPv6 packet
         let src_ip6 = embed_ipv4_in_nat64(src_ip4);
@@ -569,7 +569,7 @@ impl Nat64Translator {
         let (client_ip6, original_id) = self
             .state
             .lookup_reverse(translated_id, src_ip4, 0, Nat64Protocol::Icmp)
-            .ok_or_else(|| VpnError::Nat64("No NAT64 mapping for ICMP response".into()))?;
+            .ok_or_else(|| VpnError::Nat64NoMapping("No NAT64 mapping for ICMP response".into()))?;
 
         let src_ip6 = embed_ipv4_in_nat64(src_ip4);
         let dst_ip6 = client_ip6;

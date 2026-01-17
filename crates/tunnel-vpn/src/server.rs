@@ -18,6 +18,7 @@ use bytes::{Bytes, BytesMut};
 use dashmap::DashMap;
 use ipnet::{Ipv4Net, Ipv6Net};
 use iroh::{Endpoint, EndpointId};
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -1171,28 +1172,36 @@ impl VpnServer {
             self.stats.tun_packets_read.fetch_add(1, Ordering::Relaxed);
 
             // Check for NAT64 reverse translation (IPv4 -> IPv6 response)
-            // If this is an IPv4 packet and NAT64 is enabled, try to translate
-            let (final_packet, dest_client_ip6) = if let Some(ref nat64) = self.nat64 {
-                if packet.len() >= 20 && (packet[0] >> 4) == 4 {
-                    // This is an IPv4 packet - try NAT64 reverse translation
-                    match nat64.translate_4to6(packet) {
-                        Ok((client_ip6, ipv6_packet)) => {
-                            self.stats.packets_nat64_4to6.fetch_add(1, Ordering::Relaxed);
-                            (ipv6_packet, Some(client_ip6))
+            // If this is an IPv4 packet and NAT64 is enabled, try to translate.
+            // Use Cow to avoid allocation when no translation is needed.
+            let (final_packet, dest_client_ip6): (Cow<'_, [u8]>, Option<Ipv6Addr>) =
+                if let Some(ref nat64) = self.nat64 {
+                    if packet.len() >= 20 && (packet[0] >> 4) == 4 {
+                        // This is an IPv4 packet - try NAT64 reverse translation
+                        match nat64.translate_4to6(packet) {
+                            Ok((client_ip6, ipv6_packet)) => {
+                                self.stats.packets_nat64_4to6.fetch_add(1, Ordering::Relaxed);
+                                (Cow::Owned(ipv6_packet), Some(client_ip6))
+                            }
+                            Err(VpnError::Nat64NoMapping(_)) => {
+                                // Not a NAT64 response - route normally without allocation
+                                (Cow::Borrowed(packet), None)
+                            }
+                            Err(e) => {
+                                // Real translation error
+                                self.stats.packets_nat64_errors.fetch_add(1, Ordering::Relaxed);
+                                log::debug!("NAT64 4to6 translation error: {}", e);
+                                (Cow::Borrowed(packet), None)
+                            }
                         }
-                        Err(_) => {
-                            // Not a NAT64 response, continue with normal routing
-                            (packet.to_vec(), None)
-                        }
+                    } else {
+                        (Cow::Borrowed(packet), None)
                     }
                 } else {
-                    (packet.to_vec(), None)
-                }
-            } else {
-                (packet.to_vec(), None)
-            };
+                    (Cow::Borrowed(packet), None)
+                };
 
-            let packet_ref = final_packet.as_slice();
+            let packet_ref: &[u8] = &final_packet;
 
             // Extract destination IP from packet (IPv4 or IPv6)
             // DashMap lookups are lock-free - no async await needed

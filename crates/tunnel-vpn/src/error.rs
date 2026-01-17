@@ -62,6 +62,12 @@ pub enum VpnError {
     /// NAT64 unsupported protocol.
     #[error("NAT64 unsupported protocol: {0}")]
     Nat64UnsupportedProtocol(u8),
+
+    /// NAT64 no mapping found (not an error, just no state for this packet).
+    /// This is used when an IPv4 packet doesn't match any NAT64 state,
+    /// indicating it's not a NAT64 response and should be routed normally.
+    #[error("NAT64 no mapping: {0}")]
+    Nat64NoMapping(String),
 }
 
 impl VpnError {
@@ -84,6 +90,7 @@ impl VpnError {
     /// - `Nat64` - NAT64 translation error (malformed packet)
     /// - `Nat64PortExhausted` - NAT64 port pool exhausted
     /// - `Nat64UnsupportedProtocol` - unsupported protocol for NAT64 translation
+    /// - `Nat64NoMapping` - no NAT64 state found (non-fatal, just means packet isn't a NAT64 response)
     pub fn is_recoverable(&self) -> bool {
         matches!(
             self,

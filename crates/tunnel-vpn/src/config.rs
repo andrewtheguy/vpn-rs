@@ -58,6 +58,7 @@ impl Nat64Config {
     /// Returns an error if:
     /// - `port_range.0 > port_range.1` (start port greater than end port)
     /// - `port_range.0 == 0` (port 0 is reserved and cannot be used)
+    /// - Any timeout field is 0 (sessions would expire immediately)
     pub fn validate(&self) -> Result<(), String> {
         if self.port_range.0 == 0 {
             return Err("NAT64 port_range start must be > 0 (port 0 is reserved)".to_string());
@@ -67,6 +68,24 @@ impl Nat64Config {
                 "NAT64 port_range start ({}) must be <= end ({})",
                 self.port_range.0, self.port_range.1
             ));
+        }
+        if self.tcp_timeout_secs == 0 {
+            return Err(
+                "NAT64 tcp_timeout_secs must be > 0 (sessions would expire immediately)"
+                    .to_string(),
+            );
+        }
+        if self.udp_timeout_secs == 0 {
+            return Err(
+                "NAT64 udp_timeout_secs must be > 0 (sessions would expire immediately)"
+                    .to_string(),
+            );
+        }
+        if self.icmp_timeout_secs == 0 {
+            return Err(
+                "NAT64 icmp_timeout_secs must be > 0 (sessions would expire immediately)"
+                    .to_string(),
+            );
         }
         Ok(())
     }
