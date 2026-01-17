@@ -18,6 +18,30 @@ Port forwarding modes (iroh, nostr, manual) support TCP and UDP tunneling with e
 
 ### Medium Priority
 
+#### NAT64 Enhancements
+
+**Status:** Experimental / Partial
+
+NAT64 basic translation is implemented for TCP, UDP, and ICMP echo (ping). It is **experimental** and intended primarily for IPv6-only VPN deployments that need IPv4 reachability. The table below shows the implementation status for each NAT64 feature:
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| TCP/UDP translation | **Implemented** | Full NAPT with connection tracking |
+| ICMP Echo (ping) | **Implemented** | Echo request/reply only |
+| ICMP Error Messages | Not implemented | Destination Unreachable, Time Exceeded, etc. |
+| IPv6 Extension Headers | Not implemented | Assumes simple IPv6 header |
+| IPv4 Fragmentation | Not implemented | DF bit is set; large packets may be dropped |
+| Path MTU Discovery | Not implemented | No ICMPv6 Packet Too Big generation |
+| DNS64 | Not implemented | Clients must use external DNS64 or manual NAT64 addresses |
+| ALG (FTP, SIP, etc.) | Not implemented | Protocols embedding IP addresses in payload won't work |
+
+**Priority improvements:**
+1. **ICMP Error Translation** - Translating error messages enables proper TCP path MTU discovery and error reporting
+2. **DNS64** - Automatic synthesis of AAAA records from A records for seamless NAT64 operation
+3. **IPv6 Extension Header Handling** - Skip extension headers to find the transport layer
+
+---
+
 #### Multi-Source/Target per Client
 
 **Status:** Idea

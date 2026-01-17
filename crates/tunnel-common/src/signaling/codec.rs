@@ -367,7 +367,7 @@ fn crc32(bytes: &[u8]) -> u32 {
 /// bytes for efficiency, which is safe for ASCII but would split multi-byte UTF-8
 /// codepoints. The function will panic if given non-ASCII input.
 pub fn wrap_lines(s: &str, width: usize) -> String {
-    debug_assert!(
+    assert!(
         s.is_ascii(),
         "wrap_lines requires ASCII input; got non-ASCII characters"
     );

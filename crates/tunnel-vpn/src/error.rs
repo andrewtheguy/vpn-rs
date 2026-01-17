@@ -50,6 +50,18 @@ pub enum VpnError {
     /// Maximum reconnection attempts exceeded.
     #[error("Max reconnection attempts ({0}) exceeded")]
     MaxReconnectAttemptsExceeded(NonZeroU32),
+
+    /// NAT64 translation error.
+    #[error("NAT64 error: {0}")]
+    Nat64(String),
+
+    /// NAT64 port pool exhausted.
+    #[error("NAT64 port pool exhausted")]
+    Nat64PortExhausted,
+
+    /// NAT64 unsupported protocol.
+    #[error("NAT64 unsupported protocol: {0}")]
+    Nat64UnsupportedProtocol(u8),
 }
 
 impl VpnError {
@@ -59,6 +71,7 @@ impl VpnError {
     /// - `ConnectionLost` - VPN session ended (server restart, network blip)
     /// - `Network` - I/O errors (connection reset, timeout)
     /// - `Signaling` - iroh connection issues (peer unreachable, relay failure)
+    /// - `Nat64PortExhausted` - NAT64 port pool temporarily exhausted (ports free up)
     ///
     /// **Non-recoverable (permanent):**
     /// - `AuthenticationFailed` - invalid token, server rejected credentials
@@ -69,10 +82,15 @@ impl VpnError {
     /// - `IpAssignment` - IP pool exhausted (unlikely to recover quickly)
     /// - `PeerNotFound` - unknown peer
     /// - `MaxReconnectAttemptsExceeded` - retry limit hit
+    /// - `Nat64` - NAT64 translation error (malformed packet)
+    /// - `Nat64UnsupportedProtocol` - unsupported protocol for NAT64 translation
     pub fn is_recoverable(&self) -> bool {
         matches!(
             self,
-            VpnError::ConnectionLost(_) | VpnError::Network(_) | VpnError::Signaling(_)
+            VpnError::ConnectionLost(_)
+                | VpnError::Network(_)
+                | VpnError::Signaling(_)
+                | VpnError::Nat64PortExhausted
         )
     }
 }

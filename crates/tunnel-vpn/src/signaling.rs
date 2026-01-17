@@ -128,6 +128,27 @@ impl VpnHandshakeResponse {
         }
     }
 
+    /// Create an accepted response with IPv6 only (no IPv4).
+    ///
+    /// Use this for IPv6-only VPN networks where no IPv4 address is allocated.
+    pub fn accepted_ipv6_only(
+        assigned_ip6: Ipv6Addr,
+        network6: Ipv6Net,
+        server_ip6: Ipv6Addr,
+    ) -> Self {
+        Self {
+            version: VPN_PROTOCOL_VERSION,
+            accepted: true,
+            assigned_ip: None,
+            network: None,
+            server_ip: None,
+            assigned_ip6: Some(assigned_ip6),
+            network6: Some(network6),
+            server_ip6: Some(server_ip6),
+            reject_reason: None,
+        }
+    }
+
     /// Create a rejected response.
     pub fn rejected(reason: impl Into<String>) -> Self {
         Self {
@@ -345,6 +366,30 @@ mod tests {
         let decoded = VpnHandshakeResponse::decode(&encoded).unwrap();
         assert!(!decoded.accepted);
         assert_eq!(decoded.reject_reason, Some("Server full".to_string()));
+    }
+
+    #[test]
+    fn test_response_accepted_ipv6_only_roundtrip() {
+        let assigned_ip6: Ipv6Addr = "fd00::2".parse().unwrap();
+        let network6: Ipv6Net = "fd00::/64".parse().unwrap();
+        let server_ip6: Ipv6Addr = "fd00::1".parse().unwrap();
+
+        let response =
+            VpnHandshakeResponse::accepted_ipv6_only(assigned_ip6, network6, server_ip6);
+
+        let encoded = response.encode().unwrap();
+        let decoded = VpnHandshakeResponse::decode(&encoded).unwrap();
+
+        assert!(decoded.accepted);
+        // IPv4 fields should be None
+        assert_eq!(decoded.assigned_ip, None);
+        assert_eq!(decoded.network, None);
+        assert_eq!(decoded.server_ip, None);
+        // IPv6 fields should be present
+        assert_eq!(decoded.assigned_ip6, Some(assigned_ip6));
+        assert_eq!(decoded.network6, Some(network6));
+        assert_eq!(decoded.server_ip6, Some(server_ip6));
+        assert_eq!(decoded.reject_reason, None);
     }
 
     #[test]

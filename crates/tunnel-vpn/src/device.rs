@@ -29,6 +29,17 @@ pub struct TunConfig {
     pub mtu: u16,
 }
 
+/// Validate IPv6 prefix length (must be 0-128).
+fn validate_prefix_len6(prefix_len6: u8) -> VpnResult<()> {
+    if prefix_len6 > 128 {
+        return Err(VpnError::Config(format!(
+            "Invalid IPv6 prefix length {}: must be 0-128",
+            prefix_len6
+        )));
+    }
+    Ok(())
+}
+
 impl TunConfig {
     /// Create a new TUN configuration.
     pub fn new(address: Ipv4Addr, netmask: Ipv4Addr, destination: Ipv4Addr) -> Self {
@@ -60,15 +71,55 @@ impl TunConfig {
     /// # Errors
     /// Returns an error if `prefix_len6` is greater than 128.
     pub fn with_ipv6(mut self, address6: Ipv6Addr, prefix_len6: u8) -> VpnResult<Self> {
-        if prefix_len6 > 128 {
-            return Err(VpnError::Config(format!(
-                "Invalid IPv6 prefix length {}: must be 0-128",
-                prefix_len6
-            )));
-        }
+        validate_prefix_len6(prefix_len6)?;
         self.address6 = Some(address6);
         self.prefix_len6 = Some(prefix_len6);
         Ok(self)
+    }
+
+    /// Create IPv6-only TUN configuration.
+    ///
+    /// For IPv6-only VPN networks, this creates a TUN configuration with
+    /// a unique placeholder IPv4 address in the link-local range (169.254.x.x)
+    /// that satisfies the device creation requirements but won't interfere
+    /// with real traffic.
+    ///
+    /// The placeholder IP is derived from the IPv6 address to ensure uniqueness
+    /// when multiple IPv6-only TUN devices are created on the same host.
+    ///
+    /// # Errors
+    /// Returns an error if `prefix_len6` is greater than 128.
+    pub fn ipv6_only(address6: Ipv6Addr, prefix_len6: u8, mtu: u16) -> VpnResult<Self> {
+        validate_prefix_len6(prefix_len6)?;
+        // Use a link-local placeholder address that won't conflict with real traffic.
+        // This satisfies TUN creation on platforms that require IPv4 (macOS/Windows
+        // in tun 0.8.x), but won't affect IPv4 routing.
+        //
+        // Derive unique placeholder from IPv6 address to avoid conflicts when
+        // multiple IPv6-only TUN devices exist on the same host.
+        // In ipv6_only, we hash full octets so placeholder_ip/placeholder_netmask
+        // are more unique than the previous last-two-bytes-only approach.
+        let octets = address6.octets();
+        // Hash all IPv6 bytes into two stable bytes, then ensure we stay in
+        // the 169.254.1.1 - 169.254.254.254 range (avoiding reserved .0/.255
+        // subnets and .0/.255 host addresses).
+        let mut hash: u16 = 0x9e37;
+        for (idx, byte) in octets.iter().enumerate() {
+            hash = hash.rotate_left(5) ^ (*byte as u16).wrapping_add(idx as u16);
+        }
+        let third = ((hash as u8) % 254) + 1; // 1-254 (uniform distribution)
+        let fourth = (((hash >> 8) as u8) % 254) + 1; // 1-254 (uniform distribution)
+        let placeholder_ip = Ipv4Addr::new(169, 254, third, fourth);
+        let placeholder_netmask = Ipv4Addr::new(255, 255, 255, 255);
+        Ok(Self {
+            name: None,
+            address: placeholder_ip,
+            netmask: placeholder_netmask,
+            destination: placeholder_ip,
+            address6: Some(address6),
+            prefix_len6: Some(prefix_len6),
+            mtu,
+        })
     }
 }
 
@@ -868,6 +919,90 @@ pub async fn add_route6(tun_name: &str, route: &Ipv6Net) -> VpnResult<()> {
     add_route_generic(tun_name, route).await
 }
 
+/// Add an IPv6 route with an explicit source address.
+///
+/// This is important when the client has multiple IPv6 addresses (e.g., a real
+/// public IPv6 and a VPN-assigned IPv6). Without specifying the source, the kernel
+/// may select the wrong source address for packets routed through this route.
+///
+/// If the route already exists, this is treated as idempotent success.
+pub async fn add_route6_with_src(
+    tun_name: &str,
+    route: &Ipv6Net,
+    src: Ipv6Addr,
+) -> VpnResult<()> {
+    #[cfg(target_os = "macos")]
+    {
+        // macOS doesn't support source address in routes the same way
+        // Fall back to standard route addition
+        log::debug!(
+            "macOS: ignoring source address {} for IPv6 route {} via {}",
+            src, route, tun_name
+        );
+        add_route_generic(tun_name, route).await
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let output = Command::new("ip")
+            .args([
+                "-6",
+                "route",
+                "add",
+                &route.to_string(),
+                "dev",
+                tun_name,
+                "src",
+                &src.to_string(),
+            ])
+            .output()
+            .await
+            .map_err(|e| {
+                VpnError::TunDevice(format!("Failed to execute ip route command: {}", e))
+            })?;
+
+        if output.status.success() {
+            log::info!("Added IPv6 route {} via {} src {}", route, tun_name, src);
+            return Ok(());
+        }
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stderr_trimmed = stderr.trim();
+        if is_already_exists_error(&stderr) {
+            log::warn!(
+                "IPv6 route {} already exists (treating as success): {}",
+                route,
+                stderr_trimmed
+            );
+            Ok(())
+        } else {
+            Err(VpnError::TunDevice(format!(
+                "Failed to add IPv6 route {}: {}",
+                route, stderr_trimmed
+            )))
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        // Windows doesn't support source address in routes the same way
+        // Fall back to standard route addition
+        log::debug!(
+            "Windows: ignoring source address {} for IPv6 route {} via {}",
+            src, route, tun_name
+        );
+        add_route_generic(tun_name, route).await
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    {
+        let _ = (tun_name, route, src);
+        Err(VpnError::TunDevice(
+            "Route management not supported on this platform".into(),
+        ))
+    }
+}
+
 /// Remove an IPv6 route from the system (async version).
 pub async fn remove_route6(tun_name: &str, route: &Ipv6Net) -> VpnResult<()> {
     remove_route_generic(tun_name, route).await
@@ -887,6 +1022,45 @@ pub async fn add_routes6(tun_name: &str, routes: &[Ipv6Net]) -> VpnResult<Route6
 
     for route in routes {
         if let Err(e) = add_route6(tun_name, route).await {
+            // Rollback previously added routes
+            log::warn!(
+                "Failed to add IPv6 route {}, rolling back {} route(s)",
+                route,
+                added.len()
+            );
+            for added_route in added.iter().rev() {
+                if let Err(rollback_err) = remove_route6(tun_name, added_route).await {
+                    log::warn!(
+                        "Rollback failed for IPv6 route {}: {}",
+                        added_route,
+                        rollback_err
+                    );
+                }
+            }
+            return Err(e);
+        }
+        added.push(*route);
+    }
+    Ok(Route6Guard::new(tun_name.to_string(), added))
+}
+
+/// Add multiple IPv6 routes with an explicit source address.
+///
+/// This variant specifies the source address for route selection, which is
+/// important when the client has multiple IPv6 addresses. Without specifying
+/// the source, the kernel may select the wrong source address.
+///
+/// Returns a `Route6Guard` that automatically removes the routes when dropped.
+/// If any route fails to add, previously added routes are rolled back.
+pub async fn add_routes6_with_src(
+    tun_name: &str,
+    routes: &[Ipv6Net],
+    src: Ipv6Addr,
+) -> VpnResult<Route6Guard> {
+    let mut added: Vec<Ipv6Net> = Vec::with_capacity(routes.len());
+
+    for route in routes {
+        if let Err(e) = add_route6_with_src(tun_name, route, src).await {
             // Rollback previously added routes
             log::warn!(
                 "Failed to add IPv6 route {}, rolling back {} route(s)",

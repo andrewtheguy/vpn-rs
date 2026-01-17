@@ -35,6 +35,22 @@ tunnel-rs server --dns-server https://dns.example.com/pkarr --secret-file ./serv
 tunnel-rs client --dns-server https://dns.example.com/pkarr --server-node-id <ID> --source tcp://127.0.0.1:22 --target 127.0.0.1:2222 --auth-token "$AUTH_TOKEN"
 ```
 
+## Disabling DNS Discovery
+
+You can disable DNS-based peer discovery entirely by setting `--dns-server none`:
+
+```bash
+# Both sides disable DNS discovery
+tunnel-rs server --dns-server none --relay-url https://relay.example.com --allowed-tcp 127.0.0.0/8 --auth-tokens "$AUTH_TOKEN"
+tunnel-rs client --dns-server none --relay-url https://relay.example.com --server-node-id <ID> --source tcp://127.0.0.1:22 --target 127.0.0.1:2222 --auth-token "$AUTH_TOKEN"
+```
+
+When DNS discovery is disabled, clients and server must connect using one of these methods:
+1. **Common relay server** — Both specify the same `--relay-url`
+2. **mDNS** — Automatic discovery on the same local network (always enabled)
+
+> **Note:** mDNS discovery is unaffected by the `--dns-server none` setting and remains active for local network discovery.
+
 ## Full Self-Hosted Infrastructure
 
 For fully independent operation, you can self-host both iroh's relay and DNS servers.

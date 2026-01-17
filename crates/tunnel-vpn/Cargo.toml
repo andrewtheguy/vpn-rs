@@ -45,6 +45,9 @@ ipnet = { version = "2", features = ["serde"] }
 # Lock-free concurrent hashmap for hot-path lookups
 dashmap = "6"
 
+# Packet parsing for NAT64 translation
+etherparse = "0.18"
+
 # Zero-copy byte buffers for efficient packet handling
 bytes = "1"
 
@@ -57,3 +60,5 @@ fs2 = "0.4"
 [dev-dependencies]
 # Deterministic RNG for testing
 rand_chacha = "0.3"
+# Mockable time for testing timeout behavior
+mock_instant = "0.5"

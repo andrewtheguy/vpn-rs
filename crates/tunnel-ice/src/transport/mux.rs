@@ -149,7 +149,7 @@ impl AsyncUdpSocket for DemuxSocket {
                         } else {
                             // Keep QUIC packet in results
                             // Invariant: quic_count <= i (we only increment quic_count after processing)
-                            debug_assert!(
+                            assert!(
                                 quic_count <= i,
                                 "quic_count must not exceed current index"
                             );

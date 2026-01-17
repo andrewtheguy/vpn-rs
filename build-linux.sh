@@ -3,7 +3,7 @@ set -e
 
 # Build script for cross-compiling Linux binaries using Docker
 # Builds for both AMD64 and ARM64 architectures
-# Produces: tunnel-rs (main tunnel binary) and tunnel-signaling (DCUtR signaling server)
+# Produces: tunnel-rs (iroh mode), tunnel-rs-ice (manual/nostr ICE), tunnel-rs-vpn (VPN mode)
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUILD_DIR="${SCRIPT_DIR}/target/build"
@@ -68,9 +68,13 @@ if [ -d "$BUILD_DIR/linux_amd64" ]; then
         mv "$BUILD_DIR/linux_amd64/tunnel-rs" "$BUILD_DIR/tunnel-rs-linux-amd64"
         echo "✓ tunnel-rs AMD64 saved to: $BUILD_DIR/tunnel-rs-linux-amd64"
     fi
-    if [ -f "$BUILD_DIR/linux_amd64/tunnel-signaling" ]; then
-        mv "$BUILD_DIR/linux_amd64/tunnel-signaling" "$BUILD_DIR/tunnel-signaling-linux-amd64"
-        echo "✓ tunnel-signaling AMD64 saved to: $BUILD_DIR/tunnel-signaling-linux-amd64"
+    if [ -f "$BUILD_DIR/linux_amd64/tunnel-rs-ice" ]; then
+        mv "$BUILD_DIR/linux_amd64/tunnel-rs-ice" "$BUILD_DIR/tunnel-rs-ice-linux-amd64"
+        echo "✓ tunnel-rs-ice AMD64 saved to: $BUILD_DIR/tunnel-rs-ice-linux-amd64"
+    fi
+    if [ -f "$BUILD_DIR/linux_amd64/tunnel-rs-vpn" ]; then
+        mv "$BUILD_DIR/linux_amd64/tunnel-rs-vpn" "$BUILD_DIR/tunnel-rs-vpn-linux-amd64"
+        echo "✓ tunnel-rs-vpn AMD64 saved to: $BUILD_DIR/tunnel-rs-vpn-linux-amd64"
     fi
     rm -rf "$BUILD_DIR/linux_amd64"
 fi
@@ -80,9 +84,13 @@ if [ -d "$BUILD_DIR/linux_arm64" ]; then
         mv "$BUILD_DIR/linux_arm64/tunnel-rs" "$BUILD_DIR/tunnel-rs-linux-arm64"
         echo "✓ tunnel-rs ARM64 saved to: $BUILD_DIR/tunnel-rs-linux-arm64"
     fi
-    if [ -f "$BUILD_DIR/linux_arm64/tunnel-signaling" ]; then
-        mv "$BUILD_DIR/linux_arm64/tunnel-signaling" "$BUILD_DIR/tunnel-signaling-linux-arm64"
-        echo "✓ tunnel-signaling ARM64 saved to: $BUILD_DIR/tunnel-signaling-linux-arm64"
+    if [ -f "$BUILD_DIR/linux_arm64/tunnel-rs-ice" ]; then
+        mv "$BUILD_DIR/linux_arm64/tunnel-rs-ice" "$BUILD_DIR/tunnel-rs-ice-linux-arm64"
+        echo "✓ tunnel-rs-ice ARM64 saved to: $BUILD_DIR/tunnel-rs-ice-linux-arm64"
+    fi
+    if [ -f "$BUILD_DIR/linux_arm64/tunnel-rs-vpn" ]; then
+        mv "$BUILD_DIR/linux_arm64/tunnel-rs-vpn" "$BUILD_DIR/tunnel-rs-vpn-linux-arm64"
+        echo "✓ tunnel-rs-vpn ARM64 saved to: $BUILD_DIR/tunnel-rs-vpn-linux-arm64"
     fi
     rm -rf "$BUILD_DIR/linux_arm64"
 fi
@@ -95,15 +103,15 @@ echo ""
 echo "Tunnel binaries:"
 ls -lh "$BUILD_DIR"/tunnel-rs-* 2>/dev/null || echo "  (none found)"
 echo ""
-echo "Signaling server binaries:"
-ls -lh "$BUILD_DIR"/tunnel-signaling-* 2>/dev/null || echo "  (none found)"
+echo "ICE + VPN binaries:"
+ls -lh "$BUILD_DIR"/tunnel-rs-ice-* "$BUILD_DIR"/tunnel-rs-vpn-* 2>/dev/null || echo "  (none found)"
 echo ""
 
 # Verify binaries
 echo "Verifying binaries..."
 echo "---------------------"
 if command -v file &> /dev/null; then
-    file "$BUILD_DIR"/tunnel-rs-* "$BUILD_DIR"/tunnel-signaling-* 2>/dev/null || true
+    file "$BUILD_DIR"/tunnel-rs-* "$BUILD_DIR"/tunnel-rs-ice-* "$BUILD_DIR"/tunnel-rs-vpn-* 2>/dev/null || true
 else
     echo "Note: 'file' command not available, skipping binary verification"
 fi
@@ -114,12 +122,16 @@ echo ""
 echo "To test on Linux:"
 echo "  # AMD64:"
 echo "  scp $BUILD_DIR/tunnel-rs-linux-amd64 user@host:/tmp/tunnel-rs"
-echo "  scp $BUILD_DIR/tunnel-signaling-linux-amd64 user@host:/tmp/tunnel-signaling"
+echo "  scp $BUILD_DIR/tunnel-rs-ice-linux-amd64 user@host:/tmp/tunnel-rs-ice"
+echo "  scp $BUILD_DIR/tunnel-rs-vpn-linux-amd64 user@host:/tmp/tunnel-rs-vpn"
 echo "  ssh user@host '/tmp/tunnel-rs --help'"
-echo "  ssh user@host '/tmp/tunnel-signaling --help'"
+echo "  ssh user@host '/tmp/tunnel-rs-ice --help'"
+echo "  ssh user@host '/tmp/tunnel-rs-vpn --help'"
 echo ""
 echo "  # ARM64:"
 echo "  scp $BUILD_DIR/tunnel-rs-linux-arm64 user@host:/tmp/tunnel-rs"
-echo "  scp $BUILD_DIR/tunnel-signaling-linux-arm64 user@host:/tmp/tunnel-signaling"
+echo "  scp $BUILD_DIR/tunnel-rs-ice-linux-arm64 user@host:/tmp/tunnel-rs-ice"
+echo "  scp $BUILD_DIR/tunnel-rs-vpn-linux-arm64 user@host:/tmp/tunnel-rs-vpn"
 echo "  ssh user@host '/tmp/tunnel-rs --help'"
-echo "  ssh user@host '/tmp/tunnel-signaling --help'"
+echo "  ssh user@host '/tmp/tunnel-rs-ice --help'"
+echo "  ssh user@host '/tmp/tunnel-rs-vpn --help'"

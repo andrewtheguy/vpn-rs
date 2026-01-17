@@ -153,7 +153,7 @@ pub fn print_relay_status(relay_urls: &[String], relay_only: bool, using_custom_
 /// # Arguments
 /// * `relay_mode` - The relay mode to use
 /// * `relay_only` - If true, only use relay connections (no direct P2P). Only effective with 'test-utils' feature.
-/// * `dns_server` - Optional custom DNS server URL (e.g., "https://dns.example.com")
+/// * `dns_server` - Optional custom DNS server URL (e.g., "https://dns.example.com"), or "none" to disable DNS discovery
 /// * `secret_key` - Optional secret key (required for publishing to custom DNS server)
 /// * `transport_tuning` - Optional transport layer tuning (congestion control, buffer sizes)
 pub fn create_endpoint_builder(
@@ -216,22 +216,27 @@ pub fn create_endpoint_builder(
     }
 
     if !relay_only {
-        match (dns_server, secret_key) {
-            (Some(dns_url), Some(secret)) => {
+        // DNS-based peer discovery (can be disabled via dns_server="none")
+        match dns_server {
+            Some("none") => {
+                // Explicitly disabled
+                info!("DNS discovery disabled (dns_server=none)");
+            }
+            Some(dns_url) if secret_key.is_some() => {
                 // Custom DNS server with publishing and resolving via HTTP (pkarr)
                 let pkarr_url: Url = dns_url.parse().context("Invalid DNS server URL")?;
                 info!("Using custom DNS server: {}", dns_url);
                 builder = builder
-                    .discovery(PkarrPublisher::builder(pkarr_url.clone()).build(secret.clone()))
+                    .discovery(PkarrPublisher::builder(pkarr_url.clone()).build(secret_key.unwrap().clone()))
                     .discovery(PkarrResolver::builder(pkarr_url));
             }
-            (Some(dns_url), None) => {
+            Some(dns_url) => {
                 // Custom DNS server, resolve only via HTTP (no secret = can't publish)
                 let pkarr_url: Url = dns_url.parse().context("Invalid DNS server URL")?;
                 info!("Using custom DNS server (resolve only): {}", dns_url);
                 builder = builder.discovery(PkarrResolver::builder(pkarr_url));
             }
-            (None, _) => {
+            None => {
                 // Default n0 DNS
                 builder = builder
                     .discovery(PkarrPublisher::n0_dns())

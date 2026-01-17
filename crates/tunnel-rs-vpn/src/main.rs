@@ -289,10 +289,12 @@ async fn main() -> Result<()> {
 
 /// Run VPN server.
 async fn run_vpn_server(resolved: ResolvedVpnServerConfig) -> Result<()> {
-    // Parse network CIDR (already validated by builder)
-    let network: Ipv4Net = resolved
+    // Parse IPv4 network CIDR (optional, for IPv6-only servers)
+    let network: Option<Ipv4Net> = resolved
         .network
-        .parse()
+        .as_ref()
+        .map(|n| n.parse())
+        .transpose()
         .context("Invalid VPN network CIDR")?;
 
     // Parse server IP if provided
@@ -345,6 +347,9 @@ async fn run_vpn_server(resolved: ResolvedVpnServerConfig) -> Result<()> {
         );
     };
 
+    // Convert NAT64 config from tunnel_common to tunnel_vpn types
+    let nat64: Option<tunnel_vpn::config::Nat64Config> = resolved.nat64.map(Into::into);
+
     // Create VPN server config
     let config = VpnServerConfig {
         network,
@@ -357,6 +362,7 @@ async fn run_vpn_server(resolved: ResolvedVpnServerConfig) -> Result<()> {
         drop_on_full: resolved.drop_on_full,
         client_channel_size: resolved.client_channel_size,
         tun_writer_channel_size: resolved.tun_writer_channel_size,
+        nat64,
     };
 
     // Create iroh endpoint for signaling.

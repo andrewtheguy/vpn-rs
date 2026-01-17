@@ -1333,6 +1333,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "etherparse"
+version = "0.18.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "54a48e7bdc36cdf86876a6890c0840957029374ea07f6697c96fa15898730375"
+dependencies = [
+ "arrayvec",
+]
+
+[[package]]
 name = "event-listener"
 version = "5.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2567,6 +2576,12 @@ dependencies = [
  "wasi",
  "windows-sys 0.61.2",
 ]
+
+[[package]]
+name = "mock_instant"
+version = "0.5.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4e1d4c44418358edcac6e1d9ce59cea7fb38052429c7704033f1196f0c179e6a"
 
 [[package]]
 name = "moka"
@@ -4961,7 +4976,7 @@ dependencies = [
 
 [[package]]
 name = "tunnel-common"
-version = "0.1.64"
+version = "0.1.65"
 dependencies = [
  "anyhow",
  "base64",
@@ -4978,7 +4993,7 @@ dependencies = [
 
 [[package]]
 name = "tunnel-ice"
-version = "0.1.64"
+version = "0.1.65"
 dependencies = [
  "anyhow",
  "base64",
@@ -5003,7 +5018,7 @@ dependencies = [
 
 [[package]]
 name = "tunnel-iroh"
-version = "0.1.64"
+version = "0.1.65"
 dependencies = [
  "anyhow",
  "base64",
@@ -5024,7 +5039,7 @@ dependencies = [
 
 [[package]]
 name = "tunnel-rs"
-version = "0.1.64"
+version = "0.1.65"
 dependencies = [
  "anyhow",
  "clap",
@@ -5038,7 +5053,7 @@ dependencies = [
 
 [[package]]
 name = "tunnel-rs-ice"
-version = "0.1.64"
+version = "0.1.65"
 dependencies = [
  "anyhow",
  "clap",
@@ -5052,7 +5067,7 @@ dependencies = [
 
 [[package]]
 name = "tunnel-rs-vpn"
-version = "0.1.64"
+version = "0.1.65"
 dependencies = [
  "anyhow",
  "clap",
@@ -5068,16 +5083,18 @@ dependencies = [
 
 [[package]]
 name = "tunnel-vpn"
-version = "0.1.64"
+version = "0.1.65"
 dependencies = [
  "anyhow",
  "bytes",
  "dashmap",
+ "etherparse",
  "fs2",
  "futures",
  "ipnet",
  "iroh",
  "log",
+ "mock_instant",
  "rand 0.8.5",
  "rand_chacha 0.3.1",
  "serde",

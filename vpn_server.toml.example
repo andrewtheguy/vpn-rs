@@ -13,8 +13,13 @@ mode = "iroh"
 # ============================================================================
 # VPN Network Configuration
 # ============================================================================
+# At least one of 'network' (IPv4) or 'network6' (IPv6) is REQUIRED.
+# You can configure:
+#   - IPv4-only:   Set 'network' only
+#   - IPv6-only:   Set 'network6' only
+#   - Dual-stack:  Set both 'network' and 'network6'
 
-# VPN network CIDR (REQUIRED)
+# IPv4 VPN network CIDR (optional if network6 is set)
 # Clients will be assigned IPs from this network
 network = "10.0.0.0/24"
 
@@ -23,12 +28,12 @@ network = "10.0.0.0/24"
 # server_ip = "10.0.0.1"
 
 # ============================================================================
-# IPv6 Dual-Stack (Optional)
+# IPv6 Configuration (Optional for Dual-Stack or IPv6-only)
 # ============================================================================
-# Enable IPv6 alongside IPv4. When configured, clients receive both an IPv4
-# and an IPv6 address. IPv6 is optional - IPv4-only configs continue to work.
+# Enable IPv6 alongside IPv4 (dual-stack) or as the only address family (IPv6-only).
+# When both network and network6 are set, clients receive addresses from both.
 
-# IPv6 VPN network CIDR (optional, enables dual-stack)
+# IPv6 VPN network CIDR (required for dual-stack or IPv6-only)
 # Clients will be assigned IPs from this network (one /128 per client)
 # network6 = "fd00::/64"
 
@@ -37,12 +42,23 @@ network = "10.0.0.0/24"
 # server_ip6 = "fd00::1"
 
 # ============================================================================
+# IPv6-only Example Configuration
+# ============================================================================
+# For an IPv6-only VPN server, comment out 'network' above and enable:
+#
+# # network = "10.0.0.0/24"  # Comment out or remove for IPv6-only
+# network6 = "fd00::/64"
+# server_ip6 = "fd00::1"
+#
+# To allow IPv6 clients to reach IPv4 destinations, enable NAT64 (see below).
+
+# ============================================================================
 # Performance Tuning
 # ============================================================================
 
 # MTU for VPN packets (576-1500, default: 1420)
 # Lower values may help with fragmentation issues
-mtu = 1420
+# mtu = 1420
 
 # QUIC keepalive interval in seconds (10-300, default: 25)
 # keepalive_secs = 25
@@ -120,10 +136,16 @@ auth_tokens = ["iXXXXXXXXXXXXXXXXX"]  # Replace with real token from generate-to
 #     "https://relay2.example.com",
 # ]
 
-# Custom DNS server URL for peer discovery
-# Must match client's dns_server configuration
+# Custom DNS server URL for peer discovery, or "none" to disable DNS discovery.
+# Must match client's dns_server configuration.
 # NOTE: URL must include the /pkarr path
 # dns_server = "https://dns.example.com/pkarr"
+#
+# Set to "none" to disable DNS-based peer discovery entirely.
+# When disabled, clients and server must use one of these methods to connect:
+#   1. Common relay server - both specify the same relay_urls
+#   2. mDNS - automatic discovery on the same local network
+# dns_server = "none"
 
 # ============================================================================
 # Transport Tuning (Optional)
@@ -147,3 +169,46 @@ auth_tokens = ["iXXXXXXXXXXXXXXXXX"]  # Replace with real token from generate-to
 # Controls how much data can be sent before acknowledgment
 # Valid range: 1024 (1KB) to 16777216 (16MB)
 # send_window = 2097152
+
+# ============================================================================
+# NAT64 Configuration (Optional)
+# ============================================================================
+# NAT64 allows IPv6-only clients to access IPv4 resources.
+# NOTE: NAT64 support is experimental.
+# When enabled, the server translates IPv6 packets destined for the well-known
+# NAT64 prefix (64:ff9b::/96) to IPv4 and performs NAPT.
+#
+# NOTE: The NAT64 prefix is fixed at 64:ff9b::/96 (RFC 6052 well-known prefix).
+#
+# Recommended for IPv6-only VPN configurations to maintain IPv4 compatibility.
+
+[iroh.nat64]
+# Enable NAT64 translation (default: false)
+# enabled = true
+
+# IPv4 source address for translated packets (optional).
+# By default, NAT64 uses the server's VPN IPv4 address (from 'network').
+# Set this to enable NAT64 in IPv6-only VPN configurations where:
+#   - The VPN has no IPv4 network (only 'network6' is configured)
+#   - The host has dual-stack connectivity (an IPv4 address on its interface)
+#
+# Example: Your VPN server host has IPv4 address 203.0.113.5 on its WAN interface.
+#          Configure source_ip = "203.0.113.5" to use that for NAT64 translation.
+#
+# source_ip = "203.0.113.5"
+
+# Port range for NAPT (default: 32768-65535)
+# Each translated connection uses one port from this range.
+# port_range = [32768, 65535]
+
+# TCP connection timeout in seconds (default: 300)
+# TCP connections without activity for this duration are removed.
+# tcp_timeout_secs = 300
+
+# UDP session timeout in seconds (default: 30)
+# UDP sessions without activity for this duration are removed.
+# udp_timeout_secs = 30
+
+# ICMP session timeout in seconds (default: 30)
+# ICMP sessions without activity for this duration are removed.
+# icmp_timeout_secs = 30

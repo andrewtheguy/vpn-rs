@@ -96,10 +96,16 @@ routes = [
 #     "https://relay2.example.com",
 # ]
 
-# Custom DNS server URL for peer discovery
-# Must match server's dns_server configuration
+# Custom DNS server URL for peer discovery, or "none" to disable DNS discovery.
+# Must match server's dns_server configuration.
 # NOTE: URL must include the /pkarr path
 # dns_server = "https://dns.example.com/pkarr"
+#
+# Set to "none" to disable DNS-based peer discovery entirely.
+# When disabled, clients and server must use one of these methods to connect:
+#   1. Common relay server - both specify the same relay_urls
+#   2. mDNS - automatic discovery on the same local network
+# dns_server = "none"
 
 # ============================================================================
 # Transport Tuning (Optional)

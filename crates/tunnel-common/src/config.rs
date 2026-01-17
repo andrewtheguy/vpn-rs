@@ -131,6 +131,99 @@ pub struct NostrConfig {
     pub target: Option<String>,
 }
 
+/// NAT64 configuration for IPv6-only clients to access IPv4 resources.
+///
+/// When enabled, the VPN server translates IPv6 packets destined for the
+/// well-known NAT64 prefix `64:ff9b::/96` to IPv4 packets, performs NAPT
+/// (Network Address Port Translation), and routes them to the IPv4 destination.
+///
+/// Note: The NAT64 prefix is fixed at `64:ff9b::/96` (RFC 6052 well-known prefix).
+#[derive(Deserialize, Default, Clone, Debug)]
+pub struct Nat64Config {
+    /// Enable NAT64 translation.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// IPv4 source address for translated packets (optional).
+    ///
+    /// If not set, the server's VPN IPv4 address is used (requires `network` to be configured).
+    /// Set this to allow NAT64 in IPv6-only VPN configurations where the host has
+    /// dual-stack connectivity but no IPv4 VPN network is needed.
+    ///
+    /// This should be a routable IPv4 address on the host that can receive return traffic.
+    #[serde(default)]
+    pub source_ip: Option<std::net::Ipv4Addr>,
+
+    /// Port range for NAPT (default: 32768-65535).
+    /// The first value is the start port, the second is the end port (inclusive).
+    #[serde(default = "default_nat64_port_range")]
+    pub port_range: (u16, u16),
+
+    /// TCP connection timeout in seconds (default: 300).
+    /// TCP connections without activity for this duration are removed.
+    #[serde(default = "default_nat64_tcp_timeout")]
+    pub tcp_timeout_secs: u64,
+
+    /// UDP session timeout in seconds (default: 30).
+    /// UDP sessions without activity for this duration are removed.
+    #[serde(default = "default_nat64_udp_timeout")]
+    pub udp_timeout_secs: u64,
+
+    /// ICMP session timeout in seconds (default: 30).
+    /// ICMP sessions without activity for this duration are removed.
+    #[serde(default = "default_nat64_icmp_timeout")]
+    pub icmp_timeout_secs: u64,
+}
+
+fn default_nat64_port_range() -> (u16, u16) {
+    (32768, 65535)
+}
+
+impl Nat64Config {
+    /// Validate the NAT64 configuration.
+    ///
+    /// Returns an error if:
+    /// - `port_range.0 > port_range.1` (start port greater than end port)
+    /// - `port_range.0 == 0` (port 0 is reserved and cannot be used)
+    /// - Any timeout value is 0 (tcp_timeout_secs, udp_timeout_secs, icmp_timeout_secs)
+    pub fn validate(&self) -> Result<()> {
+        if self.port_range.0 == 0 {
+            anyhow::bail!(
+                "[nat64] port_range start must be > 0 (port 0 is reserved)"
+            );
+        }
+        if self.port_range.0 > self.port_range.1 {
+            anyhow::bail!(
+                "[nat64] port_range start ({}) must be <= end ({})",
+                self.port_range.0,
+                self.port_range.1
+            );
+        }
+        if self.tcp_timeout_secs == 0 {
+            anyhow::bail!("[nat64] tcp_timeout_secs must be > 0");
+        }
+        if self.udp_timeout_secs == 0 {
+            anyhow::bail!("[nat64] udp_timeout_secs must be > 0");
+        }
+        if self.icmp_timeout_secs == 0 {
+            anyhow::bail!("[nat64] icmp_timeout_secs must be > 0");
+        }
+        Ok(())
+    }
+}
+
+fn default_nat64_tcp_timeout() -> u64 {
+    300
+}
+
+fn default_nat64_udp_timeout() -> u64 {
+    30
+}
+
+fn default_nat64_icmp_timeout() -> u64 {
+    30
+}
+
 /// Shared VPN iroh configuration fields (used by both server and client).
 #[derive(Deserialize, Default, Clone)]
 pub struct VpnIrohSharedConfig {
@@ -181,6 +274,9 @@ pub struct VpnServerIrohConfig {
     /// Channel buffer size for TUN writer task (default: 512).
     /// Aggregate buffer for all client -> TUN traffic. Lower values bound memory usage.
     pub tun_writer_channel_size: Option<usize>,
+    /// NAT64 configuration for IPv6-only clients to access IPv4 resources.
+    /// When enabled, clients can access IPv4 addresses via the `64:ff9b::/96` prefix.
+    pub nat64: Option<Nat64Config>,
     /// Shared configuration fields
     #[serde(flatten)]
     pub shared: VpnIrohSharedConfig,
@@ -596,6 +692,50 @@ fn validate_vpn_network6(
     Ok(net)
 }
 
+/// Validate VPN server network configuration.
+///
+/// This is a shared helper that validates:
+/// - At least one of network (IPv4) or network6 (IPv6) is configured
+/// - server_ip is not orphaned without network
+/// - server_ip6 is not orphaned without network6
+/// - Network CIDRs are valid and server IPs are within their respective networks
+fn validate_vpn_networks(
+    network: Option<&str>,
+    server_ip: Option<&str>,
+    network6: Option<&str>,
+    server_ip6: Option<&str>,
+    section: &str,
+) -> Result<()> {
+    // Require at least one of network (IPv4) or network6 (IPv6)
+    if network.is_none() && network6.is_none() {
+        anyhow::bail!(
+            "[{}] At least one of 'network' (IPv4) or 'network6' (IPv6) is required for VPN server configuration.",
+            section
+        );
+    }
+
+    // Validate IPv4: server_ip requires network
+    if server_ip.is_some() && network.is_none() {
+        anyhow::bail!("[{}] 'server_ip' requires 'network' to be set.", section);
+    }
+    if let Some(net) = network {
+        validate_vpn_network(net, server_ip, section)?;
+    }
+
+    // Validate IPv6: server_ip6 requires network6
+    if server_ip6.is_some() && network6.is_none() {
+        anyhow::bail!(
+            "[{}] 'server_ip6' requires 'network6' to be set.",
+            section
+        );
+    }
+    if let Some(net6) = network6 {
+        validate_vpn_network6(net6, server_ip6, section)?;
+    }
+
+    Ok(())
+}
+
 // ============================================================================
 // Config Accessor Methods
 // ============================================================================
@@ -898,22 +1038,14 @@ impl VpnServerConfig {
                 anyhow::bail!("[iroh] Use only one of 'auth_tokens' or 'auth_tokens_file'.");
             }
 
-            // Require network for VPN server
-            let network = iroh.network.as_ref().ok_or_else(|| {
-                anyhow::anyhow!("[iroh] 'network' is required for VPN server configuration.")
-            })?;
-
-            // Validate network CIDR and server_ip
-            validate_vpn_network(network, iroh.server_ip.as_deref(), "iroh")?;
-
-            // Validate IPv6 network CIDR and server_ip6 (optional)
-            // Ensure server_ip6 is not orphaned without network6
-            if iroh.server_ip6.is_some() && iroh.network6.is_none() {
-                anyhow::bail!("[iroh] 'server_ip6' requires 'network6' to be set.");
-            }
-            if let Some(ref network6) = iroh.network6 {
-                validate_vpn_network6(network6, iroh.server_ip6.as_deref(), "iroh")?;
-            }
+            // Validate network configuration (presence, containment, format)
+            validate_vpn_networks(
+                iroh.network.as_deref(),
+                iroh.server_ip.as_deref(),
+                iroh.network6.as_deref(),
+                iroh.server_ip6.as_deref(),
+                "iroh",
+            )?;
 
             // Validate MTU range
             if let Some(mtu) = iroh.shared.mtu {
@@ -1176,13 +1308,13 @@ pub const DEFAULT_TUN_WRITER_CHANNEL_SIZE: usize = 512;
 ///     };
 ///
 ///     let config = ResolvedVpnServerConfig::from_config(&toml_config)?;
-///     assert_eq!(config.network, "10.0.0.0/24");
+///     assert_eq!(config.network, Some("10.0.0.0/24".to_string()));
 ///     Ok(())
 /// }
 /// ```
 #[derive(Debug, Clone)]
 pub struct ResolvedVpnServerConfig {
-    pub network: String,
+    pub network: Option<String>,
     pub server_ip: Option<String>,
     pub network6: Option<String>,
     pub server_ip6: Option<String>,
@@ -1196,31 +1328,45 @@ pub struct ResolvedVpnServerConfig {
     pub client_channel_size: usize,
     pub tun_writer_channel_size: usize,
     pub transport: TransportTuning,
+    pub nat64: Option<Nat64Config>,
 }
 
 impl ResolvedVpnServerConfig {
     /// Create resolved config from TOML config, applying defaults for missing values.
+    ///
+    /// This method performs defensive validation of all fields, so callers do not need
+    /// to call `VpnServerConfig::validate()` beforehand. This is intentional because
+    /// `from_config` accepts a `VpnServerIrohConfig` directly (which can be constructed
+    /// without going through `VpnServerConfig::validate()`).
+    ///
+    /// Validation includes:
+    /// - Network configuration (at least one of IPv4/IPv6 required, server IPs within networks)
+    /// - NAT64 configuration (port range validity, IPv4 source requirement when enabled)
+    /// - MTU range, channel sizes, transport tuning window sizes
+    /// - Auth tokens mutual exclusion
     pub fn from_config(cfg: &VpnServerIrohConfig) -> Result<Self> {
-        let network = cfg.network.clone().ok_or_else(|| {
-            anyhow::anyhow!(
-                "VPN network CIDR is required.\n\
-                 In config: network = \"10.0.0.0/24\""
-            )
-        })?;
+        // Validate network configuration (presence, containment, format)
+        validate_vpn_networks(
+            cfg.network.as_deref(),
+            cfg.server_ip.as_deref(),
+            cfg.network6.as_deref(),
+            cfg.server_ip6.as_deref(),
+            "config",
+        )?;
 
-        // Validate network CIDR format
-        validate_vpn_network(&network, cfg.server_ip.as_deref(), "config")?;
+        // Validate NAT64 configuration
+        if let Some(ref nat64) = cfg.nat64 {
+            // Validate port_range and other NAT64 fields
+            nat64.validate()?;
 
-        // Validate IPv6 network CIDR format (optional)
-        // Ensure server_ip6 is not orphaned without network6
-        if cfg.server_ip6.is_some() && cfg.network6.is_none() {
-            anyhow::bail!(
-                "'server_ip6' requires 'network6' to be set.\n\
-                 In config: network6 = \"fd00::/64\""
-            );
-        }
-        if let Some(ref network6) = cfg.network6 {
-            validate_vpn_network6(network6, cfg.server_ip6.as_deref(), "config")?;
+            // NAT64 requires an IPv4 source address for translated packets.
+            // This can come from either the VPN network (server_ip) or explicit nat64.source_ip
+            if nat64.enabled && nat64.source_ip.is_none() && cfg.network.is_none() {
+                anyhow::bail!(
+                    "[config] NAT64 requires an IPv4 source address for translated packets.\n\
+                     Either set 'network' (IPv4 VPN network) or 'nat64.source_ip' (explicit IPv4 address)."
+                );
+            }
         }
 
         // Apply defaults for optional fields
@@ -1251,7 +1397,7 @@ impl ResolvedVpnServerConfig {
         validate_transport_tuning(&cfg.shared.transport, "iroh.transport")?;
 
         Ok(Self {
-            network,
+            network: cfg.network.clone(),
             server_ip: cfg.server_ip.clone(),
             network6: cfg.network6.clone(),
             server_ip6: cfg.server_ip6.clone(),
@@ -1265,6 +1411,7 @@ impl ResolvedVpnServerConfig {
             client_channel_size,
             tun_writer_channel_size,
             transport: cfg.shared.transport.clone(),
+            nat64: cfg.nat64.clone(),
         })
     }
 }
