@@ -286,24 +286,29 @@ impl VpnClient {
 
     /// Create and configure the TUN device.
     fn create_tun_device(&self, server_info: &ServerInfo) -> VpnResult<TunDevice> {
-        // Build TUN config based on what the server provided
+        // Build TUN config based on what the server provided.
+        // Match includes all fields explicitly to be defensive against future validation changes
+        // in perform_handshake and avoid implicit assumptions about grouped fields.
         let tun_config = match (
             server_info.assigned_ip,
             server_info.network,
             server_info.server_ip,
             server_info.assigned_ip6,
             server_info.network6,
+            server_info.server_ip6,
         ) {
             // Dual-stack: both IPv4 and IPv6
-            (Some(ip4), Some(net4), Some(gw4), Some(ip6), Some(net6)) => TunConfig::new(ip4, net4.netmask(), gw4)
-                .with_mtu(self.config.mtu)
-                .with_ipv6(ip6, net6.prefix_len())?,
+            (Some(ip4), Some(net4), Some(gw4), Some(ip6), Some(net6), Some(_gw6)) => {
+                TunConfig::new(ip4, net4.netmask(), gw4)
+                    .with_mtu(self.config.mtu)
+                    .with_ipv6(ip6, net6.prefix_len())?
+            }
             // IPv4-only
-            (Some(ip4), Some(net4), Some(gw4), None, None) => {
+            (Some(ip4), Some(net4), Some(gw4), None, None, None) => {
                 TunConfig::new(ip4, net4.netmask(), gw4).with_mtu(self.config.mtu)
             }
             // IPv6-only
-            (None, None, None, Some(ip6), Some(net6)) => {
+            (None, None, None, Some(ip6), Some(net6), Some(_gw6)) => {
                 TunConfig::ipv6_only(ip6, net6.prefix_len(), self.config.mtu)?
             }
             // Invalid: should be caught earlier in perform_handshake
