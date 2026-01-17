@@ -1310,6 +1310,17 @@ impl ResolvedVpnServerConfig {
             "config",
         )?;
 
+        // Validate NAT64 configuration: requires an IPv4 source address
+        // This can come from either the VPN network (server_ip) or explicit nat64.source_ip
+        if let Some(ref nat64) = cfg.nat64 {
+            if nat64.enabled && nat64.source_ip.is_none() && cfg.network.is_none() {
+                anyhow::bail!(
+                    "[config] NAT64 requires an IPv4 source address for translated packets.\n\
+                     Either set 'network' (IPv4 VPN network) or 'nat64.source_ip' (explicit IPv4 address)."
+                );
+            }
+        }
+
         // Apply defaults for optional fields
         let mtu = cfg.shared.mtu.unwrap_or(DEFAULT_VPN_MTU);
         validate_mtu(mtu, "config")?;
