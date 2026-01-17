@@ -19,7 +19,7 @@ use crate::signaling::{
 use bytes::{Bytes, BytesMut};
 use ipnet::{Ipv4Net, Ipv6Net};
 use iroh::endpoint::{RecvStream, SendStream};
-use iroh::{Endpoint, EndpointId};
+use iroh::{Endpoint, EndpointAddr, EndpointId, RelayUrl};
 use rand::Rng;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::num::NonZeroU32;
@@ -105,7 +105,14 @@ impl VpnClient {
     }
 
     /// Connect to the VPN server and establish the tunnel.
-    pub async fn connect(&self, endpoint: &Endpoint) -> VpnResult<()> {
+    ///
+    /// # Arguments
+    /// * `endpoint` - The iroh endpoint to use for the connection
+    /// * `relay_urls` - Optional relay URLs to use as connection hints. When DNS
+    ///   discovery is disabled, relay URLs are required for the connection to succeed.
+    ///   iroh will attempt hole punching for direct P2P connections, falling back
+    ///   to relay transport if needed.
+    pub async fn connect(&self, endpoint: &Endpoint, relay_urls: &[String]) -> VpnResult<()> {
         // Parse server endpoint ID
         let server_id: EndpointId = self.config.server_node_id.parse().map_err(|_| {
             VpnError::Config(format!(
@@ -116,9 +123,27 @@ impl VpnClient {
 
         log::info!("Connecting to VPN server: {}", server_id);
 
+        // Build EndpointAddr with relay hints if available.
+        // When DNS discovery is disabled, relay URLs are required for the
+        // connection to succeed. iroh uses the relay for initial connection
+        // routing while still attempting hole punching for direct P2P.
+        let endpoint_addr = if !relay_urls.is_empty() {
+            let mut addr = EndpointAddr::new(server_id);
+            for relay_url_str in relay_urls {
+                let relay_url: RelayUrl = relay_url_str.parse().map_err(|_| {
+                    VpnError::Config(format!("Invalid relay URL: {}", relay_url_str))
+                })?;
+                addr = addr.with_relay_url(relay_url);
+            }
+            log::info!("Using {} relay hint(s) for connection", relay_urls.len());
+            addr
+        } else {
+            EndpointAddr::new(server_id)
+        };
+
         // Connect to server
         let connection = endpoint
-            .connect(server_id, VPN_ALPN)
+            .connect(endpoint_addr, VPN_ALPN)
             .await
             .map_err(|e| VpnError::Signaling(format!("Failed to connect to server: {}", e)))?;
 
@@ -622,6 +647,8 @@ impl VpnClient {
     ///
     /// # Arguments
     /// * `endpoint` - The iroh endpoint to use for connections
+    /// * `relay_urls` - Optional relay URLs to use as connection hints. When DNS
+    ///   discovery is disabled, relay URLs are required for the connection to succeed.
     /// * `max_attempts` - Maximum total connection attempts (None = unlimited).
     ///   This counts all attempts including the initial one:
     ///   - `Some(1)` = try once, exit on any failure (no retries)
@@ -637,6 +664,7 @@ impl VpnClient {
     pub async fn run_with_reconnect(
         &self,
         endpoint: &Endpoint,
+        relay_urls: &[String],
         max_attempts: Option<NonZeroU32>,
     ) -> VpnResult<()> {
         let mut attempt = 0u32;
@@ -650,7 +678,7 @@ impl VpnClient {
                 log::info!("VPN reconnection attempt #{}", attempt);
             }
 
-            match self.connect(endpoint).await {
+            match self.connect(endpoint, relay_urls).await {
                 Ok(()) => {
                     // Graceful exit (shouldn't normally happen)
                     log::info!("VPN connection ended gracefully");
