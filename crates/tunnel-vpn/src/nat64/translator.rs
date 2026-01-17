@@ -769,6 +769,7 @@ mod tests {
             tcp_timeout_secs: 300,
             udp_timeout_secs: 30,
             icmp_timeout_secs: 30,
+            source_ip: None,
         }
     }
 
@@ -1508,6 +1509,7 @@ mod tests {
             tcp_timeout_secs: 1,
             udp_timeout_secs: 1,
             icmp_timeout_secs: 1,
+            source_ip: None,
         };
         let translator = Nat64Translator::new(&config, Ipv4Addr::new(10, 0, 0, 1));
 

@@ -144,6 +144,16 @@ pub struct Nat64Config {
     #[serde(default)]
     pub enabled: bool,
 
+    /// IPv4 source address for translated packets (optional).
+    ///
+    /// If not set, the server's VPN IPv4 address is used (requires `network` to be configured).
+    /// Set this to allow NAT64 in IPv6-only VPN configurations where the host has
+    /// dual-stack connectivity but no IPv4 VPN network is needed.
+    ///
+    /// This should be a routable IPv4 address on the host that can receive return traffic.
+    #[serde(default)]
+    pub source_ip: Option<std::net::Ipv4Addr>,
+
     /// Port range for NAPT (default: 32768-65535).
     /// The first value is the start port, the second is the end port (inclusive).
     #[serde(default = "default_nat64_port_range")]

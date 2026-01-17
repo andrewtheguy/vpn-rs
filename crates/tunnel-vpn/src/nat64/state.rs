@@ -394,6 +394,7 @@ mod tests {
             tcp_timeout_secs: 1,
             udp_timeout_secs: 1,
             icmp_timeout_secs: 1,
+            source_ip: None,
         }
     }
 
@@ -529,6 +530,7 @@ mod tests {
             tcp_timeout_secs: 300,
             udp_timeout_secs: 30,
             icmp_timeout_secs: 30,
+            source_ip: None,
         };
         let table = Nat64StateTable::new(&config);
 
@@ -585,6 +587,7 @@ mod tests {
             tcp_timeout_secs: 300,
             udp_timeout_secs: 30,
             icmp_timeout_secs: 30,
+            source_ip: None,
         };
         let table = Arc::new(Nat64StateTable::new(&config));
 

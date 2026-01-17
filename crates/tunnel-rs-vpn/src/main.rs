@@ -354,6 +354,7 @@ async fn run_vpn_server(resolved: ResolvedVpnServerConfig) -> Result<()> {
         tcp_timeout_secs: cfg.tcp_timeout_secs,
         udp_timeout_secs: cfg.udp_timeout_secs,
         icmp_timeout_secs: cfg.icmp_timeout_secs,
+        source_ip: cfg.source_ip,
     });
 
     // Create VPN server config

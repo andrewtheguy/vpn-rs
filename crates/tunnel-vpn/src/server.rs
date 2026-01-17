@@ -380,27 +380,35 @@ impl VpnServer {
         }
 
         // Initialize NAT64 translator if configured
-        // NAT64 requires IPv4 network for the source IP
-        let nat64 = match (&config.nat64, &ip_pool) {
-            (Some(nat64_config), Some(ip_pool_arc)) if nat64_config.enabled => {
+        // NAT64 needs an IPv4 source address for translated packets.
+        // This can come from either nat64.source_ip or the VPN server_ip.
+        let nat64 = match &config.nat64 {
+            Some(nat64_config) if nat64_config.enabled => {
                 // Validate NAT64 configuration before creating translator
                 nat64_config.validate().map_err(VpnError::Config)?;
 
-                let server_ip = ip_pool_arc.read().await.server_ip();
+                // Determine the IPv4 source address for NAT64:
+                // 1. Use explicit nat64.source_ip if configured
+                // 2. Fall back to VPN server_ip if available
+                let source_ip = match (nat64_config.source_ip, &ip_pool) {
+                    (Some(explicit_ip), _) => explicit_ip,
+                    (None, Some(ip_pool_arc)) => ip_pool_arc.read().await.server_ip(),
+                    (None, None) => {
+                        // This should be caught by config validation, but handle it as a safety net
+                        return Err(VpnError::Config(
+                            "NAT64 requires either 'network' (IPv4) or 'nat64.source_ip' to be configured".to_string(),
+                        ));
+                    }
+                };
+
                 log::info!(
                     "NAT64 enabled: translating {} -> {} with ports {}-{}",
                     NAT64_PREFIX_CIDR,
-                    server_ip,
+                    source_ip,
                     nat64_config.port_range.0,
                     nat64_config.port_range.1
                 );
-                Some(Arc::new(Nat64Translator::new(nat64_config, server_ip)))
-            }
-            (Some(nat64_config), None) if nat64_config.enabled => {
-                // NAT64 enabled but no IPv4 network - this is a config error
-                return Err(VpnError::Config(
-                    "NAT64 requires 'network' (IPv4) to be configured".to_string(),
-                ));
+                Some(Arc::new(Nat64Translator::new(nat64_config, source_ip)))
             }
             _ => None,
         };

@@ -19,6 +19,16 @@ pub struct Nat64Config {
     #[serde(default)]
     pub enabled: bool,
 
+    /// IPv4 source address for translated packets (optional).
+    ///
+    /// If not set, the server's VPN IPv4 address is used (requires `network` to be configured).
+    /// Set this to allow NAT64 in IPv6-only VPN configurations where the host has
+    /// dual-stack connectivity but no IPv4 VPN network is needed.
+    ///
+    /// This should be a routable IPv4 address on the host that can receive return traffic.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_ip: Option<Ipv4Addr>,
+
     /// Port range for NAPT (default: 32768-65535).
     /// The first value is the start port, the second is the end port (inclusive).
     #[serde(default = "default_nat64_port_range")]
@@ -44,6 +54,7 @@ impl Default for Nat64Config {
     fn default() -> Self {
         Self {
             enabled: false,
+            source_ip: None,
             port_range: default_nat64_port_range(),
             tcp_timeout_secs: default_nat64_tcp_timeout(),
             udp_timeout_secs: default_nat64_udp_timeout(),
@@ -238,10 +249,23 @@ impl VpnServerConfig {
             }
         }
 
-        // NAT64 requires network6 (only makes sense for IPv6-capable networks)
+        // NAT64 validation
         if let Some(ref nat64) = self.nat64 {
-            if nat64.enabled && self.network6.is_none() {
-                return Err("NAT64 requires 'network6' to be configured".to_string());
+            if nat64.enabled {
+                // NAT64 requires network6 (only makes sense for IPv6-capable networks)
+                if self.network6.is_none() {
+                    return Err("NAT64 requires 'network6' to be configured".to_string());
+                }
+                // NAT64 requires an IPv4 source address for translated packets.
+                // This can come from either:
+                // 1. The VPN network (server_ip from the IPv4 pool)
+                // 2. An explicit nat64.source_ip configuration
+                if self.network.is_none() && nat64.source_ip.is_none() {
+                    return Err(
+                        "NAT64 requires either 'network' (IPv4) or 'nat64.source_ip' to be configured"
+                            .to_string(),
+                    );
+                }
             }
             nat64.validate()?;
         }
@@ -353,4 +377,166 @@ fn default_nat64_udp_timeout() -> u64 {
 
 fn default_nat64_icmp_timeout() -> u64 {
     30
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn minimal_server_config() -> VpnServerConfig {
+        VpnServerConfig {
+            network: Some("10.0.0.0/24".parse().unwrap()),
+            network6: None,
+            server_ip: None,
+            server_ip6: None,
+            mtu: DEFAULT_MTU,
+            max_clients: 254,
+            auth_tokens: None,
+            drop_on_full: false,
+            client_channel_size: 1024,
+            tun_writer_channel_size: 512,
+            nat64: None,
+        }
+    }
+
+    #[test]
+    fn test_validate_ipv4_only_ok() {
+        let config = minimal_server_config();
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_ipv6_only_ok() {
+        let mut config = minimal_server_config();
+        config.network = None;
+        config.network6 = Some("fd00::/64".parse().unwrap());
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_dual_stack_ok() {
+        let mut config = minimal_server_config();
+        config.network6 = Some("fd00::/64".parse().unwrap());
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_no_network_fails() {
+        let mut config = minimal_server_config();
+        config.network = None;
+        let result = config.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("At least one of"));
+    }
+
+    #[test]
+    fn test_validate_nat64_requires_network6() {
+        let mut config = minimal_server_config();
+        config.nat64 = Some(Nat64Config {
+            enabled: true,
+            ..Default::default()
+        });
+        let result = config.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("network6"));
+    }
+
+    #[test]
+    fn test_validate_nat64_requires_ipv4_source() {
+        // NAT64 without network and without source_ip should fail
+        let mut config = minimal_server_config();
+        config.network = None;
+        config.network6 = Some("fd00::/64".parse().unwrap());
+        config.nat64 = Some(Nat64Config {
+            enabled: true,
+            ..Default::default()
+        });
+        let result = config.validate();
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("NAT64 requires either 'network' (IPv4) or 'nat64.source_ip'"),
+            "Expected NAT64 source IP error, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_validate_nat64_dual_stack_ok() {
+        let mut config = minimal_server_config();
+        config.network6 = Some("fd00::/64".parse().unwrap());
+        config.nat64 = Some(Nat64Config {
+            enabled: true,
+            ..Default::default()
+        });
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_nat64_ipv6_only_with_source_ip_ok() {
+        // NAT64 with IPv6-only + explicit source_ip should succeed
+        let mut config = minimal_server_config();
+        config.network = None;
+        config.network6 = Some("fd00::/64".parse().unwrap());
+        config.nat64 = Some(Nat64Config {
+            enabled: true,
+            source_ip: Some("192.168.1.1".parse().unwrap()),
+            ..Default::default()
+        });
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_nat64_disabled_ipv6_only_ok() {
+        // NAT64 disabled should allow IPv6-only
+        let mut config = minimal_server_config();
+        config.network = None;
+        config.network6 = Some("fd00::/64".parse().unwrap());
+        config.nat64 = Some(Nat64Config {
+            enabled: false,
+            ..Default::default()
+        });
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_server_ip_requires_network() {
+        let mut config = minimal_server_config();
+        config.network = None;
+        config.network6 = Some("fd00::/64".parse().unwrap());
+        config.server_ip = Some("10.0.0.1".parse().unwrap());
+        let result = config.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("'server_ip' requires 'network'"));
+    }
+
+    #[test]
+    fn test_validate_server_ip6_requires_network6() {
+        let mut config = minimal_server_config();
+        config.server_ip6 = Some("fd00::1".parse().unwrap());
+        let result = config.validate();
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .contains("'server_ip6' requires 'network6'"));
+    }
+
+    #[test]
+    fn test_validate_server_ip_within_network() {
+        let mut config = minimal_server_config();
+        config.server_ip = Some("192.168.1.1".parse().unwrap()); // Not in 10.0.0.0/24
+        let result = config.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not within 'network'"));
+    }
+
+    #[test]
+    fn test_validate_server_ip6_within_network6() {
+        let mut config = minimal_server_config();
+        config.network6 = Some("fd00::/64".parse().unwrap());
+        config.server_ip6 = Some("fd01::1".parse().unwrap()); // Not in fd00::/64
+        let result = config.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not within 'network6'"));
+    }
 }

@@ -179,6 +179,17 @@ auth_tokens = ["iXXXXXXXXXXXXXXXXX"]  # Replace with real token from generate-to
 # Enable NAT64 translation (default: false)
 # enabled = true
 
+# IPv4 source address for translated packets (optional).
+# By default, NAT64 uses the server's VPN IPv4 address (from 'network').
+# Set this to enable NAT64 in IPv6-only VPN configurations where:
+#   - The VPN has no IPv4 network (only 'network6' is configured)
+#   - The host has dual-stack connectivity (an IPv4 address on its interface)
+#
+# Example: Your VPN server host has IPv4 address 203.0.113.5 on its WAN interface.
+#          Configure source_ip = "203.0.113.5" to use that for NAT64 translation.
+#
+# source_ip = "203.0.113.5"
+
 # Port range for NAPT (default: 32768-65535)
 # Each translated connection uses one port from this range.
 # port_range = [32768, 65535]
