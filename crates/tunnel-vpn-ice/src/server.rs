@@ -8,7 +8,7 @@ use crate::config::VpnIceServerConfig;
 use crate::error::{VpnIceError, VpnIceResult};
 use bytes::{Bytes, BytesMut};
 use ipnet::{Ipv4Net, Ipv6Net};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -50,6 +50,7 @@ struct SimpleIpPool {
     server_ip: Ipv4Addr,
     next_host: u32,
     max_host: u32,
+    allocated: HashSet<Ipv4Addr>,
 }
 
 impl SimpleIpPool {
@@ -71,6 +72,7 @@ impl SimpleIpPool {
             server_ip: server,
             next_host,
             max_host: broadcast_u32,
+            allocated: HashSet::new(),
         }
     }
 
@@ -86,8 +88,10 @@ impl SimpleIpPool {
             // Skip network address, broadcast, and server IP
             if candidate != self.network.network() 
                 && candidate != self.network.broadcast()
-                && candidate != self.server_ip 
+                && candidate != self.server_ip
+                && !self.allocated.contains(&candidate)
             {
+                self.allocated.insert(candidate);
                 return Some(candidate);
             }
             
@@ -98,6 +102,10 @@ impl SimpleIpPool {
         }
     }
 
+    #[allow(dead_code)]
+    fn release(&mut self, ip: Ipv4Addr) {
+        self.allocated.remove(&ip);
+    }
 
 }
 
