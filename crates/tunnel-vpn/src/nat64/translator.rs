@@ -41,6 +41,9 @@ const ICMPV4_ECHO_REQUEST: u8 = 8;
 /// ICMPv4 echo reply type.
 const ICMPV4_ECHO_REPLY: u8 = 0;
 
+/// Default cleanup interval for expired NAT64 state entries (60 seconds).
+const DEFAULT_CLEANUP_INTERVAL_SECS: u64 = 60;
+
 /// NAT64 translator for converting between IPv6 and IPv4 packets.
 pub struct Nat64Translator {
     /// NAT64 state table for connection tracking.
@@ -63,7 +66,7 @@ impl Nat64Translator {
             state: Nat64StateTable::new(config),
             server_ip4,
             last_cleanup: RwLock::new(Instant::now()),
-            cleanup_interval: Duration::from_secs(60), // Cleanup every minute
+            cleanup_interval: Duration::from_secs(DEFAULT_CLEANUP_INTERVAL_SECS),
         }
     }
 
