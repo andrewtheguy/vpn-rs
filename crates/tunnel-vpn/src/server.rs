@@ -1207,14 +1207,19 @@ impl VpnServer {
                         );
 
                         if is_nat64_address(&dest_ip6) {
+                            log::info!("NAT64: translating packet to {}", dest_ip6);
                             // Translate IPv6 to IPv4
                             match nat64.translate_6to4(packet) {
                                 Ok(ipv4_packet) => {
                                     stats.packets_nat64_6to4.fetch_add(1, Ordering::Relaxed);
+                                    log::info!(
+                                        "NAT64 6to4: translated {} bytes -> {} bytes for client {}",
+                                        packet.len(), ipv4_packet.len(), client_id
+                                    );
                                     packet_bytes = Cow::Owned(ipv4_packet);
                                 }
                                 Err(e) => {
-                                    log::debug!(
+                                    log::warn!(
                                         "NAT64 translation error for client {}: {}",
                                         client_id, e
                                     );
@@ -1334,6 +1339,7 @@ impl VpnServer {
                         match nat64.translate_4to6(packet) {
                             Ok(Nat64TranslateResult::Translated { client_ip6, packet }) => {
                                 self.stats.packets_nat64_4to6.fetch_add(1, Ordering::Relaxed);
+                                log::info!("NAT64 4to6: translated response for client {}", client_ip6);
                                 (Cow::Owned(packet), Some(client_ip6))
                             }
                             Ok(Nat64TranslateResult::NotNat64Packet) => {
