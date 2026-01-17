@@ -26,6 +26,7 @@ pub enum Nat64TranslateResult {
     /// This is normal for IPv4 packets that aren't responses to NAT64-translated traffic.
     NotNat64Packet,
 }
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
@@ -69,6 +70,10 @@ pub struct Nat64Translator {
     last_cleanup: RwLock<Instant>,
     /// Cleanup interval.
     cleanup_interval: Duration,
+    /// Monotonically increasing IPv4 packet identification for translated packets.
+    /// Used to populate the Identification field in IPv4 headers, which is needed
+    /// for fragment reassembly if packets are fragmented in transit.
+    packet_id: AtomicU16,
 }
 
 impl Nat64Translator {
@@ -82,6 +87,7 @@ impl Nat64Translator {
             server_ip4,
             last_cleanup: RwLock::new(Instant::now()),
             cleanup_interval: Duration::from_secs(DEFAULT_CLEANUP_INTERVAL_SECS),
+            packet_id: AtomicU16::new(0),
         }
     }
 
@@ -476,11 +482,14 @@ impl Nat64Translator {
 
         let mut packet = Vec::with_capacity(total_length as usize);
 
+        // Get next packet ID (wraps at u16::MAX, which is fine for IPv4 Identification)
+        let packet_id = self.packet_id.fetch_add(1, Ordering::Relaxed);
+
         // IPv4 header
         packet.push(0x45); // Version 4, IHL 5 (20 bytes)
         packet.push(0x00); // DSCP/ECN
         packet.extend_from_slice(&total_length.to_be_bytes()); // Total length
-        packet.extend_from_slice(&[0x00, 0x00]); // Identification
+        packet.extend_from_slice(&packet_id.to_be_bytes()); // Identification
         packet.extend_from_slice(&[0x40, 0x00]); // Flags (DF) + Fragment offset
         packet.push(ttl); // TTL (decremented from IPv6 hop limit)
         packet.push(protocol); // Protocol
