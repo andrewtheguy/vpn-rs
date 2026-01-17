@@ -78,20 +78,15 @@ impl SimpleIpPool {
 
     fn allocate(&mut self) -> Option<Ipv4Addr> {
         let start = self.next_host;
-        let network_u32 = u32::from(self.network.network());
-        let broadcast_u32 = u32::from(self.network.broadcast());
         loop {
             let candidate = Ipv4Addr::from(self.next_host);
-            let candidate_u32 = self.next_host;
             self.next_host = self.next_host.saturating_add(1);
             if self.next_host >= self.max_host {
                 self.next_host = u32::from(self.network.network()).saturating_add(1);
             }
             
             // Skip network address, broadcast, and server IP
-            if candidate_u32 > network_u32
-                && candidate_u32 < broadcast_u32
-                && candidate != self.network.network() 
+            if candidate != self.network.network() 
                 && candidate != self.network.broadcast()
                 && candidate != self.server_ip
                 && !self.allocated.contains(&candidate)
