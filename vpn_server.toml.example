@@ -202,16 +202,29 @@ auth_tokens = ["iXXXXXXXXXXXXXXXXX"]  # Replace with real token from generate-to
 # Enable NAT64 translation (default: false)
 # enabled = true
 
-# IPv4 source address for translated packets (optional).
-# By default, NAT64 uses the server's VPN IPv4 address (from 'network').
-# Set this to enable NAT64 in IPv6-only VPN configurations where:
-#   - The VPN has no IPv4 network (only 'network6' is configured)
-#   - The host has dual-stack connectivity (an IPv4 address on its interface)
+# IPv4 source address for translated packets.
 #
-# Example: Your VPN server host has IPv4 address 203.0.113.5 on its WAN interface.
-#          Configure source_ip = "203.0.113.5" to use that for NAT64 translation.
+# IMPORTANT: This IP must NOT be the server's own TUN interface IP (server_ip).
+# When NAT64 translates IPv6→IPv4, it uses source_ip as the source address.
+# Return packets destined for source_ip must be received through the TUN interface
+# for 4→6 translation to work. If source_ip equals the TUN IP, the kernel delivers
+# return packets locally instead of through TUN, breaking NAT64 responses.
 #
-# source_ip = "203.0.113.5"
+# Recommended configurations:
+#
+# 1. Dual-stack VPN (network + network6):
+#    Use an IP from the VPN range that is NOT the server's IP.
+#    Example: network = "10.0.0.0/24", server_ip = "10.0.0.1"
+#             source_ip = "10.0.0.100"  # Different from server_ip
+#
+# 2. IPv6-only VPN (network6 only):
+#    Use the host's WAN IPv4 address or a routable IPv4 that reaches TUN.
+#    Example: source_ip = "203.0.113.5"  # Host's WAN IPv4
+#
+# If not set, defaults to server_ip from the VPN network, which will NOT work
+# for NAT64 response translation. Always set this explicitly when using NAT64.
+#
+# source_ip = "10.0.0.100"
 
 # Port range for NAPT (default: 32768-65535)
 # Each translated connection uses one port from this range.
