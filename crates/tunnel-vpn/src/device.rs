@@ -97,12 +97,18 @@ impl TunConfig {
         //
         // Derive unique placeholder from IPv6 address to avoid conflicts when
         // multiple IPv6-only TUN devices exist on the same host.
+        // In ipv6_only, we hash full octets so placeholder_ip/placeholder_netmask
+        // are more unique than the previous last-two-bytes-only approach.
         let octets = address6.octets();
-        // Use last two bytes of IPv6 address for uniqueness, but ensure we stay
-        // in the 169.254.1.1 - 169.254.254.254 range (avoiding reserved .0/.255 subnets
-        // and .0/.255 host addresses).
-        let third = octets[14].wrapping_add(1).clamp(1, 254); // 1-254
-        let fourth = octets[15].wrapping_add(1).clamp(1, 254); // 1-254
+        // Hash all IPv6 bytes into two stable bytes, then ensure we stay in
+        // the 169.254.1.1 - 169.254.254.254 range (avoiding reserved .0/.255
+        // subnets and .0/.255 host addresses).
+        let mut hash: u16 = 0x9e37;
+        for (idx, byte) in octets.iter().enumerate() {
+            hash = hash.rotate_left(5) ^ (*byte as u16).wrapping_add(idx as u16);
+        }
+        let third = (hash as u8).wrapping_add(1).clamp(1, 254); // 1-254
+        let fourth = ((hash >> 8) as u8).wrapping_add(1).clamp(1, 254); // 1-254
         let placeholder_ip = Ipv4Addr::new(169, 254, third, fourth);
         let placeholder_netmask = Ipv4Addr::new(255, 255, 255, 255);
         Ok(Self {
