@@ -55,8 +55,7 @@ struct SimpleIpPool {
 
 impl SimpleIpPool {
     fn new(network: Ipv4Net, server_ip: Option<Ipv4Addr>) -> Self {
-        let hosts: Vec<_> = network.hosts().collect();
-        let server = server_ip.unwrap_or_else(|| hosts.first().copied().unwrap_or(Ipv4Addr::new(10, 0, 0, 1)));
+        let server = server_ip.unwrap_or_else(|| default_server_ip4(network));
         let network_u32 = u32::from(network.network());
         let broadcast_u32 = u32::from(network.broadcast());
         let server_u32 = u32::from(server);
@@ -78,15 +77,20 @@ impl SimpleIpPool {
 
     fn allocate(&mut self) -> Option<Ipv4Addr> {
         let start = self.next_host;
+        let network_u32 = u32::from(self.network.network());
+        let broadcast_u32 = u32::from(self.network.broadcast());
         loop {
             let candidate = Ipv4Addr::from(self.next_host);
+            let candidate_u32 = self.next_host;
             self.next_host = self.next_host.saturating_add(1);
             if self.next_host >= self.max_host {
                 self.next_host = u32::from(self.network.network()).saturating_add(1);
             }
             
             // Skip network address, broadcast, and server IP
-            if candidate != self.network.network() 
+            if candidate_u32 > network_u32
+                && candidate_u32 < broadcast_u32
+                && candidate != self.network.network() 
                 && candidate != self.network.broadcast()
                 && candidate != self.server_ip
                 && !self.allocated.contains(&candidate)
@@ -102,7 +106,6 @@ impl SimpleIpPool {
         }
     }
 
-    #[allow(dead_code)]
     fn release(&mut self, ip: Ipv4Addr) {
         self.allocated.remove(&ip);
     }
@@ -114,27 +117,23 @@ struct SimpleIp6Pool {
     network: Ipv6Net,
     server_ip: Ipv6Addr,
     next_suffix: u128,
+    allocated: HashSet<Ipv6Addr>,
 }
 
 impl SimpleIp6Pool {
     fn new(network: Ipv6Net, server_ip: Option<Ipv6Addr>) -> Self {
-        let base = network.network();
-        let segments = base.segments();
-        let server = server_ip.unwrap_or_else(|| Ipv6Addr::new(
-            segments[0], segments[1], segments[2], segments[3],
-            segments[4], segments[5], segments[6], segments[7].saturating_add(1),
-        ));
+        let server = server_ip.unwrap_or_else(|| default_server_ip6(network));
         
         Self {
             network,
             server_ip: server,
             next_suffix: 1, // Start from ::1 and skip server IP as needed.
+            allocated: HashSet::new(),
         }
     }
 
     fn allocate(&mut self) -> Option<Ipv6Addr> {
         let base = self.network.network();
-        let base_u128 = u128::from(base);
         let host_bits = 128u32.saturating_sub(self.network.prefix_len() as u32);
         let max_offset = if host_bits >= 128 {
             u128::MAX
@@ -143,6 +142,7 @@ impl SimpleIp6Pool {
         };
         let max_attempts = max_offset.saturating_add(1);
         let mut attempts = 0u128;
+        let base_u128 = u128::from(base);
 
         while attempts < max_attempts {
             if self.next_suffix >= max_attempts {
@@ -154,7 +154,8 @@ impl SimpleIp6Pool {
 
             let addr_u128 = base_u128.checked_add(offset)?;
             let ip = Ipv6Addr::from(addr_u128);
-            if ip != self.server_ip {
+            if ip != self.server_ip && !self.allocated.contains(&ip) {
+                self.allocated.insert(ip);
                 return Some(ip);
             }
         }
@@ -162,6 +163,9 @@ impl SimpleIp6Pool {
         None
     }
 
+    fn release(&mut self, ip: Ipv6Addr) {
+        self.allocated.remove(&ip);
+    }
 
 }
 
@@ -444,6 +448,17 @@ impl VpnIceServer {
                 ice_disconnect_rx: ice_disconnect_rx.clone(),
             })
             .await;
+
+        if let Some(ip) = handshake_result.assigned_ip {
+            if let Some(pool) = ip_pool.as_mut() {
+                pool.release(ip);
+            }
+        }
+        if let Some(ip6) = handshake_result.assigned_ip6 {
+            if let Some(pool) = ip6_pool.as_mut() {
+                pool.release(ip6);
+            }
+        }
 
         // Cleanup
         ice_keeper_handle.abort();
@@ -830,12 +845,14 @@ struct RunVpnLoopParams {
 }
 
 fn default_server_ip4(net: Ipv4Net) -> Ipv4Addr {
-    let hosts: Vec<_> = net.hosts().collect();
-    hosts.first().copied().unwrap_or(Ipv4Addr::new(10, 0, 0, 1))
+    net.hosts().next().unwrap_or_else(|| net.network())
 }
 
 fn default_server_ip6(net: Ipv6Net) -> Ipv6Addr {
     let base = net.network();
+    if net.prefix_len() == 128 {
+        return base;
+    }
     let segments = base.segments();
     Ipv6Addr::new(
         segments[0],
