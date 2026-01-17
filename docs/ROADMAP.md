@@ -22,7 +22,7 @@ Port forwarding modes (iroh, nostr, manual) support TCP and UDP tunneling with e
 
 **Status:** Partial
 
-NAT64 basic translation is implemented for TCP, UDP, and ICMP echo (ping). The following features are not yet supported:
+NAT64 basic translation is implemented for TCP, UDP, and ICMP echo (ping). The table below shows the implementation status for each NAT64 feature:
 
 | Feature | Status | Notes |
 |---------|--------|-------|

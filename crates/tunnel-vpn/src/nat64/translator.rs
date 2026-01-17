@@ -94,7 +94,7 @@ impl Nat64Translator {
 
         let payload_length = u16::from_be_bytes([ipv6_packet[4], ipv6_packet[5]]) as usize;
         let next_header = ipv6_packet[6];
-        let _hop_limit = ipv6_packet[7];
+        let hop_limit = ipv6_packet[7];
 
         // Extract source and destination IPv6 addresses
         let src_ip6 = Ipv6Addr::from(<[u8; 16]>::try_from(&ipv6_packet[8..24]).unwrap());
@@ -124,14 +124,16 @@ impl Nat64Translator {
         self.maybe_cleanup().ok();
 
         // Translate based on protocol
+        // TTL is decremented per RFC 6146 Section 4
+        let ttl = hop_limit.saturating_sub(1);
         match protocol {
             Nat64Protocol::Tcp => {
-                self.translate_tcp_6to4(src_ip6, dst_ip4, payload, payload_length as u16)
+                self.translate_tcp_6to4(src_ip6, dst_ip4, payload, payload_length as u16, ttl)
             }
             Nat64Protocol::Udp => {
-                self.translate_udp_6to4(src_ip6, dst_ip4, payload, payload_length as u16)
+                self.translate_udp_6to4(src_ip6, dst_ip4, payload, payload_length as u16, ttl)
             }
-            Nat64Protocol::Icmp => self.translate_icmp_6to4(src_ip6, dst_ip4, payload),
+            Nat64Protocol::Icmp => self.translate_icmp_6to4(src_ip6, dst_ip4, payload, ttl),
         }
     }
 
@@ -162,7 +164,7 @@ impl Nat64Translator {
 
         let total_length = u16::from_be_bytes([ipv4_packet[2], ipv4_packet[3]]) as usize;
         let protocol = ipv4_packet[9];
-        let _ttl = ipv4_packet[8];
+        let ttl = ipv4_packet[8];
 
         // Extract source and destination IPv4 addresses
         let src_ip4 = Ipv4Addr::from(<[u8; 4]>::try_from(&ipv4_packet[12..16]).unwrap());
@@ -201,10 +203,12 @@ impl Nat64Translator {
         let payload_length = payload.len() as u16;
 
         // Translate based on protocol
+        // Hop limit is decremented per RFC 6146 Section 4
+        let hop_limit = ttl.saturating_sub(1);
         match nat64_protocol {
-            Nat64Protocol::Tcp => self.translate_tcp_4to6(src_ip4, payload, payload_length),
-            Nat64Protocol::Udp => self.translate_udp_4to6(src_ip4, payload, payload_length),
-            Nat64Protocol::Icmp => self.translate_icmp_4to6(src_ip4, payload),
+            Nat64Protocol::Tcp => self.translate_tcp_4to6(src_ip4, payload, payload_length, hop_limit),
+            Nat64Protocol::Udp => self.translate_udp_4to6(src_ip4, payload, payload_length, hop_limit),
+            Nat64Protocol::Icmp => self.translate_icmp_4to6(src_ip4, payload, hop_limit),
         }
     }
 
@@ -215,6 +219,7 @@ impl Nat64Translator {
         dst_ip4: Ipv4Addr,
         tcp_payload: &[u8],
         payload_len: u16,
+        ttl: u8,
     ) -> VpnResult<Vec<u8>> {
         if tcp_payload.len() < TCP_HEADER_MIN_SIZE {
             return Err(VpnError::Nat64("TCP segment too short".into()));
@@ -240,6 +245,7 @@ impl Nat64Translator {
             payload_len,
             src_ip6,
             embed_ipv4_in_nat64(dst_ip4),
+            ttl,
         )
     }
 
@@ -250,6 +256,7 @@ impl Nat64Translator {
         dst_ip4: Ipv4Addr,
         udp_payload: &[u8],
         payload_len: u16,
+        ttl: u8,
     ) -> VpnResult<Vec<u8>> {
         if udp_payload.len() < UDP_HEADER_SIZE {
             return Err(VpnError::Nat64("UDP datagram too short".into()));
@@ -275,6 +282,7 @@ impl Nat64Translator {
             payload_len,
             src_ip6,
             embed_ipv4_in_nat64(dst_ip4),
+            ttl,
         )
     }
 
@@ -284,6 +292,7 @@ impl Nat64Translator {
         src_ip6: Ipv6Addr,
         dst_ip4: Ipv4Addr,
         icmp_payload: &[u8],
+        ttl: u8,
     ) -> VpnResult<Vec<u8>> {
         if icmp_payload.len() < ICMP_HEADER_MIN_SIZE {
             return Err(VpnError::Nat64("ICMPv6 message too short".into()));
@@ -330,7 +339,7 @@ impl Nat64Translator {
         icmpv4[3] = checksum as u8;
 
         // Build IPv4 packet
-        self.build_ipv4_header_with_payload(dst_ip4, 1, &icmpv4) // ICMP = 1
+        self.build_ipv4_header_with_payload(dst_ip4, 1, &icmpv4, ttl) // ICMP = 1
     }
 
     /// Build an IPv4 packet with translated TCP/UDP payload.
@@ -346,6 +355,7 @@ impl Nat64Translator {
         payload_len: u16,
         src_ip6: Ipv6Addr,
         dst_ip6: Ipv6Addr,
+        ttl: u8,
     ) -> VpnResult<Vec<u8>> {
         use super::checksum::update_checksum_16;
 
@@ -373,7 +383,7 @@ impl Nat64Translator {
         new_payload[checksum_offset] = (new_checksum >> 8) as u8;
         new_payload[checksum_offset + 1] = new_checksum as u8;
 
-        self.build_ipv4_header_with_payload(dst_ip4, protocol, &new_payload)
+        self.build_ipv4_header_with_payload(dst_ip4, protocol, &new_payload, ttl)
     }
 
     /// Build an IPv4 header and combine with payload.
@@ -382,6 +392,7 @@ impl Nat64Translator {
         dst_ip4: Ipv4Addr,
         protocol: u8,
         payload: &[u8],
+        ttl: u8,
     ) -> VpnResult<Vec<u8>> {
         let total_length = (IPV4_HEADER_SIZE + payload.len()) as u16;
 
@@ -393,7 +404,7 @@ impl Nat64Translator {
         packet.extend_from_slice(&total_length.to_be_bytes()); // Total length
         packet.extend_from_slice(&[0x00, 0x00]); // Identification
         packet.extend_from_slice(&[0x40, 0x00]); // Flags (DF) + Fragment offset
-        packet.push(64); // TTL
+        packet.push(ttl); // TTL (decremented from IPv6 hop limit)
         packet.push(protocol); // Protocol
         packet.extend_from_slice(&[0x00, 0x00]); // Header checksum placeholder
         packet.extend_from_slice(&self.server_ip4.octets()); // Source IP
@@ -416,6 +427,7 @@ impl Nat64Translator {
         src_ip4: Ipv4Addr,
         tcp_payload: &[u8],
         payload_len: u16,
+        hop_limit: u8,
     ) -> VpnResult<(Ipv6Addr, Vec<u8>)> {
         use super::checksum::update_checksum_16;
 
@@ -459,7 +471,7 @@ impl Nat64Translator {
         new_payload[16] = (new_checksum >> 8) as u8;
         new_payload[17] = new_checksum as u8;
 
-        let packet = self.build_ipv6_packet(src_ip6, dst_ip6, 6, &new_payload);
+        let packet = self.build_ipv6_packet(src_ip6, dst_ip6, 6, &new_payload, hop_limit);
         Ok((client_ip6, packet))
     }
 
@@ -469,6 +481,7 @@ impl Nat64Translator {
         src_ip4: Ipv4Addr,
         udp_payload: &[u8],
         payload_len: u16,
+        hop_limit: u8,
     ) -> VpnResult<(Ipv6Addr, Vec<u8>)> {
         use super::checksum::update_checksum_16;
 
@@ -519,7 +532,7 @@ impl Nat64Translator {
         new_payload[6] = (new_checksum >> 8) as u8;
         new_payload[7] = new_checksum as u8;
 
-        let packet = self.build_ipv6_packet(src_ip6, dst_ip6, 17, &new_payload);
+        let packet = self.build_ipv6_packet(src_ip6, dst_ip6, 17, &new_payload, hop_limit);
         Ok((client_ip6, packet))
     }
 
@@ -528,6 +541,7 @@ impl Nat64Translator {
         &self,
         src_ip4: Ipv4Addr,
         icmp_payload: &[u8],
+        hop_limit: u8,
     ) -> VpnResult<(Ipv6Addr, Vec<u8>)> {
         if icmp_payload.len() < ICMP_HEADER_MIN_SIZE {
             return Err(VpnError::Nat64("ICMPv4 message too short".into()));
@@ -573,7 +587,7 @@ impl Nat64Translator {
         icmpv6[2] = (checksum >> 8) as u8;
         icmpv6[3] = checksum as u8;
 
-        let packet = self.build_ipv6_packet(src_ip6, dst_ip6, 58, &icmpv6); // ICMPv6 = 58
+        let packet = self.build_ipv6_packet(src_ip6, dst_ip6, 58, &icmpv6, hop_limit); // ICMPv6 = 58
         Ok((client_ip6, packet))
     }
 
@@ -584,6 +598,7 @@ impl Nat64Translator {
         dst_ip6: Ipv6Addr,
         next_header: u8,
         payload: &[u8],
+        hop_limit: u8,
     ) -> Vec<u8> {
         let payload_length = payload.len() as u16;
 
@@ -594,7 +609,7 @@ impl Nat64Translator {
         packet.extend_from_slice(&[0x00, 0x00, 0x00]); // Traffic class + flow label
         packet.extend_from_slice(&payload_length.to_be_bytes()); // Payload length
         packet.push(next_header); // Next header
-        packet.push(64); // Hop limit
+        packet.push(hop_limit); // Hop limit (decremented from IPv4 TTL)
         packet.extend_from_slice(&src_ip6.octets()); // Source
         packet.extend_from_slice(&dst_ip6.octets()); // Destination
 
@@ -710,8 +725,9 @@ mod tests {
         let src: Ipv6Addr = "64:ff9b::8.8.8.8".parse().unwrap();
         let dst: Ipv6Addr = "fd00::2".parse().unwrap();
         let payload = vec![0x12, 0x34, 0x56, 0x78];
+        let hop_limit = 63u8;
 
-        let packet = translator.build_ipv6_packet(src, dst, 17, &payload);
+        let packet = translator.build_ipv6_packet(src, dst, 17, &payload, hop_limit);
 
         // Verify header
         assert_eq!(packet[0] >> 4, 6); // Version
@@ -720,7 +736,7 @@ mod tests {
             payload.len() as u16
         ); // Payload length
         assert_eq!(packet[6], 17); // Next header (UDP)
-        assert_eq!(packet[7], 64); // Hop limit
+        assert_eq!(packet[7], hop_limit); // Hop limit
 
         // Verify addresses
         let src_from_packet = Ipv6Addr::from(<[u8; 16]>::try_from(&packet[8..24]).unwrap());
