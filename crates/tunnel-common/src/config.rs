@@ -179,6 +179,29 @@ fn default_nat64_port_range() -> (u16, u16) {
     (32768, 65535)
 }
 
+impl Nat64Config {
+    /// Validate the NAT64 configuration.
+    ///
+    /// Returns an error if:
+    /// - `port_range.0 > port_range.1` (start port greater than end port)
+    /// - `port_range.0 == 0` (port 0 is reserved and cannot be used)
+    pub fn validate(&self) -> Result<()> {
+        if self.port_range.0 == 0 {
+            anyhow::bail!(
+                "[nat64] port_range start must be > 0 (port 0 is reserved)"
+            );
+        }
+        if self.port_range.0 > self.port_range.1 {
+            anyhow::bail!(
+                "[nat64] port_range start ({}) must be <= end ({})",
+                self.port_range.0,
+                self.port_range.1
+            );
+        }
+        Ok(())
+    }
+}
+
 fn default_nat64_tcp_timeout() -> u64 {
     300
 }
@@ -1300,6 +1323,17 @@ pub struct ResolvedVpnServerConfig {
 
 impl ResolvedVpnServerConfig {
     /// Create resolved config from TOML config, applying defaults for missing values.
+    ///
+    /// This method performs defensive validation of all fields, so callers do not need
+    /// to call `VpnServerConfig::validate()` beforehand. This is intentional because
+    /// `from_config` accepts a `VpnServerIrohConfig` directly (which can be constructed
+    /// without going through `VpnServerConfig::validate()`).
+    ///
+    /// Validation includes:
+    /// - Network configuration (at least one of IPv4/IPv6 required, server IPs within networks)
+    /// - NAT64 configuration (port range validity, IPv4 source requirement when enabled)
+    /// - MTU range, channel sizes, transport tuning window sizes
+    /// - Auth tokens mutual exclusion
     pub fn from_config(cfg: &VpnServerIrohConfig) -> Result<Self> {
         // Validate network configuration (presence, containment, format)
         validate_vpn_networks(
@@ -1310,9 +1344,13 @@ impl ResolvedVpnServerConfig {
             "config",
         )?;
 
-        // Validate NAT64 configuration: requires an IPv4 source address
-        // This can come from either the VPN network (server_ip) or explicit nat64.source_ip
+        // Validate NAT64 configuration
         if let Some(ref nat64) = cfg.nat64 {
+            // Validate port_range and other NAT64 fields
+            nat64.validate()?;
+
+            // NAT64 requires an IPv4 source address for translated packets.
+            // This can come from either the VPN network (server_ip) or explicit nat64.source_ip
             if nat64.enabled && nat64.source_ip.is_none() && cfg.network.is_none() {
                 anyhow::bail!(
                     "[config] NAT64 requires an IPv4 source address for translated packets.\n\
