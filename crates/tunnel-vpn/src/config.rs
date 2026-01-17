@@ -235,6 +235,18 @@ pub struct VpnServerConfig {
     /// When enabled, clients can access IPv4 addresses via the `64:ff9b::/96` prefix.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub nat64: Option<Nat64Config>,
+
+    /// Disable source IP spoofing checks (default: false).
+    ///
+    /// When `false` (default): Only packets with source IPs that don't belong to
+    /// other connected clients are allowed. This prevents inter-client spoofing
+    /// while allowing clients to use their own public IP addresses (useful for
+    /// dual-stack scenarios).
+    ///
+    /// When `true`: All source IP validation is disabled. Use with caution as this
+    /// allows clients to send packets with arbitrary source addresses.
+    #[serde(default)]
+    pub disable_spoofing_check: bool,
 }
 
 impl VpnServerConfig {
@@ -436,6 +448,7 @@ mod tests {
             client_channel_size: 1024,
             tun_writer_channel_size: 512,
             nat64: None,
+            disable_spoofing_check: false,
         }
     }
 
