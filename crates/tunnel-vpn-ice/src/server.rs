@@ -919,7 +919,11 @@ impl VpnIceServer {
         };
 
         log::debug!("[{}] VPN loop ended: {}", short_id, reason);
-        Err(VpnIceError::Internal(format!("Connection ended: {}", reason)))
+        if result.0 == "inbound" && reason.starts_with("Client disconnected:") {
+            Ok(())
+        } else {
+            Err(VpnIceError::Internal(format!("Connection ended: {}", reason)))
+        }
     }
 }
 
