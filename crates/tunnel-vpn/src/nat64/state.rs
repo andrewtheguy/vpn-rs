@@ -391,6 +391,13 @@ impl Nat64StateTable {
                 // Remove reverse mapping first to avoid orphan entries if we panic later.
                 self.reverse.remove(&reverse_key);
 
+                // There is a small transient window where reverse_key has been removed
+                // but the forward entry may still exist. A concurrent lookup_reverse
+                // could miss the mapping and drop a packet; this is acceptable for NAT64.
+                // The conditional self.forward.remove_if and the restore via
+                // self.reverse.entry(reverse_key).or_insert(forward_key) close the window
+                // if the forward entry was refreshed.
+
                 // Use remove_if for atomic conditional removal:
                 // only remove if the entry is still expired
                 let maybe_removed = self.forward.remove_if(&forward_key, |_key, entry| {
@@ -593,7 +600,7 @@ mod tests {
             // just started and Instant::now() is close to the epoch.
             entry.last_activity = Instant::now()
                 .checked_sub(Duration::from_secs(2))
-                .unwrap_or_else(|| Instant::now() - Duration::from_millis(1));
+                .unwrap_or_else(Instant::now);
         }
 
         // Sleep past the timeout to ensure expiry regardless of whether checked_sub
@@ -626,9 +633,7 @@ mod tests {
         };
 
         if let Some(mut entry) = table.forward.get_mut(&forward_key) {
-            entry.last_activity = Instant::now()
-                .checked_sub(Duration::from_secs(2))
-                .unwrap_or_else(|| Instant::now() - Duration::from_millis(1));
+            entry.last_activity = Instant::now() - Duration::from_secs(2);
         }
 
         let removed = cleanup_single_expired_with_hook(&table, forward_key.clone(), |key| {
