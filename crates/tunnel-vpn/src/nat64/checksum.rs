@@ -99,7 +99,6 @@ pub fn ipv6_pseudo_header_sum(src: Ipv6Addr, dst: Ipv6Addr, next_header: u8, len
 /// `old_checksum` is the current checksum (already complemented),
 /// `old_value` is the old 16-bit value, `new_value` is the new 16-bit value.
 #[inline]
-#[allow(dead_code)]
 pub fn update_checksum_16(old_checksum: u16, old_value: u16, new_value: u16) -> u16 {
     // HC' = ~(~HC + ~m + m') from RFC 1624
     let hc = !old_checksum as u32;

@@ -325,20 +325,22 @@ impl Nat64Translator {
         dst_ip4: Ipv4Addr,
         protocol: u8,
         payload: &[u8],
-        _old_src_port: u16,
+        old_src_port: u16,
         new_src_port: u16,
         old_checksum: u16,
         payload_len: u16,
         src_ip6: Ipv6Addr,
         dst_ip6: Ipv6Addr,
     ) -> VpnResult<Vec<u8>> {
+        use super::checksum::update_checksum_16;
+
         // Create modified payload with new source port
         let mut new_payload = payload.to_vec();
         new_payload[0] = (new_src_port >> 8) as u8;
         new_payload[1] = new_src_port as u8;
 
-        // Adjust checksum for pseudo-header change and port change
-        let new_checksum = adjust_checksum_6to4(
+        // Adjust checksum for pseudo-header change (IPv6 -> IPv4)
+        let checksum_after_pseudo = adjust_checksum_6to4(
             old_checksum,
             src_ip6,
             dst_ip6,
@@ -347,6 +349,9 @@ impl Nat64Translator {
             protocol,
             payload_len,
         );
+
+        // Also adjust checksum for source port change (old_src_port -> new_src_port)
+        let new_checksum = update_checksum_16(checksum_after_pseudo, old_src_port, new_src_port);
 
         // Update checksum in payload
         let checksum_offset = if protocol == 6 { 16 } else { 6 }; // TCP vs UDP
@@ -397,6 +402,8 @@ impl Nat64Translator {
         tcp_payload: &[u8],
         payload_len: u16,
     ) -> VpnResult<(Ipv6Addr, Vec<u8>)> {
+        use super::checksum::update_checksum_16;
+
         if tcp_payload.len() < TCP_HEADER_MIN_SIZE {
             return Err(VpnError::Nat64("TCP segment too short".into()));
         }
@@ -420,8 +427,8 @@ impl Nat64Translator {
         new_payload[2] = (client_port >> 8) as u8;
         new_payload[3] = client_port as u8;
 
-        // Adjust checksum
-        let new_checksum = adjust_checksum_4to6(
+        // Adjust checksum for pseudo-header change (IPv4 -> IPv6)
+        let checksum_after_pseudo = adjust_checksum_4to6(
             old_checksum,
             src_ip4,
             self.server_ip4,
@@ -430,6 +437,9 @@ impl Nat64Translator {
             6, // TCP
             payload_len,
         );
+
+        // Also adjust checksum for destination port change (dst_port -> client_port)
+        let new_checksum = update_checksum_16(checksum_after_pseudo, dst_port, client_port);
 
         new_payload[16] = (new_checksum >> 8) as u8;
         new_payload[17] = new_checksum as u8;
@@ -445,6 +455,8 @@ impl Nat64Translator {
         udp_payload: &[u8],
         payload_len: u16,
     ) -> VpnResult<(Ipv6Addr, Vec<u8>)> {
+        use super::checksum::update_checksum_16;
+
         if udp_payload.len() < UDP_HEADER_SIZE {
             return Err(VpnError::Nat64("UDP datagram too short".into()));
         }
@@ -471,10 +483,11 @@ impl Nat64Translator {
         // Adjust checksum (handle zero checksum in UDP)
         let new_checksum = if old_checksum == 0 {
             // UDP checksum was 0 (optional in IPv4), but mandatory in IPv6
-            // We need to compute it from scratch
+            // We need to compute it from scratch (new_payload already has client_port)
             self.compute_udp_checksum_ipv6(src_ip6, dst_ip6, &new_payload)
         } else {
-            adjust_checksum_4to6(
+            // First adjust for pseudo-header change (IPv4 -> IPv6)
+            let checksum_after_pseudo = adjust_checksum_4to6(
                 old_checksum,
                 src_ip4,
                 self.server_ip4,
@@ -482,7 +495,10 @@ impl Nat64Translator {
                 dst_ip6,
                 17, // UDP
                 payload_len,
-            )
+            );
+
+            // Also adjust checksum for destination port change (dst_port -> client_port)
+            update_checksum_16(checksum_after_pseudo, dst_port, client_port)
         };
 
         new_payload[6] = (new_checksum >> 8) as u8;
