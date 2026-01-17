@@ -1096,7 +1096,16 @@ mod tests {
         // Step 1: Client sends IPv6 packet to NAT64 destination
         let ipv6_packet =
             build_test_ipv6_udp_packet(client_ip6, dest_ip6, src_port, dst_port, payload);
+        let original_hop_limit = ipv6_packet[7]; // Hop limit is at offset 7 in IPv6 header
         let ipv4_outbound = translator.translate_6to4(&ipv6_packet).unwrap();
+
+        // Verify TTL is decremented (RFC 6146 Section 4)
+        let ipv4_ttl = ipv4_outbound[8]; // TTL is at offset 8 in IPv4 header
+        assert_eq!(
+            ipv4_ttl,
+            original_hop_limit - 1,
+            "IPv4 TTL should be IPv6 hop limit - 1"
+        );
 
         // Extract the translated source port (NAPT port)
         let udp_start = 20;
@@ -1114,6 +1123,7 @@ mod tests {
             translated_port, // Dest port is the translated NAPT port
             response_payload,
         );
+        let original_ipv4_ttl = ipv4_response[8]; // TTL is at offset 8 in IPv4 header
 
         // Step 3: Translate response back to IPv6
         let result = translator.translate_4to6(&ipv4_response).unwrap();
@@ -1128,6 +1138,14 @@ mod tests {
         // Verify IPv6 header
         assert_eq!(ipv6_response[0] >> 4, 6); // Version 6
         assert_eq!(ipv6_response[6], 17); // Next header = UDP
+
+        // Verify hop limit is decremented (RFC 6146 Section 4)
+        let ipv6_hop_limit = ipv6_response[7]; // Hop limit is at offset 7 in IPv6 header
+        assert_eq!(
+            ipv6_hop_limit,
+            original_ipv4_ttl - 1,
+            "IPv6 hop limit should be IPv4 TTL - 1"
+        );
 
         // Verify source is NAT64 address of original destination
         let src_from_response =
