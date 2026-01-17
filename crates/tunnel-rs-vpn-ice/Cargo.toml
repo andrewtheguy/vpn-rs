@@ -8,37 +8,33 @@ description = "IP-over-QUIC VPN tunnel via ICE/Nostr P2P"
 name = "tunnel-rs-vpn-ice"
 path = "src/main.rs"
 
-[dependencies]
-tunnel-vpn-ice = { path = "../tunnel-vpn-ice" }
-tunnel-common = { path = "../tunnel-common" }
-tunnel-ice = { path = "../tunnel-ice" }
-
-# CLI
-clap = { version = "4", features = ["derive"] }
-
-# Async runtime
-tokio = { version = "1", features = ["full"] }
-
-# Error handling
-anyhow = "1"
-
-# Logging
-env_logger = "0.11"
-log = "0.4"
-
-# IP handling
-ipnet = "2"
-
-# Nostr (for key generation)
-nostr-sdk = "0.37"
-
-# Serialization
-serde = { version = "1", features = ["derive"] }
-toml = "0.8"
-
-[target.'cfg(all(not(target_env = "musl"), not(target_os = "windows")))'.dependencies]
-tikv-jemallocator = { version = "0.6", optional = true }
-
 [features]
 default = ["jemalloc"]
-jemalloc = ["tikv-jemallocator"]
+jemalloc = ["dep:tikv-jemallocator"]
+
+[dependencies]
+tunnel-common = { path = "../tunnel-common" }
+tunnel-vpn-ice = { path = "../tunnel-vpn-ice" }
+
+# CLI + runtime
+clap = { version = "4", features = ["derive"] }
+tokio = { version = "1", features = ["full"] }
+
+# Config + serialization
+toml = "0.8"
+serde = { version = "1", features = ["derive"] }
+
+# Utilities
+anyhow = "1"
+log = "0.4"
+env_logger = "0.11"
+ipnet = "2"
+dirs = "5"
+
+# Nostr signaling
+nostr-sdk = "0.44.1"
+
+# Performance: jemalloc allocator for better multi-threaded allocation
+# Exclude musl (static linking issues) and Windows (not supported)
+[target.'cfg(all(not(target_env = "musl"), not(target_os = "windows")))'.dependencies]
+tikv-jemallocator = { version = "0.6", optional = true }

@@ -15,6 +15,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
+use quinn::{RecvStream, SendStream};
 use tunnel_ice::signaling::{
     ManualOffer, ManualRequest, NostrSignaling, SignalingError, MANUAL_SIGNAL_VERSION,
 };
@@ -97,9 +98,7 @@ impl SimpleIpPool {
         }
     }
 
-    fn server_ip(&self) -> Ipv4Addr {
-        self.server_ip
-    }
+
 }
 
 /// Simple IPv6 address pool for VPN clients.
@@ -128,19 +127,22 @@ impl SimpleIp6Pool {
     fn allocate(&mut self) -> Option<Ipv6Addr> {
         let base = self.network.network();
         let segments = base.segments();
-        
-        // Simple allocation: increment suffix
-        let ip = Ipv6Addr::new(
-            segments[0], segments[1], segments[2], segments[3],
-            segments[4], segments[5], segments[6], (segments[7] as u64 + self.next_suffix) as u16,
-        );
-        self.next_suffix += 1;
-        Some(ip)
+
+        // Simple allocation: increment suffix, skipping the server IP if needed.
+        loop {
+            let ip = Ipv6Addr::new(
+                segments[0], segments[1], segments[2], segments[3],
+                segments[4], segments[5], segments[6],
+                (segments[7] as u64 + self.next_suffix) as u16,
+            );
+            self.next_suffix += 1;
+            if ip != self.server_ip {
+                return Some(ip);
+            }
+        }
     }
 
-    fn server_ip(&self) -> Ipv6Addr {
-        self.server_ip
-    }
+
 }
 
 /// VPN server using ICE/Nostr transport.
@@ -183,10 +185,6 @@ impl VpnIceServer {
         } else {
             None
         };
-
-        // Create TUN device
-        let tun_device = self.create_tun_device()?;
-        log::info!("Created TUN device: {}", tun_device.name());
 
         // Initialize Nostr signaling
         let relay_list = self.config.relays.clone();
@@ -293,7 +291,6 @@ impl VpnIceServer {
                     request,
                     &mut ip_pool,
                     &mut ip6_pool,
-                    &tun_device,
                 )
                 .await
             {
@@ -316,12 +313,15 @@ impl VpnIceServer {
         request: ManualRequest,
         ip_pool: &mut Option<SimpleIpPool>,
         ip6_pool: &mut Option<SimpleIp6Pool>,
-        tun_device: &TunDevice,
     ) -> VpnIceResult<()> {
         let session_id = request.session_id.clone();
         let short_id = short_session_id(&session_id).to_string();
 
         log::info!("[{}] Starting VPN session...", short_id);
+
+        // Create TUN device
+        let tun_device = self.create_tun_device()?;
+        log::info!("[{}] Created TUN device: {}", short_id, tun_device.name());
 
         // Gather ICE candidates
         let ice = IceEndpoint::gather(&self.config.stun_servers)
@@ -374,7 +374,7 @@ impl VpnIceServer {
         );
 
         // Spawn ICE keeper
-        let mut ice_disconnect_rx = ice_conn.disconnect_rx.clone();
+        let ice_disconnect_rx = ice_conn.disconnect_rx.clone();
         let ice_keeper_handle = tokio::spawn(ice_conn.ice_keeper.run());
 
         // Create QUIC endpoint
@@ -395,7 +395,7 @@ impl VpnIceServer {
         log::info!("[{}] QUIC connected", short_id);
 
         // Perform VPN handshake
-        let (handshake_result, device_id) =
+        let (handshake_result, _device_id) =
             self.perform_handshake(&conn, ip_pool, ip6_pool).await?;
 
         log::info!("[{}] VPN handshake complete:", short_id);
@@ -515,7 +515,7 @@ impl VpnIceServer {
         ip6_pool: &mut Option<SimpleIp6Pool>,
     ) -> VpnIceResult<(HandshakeResult, u64)> {
         // Accept handshake stream
-        let (mut send, mut recv) = conn
+        let (mut send, mut recv): (SendStream, RecvStream) = conn
             .accept_bi()
             .await
             .map_err(|e| VpnIceError::Quic(format!("Failed to accept handshake stream: {}", e)))?;
@@ -543,7 +543,7 @@ impl VpnIceServer {
         // At least one IP must be assigned
         if assigned_ip.is_none() && assigned_ip6.is_none() {
             let response = VpnHandshakeResponse::rejected("No IP addresses available");
-            write_message(&mut send, &response.encode()?)
+            write_message::<SendStream>(&mut send, &response.encode()?)
                 .await
                 .map_err(|e| VpnIceError::Handshake(e.to_string()))?;
             return Err(VpnIceError::Rejected("No IP addresses available".to_string()));
@@ -596,14 +596,14 @@ impl VpnIceServer {
             }
             _ => {
                 let response = VpnHandshakeResponse::rejected("Configuration error");
-                write_message(&mut send, &response.encode()?)
+                write_message::<SendStream>(&mut send, &response.encode()?)
                     .await
                     .map_err(|e| VpnIceError::Handshake(e.to_string()))?;
                 return Err(VpnIceError::Config("Invalid network configuration".to_string()));
             }
         };
 
-        write_message(&mut send, &response.encode()?)
+        write_message::<SendStream>(&mut send, &response.encode()?)
             .await
             .map_err(|e| VpnIceError::Handshake(e.to_string()))?;
 
@@ -624,7 +624,7 @@ impl VpnIceServer {
     async fn run_vpn_loop(
         &self,
         short_id: &str,
-        tun_device: &TunDevice,
+        tun_device: TunDevice,
         data_send: quinn::SendStream,
         data_recv: quinn::RecvStream,
         client_ip: Option<Ipv4Addr>,
@@ -659,6 +659,7 @@ impl VpnIceServer {
         // Inbound task (QUIC -> TUN)
         // Filter packets to only those destined for this client
         let inbound_short_id = short_id.to_string();
+        let outbound_tx_pong = outbound_tx.clone();
         let mut inbound_handle: tokio::task::JoinHandle<Option<String>> = tokio::spawn(async move {
             const MAX_TUN_WRITE_FAILURES: u32 = 10;
             let mut data_recv = data_recv;
@@ -690,6 +691,11 @@ impl VpnIceServer {
                     DataMessageType::HeartbeatPing => {
                         let now = inbound_start_time.elapsed().as_millis() as u64;
                         last_ping_inbound.store(now, Ordering::Relaxed);
+                        // Send Pong
+                        let pong = Bytes::copy_from_slice(&[DataMessageType::HeartbeatPong.as_byte()]);
+                        if let Err(_) = outbound_tx_pong.send(pong).await {
+                             return Some("Failed to send Pong".to_string());
+                        }
                         continue;
                     }
                     DataMessageType::HeartbeatPong => {
@@ -781,7 +787,6 @@ impl VpnIceServer {
 
         // Heartbeat checker task (send pong in response to ping, check for timeout)
         let heartbeat_short_id = short_id.to_string();
-        let outbound_tx_heartbeat = outbound_tx.clone();
         let mut heartbeat_handle: tokio::task::JoinHandle<Option<String>> = tokio::spawn(async move {
             let heartbeat_start = start_time;
             loop {

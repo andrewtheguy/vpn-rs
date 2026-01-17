@@ -3,7 +3,7 @@
 use crate::error::VpnIceError;
 use ipnet::{Ipv4Net, Ipv6Net};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+
 use std::net::{Ipv4Addr, Ipv6Addr};
 
 /// Default MTU for VPN tunnel.

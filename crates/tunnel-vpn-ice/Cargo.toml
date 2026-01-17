@@ -53,7 +53,7 @@ etherparse = "0.18"
 dashmap = "6"
 
 # ICE transport
-str0m = "0.6"
+str0m = "0.14"
 
 # QUIC transport
 quinn = "0.11"

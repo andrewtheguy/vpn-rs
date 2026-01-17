@@ -15,6 +15,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
+use quinn::{RecvStream, SendStream};
 use tunnel_ice::signaling::{
     ManualAnswer, ManualOffer, ManualRequest, NostrSignaling, OfferWaitError, MANUAL_SIGNAL_VERSION,
 };
@@ -193,8 +194,7 @@ impl VpnIceClient {
             .map_err(|e| VpnIceError::Ice(e.to_string()))?;
 
         log::info!(
-            "ICE connected: local {} -> remote {}",
-            ice_conn.local_addr,
+            "ICE connected: -> {}",
             ice_conn.remote_addr
         );
 
@@ -276,7 +276,7 @@ impl VpnIceClient {
             };
 
         // Open data stream
-        let (data_send, data_recv) = conn
+        let (data_send, data_recv): (SendStream, RecvStream) = conn
             .open_bi()
             .await
             .map_err(|e| VpnIceError::Quic(format!("Failed to open data stream: {}", e)))?;
@@ -383,14 +383,14 @@ impl VpnIceClient {
         &self,
         connection: &quinn::Connection,
     ) -> VpnIceResult<ServerInfo> {
-        let (mut send, mut recv) = connection
+        let (mut send, mut recv): (SendStream, RecvStream) = connection
             .open_bi()
             .await
             .map_err(|e| VpnIceError::Quic(format!("Failed to open stream: {}", e)))?;
 
         // Send handshake (no auth token for nostr mode - npub is the auth)
         let handshake = VpnHandshake::new(self.device_id);
-        write_message(&mut send, &handshake.encode()?)
+        write_message::<SendStream>(&mut send, &handshake.encode()?)
             .await
             .map_err(|e| VpnIceError::Handshake(e.to_string()))?;
 

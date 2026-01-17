@@ -68,7 +68,8 @@ tunnel-rs provides multiple modes for establishing tunnels. **Use `iroh` mode** 
 **Binary layout:**
 - `tunnel-rs`: Port forwarding with iroh mode
 - `tunnel-rs-ice`: Port forwarding with manual and nostr modes
-- `tunnel-rs-vpn`: VPN mode
+- `tunnel-rs-vpn`: VPN mode (iroh)
+- `tunnel-rs-vpn-ice`: VPN mode (Nostr/ICE)
 
 ### Port Forwarding Modes
 
@@ -82,7 +83,8 @@ tunnel-rs provides multiple modes for establishing tunnels. **Use `iroh` mode** 
 
 | Mode | NAT Traversal | Discovery | Platform | External Dependency |
 |------|---------------|-----------|----------|---------------------|
-| **vpn** | Best (relay fallback) | Automatic | Linux/macOS/Windows | iroh relay infrastructure |
+| **vpn** (iroh) | Best (relay fallback) | Automatic | Linux/macOS/Windows | iroh relay infrastructure |
+| **vpn-ice** | STUN only | Nostr | Linux/macOS/Windows | Nostr relays (decentralized) |
 
 > See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for detailed diagrams and technical deep-dives.
 
@@ -780,6 +782,72 @@ This differs from WireGuard where a static public key identifies each device and
 ## Single Instance Lock
 
 Only one VPN client can run at a time per machine. This prevents routing conflicts and TUN device issues. The lock is automatically released when the client exits.
+
+---
+
+# VPN Mode (Nostr / ICE)
+
+For completely decentralized VPN without iroh infrastructure dependencies, use `tunnel-rs-vpn-ice`. This mode uses Nostr relays for signaling and ICE (STUN) for NAT traversal.
+
+> [!WARNING]
+> **NAT Traversal Limitation:** This mode uses STUN-only NAT traversal. If both peers are behind symmetric NATs (common in enterprise/cellular networks), the connection will fail. Use `tunnel-rs-vpn` (iroh mode) for reliable connectivity with relay fallback.
+
+## Quick Start
+
+### 1. Installation
+
+Download `tunnel-rs-vpn-ice` from releases or build from source:
+```bash
+cargo install --path . -p tunnel-rs-vpn-ice
+```
+
+### 2. Generate Nostr Keys
+
+Both server and client need a Nostr identity (nsec/npub).
+
+```bash
+# Generate server key
+tunnel-rs-vpn-ice generate-nostr-key > server_nsec.txt
+tunnel-rs-vpn-ice show-pubkey server_nsec.txt
+# Output: npub1server... (Share this with client)
+
+# Generate client key
+tunnel-rs-vpn-ice generate-nostr-key > client_nsec.txt
+tunnel-rs-vpn-ice show-pubkey client_nsec.txt
+# Output: npub1client... (Add this to server config whitelist)
+```
+
+### 3. Server Configuration
+
+Create `vpn_server_ice.toml`:
+```toml
+network = "10.0.0.0/24"
+server_ip = "10.0.0.1"
+nsec_file = "server_nsec.txt"
+
+# Whitelist allowed client npubs
+peers = ["npub1client..."] 
+```
+
+Start server:
+```bash
+sudo tunnel-rs-vpn-ice server -c vpn_server_ice.toml
+```
+
+### 4. Client Configuration
+
+Create `vpn_client_ice.toml`:
+```toml
+nsec_file = "client_nsec.txt"
+peer_npub = "npub1server..." # Server's npub
+```
+
+Start client:
+```bash
+sudo tunnel-rs-vpn-ice client -c vpn_client_ice.toml
+```
+
+**See [`vpn_server_ice.toml.example`](vpn_server_ice.toml.example) and [`vpn_client_ice.toml.example`](vpn_client_ice.toml.example) for full configuration options.**
 
 ---
 
