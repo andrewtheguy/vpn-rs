@@ -139,7 +139,7 @@ impl VpnIceClient {
             ice_pwd: local_creds.pass.clone(),
             candidates: local_candidates.clone(),
             session_id: session_id.clone(),
-            timestamp: current_timestamp(),
+            timestamp: 0,
             source: Some("vpn://connect".to_string()), // VPN mode indicator
         };
 
