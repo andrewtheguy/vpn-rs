@@ -31,6 +31,7 @@
 //! - ICMP/ICMPv6: Echo request/reply translation with identifier mapping
 
 mod checksum;
+mod clock;
 mod state;
 mod translator;
 

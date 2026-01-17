@@ -8,7 +8,9 @@ use crate::error::{VpnError, VpnResult};
 use dashmap::DashMap;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::sync::atomic::{AtomicU16, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use super::clock::Instant;
 
 /// Protocol type for NAT64 connection tracking.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -418,6 +420,7 @@ impl Nat64StateTable {
 
 #[cfg(test)]
 mod tests {
+    use super::clock::MockClock;
     use super::*;
 
     fn test_config() -> Nat64Config {
@@ -567,6 +570,9 @@ mod tests {
 
     #[test]
     fn test_cleanup_expired() {
+        // Reset mock clock to a known state
+        MockClock::set_time(Duration::ZERO);
+
         let table = Nat64StateTable::new(&test_config());
 
         let client_ip6: Ipv6Addr = "fd00::2".parse().unwrap();
@@ -579,28 +585,15 @@ mod tests {
 
         assert_eq!(table.active_mappings(), 1);
 
-        // Make the mapping appear expired by setting last_activity to the past
-        let forward_key = ForwardKey {
-            client_ip6,
-            client_port: 12345,
-            dest_ip4,
-            dest_port: 80,
-            protocol: Nat64Protocol::Tcp,
-        };
-        if let Some(mut entry) = table.forward.get_mut(&forward_key) {
-            // Try to set last_activity to 2 seconds ago (timeout is 1 second).
-            // Use checked_sub with fallback to handle fast CI where process may have
-            // just started and Instant::now() is close to the epoch.
-            entry.last_activity = Instant::now()
-                .checked_sub(Duration::from_secs(2))
-                .unwrap_or_else(Instant::now);
-        }
+        // Cleanup should not remove anything yet (not expired)
+        let removed = table.cleanup_expired();
+        assert_eq!(removed, 0);
+        assert_eq!(table.active_mappings(), 1);
 
-        // Sleep past the timeout to ensure expiry regardless of whether checked_sub
-        // succeeded (entry 2s old) or fell back (entry ~0s old, needs full timeout)
-        std::thread::sleep(Duration::from_millis(1100));
+        // Advance time past the TCP timeout (1 second in test_config)
+        MockClock::advance(Duration::from_secs(2));
 
-        // Cleanup should remove the expired entry
+        // Cleanup should now remove the expired entry
         let removed = table.cleanup_expired();
         assert_eq!(removed, 1);
         assert_eq!(table.active_mappings(), 0);
@@ -608,6 +601,9 @@ mod tests {
 
     #[test]
     fn test_cleanup_expired_restores_reverse_on_refresh() {
+        // Reset mock clock to a known state
+        MockClock::set_time(Duration::ZERO);
+
         let table = Nat64StateTable::new(&test_config());
 
         let client_ip6: Ipv6Addr = "fd00::2".parse().unwrap();
@@ -625,23 +621,25 @@ mod tests {
             protocol: Nat64Protocol::Tcp,
         };
 
-        if let Some(mut entry) = table.forward.get_mut(&forward_key) {
-            // Use checked_sub with fallback to handle fast CI where process may have
-            // just started and Instant::now() is close to the epoch.
-            entry.last_activity = Instant::now()
-                .checked_sub(Duration::from_secs(2))
-                .unwrap_or_else(Instant::now);
-        }
+        // Advance time past the timeout to make the entry appear expired
+        MockClock::advance(Duration::from_secs(2));
 
+        // Use the hook to simulate a concurrent refresh during cleanup.
+        // The entry is "expired" when cleanup starts, but gets refreshed
+        // (via the hook) after the reverse key is removed but before
+        // the forward entry is conditionally removed.
         let removed = cleanup_single_expired_with_hook(&table, forward_key.clone(), |key| {
             if let Some(mut entry) = table.forward.get_mut(key) {
+                // Refresh the entry by updating last_activity to "now"
                 entry.last_activity = Instant::now();
             }
         });
 
+        // Entry should NOT be removed because it was refreshed
         assert_eq!(removed, 0);
         assert_eq!(table.active_mappings(), 1);
 
+        // Reverse mapping should be restored
         let reverse_key = ReverseKey {
             translated_port,
             src_ip4: dest_ip4,

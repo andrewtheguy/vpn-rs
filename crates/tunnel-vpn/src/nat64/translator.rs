@@ -28,7 +28,9 @@ pub enum Nat64TranslateResult {
 }
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::{Arc, RwLock};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use super::clock::Instant;
 
 /// IPv4 header size (without options).
 const IPV4_HEADER_SIZE: usize = 20;
@@ -815,6 +817,7 @@ pub fn create_nat64_translator(
 
 #[cfg(test)]
 mod tests {
+    use super::clock::MockClock;
     use super::*;
 
     fn test_config() -> Nat64Config {
@@ -1559,13 +1562,16 @@ mod tests {
 
     #[test]
     fn test_mapping_expiry_via_cleanup() {
+        // Reset mock clock to a known state
+        MockClock::set_time(Duration::ZERO);
+
         // Use very short timeouts for testing
         let config = Nat64Config {
             enabled: true,
             port_range: (10000, 10100),
-            tcp_timeout_secs: 1,
-            udp_timeout_secs: 1,
-            icmp_timeout_secs: 1,
+            tcp_timeout_secs: 60,
+            udp_timeout_secs: 30,
+            icmp_timeout_secs: 10,
             source_ip: None,
         };
         let translator = Nat64Translator::new(&config, Ipv4Addr::new(10, 0, 0, 1));
@@ -1574,23 +1580,139 @@ mod tests {
         let dest_ip4 = Ipv4Addr::new(8, 8, 8, 8);
         let dest_ip6 = embed_ipv4_in_nat64(dest_ip4);
 
-        // Create a mapping
+        // Create a UDP mapping
         let packet = build_test_ipv6_udp_packet(client_ip6, dest_ip6, 22222, 53, b"test");
         translator.translate_6to4(&packet).unwrap();
         assert_eq!(translator.active_mappings(), 1);
 
-        // Force the mapping to appear expired by manipulating last_activity
-        // Access internal state (we need to make last_activity old)
-        // Since we can't easily manipulate internal state, we rely on cleanup()
-        // after manually aging entries via the state table's forward map
-
-        // For this test, we'll just verify cleanup() can be called
-        // A more thorough test would require exposing internal state or using
-        // a test-specific time source
+        // Cleanup immediately after creation should not remove anything
         let removed = translator.cleanup();
-        // Initially nothing should be expired (just created)
         assert_eq!(removed, 0);
         assert_eq!(translator.active_mappings(), 1);
+
+        // Advance time past the UDP timeout (30 seconds)
+        MockClock::advance(Duration::from_secs(31));
+
+        // Now cleanup should remove the expired mapping
+        let removed = translator.cleanup();
+        assert_eq!(removed, 1);
+        assert_eq!(translator.active_mappings(), 0);
+    }
+
+    #[test]
+    fn test_mapping_expiry_protocol_specific_timeouts() {
+        // Reset mock clock to a known state
+        MockClock::set_time(Duration::ZERO);
+
+        // Configure distinct timeouts for each protocol
+        let config = Nat64Config {
+            enabled: true,
+            port_range: (10000, 10200),
+            tcp_timeout_secs: 120, // 2 minutes
+            udp_timeout_secs: 60,  // 1 minute
+            icmp_timeout_secs: 30, // 30 seconds
+            source_ip: None,
+        };
+        let translator = Nat64Translator::new(&config, Ipv4Addr::new(10, 0, 0, 1));
+
+        let client_ip6: Ipv6Addr = "fd00::7".parse().unwrap();
+        let dest_ip4 = Ipv4Addr::new(8, 8, 8, 8);
+        let dest_ip6 = embed_ipv4_in_nat64(dest_ip4);
+
+        // Create one mapping per protocol
+        // TCP mapping
+        let tcp_packet = build_test_ipv6_tcp_packet(client_ip6, dest_ip6, 10000, 80, b"");
+        translator.translate_6to4(&tcp_packet).unwrap();
+
+        // UDP mapping
+        let udp_packet = build_test_ipv6_udp_packet(client_ip6, dest_ip6, 10001, 53, b"query");
+        translator.translate_6to4(&udp_packet).unwrap();
+
+        // ICMP mapping
+        let icmp_packet = build_test_ipv6_icmp_echo_request(client_ip6, dest_ip6, 1234, 1, b"ping");
+        translator.translate_6to4(&icmp_packet).unwrap();
+
+        assert_eq!(translator.active_mappings(), 3);
+
+        // After 31 seconds: ICMP should expire, UDP and TCP should remain
+        MockClock::advance(Duration::from_secs(31));
+        let removed = translator.cleanup();
+        assert_eq!(removed, 1, "ICMP mapping should expire after 31s");
+        assert_eq!(translator.active_mappings(), 2);
+
+        // After 30 more seconds (total 61s): UDP should expire, TCP should remain
+        MockClock::advance(Duration::from_secs(30));
+        let removed = translator.cleanup();
+        assert_eq!(removed, 1, "UDP mapping should expire after 61s");
+        assert_eq!(translator.active_mappings(), 1);
+
+        // After 60 more seconds (total 121s): TCP should expire
+        MockClock::advance(Duration::from_secs(60));
+        let removed = translator.cleanup();
+        assert_eq!(removed, 1, "TCP mapping should expire after 121s");
+        assert_eq!(translator.active_mappings(), 0);
+    }
+
+    #[test]
+    fn test_mapping_activity_refresh_prevents_expiry() {
+        // Reset mock clock to a known state
+        MockClock::set_time(Duration::ZERO);
+
+        let config = Nat64Config {
+            enabled: true,
+            port_range: (10000, 10100),
+            tcp_timeout_secs: 60,
+            udp_timeout_secs: 60,
+            icmp_timeout_secs: 60,
+            source_ip: None,
+        };
+        let server_ip4 = Ipv4Addr::new(10, 0, 0, 1);
+        let translator = Nat64Translator::new(&config, server_ip4);
+
+        let client_ip6: Ipv6Addr = "fd00::8".parse().unwrap();
+        let dest_ip4 = Ipv4Addr::new(8, 8, 8, 8);
+        let dest_ip6 = embed_ipv4_in_nat64(dest_ip4);
+        let client_port = 33333u16;
+        let dest_port = 53u16;
+
+        // Create a UDP mapping
+        let packet = build_test_ipv6_udp_packet(client_ip6, dest_ip6, client_port, dest_port, b"q1");
+        let ipv4_packet = translator.translate_6to4(&packet).unwrap();
+        let translated_port = u16::from_be_bytes([ipv4_packet[20], ipv4_packet[21]]);
+        assert_eq!(translator.active_mappings(), 1);
+
+        // Advance time to 50 seconds (within timeout)
+        MockClock::advance(Duration::from_secs(50));
+
+        // Simulate a response (4to6 translation), which refreshes the mapping
+        let response = build_test_ipv4_udp_packet(
+            dest_ip4,
+            server_ip4,
+            dest_port,
+            translated_port,
+            b"response",
+        );
+        let result = translator.translate_4to6(&response);
+        assert!(
+            matches!(result, Ok(Nat64TranslateResult::Translated { .. })),
+            "Response should translate successfully"
+        );
+
+        // Advance another 50 seconds (total 100s from start, but only 50s from last activity)
+        MockClock::advance(Duration::from_secs(50));
+
+        // Cleanup should NOT remove the mapping because it was refreshed
+        let removed = translator.cleanup();
+        assert_eq!(removed, 0, "Mapping should not expire due to activity refresh");
+        assert_eq!(translator.active_mappings(), 1);
+
+        // Advance past the timeout from last activity (11 more seconds = 61s from refresh)
+        MockClock::advance(Duration::from_secs(11));
+
+        // Now cleanup should remove the expired mapping
+        let removed = translator.cleanup();
+        assert_eq!(removed, 1, "Mapping should expire 60s after last activity");
+        assert_eq!(translator.active_mappings(), 0);
     }
 
     #[test]
