@@ -52,6 +52,26 @@ impl Default for Nat64Config {
     }
 }
 
+impl Nat64Config {
+    /// Validate the NAT64 configuration.
+    ///
+    /// Returns an error if:
+    /// - `port_range.0 > port_range.1` (start port greater than end port)
+    /// - `port_range.0 == 0` (port 0 is reserved and cannot be used)
+    pub fn validate(&self) -> Result<(), String> {
+        if self.port_range.0 == 0 {
+            return Err("NAT64 port_range start must be > 0 (port 0 is reserved)".to_string());
+        }
+        if self.port_range.0 > self.port_range.1 {
+            return Err(format!(
+                "NAT64 port_range start ({}) must be <= end ({})",
+                self.port_range.0, self.port_range.1
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// VPN server configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VpnServerConfig {

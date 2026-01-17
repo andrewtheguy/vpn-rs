@@ -374,8 +374,11 @@ impl VpnServer {
             Ipv4Addr::from(net_addr + 1)
         });
 
-        let nat64 = config.nat64.as_ref().and_then(|nat64_config| {
-            if nat64_config.enabled {
+        let nat64 = match config.nat64.as_ref() {
+            Some(nat64_config) if nat64_config.enabled => {
+                // Validate NAT64 configuration before creating translator
+                nat64_config.validate().map_err(VpnError::Config)?;
+
                 log::info!(
                     "NAT64 enabled: translating 64:ff9b::/96 -> {} with ports {}-{}",
                     server_ip,
@@ -383,10 +386,9 @@ impl VpnServer {
                     nat64_config.port_range.1
                 );
                 Some(Arc::new(Nat64Translator::new(nat64_config, server_ip)))
-            } else {
-                None
             }
-        });
+            _ => None,
+        };
 
         Ok(Self {
             config,
