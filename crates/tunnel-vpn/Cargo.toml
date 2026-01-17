@@ -46,7 +46,7 @@ ipnet = { version = "2", features = ["serde"] }
 dashmap = "6"
 
 # Packet parsing for NAT64 translation
-etherparse = "0.15"
+etherparse = "0.18"
 
 # Zero-copy byte buffers for efficient packet handling
 bytes = "1"
