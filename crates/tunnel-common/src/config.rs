@@ -898,15 +898,23 @@ impl VpnServerConfig {
                 anyhow::bail!("[iroh] Use only one of 'auth_tokens' or 'auth_tokens_file'.");
             }
 
-            // Require network for VPN server
-            let network = iroh.network.as_ref().ok_or_else(|| {
-                anyhow::anyhow!("[iroh] 'network' is required for VPN server configuration.")
-            })?;
+            // Require at least one of network (IPv4) or network6 (IPv6)
+            if iroh.network.is_none() && iroh.network6.is_none() {
+                anyhow::bail!(
+                    "[iroh] At least one of 'network' (IPv4) or 'network6' (IPv6) is required for VPN server configuration."
+                );
+            }
 
-            // Validate network CIDR and server_ip
-            validate_vpn_network(network, iroh.server_ip.as_deref(), "iroh")?;
+            // Validate IPv4 network CIDR and server_ip
+            // Ensure server_ip is not orphaned without network
+            if iroh.server_ip.is_some() && iroh.network.is_none() {
+                anyhow::bail!("[iroh] 'server_ip' requires 'network' to be set.");
+            }
+            if let Some(ref network) = iroh.network {
+                validate_vpn_network(network, iroh.server_ip.as_deref(), "iroh")?;
+            }
 
-            // Validate IPv6 network CIDR and server_ip6 (optional)
+            // Validate IPv6 network CIDR and server_ip6
             // Ensure server_ip6 is not orphaned without network6
             if iroh.server_ip6.is_some() && iroh.network6.is_none() {
                 anyhow::bail!("[iroh] 'server_ip6' requires 'network6' to be set.");
@@ -1176,13 +1184,13 @@ pub const DEFAULT_TUN_WRITER_CHANNEL_SIZE: usize = 512;
 ///     };
 ///
 ///     let config = ResolvedVpnServerConfig::from_config(&toml_config)?;
-///     assert_eq!(config.network, "10.0.0.0/24");
+///     assert_eq!(config.network, Some("10.0.0.0/24".to_string()));
 ///     Ok(())
 /// }
 /// ```
 #[derive(Debug, Clone)]
 pub struct ResolvedVpnServerConfig {
-    pub network: String,
+    pub network: Option<String>,
     pub server_ip: Option<String>,
     pub network6: Option<String>,
     pub server_ip6: Option<String>,
@@ -1201,15 +1209,25 @@ pub struct ResolvedVpnServerConfig {
 impl ResolvedVpnServerConfig {
     /// Create resolved config from TOML config, applying defaults for missing values.
     pub fn from_config(cfg: &VpnServerIrohConfig) -> Result<Self> {
-        let network = cfg.network.clone().ok_or_else(|| {
-            anyhow::anyhow!(
-                "VPN network CIDR is required.\n\
-                 In config: network = \"10.0.0.0/24\""
-            )
-        })?;
+        // Validate that at least one network is configured
+        if cfg.network.is_none() && cfg.network6.is_none() {
+            anyhow::bail!(
+                "At least one of 'network' (IPv4) or 'network6' (IPv6) is required.\n\
+                 In config: network = \"10.0.0.0/24\" or network6 = \"fd00::/64\""
+            );
+        }
 
-        // Validate network CIDR format
-        validate_vpn_network(&network, cfg.server_ip.as_deref(), "config")?;
+        // Validate IPv4 network CIDR format (optional)
+        // Ensure server_ip is not orphaned without network
+        if cfg.server_ip.is_some() && cfg.network.is_none() {
+            anyhow::bail!(
+                "'server_ip' requires 'network' to be set.\n\
+                 In config: network = \"10.0.0.0/24\""
+            );
+        }
+        if let Some(ref network) = cfg.network {
+            validate_vpn_network(network, cfg.server_ip.as_deref(), "config")?;
+        }
 
         // Validate IPv6 network CIDR format (optional)
         // Ensure server_ip6 is not orphaned without network6
@@ -1251,7 +1269,7 @@ impl ResolvedVpnServerConfig {
         validate_transport_tuning(&cfg.shared.transport, "iroh.transport")?;
 
         Ok(Self {
-            network,
+            network: cfg.network.clone(),
             server_ip: cfg.server_ip.clone(),
             network6: cfg.network6.clone(),
             server_ip6: cfg.server_ip6.clone(),

@@ -112,10 +112,10 @@ struct ClientState {
     /// Unique session ID for this connection.
     /// Used to detect stale cleanup operations when a client reconnects quickly.
     session_id: u64,
-    /// Client's assigned VPN IP (IPv4).
+    /// Client's assigned VPN IP (IPv4). None for IPv6-only mode.
     #[allow(dead_code)]
-    assigned_ip: Ipv4Addr,
-    /// Client's assigned IPv6 VPN address (optional, for dual-stack).
+    assigned_ip: Option<Ipv4Addr>,
+    /// Client's assigned IPv6 VPN address (optional, for dual-stack or IPv6-only).
     #[allow(dead_code)]
     assigned_ip6: Option<Ipv6Addr>,
     /// Client's device ID.
@@ -324,8 +324,8 @@ impl Ip6Pool {
 pub struct VpnServer {
     /// Server configuration.
     config: VpnServerConfig,
-    /// IPv4 address pool.
-    ip_pool: Arc<RwLock<IpPool>>,
+    /// IPv4 address pool (None if IPv6-only mode).
+    ip_pool: Option<Arc<RwLock<IpPool>>>,
     /// IPv6 address pool (None if IPv4-only mode).
     ip6_pool: Option<Arc<RwLock<Ip6Pool>>>,
     /// Connected clients (by (endpoint ID, device ID)).
@@ -352,10 +352,16 @@ pub struct VpnServer {
 impl VpnServer {
     /// Create a new VPN server.
     pub async fn new(config: VpnServerConfig) -> VpnResult<Self> {
-        // Create IPv4 pool
-        let ip_pool = Arc::new(RwLock::new(IpPool::new(config.network, config.server_ip)));
+        // Validate configuration
+        config.validate().map_err(VpnError::Config)?;
 
-        // Create IPv6 pool if configured (dual-stack)
+        // Create IPv4 pool if configured
+        let ip_pool = match config.network {
+            Some(network) => Some(Arc::new(RwLock::new(IpPool::new(network, config.server_ip)))),
+            None => None,
+        };
+
+        // Create IPv6 pool if configured (dual-stack or IPv6-only)
         let ip6_pool = match config.network6 {
             Some(network6) => Some(Arc::new(RwLock::new(Ip6Pool::new(
                 network6,
@@ -366,17 +372,21 @@ impl VpnServer {
 
         if let Some(ref pool) = ip6_pool {
             let pool_guard = pool.read().await;
-            log::info!("IPv6 dual-stack enabled: {}", pool_guard.network());
+            if ip_pool.is_some() {
+                log::info!("IPv6 dual-stack enabled: {}", pool_guard.network());
+            } else {
+                log::info!("IPv6-only mode enabled: {}", pool_guard.network());
+            }
         }
 
         // Initialize NAT64 translator if configured
-        // Reuse the server_ip from IpPool to avoid duplicating the default IP computation
-        let nat64 = match config.nat64.as_ref() {
-            Some(nat64_config) if nat64_config.enabled => {
+        // NAT64 requires IPv4 network for the source IP
+        let nat64 = match (&config.nat64, &ip_pool) {
+            (Some(nat64_config), Some(ip_pool_arc)) if nat64_config.enabled => {
                 // Validate NAT64 configuration before creating translator
                 nat64_config.validate().map_err(VpnError::Config)?;
 
-                let server_ip = ip_pool.read().await.server_ip();
+                let server_ip = ip_pool_arc.read().await.server_ip();
                 log::info!(
                     "NAT64 enabled: translating {} -> {} with ports {}-{}",
                     NAT64_PREFIX_CIDR,
@@ -385,6 +395,12 @@ impl VpnServer {
                     nat64_config.port_range.1
                 );
                 Some(Arc::new(Nat64Translator::new(nat64_config, server_ip)))
+            }
+            (Some(nat64_config), None) if nat64_config.enabled => {
+                // NAT64 enabled but no IPv4 network - this is a config error
+                return Err(VpnError::Config(
+                    "NAT64 requires 'network' (IPv4) to be configured".to_string(),
+                ));
             }
             _ => None,
         };
@@ -405,13 +421,21 @@ impl VpnServer {
     }
 
     /// Get the server's VPN IP address.
-    pub async fn server_ip(&self) -> Ipv4Addr {
-        self.ip_pool.read().await.server_ip()
+    /// Returns None if IPv6-only mode (no IPv4 network configured).
+    pub async fn server_ip(&self) -> Option<Ipv4Addr> {
+        match &self.ip_pool {
+            Some(pool) => Some(pool.read().await.server_ip()),
+            None => None,
+        }
     }
 
     /// Get the VPN network.
-    pub async fn network(&self) -> Ipv4Net {
-        self.ip_pool.read().await.network()
+    /// Returns None if IPv6-only mode (no IPv4 network configured).
+    pub async fn network(&self) -> Option<Ipv4Net> {
+        match &self.ip_pool {
+            Some(pool) => Some(pool.read().await.network()),
+            None => None,
+        }
     }
 
     /// Get a reference to the server statistics.
@@ -423,40 +447,69 @@ impl VpnServer {
 
     /// Create and configure the TUN device.
     pub async fn setup_tun(&mut self) -> VpnResult<()> {
-        let pool = self.ip_pool.read().await;
-        let server_ip = pool.server_ip();
-        let netmask = pool.network().netmask();
-        drop(pool);
-
-        let mut tun_config =
-            TunConfig::new(server_ip, netmask, server_ip).with_mtu(self.config.mtu);
-
-        // Configure IPv6 if dual-stack is enabled
-        let server_ip6 = if let Some(ref ip6_pool) = self.ip6_pool {
-            let pool6 = ip6_pool.read().await;
-            let server_ip6 = pool6.server_ip();
-            let prefix_len6 = pool6.network().prefix_len();
-            tun_config = tun_config.with_ipv6(server_ip6, prefix_len6)?;
-            Some(server_ip6)
+        // Get IPv4 configuration if available
+        let (server_ip, netmask) = if let Some(ref ip_pool) = self.ip_pool {
+            let pool = ip_pool.read().await;
+            (Some(pool.server_ip()), Some(pool.network().netmask()))
         } else {
-            None
+            (None, None)
+        };
+
+        // Get IPv6 configuration if available
+        let (server_ip6, prefix_len6) = if let Some(ref ip6_pool) = self.ip6_pool {
+            let pool6 = ip6_pool.read().await;
+            (Some(pool6.server_ip()), Some(pool6.network().prefix_len()))
+        } else {
+            (None, None)
+        };
+
+        // Create TUN config based on available protocols
+        let tun_config = match (server_ip, netmask, server_ip6, prefix_len6) {
+            // Dual-stack: both IPv4 and IPv6
+            (Some(ip4), Some(mask), Some(ip6), Some(pl6)) => TunConfig::new(ip4, mask, ip4)
+                .with_mtu(self.config.mtu)
+                .with_ipv6(ip6, pl6)?,
+            // IPv4-only
+            (Some(ip4), Some(mask), None, None) => {
+                TunConfig::new(ip4, mask, ip4).with_mtu(self.config.mtu)
+            }
+            // IPv6-only
+            (None, None, Some(ip6), Some(pl6)) => {
+                TunConfig::ipv6_only(ip6, pl6, self.config.mtu)?
+            }
+            // Invalid: no networks configured (should be caught by validate())
+            _ => {
+                return Err(VpnError::Config(
+                    "No network configured (need at least IPv4 or IPv6)".to_string(),
+                ))
+            }
         };
 
         let device = TunDevice::create(tun_config)?;
-        if let Some(ip6) = server_ip6 {
-            log::info!(
-                "Created TUN device: {} with IP {} and IPv6 {}",
-                device.name(),
-                server_ip,
-                ip6
-            );
-        } else {
-            log::info!(
-                "Created TUN device: {} with IP {}",
-                device.name(),
-                server_ip
-            );
+
+        // Log what was created
+        match (server_ip, server_ip6) {
+            (Some(ip4), Some(ip6)) => {
+                log::info!(
+                    "Created TUN device: {} with IP {} and IPv6 {}",
+                    device.name(),
+                    ip4,
+                    ip6
+                );
+            }
+            (Some(ip4), None) => {
+                log::info!("Created TUN device: {} with IP {}", device.name(), ip4);
+            }
+            (None, Some(ip6)) => {
+                log::info!(
+                    "Created TUN device: {} with IPv6 {} (IPv6-only mode)",
+                    device.name(),
+                    ip6
+                );
+            }
+            (None, None) => unreachable!(), // Caught above
         }
+
         self.tun_device = Some(device);
         Ok(())
     }
@@ -466,19 +519,27 @@ impl VpnServer {
         // Setup TUN device
         self.setup_tun().await?;
 
-        let server_ip = self.server_ip().await;
-        let network = self.network().await;
-        // let public_key = self.public_key();
-
         log::info!("VPN Server started:");
-        log::info!("  Network: {}", network);
-        log::info!("  Server IP: {}", server_ip);
+        // Log IPv4 info if configured
+        if let Some(ref ip_pool) = self.ip_pool {
+            let pool = ip_pool.read().await;
+            log::info!("  Network: {}", pool.network());
+            log::info!("  Server IP: {}", pool.server_ip());
+        }
+        // Log IPv6 info if configured
         if let Some(ref ip6_pool) = self.ip6_pool {
             let pool = ip6_pool.read().await;
             log::info!("  Network6: {}", pool.network());
             log::info!("  Server IP6: {}", pool.server_ip());
         }
-        // log::info!("  Public key: {}", public_key.to_base64());
+        // Log mode
+        if self.ip_pool.is_none() {
+            log::info!("  Mode: IPv6-only");
+        } else if self.ip6_pool.is_some() {
+            log::info!("  Mode: dual-stack (IPv4 + IPv6)");
+        } else {
+            log::info!("  Mode: IPv4-only");
+        }
         log::info!("  Node ID: {}", endpoint.id());
 
         // Take TUN device and split it
@@ -663,21 +724,18 @@ impl VpnServer {
         tun_write_tx: mpsc::Sender<Bytes>,
         device_id: u64,
     ) -> VpnResult<()> {
-        // Allocate IPv4 for client (required)
-        let assigned_ip = {
-            let mut pool = self.ip_pool.write().await;
-            pool.allocate(remote_id, device_id)
-                .ok_or_else(|| VpnError::IpAssignment("IPv4 pool exhausted".into()))?
-        };
-
-        // Allocate IPv6 for client (optional, if server has IPv6 configured)
-        let assigned_ip6 = if let Some(ref ip6_pool) = self.ip6_pool {
-            let mut pool = ip6_pool.write().await;
+        // Allocate IPv4 for client (if server has IPv4 configured)
+        let assigned_ip = if let Some(ref ip_pool) = self.ip_pool {
+            let mut pool = ip_pool.write().await;
             match pool.allocate(remote_id, device_id) {
                 Some(ip) => Some(ip),
                 None => {
-                    // IPv6 allocation failure is not fatal - client just won't have IPv6
-                    log::warn!("IPv6 pool exhausted for client {}", remote_id);
+                    // IPv4 pool exhausted - fatal if this is IPv4-only mode
+                    if self.ip6_pool.is_none() {
+                        return Err(VpnError::IpAssignment("IPv4 pool exhausted".into()));
+                    }
+                    // Dual-stack: continue with IPv6 only
+                    log::warn!("IPv4 pool exhausted for client {}, using IPv6 only", remote_id);
                     None
                 }
             }
@@ -685,25 +743,61 @@ impl VpnServer {
             None
         };
 
-        // Get server info for response
-        let pool = self.ip_pool.read().await;
-        let server_ip = pool.server_ip();
-        let network = pool.network();
-        drop(pool);
-
-        // Send response - include IPv6 info if allocated
-        let response = if let Some(ip6) = assigned_ip6 {
-            let ip6_pool = self.ip6_pool.as_ref().unwrap().read().await;
-            VpnHandshakeResponse::accepted_dual_stack(
-                assigned_ip,
-                network,
-                server_ip,
-                ip6,
-                ip6_pool.network(),
-                ip6_pool.server_ip(),
-            )
+        // Allocate IPv6 for client (if server has IPv6 configured)
+        let assigned_ip6 = if let Some(ref ip6_pool) = self.ip6_pool {
+            let mut pool = ip6_pool.write().await;
+            match pool.allocate(remote_id, device_id) {
+                Some(ip) => Some(ip),
+                None => {
+                    // IPv6 pool exhausted - fatal if this is IPv6-only mode
+                    if self.ip_pool.is_none() {
+                        return Err(VpnError::IpAssignment("IPv6 pool exhausted".into()));
+                    }
+                    // Dual-stack: continue with IPv4 only
+                    log::warn!("IPv6 pool exhausted for client {}, using IPv4 only", remote_id);
+                    None
+                }
+            }
         } else {
-            VpnHandshakeResponse::accepted(assigned_ip, network, server_ip)
+            None
+        };
+
+        // Must have at least one IP assigned
+        if assigned_ip.is_none() && assigned_ip6.is_none() {
+            return Err(VpnError::IpAssignment("All IP pools exhausted".into()));
+        }
+
+        // Build handshake response based on what was allocated
+        let response = match (assigned_ip, assigned_ip6) {
+            // Dual-stack: both IPv4 and IPv6
+            (Some(ip4), Some(ip6)) => {
+                let ip_pool = self.ip_pool.as_ref().unwrap().read().await;
+                let ip6_pool = self.ip6_pool.as_ref().unwrap().read().await;
+                VpnHandshakeResponse::accepted_dual_stack(
+                    ip4,
+                    ip_pool.network(),
+                    ip_pool.server_ip(),
+                    ip6,
+                    ip6_pool.network(),
+                    ip6_pool.server_ip(),
+                )
+            }
+            // IPv4-only
+            (Some(ip4), None) => {
+                let ip_pool = self.ip_pool.as_ref().unwrap().read().await;
+                VpnHandshakeResponse::accepted(ip4, ip_pool.network(), ip_pool.server_ip())
+            }
+            // IPv6-only
+            (None, Some(ip6)) => {
+                let ip6_pool = self.ip6_pool.as_ref().unwrap().read().await;
+                VpnHandshakeResponse::accepted_ipv6_only(
+                    ip6,
+                    ip6_pool.network(),
+                    ip6_pool.server_ip(),
+                )
+            }
+            // Should not happen - checked above
+            (None, None) => unreachable!(),
         };
 
         write_message(send, &response.encode()?).await?;
@@ -711,19 +805,27 @@ impl VpnServer {
             log::debug!("Failed to finish handshake stream: {}", e);
         }
 
-        if let Some(ip6) = assigned_ip6 {
-            log::info!(
-                "Client {} connected, assigned IP: {}, IPv6: {}",
-                remote_id,
-                assigned_ip,
-                ip6
-            );
-        } else {
-            log::info!(
-                "Client {} connected, assigned IP: {}",
-                remote_id,
-                assigned_ip
-            );
+        // Log connection based on what was assigned
+        match (assigned_ip, assigned_ip6) {
+            (Some(ip4), Some(ip6)) => {
+                log::info!(
+                    "Client {} connected, assigned IP: {}, IPv6: {}",
+                    remote_id,
+                    ip4,
+                    ip6
+                );
+            }
+            (Some(ip4), None) => {
+                log::info!("Client {} connected, assigned IP: {}", remote_id, ip4);
+            }
+            (None, Some(ip6)) => {
+                log::info!(
+                    "Client {} connected, assigned IPv6: {} (IPv6-only)",
+                    remote_id,
+                    ip6
+                );
+            }
+            (None, None) => unreachable!(),
         }
 
         // Accept data stream for IP packets
@@ -748,14 +850,18 @@ impl VpnServer {
 
         // Spawn dedicated writer task that owns the SendStream.
         // Returns error through oneshot channel for immediate cleanup propagation.
-        let writer_assigned_ip = assigned_ip;
+        // Use endpoint ID for logging when no IPv4 is assigned
+        let writer_client_id = assigned_ip
+            .map(|ip| ip.to_string())
+            .or_else(|| assigned_ip6.map(|ip| ip.to_string()))
+            .unwrap_or_else(|| remote_id.to_string());
         let mut data_send = data_send;
         let writer_handle = tokio::spawn(async move {
             let error = loop {
                 match packet_rx.recv().await {
                     Some(data) => {
                         if let Err(e) = data_send.write_all(&data).await {
-                            log::warn!("Failed to write to client {}: {}", writer_assigned_ip, e);
+                            log::warn!("Failed to write to client {}: {}", writer_client_id, e);
                             break Some(format!("QUIC write error: {}", e));
                         }
                     }
@@ -764,7 +870,7 @@ impl VpnServer {
                         if let Err(e) = data_send.finish() {
                             log::warn!(
                                 "Failed to finish QUIC stream for client {}: {}",
-                                writer_assigned_ip,
+                                writer_client_id,
                                 e
                             );
                             break Some(format!("QUIC finish error: {}", e));
@@ -773,7 +879,7 @@ impl VpnServer {
                     }
                 }
             };
-            log::trace!("Writer task for {} exiting", writer_assigned_ip);
+            log::trace!("Writer task for {} exiting", writer_client_id);
             // Signal error to trigger immediate cleanup (ignore send error if receiver dropped)
             if let Some(err_msg) = error {
                 let _ = writer_error_tx.send(err_msg);
@@ -803,9 +909,13 @@ impl VpnServer {
 
         // DashMap operations are lock-free (no async needed)
         self.clients.insert(client_key, client_state);
-        self.ip_to_endpoint
-            .insert(assigned_ip, (remote_id, device_id));
 
+        // Add IPv4 reverse lookup if assigned
+        if let Some(ip4) = assigned_ip {
+            self.ip_to_endpoint.insert(ip4, (remote_id, device_id));
+        }
+
+        // Add IPv6 reverse lookup if assigned
         if let Some(ip6) = assigned_ip6 {
             self.ip6_to_endpoint.insert(ip6, (remote_id, device_id));
         }
@@ -847,27 +957,39 @@ impl VpnServer {
         // DashMap remove_if atomically checks and removes if the predicate holds.
         let removed = clients.remove_if(&client_key, |_, state| state.session_id == session_id);
 
-        let (endpoint_to_release, release_ipv6) = if let Some((_, client_state)) = removed {
-            // Remove IPv4 mapping if it points to us
-            ip_to_endpoint.remove_if(&assigned_ip, |_, (ep, dev)| {
-                *ep == remote_id && *dev == device_id
-            });
+        let (endpoint_to_release, release_ipv4, release_ipv6) =
+            if let Some((_, client_state)) = removed {
+                // Remove IPv4 mapping if it points to us
+                if let Some(ip4) = assigned_ip {
+                    ip_to_endpoint.remove_if(&ip4, |_, (ep, dev)| {
+                        *ep == remote_id && *dev == device_id
+                    });
+                }
 
-            // Remove IPv6 mapping if it points to us
-            if let Some(ip6) = assigned_ip6 {
-                ip6_to_endpoint.remove_if(&ip6, |_, (ep6, dev6)| {
-                    *ep6 == remote_id && *dev6 == device_id
-                });
-            }
+                // Remove IPv6 mapping if it points to us
+                if let Some(ip6) = assigned_ip6 {
+                    ip6_to_endpoint.remove_if(&ip6, |_, (ep6, dev6)| {
+                        *ep6 == remote_id && *dev6 == device_id
+                    });
+                }
 
-            (Some((remote_id, device_id)), client_state.assigned_ip6.is_some())
-        } else {
-            // Session_id didn't match or client already gone - do nothing
-            (None, false)
-        };
+                (
+                    Some((remote_id, device_id)),
+                    client_state.assigned_ip.is_some(),
+                    client_state.assigned_ip6.is_some(),
+                )
+            } else {
+                // Session_id didn't match or client already gone - do nothing
+                (None, false, false)
+            };
 
         if let Some((endpoint_id, dev_id)) = endpoint_to_release {
-            ip_pool.write().await.release(&endpoint_id, dev_id);
+            // Release IPv4 if allocated for this session
+            if release_ipv4 {
+                if let Some(ref ip_pool) = ip_pool {
+                    ip_pool.write().await.release(&endpoint_id, dev_id);
+                }
+            }
 
             // Release IPv6 if allocated for this session
             if release_ipv6 {
@@ -892,17 +1014,26 @@ impl VpnServer {
     ///
     /// If NAT64 is enabled, IPv6 packets destined for `64:ff9b::/96` are translated to
     /// IPv4 before being written to the TUN device.
+    ///
+    /// At least one of `assigned_ip` (IPv4) or `assigned_ip6` (IPv6) must be provided.
     #[allow(clippy::too_many_arguments)]
     async fn handle_client_data(
         packet_tx: mpsc::Sender<Bytes>,
         mut data_recv: iroh::endpoint::RecvStream,
-        assigned_ip: Ipv4Addr,
+        assigned_ip: Option<Ipv4Addr>,
         assigned_ip6: Option<Ipv6Addr>,
         tun_write_tx: mpsc::Sender<Bytes>,
         writer_error_rx: oneshot::Receiver<String>,
         stats: Arc<VpnServerStats>,
         nat64: Option<Arc<Nat64Translator>>,
     ) -> VpnResult<()> {
+        // Create client identifier string for logging (used both in spawned task and select!)
+        let client_id = assigned_ip
+            .map(|ip| ip.to_string())
+            .or_else(|| assigned_ip6.map(|ip| ip.to_string()))
+            .unwrap_or_else(|| "unknown".to_string());
+        let client_id_outer = client_id.clone(); // For use in select! block
+
         // Spawn inbound task (QUIC stream -> TUN via channel)
         let mut inbound_handle = tokio::spawn(async move {
             let mut type_buf = [0u8; 1];
@@ -913,7 +1044,7 @@ impl VpnServer {
                 match data_recv.read_exact(&mut type_buf).await {
                     Ok(()) => {}
                     Err(e) => {
-                        log::debug!("Client {} stream closed: {}", assigned_ip, e);
+                        log::debug!("Client {} stream closed: {}", client_id, e);
                         break;
                     }
                 }
@@ -923,7 +1054,7 @@ impl VpnServer {
                     None => {
                         log::error!(
                             "Unknown message type from {}: 0x{:02x}, closing connection",
-                            assigned_ip,
+                            client_id,
                             type_buf[0]
                         );
                         break;
@@ -933,17 +1064,17 @@ impl VpnServer {
                 match msg_type {
                     DataMessageType::HeartbeatPing => {
                         // Respond with pong via the writer task channel (static Bytes, zero allocation)
-                        log::trace!("Heartbeat ping from {}", assigned_ip);
+                        log::trace!("Heartbeat ping from {}", client_id);
                         let pong = Bytes::from_static(HEARTBEAT_PONG_BYTE);
                         if packet_tx.send(pong).await.is_err() {
-                            log::warn!("Failed to send heartbeat pong to {}: channel closed", assigned_ip);
+                            log::warn!("Failed to send heartbeat pong to {}: channel closed", client_id);
                             break;
                         }
                         continue;
                     }
                     DataMessageType::HeartbeatPong => {
                         // Server shouldn't receive pongs, ignore
-                        log::trace!("Unexpected heartbeat pong from {}", assigned_ip);
+                        log::trace!("Unexpected heartbeat pong from {}", client_id);
                         continue;
                     }
                     DataMessageType::IpPacket => {
@@ -957,7 +1088,7 @@ impl VpnServer {
                     Err(e) => {
                         log::debug!(
                             "Failed to read IP packet length from {}: {}",
-                            assigned_ip,
+                            client_id,
                             e
                         );
                         break;
@@ -965,7 +1096,7 @@ impl VpnServer {
                 }
                 let len = u32::from_be_bytes(len_buf) as usize;
                 if len > MAX_IP_PACKET_SIZE {
-                    log::error!("IP packet too large from {}: {}", assigned_ip, len);
+                    log::error!("IP packet too large from {}: {}", client_id, len);
                     break;
                 }
 
@@ -973,7 +1104,7 @@ impl VpnServer {
                 match data_recv.read_exact(&mut data_buf[..len]).await {
                     Ok(()) => {}
                     Err(e) => {
-                        log::debug!("Failed to read IP packet from {}: {}", assigned_ip, e);
+                        log::debug!("Failed to read IP packet from {}: {}", client_id, e);
                         break;
                     }
                 }
@@ -983,16 +1114,26 @@ impl VpnServer {
                 // Validate source IP to prevent IP spoofing
                 let source_valid = match extract_source_ip(packet) {
                     Some(PacketIp::V4(src_ip)) => {
-                        if src_ip == assigned_ip {
-                            true
-                        } else {
-                            log::warn!(
-                                "IP spoofing attempt from client {}: expected source {}, got {}",
-                                assigned_ip,
-                                assigned_ip,
-                                src_ip
-                            );
-                            false
+                        // IPv4 packet validation
+                        match assigned_ip {
+                            Some(expected_ip) if src_ip == expected_ip => true,
+                            Some(expected_ip) => {
+                                log::warn!(
+                                    "IP spoofing attempt from client {}: expected source {}, got {}",
+                                    client_id,
+                                    expected_ip,
+                                    src_ip
+                                );
+                                false
+                            }
+                            None => {
+                                // IPv6-only client sending IPv4 packet
+                                log::warn!(
+                                    "IPv4 packet from client {} without assigned IPv4 address, source: {}",
+                                    client_id, src_ip
+                                );
+                                false
+                            }
                         }
                     }
                     Some(PacketIp::V6(src_ip)) => {
@@ -1009,14 +1150,14 @@ impl VpnServer {
                                 Some(expected_ip6) => {
                                     log::warn!(
                                         "IPv6 spoofing attempt from client {}: expected source {}, got {}",
-                                        assigned_ip, expected_ip6, src_ip
+                                        client_id, expected_ip6, src_ip
                                     );
                                     false
                                 }
                                 None => {
                                     log::warn!(
                                         "IPv6 packet from client {} without assigned IPv6 address, source: {}",
-                                        assigned_ip, src_ip
+                                        client_id, src_ip
                                     );
                                     false
                                 }
@@ -1026,7 +1167,7 @@ impl VpnServer {
                     None => {
                         log::warn!(
                             "Failed to parse source IP from packet from client {}",
-                            assigned_ip
+                            client_id
                         );
                         false
                     }
@@ -1057,7 +1198,7 @@ impl VpnServer {
                                 Err(e) => {
                                     log::debug!(
                                         "NAT64 translation error for client {}: {}",
-                                        assigned_ip, e
+                                        client_id, e
                                     );
                                     stats.packets_nat64_errors.fetch_add(1, Ordering::Relaxed);
                                     continue;
@@ -1109,15 +1250,15 @@ impl VpnServer {
                 match inbound_result {
                     Ok(()) => {
                         // Client disconnected normally or stream error
-                        log::trace!("Client {} inbound task completed", assigned_ip);
+                        log::trace!("Client {} inbound task completed", client_id_outer);
                     }
                     Err(e) if e.is_panic() => {
-                        log::error!("Client {} inbound task panicked: {}", assigned_ip, e);
+                        log::error!("Client {} inbound task panicked: {}", client_id_outer, e);
                         return Err(VpnError::ConnectionLost(format!("inbound task panicked: {}", e)));
                     }
                     Err(e) => {
                         // Cancelled or other JoinError
-                        log::debug!("Client {} inbound task failed: {}", assigned_ip, e);
+                        log::debug!("Client {} inbound task failed: {}", client_id_outer, e);
                         return Err(VpnError::ConnectionLost(format!("inbound task failed: {}", e)));
                     }
                 }
@@ -1127,12 +1268,12 @@ impl VpnServer {
                 inbound_handle.abort();
                 match writer_err {
                     Ok(err_msg) => {
-                        log::debug!("Client {} writer failed: {}", assigned_ip, err_msg);
+                        log::debug!("Client {} writer failed: {}", client_id_outer, err_msg);
                         return Err(VpnError::ConnectionLost(err_msg));
                     }
                     Err(_) => {
                         // Sender dropped without error (normal shutdown via channel close)
-                        log::trace!("Client {} writer channel closed", assigned_ip);
+                        log::trace!("Client {} writer channel closed", client_id_outer);
                     }
                 }
             }

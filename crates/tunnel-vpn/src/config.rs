@@ -94,16 +94,20 @@ impl Nat64Config {
 /// VPN server configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VpnServerConfig {
-    /// VPN network CIDR (e.g., "10.0.0.0/24").
+    /// VPN network CIDR (e.g., "10.0.0.0/24"). Optional for IPv6-only mode.
     /// Server gets .1 by default, clients get subsequent addresses.
-    pub network: Ipv4Net,
+    /// At least one of `network` (IPv4) or `network6` (IPv6) must be configured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network: Option<Ipv4Net>,
 
-    /// IPv6 VPN network CIDR (e.g., "fd00::/64"). Optional for dual-stack.
+    /// IPv6 VPN network CIDR (e.g., "fd00::/64"). Optional for dual-stack or IPv6-only.
     /// Server gets ::1 by default, clients get subsequent addresses.
+    /// At least one of `network` (IPv4) or `network6` (IPv6) must be configured.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub network6: Option<Ipv6Net>,
 
     /// Server's VPN IP address (defaults to first host in network, e.g., .1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server_ip: Option<Ipv4Addr>,
 
     /// Server's IPv6 VPN address (defaults to first host in network6, e.g., ::1).
@@ -184,6 +188,46 @@ pub struct VpnServerConfig {
     /// When enabled, clients can access IPv4 addresses via the `64:ff9b::/96` prefix.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub nat64: Option<Nat64Config>,
+}
+
+impl VpnServerConfig {
+    /// Validate the VPN server configuration.
+    ///
+    /// Returns an error if:
+    /// - Neither `network` (IPv4) nor `network6` (IPv6) is configured
+    /// - `server_ip` is set but `network` is not (orphaned IPv4 server IP)
+    /// - `server_ip6` is set but `network6` is not (orphaned IPv6 server IP)
+    /// - NAT64 is enabled but `network6` is not configured
+    /// - NAT64 configuration is invalid (delegates to `Nat64Config::validate()`)
+    pub fn validate(&self) -> Result<(), String> {
+        // At least one network must be configured
+        if self.network.is_none() && self.network6.is_none() {
+            return Err(
+                "At least one of 'network' (IPv4) or 'network6' (IPv6) must be configured"
+                    .to_string(),
+            );
+        }
+
+        // server_ip requires network
+        if self.server_ip.is_some() && self.network.is_none() {
+            return Err("'server_ip' requires 'network' to be set".to_string());
+        }
+
+        // server_ip6 requires network6
+        if self.server_ip6.is_some() && self.network6.is_none() {
+            return Err("'server_ip6' requires 'network6' to be set".to_string());
+        }
+
+        // NAT64 requires network6 (only makes sense for IPv6-capable networks)
+        if let Some(ref nat64) = self.nat64 {
+            if nat64.enabled && self.network6.is_none() {
+                return Err("NAT64 requires 'network6' to be configured".to_string());
+            }
+            nat64.validate()?;
+        }
+
+        Ok(())
+    }
 }
 
 /// VPN client configuration.

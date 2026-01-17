@@ -70,6 +70,37 @@ impl TunConfig {
         self.prefix_len6 = Some(prefix_len6);
         Ok(self)
     }
+
+    /// Create IPv6-only TUN configuration.
+    ///
+    /// For IPv6-only VPN networks, this creates a TUN configuration with
+    /// a placeholder IPv4 address (169.254.254.254 link-local) that satisfies
+    /// the device creation requirements but won't interfere with real traffic.
+    ///
+    /// # Errors
+    /// Returns an error if `prefix_len6` is greater than 128.
+    pub fn ipv6_only(address6: Ipv6Addr, prefix_len6: u8, mtu: u16) -> VpnResult<Self> {
+        if prefix_len6 > 128 {
+            return Err(VpnError::Config(format!(
+                "Invalid IPv6 prefix length {}: must be 0-128",
+                prefix_len6
+            )));
+        }
+        // Use a link-local placeholder address that won't conflict with real traffic.
+        // This satisfies the TUN device creation requirements on platforms that
+        // need an IPv4 address, but won't affect IPv4 routing.
+        let placeholder_ip = Ipv4Addr::new(169, 254, 254, 254);
+        let placeholder_netmask = Ipv4Addr::new(255, 255, 255, 255);
+        Ok(Self {
+            name: None,
+            address: placeholder_ip,
+            netmask: placeholder_netmask,
+            destination: placeholder_ip,
+            address6: Some(address6),
+            prefix_len6: Some(prefix_len6),
+            mtu,
+        })
+    }
 }
 
 /// A managed TUN device with async I/O.

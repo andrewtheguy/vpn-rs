@@ -59,19 +59,24 @@ pub struct VpnClient {
 }
 
 /// Information received from the VPN server after successful handshake.
+///
+/// At least one of IPv4 or IPv6 must be configured:
+/// - IPv4-only: `assigned_ip`, `network`, `server_ip` are set; IPv6 fields are None
+/// - IPv6-only: `assigned_ip6`, `network6`, `server_ip6` are set; IPv4 fields are None
+/// - Dual-stack: Both IPv4 and IPv6 fields are set
 #[non_exhaustive]
 pub struct ServerInfo {
-    /// Assigned VPN IP for this client (IPv4).
-    pub assigned_ip: Ipv4Addr,
-    /// VPN network CIDR (IPv4).
-    pub network: Ipv4Net,
-    /// Server's VPN IP (gateway, IPv4).
-    pub server_ip: Ipv4Addr,
-    /// Assigned IPv6 VPN address for this client (optional, for dual-stack).
+    /// Assigned VPN IP for this client (IPv4). None for IPv6-only mode.
+    pub assigned_ip: Option<Ipv4Addr>,
+    /// VPN network CIDR (IPv4). None for IPv6-only mode.
+    pub network: Option<Ipv4Net>,
+    /// Server's VPN IP (gateway, IPv4). None for IPv6-only mode.
+    pub server_ip: Option<Ipv4Addr>,
+    /// Assigned IPv6 VPN address for this client. None for IPv4-only mode.
     pub assigned_ip6: Option<Ipv6Addr>,
-    /// IPv6 VPN network CIDR (optional, for dual-stack).
+    /// IPv6 VPN network CIDR. None for IPv4-only mode.
     pub network6: Option<Ipv6Net>,
-    /// Server's IPv6 VPN address (gateway, optional).
+    /// Server's IPv6 VPN address (gateway). None for IPv4-only mode.
     pub server_ip6: Option<Ipv6Addr>,
 }
 
@@ -121,9 +126,17 @@ impl VpnClient {
         let server_info = self.perform_handshake(&connection).await?;
 
         log::info!("Handshake successful:");
-        log::info!("  Assigned IP: {}", server_info.assigned_ip);
-        log::info!("  Network: {}", server_info.network);
-        log::info!("  Gateway: {}", server_info.server_ip);
+        // Log IPv4 info if provided
+        if let Some(ip) = server_info.assigned_ip {
+            log::info!("  Assigned IP: {}", ip);
+        }
+        if let Some(net) = server_info.network {
+            log::info!("  Network: {}", net);
+        }
+        if let Some(gw) = server_info.server_ip {
+            log::info!("  Gateway: {}", gw);
+        }
+        // Log IPv6 info if provided
         if let Some(ip6) = server_info.assigned_ip6 {
             log::info!("  Assigned IPv6: {}", ip6);
         }
@@ -133,16 +146,26 @@ impl VpnClient {
         if let Some(gw6) = server_info.server_ip6 {
             log::info!("  Gateway6: {}", gw6);
         }
+        // Log mode
+        if server_info.assigned_ip.is_none() {
+            log::info!("  Mode: IPv6-only");
+        } else if server_info.assigned_ip6.is_some() {
+            log::info!("  Mode: dual-stack");
+        } else {
+            log::info!("  Mode: IPv4-only");
+        }
 
         // Create TUN device
         let tun_device = self.create_tun_device(&server_info)?;
 
         // Add custom IPv4 routes through the VPN (guard ensures cleanup on drop)
-        let _route_guard: Option<RouteGuard> = if !self.config.routes.is_empty() {
-            Some(add_routes(tun_device.name(), &self.config.routes).await?)
-        } else {
-            None
-        };
+        // Only add IPv4 routes if server provided IPv4 and client has routes configured
+        let _route_guard: Option<RouteGuard> =
+            if server_info.assigned_ip.is_some() && !self.config.routes.is_empty() {
+                Some(add_routes(tun_device.name(), &self.config.routes).await?)
+            } else {
+                None
+            };
 
         // Add custom IPv6 routes through the VPN (guard ensures cleanup on drop)
         // Only add IPv6 routes if server provided IPv6 and client has routes6 configured
@@ -163,7 +186,9 @@ impl VpnClient {
 
         log::info!("VPN tunnel established!");
         log::info!("  TUN device: {}", tun_device.name());
-        log::info!("  Client IP: {}", server_info.assigned_ip);
+        if let Some(ip) = server_info.assigned_ip {
+            log::info!("  Client IP: {}", ip);
+        }
         if let Some(ip6) = server_info.assigned_ip6 {
             log::info!("  Client IPv6: {}", ip6);
         }
@@ -202,19 +227,26 @@ impl VpnClient {
             return Err(VpnError::AuthenticationFailed(reason));
         }
 
-        // Extract server info (IPv4 required)
-        let assigned_ip = response
-            .assigned_ip
-            .ok_or_else(|| VpnError::Signaling("Server response missing assigned IP".into()))?;
-        let network = response
-            .network
-            .ok_or_else(|| VpnError::Signaling("Server response missing network".into()))?;
-        let server_ip = response
-            .server_ip
-            .ok_or_else(|| VpnError::Signaling("Server response missing server IP".into()))?;
+        // Extract IPv4 info (optional, for IPv4-only or dual-stack)
+        // All three IPv4 fields must be present together or all absent for consistency
+        let (assigned_ip, network, server_ip) = match (
+            response.assigned_ip,
+            response.network,
+            response.server_ip,
+        ) {
+            (Some(ip), Some(net), Some(gw)) => (Some(ip), Some(net), Some(gw)),
+            (None, None, None) => (None, None, None),
+            _ => {
+                return Err(VpnError::Signaling(
+                    "Server response has incomplete IPv4 configuration: \
+                     assigned_ip, network, and server_ip must all be present or all absent"
+                        .into(),
+                ));
+            }
+        };
 
-        // Extract IPv6 info (optional, for dual-stack)
-        // All three must be present together or all absent for consistency
+        // Extract IPv6 info (optional, for IPv6-only or dual-stack)
+        // All three IPv6 fields must be present together or all absent for consistency
         let (assigned_ip6, network6, server_ip6) = match (
             response.assigned_ip6,
             response.network6,
@@ -223,13 +255,20 @@ impl VpnClient {
             (Some(ip), Some(net), Some(gw)) => (Some(ip), Some(net), Some(gw)),
             (None, None, None) => (None, None, None),
             _ => {
-                return Err(VpnError::Config(
+                return Err(VpnError::Signaling(
                     "Server response has incomplete IPv6 configuration: \
                      assigned_ip6, network6, and server_ip6 must all be present or all absent"
                         .into(),
                 ));
             }
         };
+
+        // At least one of IPv4 or IPv6 must be provided
+        if assigned_ip.is_none() && assigned_ip6.is_none() {
+            return Err(VpnError::Signaling(
+                "Server response missing both IPv4 and IPv6 configuration".into(),
+            ));
+        }
 
         // Close handshake stream (best-effort, handshake already completed)
         if let Err(e) = send.finish() {
@@ -247,19 +286,33 @@ impl VpnClient {
 
     /// Create and configure the TUN device.
     fn create_tun_device(&self, server_info: &ServerInfo) -> VpnResult<TunDevice> {
-        let mut tun_config = TunConfig::new(
+        // Build TUN config based on what the server provided
+        let tun_config = match (
             server_info.assigned_ip,
-            server_info.network.netmask(),
+            server_info.network,
             server_info.server_ip,
-        )
-        .with_mtu(self.config.mtu);
-
-        // Add IPv6 configuration if server provided it
-        if let (Some(assigned_ip6), Some(network6)) =
-            (server_info.assigned_ip6, server_info.network6)
-        {
-            tun_config = tun_config.with_ipv6(assigned_ip6, network6.prefix_len())?;
-        }
+            server_info.assigned_ip6,
+            server_info.network6,
+        ) {
+            // Dual-stack: both IPv4 and IPv6
+            (Some(ip4), Some(net4), Some(gw4), Some(ip6), Some(net6)) => TunConfig::new(ip4, net4.netmask(), gw4)
+                .with_mtu(self.config.mtu)
+                .with_ipv6(ip6, net6.prefix_len())?,
+            // IPv4-only
+            (Some(ip4), Some(net4), Some(gw4), None, None) => {
+                TunConfig::new(ip4, net4.netmask(), gw4).with_mtu(self.config.mtu)
+            }
+            // IPv6-only
+            (None, None, None, Some(ip6), Some(net6)) => {
+                TunConfig::ipv6_only(ip6, net6.prefix_len(), self.config.mtu)?
+            }
+            // Invalid: should be caught earlier in perform_handshake
+            _ => {
+                return Err(VpnError::Signaling(
+                    "Invalid server info: need at least one complete IP configuration".into(),
+                ))
+            }
+        };
 
         TunDevice::create(tun_config)
     }

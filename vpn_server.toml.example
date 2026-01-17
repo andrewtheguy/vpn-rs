@@ -13,8 +13,13 @@ mode = "iroh"
 # ============================================================================
 # VPN Network Configuration
 # ============================================================================
+# At least one of 'network' (IPv4) or 'network6' (IPv6) is REQUIRED.
+# You can configure:
+#   - IPv4-only:   Set 'network' only
+#   - IPv6-only:   Set 'network6' only
+#   - Dual-stack:  Set both 'network' and 'network6'
 
-# VPN network CIDR (REQUIRED)
+# IPv4 VPN network CIDR (optional if network6 is set)
 # Clients will be assigned IPs from this network
 network = "10.0.0.0/24"
 
@@ -23,18 +28,32 @@ network = "10.0.0.0/24"
 # server_ip = "10.0.0.1"
 
 # ============================================================================
-# IPv6 Dual-Stack (Optional)
+# IPv6 Configuration (Optional for Dual-Stack or IPv6-only)
 # ============================================================================
-# Enable IPv6 alongside IPv4. When configured, clients receive both an IPv4
-# and an IPv6 address. IPv6 is optional - IPv4-only configs continue to work.
+# Enable IPv6 alongside IPv4 (dual-stack) or as the only address family (IPv6-only).
+# When both network and network6 are set, clients receive addresses from both.
 
-# IPv6 VPN network CIDR (optional, enables dual-stack)
+# IPv6 VPN network CIDR (required for dual-stack or IPv6-only)
 # Clients will be assigned IPs from this network (one /128 per client)
 # network6 = "fd00::/64"
 
 # Server's IPv6 VPN address (optional, defaults to first IP in network6)
 # This becomes the IPv6 gateway for connected clients
 # server_ip6 = "fd00::1"
+
+# ============================================================================
+# IPv6-only Example Configuration
+# ============================================================================
+# For an IPv6-only VPN server, comment out 'network' above and enable:
+#
+# # network = "10.0.0.0/24"  # Comment out or remove for IPv6-only
+# network6 = "fd00::/64"
+# server_ip6 = "fd00::1"
+#
+# To allow IPv6 clients to reach IPv4 destinations, enable NAT64:
+# [iroh.nat64]
+# enabled = true
+# prefix = "64:ff9b::/96"  # Standard NAT64 well-known prefix
 
 # ============================================================================
 # Performance Tuning

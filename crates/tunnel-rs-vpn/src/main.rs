@@ -289,10 +289,12 @@ async fn main() -> Result<()> {
 
 /// Run VPN server.
 async fn run_vpn_server(resolved: ResolvedVpnServerConfig) -> Result<()> {
-    // Parse network CIDR (already validated by builder)
-    let network: Ipv4Net = resolved
+    // Parse IPv4 network CIDR (optional, for IPv6-only servers)
+    let network: Option<Ipv4Net> = resolved
         .network
-        .parse()
+        .as_ref()
+        .map(|n| n.parse())
+        .transpose()
         .context("Invalid VPN network CIDR")?;
 
     // Parse server IP if provided
