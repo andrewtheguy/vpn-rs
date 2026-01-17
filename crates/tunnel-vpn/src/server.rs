@@ -130,6 +130,13 @@ struct ClientState {
     packet_tx: mpsc::Sender<Bytes>,
 }
 
+/// Per-client context used by the data handler.
+struct ClientContext {
+    assigned_ip: Option<Ipv4Addr>,
+    assigned_ip6: Option<Ipv6Addr>,
+    nat64: Option<Arc<Nat64Translator>>,
+}
+
 /// IP address pool for assigning addresses to clients.
 struct IpPool {
     /// Network CIDR.
@@ -938,15 +945,18 @@ impl VpnServer {
         // Run client handler (blocks until client disconnects or writer fails)
         // packet_tx is used for heartbeat responses (sent via the writer task)
         // writer_error_rx triggers immediate cleanup on write failures
+        let ctx = ClientContext {
+            assigned_ip,
+            assigned_ip6,
+            nat64: self.nat64.clone(),
+        };
         let result = Self::handle_client_data(
             packet_tx,
             data_recv,
-            assigned_ip,
-            assigned_ip6,
+            ctx,
             tun_write_tx,
             writer_error_rx,
             self.stats.clone(),
-            self.nat64.clone(),
         )
         .await;
 
@@ -1023,23 +1033,21 @@ impl VpnServer {
     /// If NAT64 is enabled, IPv6 packets destined for `64:ff9b::/96` are translated to
     /// IPv4 before being written to the TUN device.
     ///
-    /// At least one of `assigned_ip` (IPv4) or `assigned_ip6` (IPv6) must be provided.
-    #[allow(clippy::too_many_arguments)]
+    /// At least one of `ctx.assigned_ip` (IPv4) or `ctx.assigned_ip6` (IPv6) must be provided.
     async fn handle_client_data(
         packet_tx: mpsc::Sender<Bytes>,
         mut data_recv: iroh::endpoint::RecvStream,
-        assigned_ip: Option<Ipv4Addr>,
-        assigned_ip6: Option<Ipv6Addr>,
+        ctx: ClientContext,
         tun_write_tx: mpsc::Sender<Bytes>,
         writer_error_rx: oneshot::Receiver<String>,
         stats: Arc<VpnServerStats>,
-        nat64: Option<Arc<Nat64Translator>>,
     ) -> VpnResult<()> {
         // Create client identifier string for logging (used both in spawned task and select!)
         // At least one of assigned_ip or assigned_ip6 must be set (enforced by caller)
-        let client_id = assigned_ip
+        let client_id = ctx
+            .assigned_ip
             .map(|ip| ip.to_string())
-            .or_else(|| assigned_ip6.map(|ip| ip.to_string()))
+            .or_else(|| ctx.assigned_ip6.map(|ip| ip.to_string()))
             .expect("at least one IP must be assigned");
         let client_id_outer = client_id.clone(); // For use in select! block
 
@@ -1124,7 +1132,7 @@ impl VpnServer {
                 let source_valid = match extract_source_ip(packet) {
                     Some(PacketIp::V4(src_ip)) => {
                         // IPv4 packet validation
-                        match assigned_ip {
+                        match ctx.assigned_ip {
                             Some(expected_ip) if src_ip == expected_ip => true,
                             Some(expected_ip) => {
                                 log::warn!(
@@ -1154,7 +1162,7 @@ impl VpnServer {
                             // Link-local IPv6 packets are dropped (can't route across VPN)
                             false
                         } else {
-                            match assigned_ip6 {
+                            match ctx.assigned_ip6 {
                                 Some(expected_ip6) if src_ip == expected_ip6 => true,
                                 Some(expected_ip6) => {
                                     log::warn!(
@@ -1190,7 +1198,7 @@ impl VpnServer {
 
                 // Check for NAT64 translation (IPv6 -> IPv4)
                 let mut packet_bytes = Cow::Borrowed(packet);
-                if let Some(ref nat64) = nat64 {
+                if let Some(ref nat64) = ctx.nat64 {
                     // Check if this is an IPv6 packet destined for NAT64 prefix
                     if packet.len() >= 40 && (packet[0] >> 4) == 6 {
                         // Extract destination IPv6 address
