@@ -27,6 +27,10 @@ jobs:
           if [ -z "${{ inputs.tag_name }}" ]; then
             echo "release_tag=$(date +'%Y%m%d%H%M%S')" >> $GITHUB_OUTPUT
             echo "is_prerelease=true" >> $GITHUB_OUTPUT
+          elif [ "${{ github.ref_name }}" != "main" ]; then
+            # Non-main branches always produce prereleases
+            echo "release_tag=${{ inputs.tag_name }}" >> $GITHUB_OUTPUT
+            echo "is_prerelease=true" >> $GITHUB_OUTPUT
           else
             echo "release_tag=${{ inputs.tag_name }}" >> $GITHUB_OUTPUT
             echo "is_prerelease=false" >> $GITHUB_OUTPUT
