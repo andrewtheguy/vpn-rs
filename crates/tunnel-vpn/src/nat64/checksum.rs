@@ -190,7 +190,7 @@ pub fn adjust_checksum_6to4(
     // Note: invert old_folded as u16 before casting to u32 to avoid 32-bit complement
     let sum = hc + (!old_folded) as u32 + new_folded;
     let adjusted = !fold_checksum(sum);
-    if protocol == UDP_PROTOCOL && old_checksum != 0 && adjusted == 0 {
+    if protocol == UDP_PROTOCOL && adjusted == 0 {
         0xFFFF
     } else {
         adjusted

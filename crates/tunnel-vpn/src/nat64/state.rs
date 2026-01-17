@@ -168,18 +168,11 @@ impl PortAllocator {
                         return Some(current);
                     }
                     // Port was out of range (shouldn't happen normally).
-                    assert!(
-                        current >= self.start && current <= self.end,
+                    // Panic immediately for clarity rather than silently continuing.
+                    panic!(
                         "PortAllocator::next_candidate: current {} outside {}..={} (attempts={})",
-                        current,
-                        self.start,
-                        self.end,
-                        *attempts
+                        current, self.start, self.end, *attempts
                     );
-                    *attempts += 1;
-                    if *attempts >= range_size {
-                        return None;
-                    }
                 }
                 Err(_) => {
                     // Another thread beat us, retry

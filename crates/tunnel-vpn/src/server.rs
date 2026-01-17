@@ -1341,7 +1341,13 @@ impl VpnServer {
                                 (Cow::Borrowed(packet), None)
                             }
                             Err(e) => {
-                                // Real translation error
+                                // Translation error (e.g., no mapping found, malformed packet).
+                                // Unlike 6→4 which drops on error (destination is definitively
+                                // NAT64 and unroutable without translation), here we forward the
+                                // original IPv4 packet. For dual-stack clients, this allows
+                                // fallback to IPv4 routing. For IPv6-only clients, the packet
+                                // will be dropped by normal no-route logic since there's no
+                                // IPv4 address to route to.
                                 self.stats.packets_nat64_errors.fetch_add(1, Ordering::Relaxed);
                                 log::debug!("NAT64 4to6 translation error: {}", e);
                                 (Cow::Borrowed(packet), None)

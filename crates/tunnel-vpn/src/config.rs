@@ -624,6 +624,54 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_nat64_tcp_timeout_zero_invalid() {
+        let nat64 = Nat64Config {
+            tcp_timeout_secs: 0,
+            ..Default::default()
+        };
+        let result = nat64.validate();
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("tcp_timeout_secs"),
+            "error should mention tcp_timeout_secs: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_validate_nat64_udp_timeout_zero_invalid() {
+        let nat64 = Nat64Config {
+            udp_timeout_secs: 0,
+            ..Default::default()
+        };
+        let result = nat64.validate();
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("udp_timeout_secs"),
+            "error should mention udp_timeout_secs: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_validate_nat64_icmp_timeout_zero_invalid() {
+        let nat64 = Nat64Config {
+            icmp_timeout_secs: 0,
+            ..Default::default()
+        };
+        let result = nat64.validate();
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("icmp_timeout_secs"),
+            "error should mention icmp_timeout_secs: {}",
+            err
+        );
+    }
+
+    #[test]
     fn test_validate_client_requires_server_node_id() {
         let mut config = VpnClientConfig::default();
         config.routes.push("0.0.0.0/0".parse().unwrap());
