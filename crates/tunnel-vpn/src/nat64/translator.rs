@@ -512,7 +512,8 @@ impl Nat64Translator {
             dst_ip6,
             6, // TCP
             payload_len,
-        );
+        )
+        .expect("TCP checksum adjustment should always succeed");
 
         // Also adjust checksum for destination port change (dst_port -> client_port)
         let new_checksum = update_checksum_16(checksum_after_pseudo, dst_port, client_port);
@@ -564,24 +565,28 @@ impl Nat64Translator {
         new_payload[3] = client_port as u8;
 
         // Adjust checksum (handle zero checksum in UDP)
-        let new_checksum = if old_checksum == 0 {
-            // UDP checksum was 0 (optional in IPv4), but mandatory in IPv6
-            // We need to compute it from scratch (new_payload already has client_port)
-            self.compute_udp_checksum_ipv6(src_ip6, dst_ip6, &new_payload)
-        } else {
-            // First adjust for pseudo-header change (IPv4 -> IPv6)
-            let checksum_after_pseudo = adjust_checksum_4to6(
-                old_checksum,
-                src_ip4,
-                self.server_ip4,
-                src_ip6,
-                dst_ip6,
-                17, // UDP
-                payload_len,
-            );
+        // First adjust for pseudo-header change (IPv4 -> IPv6).
+        // UDP zero-checksum returns None, which signals that we must recompute.
+        let checksum_after_pseudo = adjust_checksum_4to6(
+            old_checksum,
+            src_ip4,
+            self.server_ip4,
+            src_ip6,
+            dst_ip6,
+            17, // UDP
+            payload_len,
+        );
 
-            // Also adjust checksum for destination port change (dst_port -> client_port)
-            update_checksum_16(checksum_after_pseudo, dst_port, client_port)
+        let new_checksum = match checksum_after_pseudo {
+            Some(checksum_after_pseudo) => {
+                // Also adjust checksum for destination port change (dst_port -> client_port)
+                update_checksum_16(checksum_after_pseudo, dst_port, client_port)
+            }
+            None => {
+                // UDP checksum was 0 (optional in IPv4), but mandatory in IPv6.
+                // Compute it from scratch (new_payload already has client_port).
+                self.compute_udp_checksum_ipv6(src_ip6, dst_ip6, &new_payload)
+            }
         };
 
         new_payload[6] = (new_checksum >> 8) as u8;

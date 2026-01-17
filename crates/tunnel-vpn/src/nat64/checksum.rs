@@ -196,6 +196,10 @@ pub fn adjust_checksum_6to4(
 ///
 /// This adjusts the checksum to account for the pseudo-header change
 /// from IPv4 to IPv6 format.
+///
+/// Returns `None` for the IPv4 UDP zero-checksum case (protocol 17 with
+/// `old_checksum == 0`), because IPv6 requires a checksum and the caller
+/// must recompute the full UDP checksum.
 pub fn adjust_checksum_4to6(
     old_checksum: u16,
     src4: Ipv4Addr,
@@ -204,7 +208,14 @@ pub fn adjust_checksum_4to6(
     dst6: Ipv6Addr,
     protocol: u8,
     payload_len: u16,
-) -> u16 {
+) -> Option<u16> {
+    // IPv4 UDP can omit the checksum (0x0000), but IPv6 requires it.
+    // Signal to the caller that a full recompute is required.
+    const UDP_PROTOCOL: u8 = 17;
+    if protocol == UDP_PROTOCOL && old_checksum == 0 {
+        return None;
+    }
+
     // Calculate old (IPv4) pseudo-header sum
     let old_pseudo = ipv4_pseudo_header_sum(src4, dst4, protocol, payload_len);
 
@@ -220,7 +231,7 @@ pub fn adjust_checksum_4to6(
     // HC' = ~(~HC + ~old + new)
     // Note: invert old_folded as u16 before casting to u32 to avoid 32-bit complement
     let sum = hc + (!old_folded) as u32 + new_folded;
-    !fold_checksum(sum)
+    Some(!fold_checksum(sum))
 }
 
 #[cfg(test)]
@@ -366,7 +377,8 @@ mod tests {
             // and we're going back to src6/dst6
             let after_4to6 = adjust_checksum_4to6(
                 after_6to4, src4, dst4, src6, dst6, protocol, payload_len,
-            );
+            )
+            .expect("TCP checksum adjustment should always succeed");
 
             assert!(
                 ones_complement_eq(after_4to6, original),
@@ -396,6 +408,16 @@ mod tests {
             let after_4to6 = adjust_checksum_4to6(
                 original, src4, dst4, src6, dst6, protocol, payload_len,
             );
+
+            if original == 0 {
+                assert!(
+                    after_4to6.is_none(),
+                    "UDP zero checksum should require full recompute"
+                );
+                continue;
+            }
+
+            let after_4to6 = after_4to6.expect("UDP non-zero checksum should adjust");
 
             // Apply 6to4 translation (IPv6 -> IPv4) - reverse direction
             let after_6to4 = adjust_checksum_6to4(
@@ -436,7 +458,8 @@ mod tests {
             );
             let after_4to6 = adjust_checksum_4to6(
                 after_6to4, src4, dst4, src6, dst6, protocol, payload_len,
-            );
+            )
+            .expect("checksum adjustment should succeed for non-zero UDP/TCP checksums");
 
             assert_eq!(
                 after_4to6, original,
@@ -469,6 +492,19 @@ mod tests {
         let result5 = adjust_checksum_4to6(original, src4, dst4, src6, dst6, protocol, payload_len);
 
         assert_eq!(result4, result5);
+    }
+
+    #[test]
+    fn test_adjust_checksum_4to6_udp_zero_checksum_requires_recompute() {
+        let src4 = Ipv4Addr::new(8, 8, 8, 8);
+        let dst4 = Ipv4Addr::new(10, 0, 0, 1);
+        let src6: Ipv6Addr = "64:ff9b::8.8.8.8".parse().unwrap();
+        let dst6: Ipv6Addr = "fd00::2".parse().unwrap();
+        let protocol = 17;
+        let payload_len: u16 = 100;
+
+        let result = adjust_checksum_4to6(0x0000, src4, dst4, src6, dst6, protocol, payload_len);
+        assert!(result.is_none(), "UDP zero checksum must be recomputed for IPv6");
     }
 
     #[test]
