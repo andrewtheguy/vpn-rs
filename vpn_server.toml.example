@@ -136,10 +136,12 @@ auth_tokens = ["iXXXXXXXXXXXXXXXXX"]  # Replace with real token from generate-to
 #     "https://relay2.example.com",
 # ]
 
-# Custom DNS server URL for peer discovery
-# Must match client's dns_server configuration
+# Custom DNS server URL for peer discovery, or "none" to disable DNS discovery.
+# Must match client's dns_server configuration.
+# Set to "none" to disable DNS-based peer discovery (mDNS still works).
 # NOTE: URL must include the /pkarr path
 # dns_server = "https://dns.example.com/pkarr"
+# dns_server = "none"
 
 # ============================================================================
 # Transport Tuning (Optional)

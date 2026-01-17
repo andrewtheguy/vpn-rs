@@ -30,7 +30,8 @@ pub struct MultiSourceServerConfig {
     pub relay_urls: Vec<String>,
     /// Whether to use relay-only mode (requires test-utils feature).
     pub relay_only: bool,
-    /// Custom DNS server for resolution.
+    /// Custom DNS server for resolution, or "none" to disable DNS discovery.
+    /// mDNS for local network discovery is unaffected.
     pub dns_server: Option<String>,
     /// Set of valid authentication tokens. **Sensitive field - redacted in Debug output.**
     pub auth_tokens: HashSet<String>,
@@ -69,7 +70,8 @@ pub struct MultiSourceClientConfig {
     pub relay_urls: Vec<String>,
     /// Whether to use relay-only mode (requires test-utils feature).
     pub relay_only: bool,
-    /// Custom DNS server for resolution.
+    /// Custom DNS server for resolution, or "none" to disable DNS discovery.
+    /// mDNS for local network discovery is unaffected.
     pub dns_server: Option<String>,
     /// Authentication token for server access. **Sensitive field - redacted in Debug output.**
     pub auth_token: String,

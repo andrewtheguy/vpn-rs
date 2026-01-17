@@ -70,7 +70,8 @@ enum Command {
         #[arg(long)]
         relay_only: bool,
 
-        /// Custom DNS server URL for peer discovery
+        /// Custom DNS server URL for peer discovery, or "none" to disable DNS discovery.
+        /// mDNS for local network discovery is unaffected.
         #[arg(long)]
         dns_server: Option<String>,
 
@@ -117,7 +118,8 @@ enum Command {
         #[arg(long)]
         relay_only: bool,
 
-        /// Custom DNS server URL for peer discovery
+        /// Custom DNS server URL for peer discovery, or "none" to disable DNS discovery.
+        /// mDNS for local network discovery is unaffected.
         #[arg(long)]
         dns_server: Option<String>,
 
