@@ -87,8 +87,8 @@ impl TunConfig {
             )));
         }
         // Use a link-local placeholder address that won't conflict with real traffic.
-        // This satisfies the TUN device creation requirements on platforms that
-        // need an IPv4 address, but won't affect IPv4 routing.
+        // This satisfies TUN creation on platforms that require IPv4 (macOS/Windows
+        // in tun 0.8.x), but won't affect IPv4 routing.
         let placeholder_ip = Ipv4Addr::new(169, 254, 254, 254);
         let placeholder_netmask = Ipv4Addr::new(255, 255, 255, 255);
         Ok(Self {
