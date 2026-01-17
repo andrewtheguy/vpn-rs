@@ -1071,7 +1071,7 @@ mod tests {
         let udp_start = 20;
         let translated_port =
             u16::from_be_bytes([ipv4_outbound[udp_start], ipv4_outbound[udp_start + 1]]);
-        assert!(translated_port >= 10000 && translated_port <= 10100);
+        assert!((10000..=10100).contains(&translated_port));
 
         // Step 2: Simulate response from IPv4 destination
         // Build an IPv4 UDP response packet

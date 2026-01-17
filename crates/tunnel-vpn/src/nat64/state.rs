@@ -409,7 +409,7 @@ mod tests {
             .get_or_create_mapping(client_ip6, 12345, dest_ip4, 80, Nat64Protocol::Tcp)
             .unwrap();
 
-        assert!(port1 >= 10000 && port1 <= 10100);
+        assert!((10000..=10100).contains(&port1));
         assert_eq!(table.active_mappings(), 1);
 
         // Same connection should return same port
