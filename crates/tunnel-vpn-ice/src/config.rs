@@ -154,6 +154,12 @@ impl VpnIceServerConfig {
                     network, server_ip
                 ));
             }
+            if (self.max_clients as u64) > capacity {
+                return Err(format!(
+                    "'network' {} only has {} usable IPv4 client addresses, but max_clients is {}",
+                    network, capacity, self.max_clients
+                ));
+            }
         }
 
         if let Some(network6) = self.network6 {
@@ -171,12 +177,24 @@ impl VpnIceServerConfig {
                     server_ip6, network6
                 ));
             }
+            if server_ip6 == network6.network() {
+                return Err(format!(
+                    "'server_ip6' {} cannot be the network address for 'network6' {}",
+                    server_ip6, network6
+                ));
+            }
 
             let capacity = ipv6_client_capacity(network6, server_ip6);
             if capacity == 0 {
                 return Err(format!(
                     "'network6' {} has no usable client IPv6 addresses after excluding server {}",
                     network6, server_ip6
+                ));
+            }
+            if (self.max_clients as u128) > capacity {
+                return Err(format!(
+                    "'network6' {} only has {} usable IPv6 client addresses, but max_clients is {}",
+                    network6, capacity, self.max_clients
                 ));
             }
         }
@@ -315,7 +333,7 @@ fn default_server_ip6(net: Ipv6Net) -> Ipv6Addr {
 fn ipv4_client_capacity(net: Ipv4Net, server_ip: Ipv4Addr) -> u64 {
     let host_bits = 32u32.saturating_sub(net.prefix_len() as u32);
     let total = if host_bits >= 32 {
-        u64::MAX
+        1u64 << 32
     } else {
         1u64 << host_bits
     };
@@ -367,6 +385,24 @@ fn default_max_clients() -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn base_server_config() -> VpnIceServerConfig {
+        VpnIceServerConfig {
+            network: Some("10.0.0.0/24".parse().unwrap()),
+            network6: None,
+            server_ip: None,
+            server_ip6: None,
+            mtu: DEFAULT_MTU,
+            max_clients: 253,
+            nsec: Some("nsec1test".to_string()),
+            nsec_file: None,
+            peer_npub: "npub1test".to_string(),
+            relays: None,
+            stun_servers: default_stun_servers(),
+            nat64: None,
+            disable_spoofing_check: false,
+        }
+    }
 
     #[test]
     fn test_server_config_validation_no_network() {
@@ -430,22 +466,59 @@ mod tests {
 
     #[test]
     fn test_server_config_validation_ok() {
-        let config = VpnIceServerConfig {
-            network: Some("10.0.0.0/24".parse().unwrap()),
-            network6: None,
-            server_ip: None,
-            server_ip6: None,
-            mtu: DEFAULT_MTU,
-            max_clients: 254,
-            nsec: Some("nsec1test".to_string()),
-            nsec_file: None,
-            peer_npub: "npub1test".to_string(),
-            relays: None,
-            stun_servers: default_stun_servers(),
-            nat64: None,
-            disable_spoofing_check: false,
-        };
+        let config = base_server_config();
         assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_server_config_validation_network_too_small() {
+        let mut config = base_server_config();
+        config.network = Some("10.0.0.0/31".parse().unwrap());
+        assert!(config.validate().is_err());
+
+        let mut config6 = base_server_config();
+        config6.network = None;
+        config6.network6 = Some("fd00::/127".parse().unwrap());
+        assert!(config6.validate().is_err());
+    }
+
+    #[test]
+    fn test_server_config_validation_server_ip_outside() {
+        let mut config = base_server_config();
+        config.server_ip = Some("10.0.1.1".parse().unwrap());
+        assert!(config.validate().is_err());
+
+        let mut config6 = base_server_config();
+        config6.network = None;
+        config6.network6 = Some("fd00::/64".parse().unwrap());
+        config6.server_ip6 = Some("fd01::1".parse().unwrap());
+        assert!(config6.validate().is_err());
+    }
+
+    #[test]
+    fn test_server_config_validation_server_ip_at_network_or_broadcast() {
+        let mut config = base_server_config();
+        config.server_ip = Some("10.0.0.0".parse().unwrap());
+        assert!(config.validate().is_err());
+
+        let mut config_broadcast = base_server_config();
+        config_broadcast.server_ip = Some("10.0.0.255".parse().unwrap());
+        assert!(config_broadcast.validate().is_err());
+
+        let mut config6 = base_server_config();
+        config6.network = None;
+        config6.network6 = Some("fd00::/64".parse().unwrap());
+        config6.server_ip6 = Some("fd00::".parse().unwrap());
+        assert!(config6.validate().is_err());
+    }
+
+    #[test]
+    fn test_server_config_validation_capacity_exhaustion() {
+        let mut config = base_server_config();
+        config.network = Some("10.0.0.0/30".parse().unwrap());
+        config.server_ip = Some("10.0.0.1".parse().unwrap());
+        config.max_clients = 2;
+        assert!(config.validate().is_err());
     }
 
     #[test]
