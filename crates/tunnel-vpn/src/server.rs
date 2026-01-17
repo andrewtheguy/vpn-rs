@@ -135,6 +135,14 @@ struct ClientContext {
     assigned_ip: Option<Ipv4Addr>,
     assigned_ip6: Option<Ipv6Addr>,
     nat64: Option<Arc<Nat64Translator>>,
+    /// Current client's key for identifying self in spoofing checks.
+    client_key: (EndpointId, u64),
+    /// Reverse lookup: IPv4 address -> client key (for inter-client spoofing detection).
+    ip_to_endpoint: Arc<DashMap<Ipv4Addr, (EndpointId, u64)>>,
+    /// Reverse lookup: IPv6 address -> client key (for inter-client spoofing detection).
+    ip6_to_endpoint: Arc<DashMap<Ipv6Addr, (EndpointId, u64)>>,
+    /// Whether to disable all source IP spoofing checks.
+    disable_spoofing_check: bool,
 }
 
 /// IP address pool for assigning addresses to clients.
@@ -949,6 +957,10 @@ impl VpnServer {
             assigned_ip,
             assigned_ip6,
             nat64: self.nat64.clone(),
+            client_key,
+            ip_to_endpoint: ip_to_endpoint.clone(),
+            ip6_to_endpoint: ip6_to_endpoint.clone(),
+            disable_spoofing_check: self.config.disable_spoofing_check,
         };
         let result = Self::handle_client_data(
             packet_tx,
@@ -1128,65 +1140,60 @@ impl VpnServer {
 
                 let packet = &data_buf[..len];
 
-                // Validate source IP to prevent IP spoofing
-                let source_valid = match extract_source_ip(packet) {
-                    Some(PacketIp::V4(src_ip)) => {
-                        // IPv4 packet validation
-                        match ctx.assigned_ip {
-                            Some(expected_ip) if src_ip == expected_ip => true,
-                            Some(expected_ip) => {
-                                log::warn!(
-                                    "IP spoofing attempt from client {}: expected source {}, got {}",
-                                    client_id,
-                                    expected_ip,
-                                    src_ip
-                                );
-                                false
-                            }
-                            None => {
-                                // IPv6-only client sending IPv4 packet
-                                log::warn!(
-                                    "IPv4 packet from client {} without assigned IPv4 address, source: {}",
-                                    client_id, src_ip
-                                );
-                                false
-                            }
-                        }
-                    }
-                    Some(PacketIp::V6(src_ip)) => {
-                        // Silently drop link-local packets (fe80::/10) - these are normal
-                        // OS traffic (neighbor discovery, etc.) that shouldn't be forwarded
-                        let src_bytes = src_ip.octets();
-                        let is_link_local = src_bytes[0] == 0xfe && (src_bytes[1] & 0xc0) == 0x80;
-                        if is_link_local {
-                            // Link-local IPv6 packets are dropped (can't route across VPN)
-                            false
-                        } else {
-                            match ctx.assigned_ip6 {
-                                Some(expected_ip6) if src_ip == expected_ip6 => true,
-                                Some(expected_ip6) => {
+                // Validate source IP to prevent inter-client IP spoofing.
+                // We only reject packets if the source IP belongs to another client,
+                // allowing clients to use their own public IPs (useful for dual-stack).
+                let source_valid = if ctx.disable_spoofing_check {
+                    // Spoofing check disabled - allow all packets
+                    true
+                } else {
+                    match extract_source_ip(packet) {
+                        Some(PacketIp::V4(src_ip)) => {
+                            // Check if this IP belongs to another client
+                            match ctx.ip_to_endpoint.get(&src_ip) {
+                                Some(ref owner) if *owner.value() == ctx.client_key => true, // Our own assigned IP
+                                Some(_) => {
+                                    // IP belongs to another client - actual spoofing
                                     log::warn!(
-                                        "IPv6 spoofing attempt from client {}: expected source {}, got {}",
-                                        client_id, expected_ip6, src_ip
-                                    );
-                                    false
-                                }
-                                None => {
-                                    log::warn!(
-                                        "IPv6 packet from client {} without assigned IPv6 address, source: {}",
+                                        "IPv4 inter-client spoofing from client {}: source {} belongs to another client",
                                         client_id, src_ip
                                     );
                                     false
                                 }
+                                None => true, // Not a VPN-assigned IP - allow (e.g., client's public IP)
                             }
                         }
-                    }
-                    None => {
-                        log::warn!(
-                            "Failed to parse source IP from packet from client {}",
-                            client_id
-                        );
-                        false
+                        Some(PacketIp::V6(src_ip)) => {
+                            // Silently drop link-local packets (fe80::/10) - these are normal
+                            // OS traffic (neighbor discovery, etc.) that shouldn't be forwarded
+                            let src_bytes = src_ip.octets();
+                            let is_link_local = src_bytes[0] == 0xfe && (src_bytes[1] & 0xc0) == 0x80;
+                            if is_link_local {
+                                // Link-local IPv6 packets are dropped (can't route across VPN)
+                                false
+                            } else {
+                                // Check if this IP belongs to another client
+                                match ctx.ip6_to_endpoint.get(&src_ip) {
+                                    Some(ref owner) if *owner.value() == ctx.client_key => true, // Our own assigned IP
+                                    Some(_) => {
+                                        // IP belongs to another client - actual spoofing
+                                        log::warn!(
+                                            "IPv6 inter-client spoofing from client {}: source {} belongs to another client",
+                                            client_id, src_ip
+                                        );
+                                        false
+                                    }
+                                    None => true, // Not a VPN-assigned IP - allow (e.g., client's public IP)
+                                }
+                            }
+                        }
+                        None => {
+                            log::warn!(
+                                "Failed to parse source IP from packet from client {}",
+                                client_id
+                            );
+                            false
+                        }
                     }
                 };
 

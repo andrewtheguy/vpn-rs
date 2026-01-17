@@ -235,6 +235,18 @@ pub struct VpnServerConfig {
     /// When enabled, clients can access IPv4 addresses via the `64:ff9b::/96` prefix.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub nat64: Option<Nat64Config>,
+
+    /// Disable inter-client IP spoofing checks (default: false).
+    ///
+    /// When `false` (default): The server rejects packets whose source IP matches
+    /// another client's assigned VPN IP. This prevents one client from impersonating
+    /// another. Packets with non-VPN source IPs (e.g., a client's public IPv6) are
+    /// still allowed, supporting dual-stack scenarios.
+    ///
+    /// When `true`: All source IP validation is disabled. Any source IP is accepted,
+    /// which may allow clients to spoof other clients' addresses. Use with caution.
+    #[serde(default)]
+    pub disable_spoofing_check: bool,
 }
 
 impl VpnServerConfig {
@@ -436,6 +448,7 @@ mod tests {
             client_channel_size: 1024,
             tun_writer_channel_size: 512,
             nat64: None,
+            disable_spoofing_check: false,
         }
     }
 

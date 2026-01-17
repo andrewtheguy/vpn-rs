@@ -277,6 +277,17 @@ pub struct VpnServerIrohConfig {
     /// NAT64 configuration for IPv6-only clients to access IPv4 resources.
     /// When enabled, clients can access IPv4 addresses via the `64:ff9b::/96` prefix.
     pub nat64: Option<Nat64Config>,
+    /// Disable inter-client IP spoofing checks (default: false).
+    ///
+    /// When `false` (default): The server rejects packets whose source IP matches
+    /// another client's assigned VPN IP. This prevents one client from impersonating
+    /// another. Packets with non-VPN source IPs (e.g., a client's public IPv6) are
+    /// still allowed, supporting dual-stack scenarios.
+    ///
+    /// When `true`: All source IP validation is disabled. Any source IP is accepted,
+    /// which may allow clients to spoof other clients' addresses. Use with caution.
+    #[serde(default)]
+    pub disable_spoofing_check: bool,
     /// Shared configuration fields
     #[serde(flatten)]
     pub shared: VpnIrohSharedConfig,
@@ -1329,6 +1340,7 @@ pub struct ResolvedVpnServerConfig {
     pub tun_writer_channel_size: usize,
     pub transport: TransportTuning,
     pub nat64: Option<Nat64Config>,
+    pub disable_spoofing_check: bool,
 }
 
 impl ResolvedVpnServerConfig {
@@ -1412,6 +1424,7 @@ impl ResolvedVpnServerConfig {
             tun_writer_channel_size,
             transport: cfg.shared.transport.clone(),
             nat64: cfg.nat64.clone(),
+            disable_spoofing_check: cfg.disable_spoofing_check,
         })
     }
 }

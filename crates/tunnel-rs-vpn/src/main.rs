@@ -363,6 +363,7 @@ async fn run_vpn_server(resolved: ResolvedVpnServerConfig) -> Result<()> {
         client_channel_size: resolved.client_channel_size,
         tun_writer_channel_size: resolved.tun_writer_channel_size,
         nat64,
+        disable_spoofing_check: resolved.disable_spoofing_check,
     };
 
     // Create iroh endpoint for signaling.
