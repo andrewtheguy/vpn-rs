@@ -39,6 +39,9 @@ impl Nat64Protocol {
     }
 
     /// Create from IPv6 next header (protocol).
+    ///
+    /// This assumes `next_header` is the transport protocol and does not
+    /// account for IPv6 extension headers.
     pub fn from_ipv6_next_header(next_header: u8) -> Option<Self> {
         match next_header {
             6 => Some(Nat64Protocol::Tcp),
@@ -133,6 +136,8 @@ impl PortAllocator {
     /// and retrying if not.
     fn next_candidate(&self, attempts: &mut usize) -> Option<u16> {
         let range_size = (self.end - self.start + 1) as usize;
+        let max_spins = 64usize;
+        let mut spins = 0usize;
 
         if *attempts >= range_size {
             return None; // Exhausted all ports
@@ -162,10 +167,27 @@ impl PortAllocator {
                         *attempts += 1;
                         return Some(current);
                     }
-                    // Port was out of range (shouldn't happen normally), retry
+                    // Port was out of range (shouldn't happen normally).
+                    debug_assert!(
+                        false,
+                        "PortAllocator::next_candidate: current {} outside {}..={} (attempts={})",
+                        current,
+                        self.start,
+                        self.end,
+                        *attempts
+                    );
+                    *attempts += 1;
+                    if *attempts >= range_size {
+                        return None;
+                    }
                 }
                 Err(_) => {
                     // Another thread beat us, retry
+                    spins += 1;
+                    if spins > max_spins {
+                        std::thread::yield_now();
+                        spins = 0;
+                    }
                     continue;
                 }
             }
@@ -354,23 +376,40 @@ impl Nat64StateTable {
         // This handles the race where get_or_create_mapping or lookup_reverse
         // refreshed the entry between collection and removal
         for forward_key in candidate_keys {
-            // Use remove_if for atomic conditional removal:
-            // only remove if the entry is still expired
-            let maybe_removed = self.forward.remove_if(&forward_key, |_key, entry| {
-                let timeout = self.timeout_for_protocol(entry.protocol);
-                now.duration_since(entry.last_activity) > timeout
-            });
+            let reverse_key = match self.forward.get(&forward_key) {
+                Some(entry) => {
+                    let timeout = self.timeout_for_protocol(entry.protocol);
+                    if now.duration_since(entry.last_activity) > timeout {
+                        Some(ReverseKey {
+                            translated_port: entry.translated_port,
+                            src_ip4: entry.dest_ip4,
+                            src_port: entry.dest_port,
+                            protocol: entry.protocol,
+                        })
+                    } else {
+                        None
+                    }
+                }
+                None => None,
+            };
 
-            if let Some((_, entry)) = maybe_removed {
-                // Entry was expired and removed, also remove from reverse map
-                let reverse_key = ReverseKey {
-                    translated_port: entry.translated_port,
-                    src_ip4: entry.dest_ip4,
-                    src_port: entry.dest_port,
-                    protocol: entry.protocol,
-                };
+            if let Some(reverse_key) = reverse_key {
+                // Remove reverse mapping first to avoid orphan entries if we panic later.
                 self.reverse.remove(&reverse_key);
-                removed += 1;
+
+                // Use remove_if for atomic conditional removal:
+                // only remove if the entry is still expired
+                let maybe_removed = self.forward.remove_if(&forward_key, |_key, entry| {
+                    let timeout = self.timeout_for_protocol(entry.protocol);
+                    now.duration_since(entry.last_activity) > timeout
+                });
+
+                if maybe_removed.is_some() {
+                    removed += 1;
+                } else {
+                    // Forward entry was refreshed; restore reverse mapping.
+                    self.reverse.insert(reverse_key, forward_key);
+                }
             }
         }
 

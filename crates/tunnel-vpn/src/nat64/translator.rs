@@ -95,6 +95,10 @@ impl Nat64Translator {
     ///
     /// Returns the translated IPv4 packet if successful.
     /// The source address is translated to `server_ip4` with NAPT.
+    ///
+    /// Note: IPv6 extension headers are not parsed. `next_header` is treated
+    /// as the transport protocol, so packets with extension headers may be
+    /// rejected as unsupported.
     pub fn translate_6to4(&self, ipv6_packet: &[u8]) -> VpnResult<Vec<u8>> {
         // Validate minimum IPv6 header size
         if ipv6_packet.len() < IPV6_HEADER_SIZE {
@@ -126,9 +130,33 @@ impl Nat64Translator {
             ))
         })?;
 
-        // Get protocol
-        let protocol = Nat64Protocol::from_ipv6_next_header(next_header)
-            .ok_or(VpnError::Nat64UnsupportedProtocol(next_header))?;
+        // Get protocol (extension headers are not parsed here).
+        let protocol = match Nat64Protocol::from_ipv6_next_header(next_header) {
+            Some(protocol) => protocol,
+            None => {
+                let ext_header_name = match next_header {
+                    0 => Some("Hop-by-Hop Options"),
+                    43 => Some("Routing"),
+                    44 => Some("Fragment"),
+                    50 => Some("ESP"),
+                    51 => Some("AH"),
+                    60 => Some("Destination Options"),
+                    135 => Some("Mobility"),
+                    139 => Some("HIP"),
+                    140 => Some("Shim6"),
+                    _ => None,
+                };
+
+                if let Some(name) = ext_header_name {
+                    return Err(VpnError::Nat64(format!(
+                        "IPv6 extension header {} ({}) not supported (transport header not parsed)",
+                        next_header, name
+                    )));
+                }
+
+                return Err(VpnError::Nat64UnsupportedProtocol(next_header));
+            }
+        };
 
         // Get payload
         let payload_start = IPV6_HEADER_SIZE;
@@ -394,13 +422,9 @@ impl Nat64Translator {
         new_payload[0] = (new_src_port >> 8) as u8;
         new_payload[1] = new_src_port as u8;
 
-        // UDP zero-checksum preservation: In IPv4, UDP checksum 0 means "no checksum
-        // computed" (optional per RFC 768). If the original IPv6 UDP packet had a
-        // checksum that happens to compute to 0xFFFF (transmitted as 0 in IPv6 would
-        // be illegal, but the original checksum field might be 0 after translation
-        // from a system that set it), we preserve the zero-checksum semantics.
-        // Note: IPv6 UDP checksum is mandatory and 0x0000 is transmitted as 0xFFFF,
-        // but when translating 6-to-4, if we detect zero we preserve it.
+        // If is_udp_zero_checksum is true (protocol == 17 && old_checksum == 0),
+        // preserve a received IPv6 UDP checksum of 0 by emitting a zero checksum
+        // in the IPv4 packet to keep "no checksum" semantics.
         let is_udp_zero_checksum = protocol == 17 && old_checksum == 0;
 
         let checksum_offset = if protocol == 6 { 16 } else { 6 }; // TCP vs UDP
