@@ -817,7 +817,7 @@ pub fn create_nat64_translator(
 
 #[cfg(test)]
 mod tests {
-    use super::clock::MockClock;
+    use crate::nat64::clock::MockClock;
     use super::*;
 
     fn test_config() -> Nat64Config {
@@ -1629,7 +1629,7 @@ mod tests {
         translator.translate_6to4(&udp_packet).unwrap();
 
         // ICMP mapping
-        let icmp_packet = build_test_ipv6_icmp_echo_request(client_ip6, dest_ip6, 1234, 1, b"ping");
+        let icmp_packet = build_test_ipv6_icmp_echo_packet(client_ip6, dest_ip6, 1234, 1, b"ping");
         translator.translate_6to4(&icmp_packet).unwrap();
 
         assert_eq!(translator.active_mappings(), 3);

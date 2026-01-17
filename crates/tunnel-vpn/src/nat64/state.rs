@@ -420,7 +420,7 @@ impl Nat64StateTable {
 
 #[cfg(test)]
 mod tests {
-    use super::clock::MockClock;
+    use crate::nat64::clock::MockClock;
     use super::*;
 
     fn test_config() -> Nat64Config {

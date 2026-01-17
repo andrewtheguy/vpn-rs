@@ -61,4 +61,4 @@ fs2 = "0.4"
 # Deterministic RNG for testing
 rand_chacha = "0.3"
 # Mockable time for testing timeout behavior
-mock_instant = { version = "0.5", features = ["sync"] }
+mock_instant = "0.5"
