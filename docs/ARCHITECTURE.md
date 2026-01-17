@@ -459,6 +459,8 @@ VPN mode supports optional IPv6 alongside IPv4. When `network6` is configured on
 - Dual-stack applications (IPv4 and IPv6 simultaneously)
 - Backwards compatibility (IPv4-only configs continue to work)
 
+IPv4 is optional: the server can run IPv6-only with `network6` and no `network`. In that mode, IPv4 reachability is only available via **experimental** NAT64.
+
 ### Key Components
 
 ```mermaid
@@ -600,7 +602,7 @@ graph TB
     style D6 fill:#BBDEFB
 ```
 
-When `network6` is configured, each client receives both an IPv4 and IPv6 address. The IPv6 pool works identically to the IPv4 pool, with each client getting a single /128 address. Unlike IPv4, a /64 network provides an effectively unlimited address space (~18.4 quintillion (2^64) addresses), so pool exhaustion is not a practical concern for IPv6.
+When `network6` is configured, each client receives both an IPv4 and IPv6 address. The IPv6 pool works identically to the IPv4 pool, with each client getting a single /128 address. Unlike IPv4, a /64 network provides an effectively unlimited address space (~18.4 quintillion (2^64) addresses), so pool exhaustion is not a practical concern for IPv6. If `network` is omitted, the IPv4 pool is not created and the server runs IPv6-only; NAT64 (experimental) can be enabled to reach IPv4 destinations.
 
 ### Platform-Specific Details
 
