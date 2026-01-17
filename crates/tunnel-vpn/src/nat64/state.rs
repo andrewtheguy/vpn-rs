@@ -111,10 +111,10 @@ impl PortAllocator {
     ///
     /// # Panics
     ///
-    /// Panics in debug builds if `end < start`. In release builds, this would
-    /// cause underflow in `range_size` computation, leading to incorrect behavior.
+    /// Panics if `end < start`, as this would cause underflow in `range_size`
+    /// computation.
     fn new(start: u16, end: u16) -> Self {
-        debug_assert!(
+        assert!(
             end >= start,
             "PortAllocator: end ({}) must be >= start ({})",
             end,
