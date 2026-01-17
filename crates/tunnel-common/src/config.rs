@@ -131,6 +131,56 @@ pub struct NostrConfig {
     pub target: Option<String>,
 }
 
+/// NAT64 configuration for IPv6-only clients to access IPv4 resources.
+///
+/// When enabled, the VPN server translates IPv6 packets destined for the
+/// well-known NAT64 prefix `64:ff9b::/96` to IPv4 packets, performs NAPT
+/// (Network Address Port Translation), and routes them to the IPv4 destination.
+///
+/// Note: The NAT64 prefix is fixed at `64:ff9b::/96` (RFC 6052 well-known prefix).
+#[derive(Deserialize, Default, Clone, Debug)]
+pub struct Nat64Config {
+    /// Enable NAT64 translation.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Port range for NAPT (default: 32768-65535).
+    /// The first value is the start port, the second is the end port (inclusive).
+    #[serde(default = "default_nat64_port_range")]
+    pub port_range: (u16, u16),
+
+    /// TCP connection timeout in seconds (default: 300).
+    /// TCP connections without activity for this duration are removed.
+    #[serde(default = "default_nat64_tcp_timeout")]
+    pub tcp_timeout_secs: u64,
+
+    /// UDP session timeout in seconds (default: 30).
+    /// UDP sessions without activity for this duration are removed.
+    #[serde(default = "default_nat64_udp_timeout")]
+    pub udp_timeout_secs: u64,
+
+    /// ICMP session timeout in seconds (default: 30).
+    /// ICMP sessions without activity for this duration are removed.
+    #[serde(default = "default_nat64_icmp_timeout")]
+    pub icmp_timeout_secs: u64,
+}
+
+fn default_nat64_port_range() -> (u16, u16) {
+    (32768, 65535)
+}
+
+fn default_nat64_tcp_timeout() -> u64 {
+    300
+}
+
+fn default_nat64_udp_timeout() -> u64 {
+    30
+}
+
+fn default_nat64_icmp_timeout() -> u64 {
+    30
+}
+
 /// Shared VPN iroh configuration fields (used by both server and client).
 #[derive(Deserialize, Default, Clone)]
 pub struct VpnIrohSharedConfig {
@@ -181,6 +231,9 @@ pub struct VpnServerIrohConfig {
     /// Channel buffer size for TUN writer task (default: 512).
     /// Aggregate buffer for all client -> TUN traffic. Lower values bound memory usage.
     pub tun_writer_channel_size: Option<usize>,
+    /// NAT64 configuration for IPv6-only clients to access IPv4 resources.
+    /// When enabled, clients can access IPv4 addresses via the `64:ff9b::/96` prefix.
+    pub nat64: Option<Nat64Config>,
     /// Shared configuration fields
     #[serde(flatten)]
     pub shared: VpnIrohSharedConfig,
@@ -1232,6 +1285,7 @@ pub struct ResolvedVpnServerConfig {
     pub client_channel_size: usize,
     pub tun_writer_channel_size: usize,
     pub transport: TransportTuning,
+    pub nat64: Option<Nat64Config>,
 }
 
 impl ResolvedVpnServerConfig {
@@ -1288,6 +1342,7 @@ impl ResolvedVpnServerConfig {
             client_channel_size,
             tun_writer_channel_size,
             transport: cfg.shared.transport.clone(),
+            nat64: cfg.nat64.clone(),
         })
     }
 }

@@ -50,10 +50,7 @@ network = "10.0.0.0/24"
 # network6 = "fd00::/64"
 # server_ip6 = "fd00::1"
 #
-# To allow IPv6 clients to reach IPv4 destinations, enable NAT64:
-# [iroh.nat64]
-# enabled = true
-# prefix = "64:ff9b::/96"  # Standard NAT64 well-known prefix
+# To allow IPv6 clients to reach IPv4 destinations, enable NAT64 (see below).
 
 # ============================================================================
 # Performance Tuning
@@ -166,3 +163,34 @@ auth_tokens = ["iXXXXXXXXXXXXXXXXX"]  # Replace with real token from generate-to
 # Controls how much data can be sent before acknowledgment
 # Valid range: 1024 (1KB) to 16777216 (16MB)
 # send_window = 2097152
+
+# ============================================================================
+# NAT64 Configuration (Optional)
+# ============================================================================
+# NAT64 allows IPv6-only clients to access IPv4 resources.
+# When enabled, the server translates IPv6 packets destined for the well-known
+# NAT64 prefix (64:ff9b::/96) to IPv4 and performs NAPT.
+#
+# NOTE: The NAT64 prefix is fixed at 64:ff9b::/96 (RFC 6052 well-known prefix).
+#
+# Recommended for IPv6-only VPN configurations to maintain IPv4 compatibility.
+
+[iroh.nat64]
+# Enable NAT64 translation (default: false)
+# enabled = true
+
+# Port range for NAPT (default: 32768-65535)
+# Each translated connection uses one port from this range.
+# port_range = [32768, 65535]
+
+# TCP connection timeout in seconds (default: 300)
+# TCP connections without activity for this duration are removed.
+# tcp_timeout_secs = 300
+
+# UDP session timeout in seconds (default: 30)
+# UDP sessions without activity for this duration are removed.
+# udp_timeout_secs = 30
+
+# ICMP session timeout in seconds (default: 30)
+# ICMP sessions without activity for this duration are removed.
+# icmp_timeout_secs = 30

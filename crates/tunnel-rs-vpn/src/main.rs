@@ -347,6 +347,15 @@ async fn run_vpn_server(resolved: ResolvedVpnServerConfig) -> Result<()> {
         );
     };
 
+    // Convert NAT64 config from tunnel_common to tunnel_vpn types
+    let nat64 = resolved.nat64.map(|cfg| tunnel_vpn::config::Nat64Config {
+        enabled: cfg.enabled,
+        port_range: cfg.port_range,
+        tcp_timeout_secs: cfg.tcp_timeout_secs,
+        udp_timeout_secs: cfg.udp_timeout_secs,
+        icmp_timeout_secs: cfg.icmp_timeout_secs,
+    });
+
     // Create VPN server config
     let config = VpnServerConfig {
         network,
@@ -359,7 +368,7 @@ async fn run_vpn_server(resolved: ResolvedVpnServerConfig) -> Result<()> {
         drop_on_full: resolved.drop_on_full,
         client_channel_size: resolved.client_channel_size,
         tun_writer_channel_size: resolved.tun_writer_channel_size,
-        nat64: None, // NAT64 not yet exposed via CLI; configure via config file
+        nat64,
     };
 
     // Create iroh endpoint for signaling.
