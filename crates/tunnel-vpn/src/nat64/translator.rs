@@ -394,24 +394,40 @@ impl Nat64Translator {
         new_payload[0] = (new_src_port >> 8) as u8;
         new_payload[1] = new_src_port as u8;
 
-        // Adjust checksum for pseudo-header change (IPv6 -> IPv4)
-        let checksum_after_pseudo = adjust_checksum_6to4(
-            old_checksum,
-            src_ip6,
-            dst_ip6,
-            self.server_ip4,
-            dst_ip4,
-            protocol,
-            payload_len,
-        );
+        // UDP zero-checksum preservation: In IPv4, UDP checksum 0 means "no checksum
+        // computed" (optional per RFC 768). If the original IPv6 UDP packet had a
+        // checksum that happens to compute to 0xFFFF (transmitted as 0 in IPv6 would
+        // be illegal, but the original checksum field might be 0 after translation
+        // from a system that set it), we preserve the zero-checksum semantics.
+        // Note: IPv6 UDP checksum is mandatory and 0x0000 is transmitted as 0xFFFF,
+        // but when translating 6-to-4, if we detect zero we preserve it.
+        let is_udp_zero_checksum = protocol == 17 && old_checksum == 0;
 
-        // Also adjust checksum for source port change (old_src_port -> new_src_port)
-        let new_checksum = update_checksum_16(checksum_after_pseudo, old_src_port, new_src_port);
-
-        // Update checksum in payload
         let checksum_offset = if protocol == 6 { 16 } else { 6 }; // TCP vs UDP
-        new_payload[checksum_offset] = (new_checksum >> 8) as u8;
-        new_payload[checksum_offset + 1] = new_checksum as u8;
+
+        if is_udp_zero_checksum {
+            // Preserve UDP zero-checksum: skip all checksum adjustments
+            new_payload[checksum_offset] = 0;
+            new_payload[checksum_offset + 1] = 0;
+        } else {
+            // Adjust checksum for pseudo-header change (IPv6 -> IPv4)
+            let checksum_after_pseudo = adjust_checksum_6to4(
+                old_checksum,
+                src_ip6,
+                dst_ip6,
+                self.server_ip4,
+                dst_ip4,
+                protocol,
+                payload_len,
+            );
+
+            // Also adjust checksum for source port change (old_src_port -> new_src_port)
+            let new_checksum = update_checksum_16(checksum_after_pseudo, old_src_port, new_src_port);
+
+            // Update checksum in payload
+            new_payload[checksum_offset] = (new_checksum >> 8) as u8;
+            new_payload[checksum_offset + 1] = new_checksum as u8;
+        }
 
         self.build_ipv4_header_with_payload(dst_ip4, protocol, &new_payload, ttl)
     }
@@ -1589,5 +1605,85 @@ mod tests {
 
         let result = translator.translate_4to6(&ipv4_packet).unwrap();
         assert!(matches!(result, Nat64TranslateResult::NotNat64Packet));
+    }
+
+    /// Helper to build an IPv6 UDP packet with zero checksum for testing.
+    /// In IPv4, UDP checksum 0 means "no checksum computed" (optional per RFC 768).
+    fn build_test_ipv6_udp_packet_zero_checksum(
+        src_ip6: Ipv6Addr,
+        dst_ip6: Ipv6Addr,
+        src_port: u16,
+        dst_port: u16,
+        payload: &[u8],
+    ) -> Vec<u8> {
+        let udp_len = 8 + payload.len();
+        let mut udp = Vec::with_capacity(udp_len);
+
+        // UDP header
+        udp.extend_from_slice(&src_port.to_be_bytes());
+        udp.extend_from_slice(&dst_port.to_be_bytes());
+        udp.extend_from_slice(&(udp_len as u16).to_be_bytes());
+        udp.extend_from_slice(&[0, 0]); // Zero checksum
+        udp.extend_from_slice(payload);
+
+        // Build IPv6 packet
+        let mut packet = Vec::with_capacity(40 + udp_len);
+        packet.push(0x60); // Version 6
+        packet.extend_from_slice(&[0, 0, 0]); // Traffic class + flow label
+        packet.extend_from_slice(&(udp_len as u16).to_be_bytes());
+        packet.push(17); // UDP
+        packet.push(64); // Hop limit
+        packet.extend_from_slice(&src_ip6.octets());
+        packet.extend_from_slice(&dst_ip6.octets());
+        packet.extend_from_slice(&udp);
+
+        packet
+    }
+
+    #[test]
+    fn test_udp_zero_checksum_preserved_6to4() {
+        let server_ip4 = Ipv4Addr::new(10, 0, 0, 1);
+        let translator = Nat64Translator::new(&test_config(), server_ip4);
+
+        let client_ip6: Ipv6Addr = "fd00::8".parse().unwrap();
+        let dest_ip4 = Ipv4Addr::new(8, 8, 8, 8);
+        let dest_ip6 = embed_ipv4_in_nat64(dest_ip4);
+
+        let src_port = 44444u16;
+        let dst_port = 53u16;
+        let payload = b"zero checksum test";
+
+        // Build IPv6 UDP packet with zero checksum
+        let ipv6_packet = build_test_ipv6_udp_packet_zero_checksum(
+            client_ip6,
+            dest_ip6,
+            src_port,
+            dst_port,
+            payload,
+        );
+
+        // Verify the IPv6 packet has zero checksum
+        let ipv6_udp_checksum = u16::from_be_bytes([ipv6_packet[46], ipv6_packet[47]]);
+        assert_eq!(ipv6_udp_checksum, 0, "Input packet should have zero checksum");
+
+        // Translate to IPv4
+        let ipv4_packet = translator.translate_6to4(&ipv6_packet).unwrap();
+
+        // Verify IPv4 header
+        assert_eq!(ipv4_packet[0] >> 4, 4); // Version 4
+        assert_eq!(ipv4_packet[9], 17); // Protocol = UDP
+
+        // Verify UDP checksum is preserved as zero
+        let udp_start = 20; // IPv4 header size
+        let ipv4_udp_checksum =
+            u16::from_be_bytes([ipv4_packet[udp_start + 6], ipv4_packet[udp_start + 7]]);
+        assert_eq!(
+            ipv4_udp_checksum, 0,
+            "UDP zero checksum should be preserved after NAT64 translation"
+        );
+
+        // Verify payload is correct
+        let payload_start = udp_start + 8;
+        assert_eq!(&ipv4_packet[payload_start..], payload);
     }
 }
