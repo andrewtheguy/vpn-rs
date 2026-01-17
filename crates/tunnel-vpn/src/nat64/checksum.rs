@@ -229,10 +229,21 @@ mod tests {
 
     #[test]
     fn test_ones_complement_sum() {
-        // Test with known data
+        // Test with known data: partial IPv4 header bytes
+        // 16-bit words: 0x4500 + 0x0073 + 0x0000 + 0x4000 + 0x4011 = 0xC584
         let data = [0x45, 0x00, 0x00, 0x73, 0x00, 0x00, 0x40, 0x00, 0x40, 0x11];
         let sum = ones_complement_sum(&data);
-        assert!(sum > 0);
+        assert_eq!(sum, 0xC584, "ones_complement_sum should return 0xC584 for test data");
+
+        // Test with odd-length data (last byte padded with 0x00)
+        // 16-bit words: 0x0102 + 0x0300 = 0x0402
+        let odd_data = [0x01, 0x02, 0x03];
+        let odd_sum = ones_complement_sum(&odd_data);
+        assert_eq!(odd_sum, 0x0402, "ones_complement_sum should handle odd-length data");
+
+        // Test empty data
+        let empty_sum = ones_complement_sum(&[]);
+        assert_eq!(empty_sum, 0, "ones_complement_sum of empty data should be 0");
     }
 
     #[test]
