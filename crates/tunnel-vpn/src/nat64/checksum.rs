@@ -518,6 +518,30 @@ mod tests {
     }
 
     #[test]
+    fn test_adjust_checksum_4to6_udp_never_returns_zero() {
+        let src4 = Ipv4Addr::new(192, 168, 1, 1);
+        let dst4 = Ipv4Addr::new(10, 0, 0, 1);
+        let src6: Ipv6Addr = "64:ff9b::192.168.1.1".parse().unwrap();
+        let dst6: Ipv6Addr = "fd00::1".parse().unwrap();
+        let protocol = 17;
+        let payload_len: u16 = 128;
+
+        for original in (0u16..=u16::MAX).step_by(257) {
+            let adjusted = adjust_checksum_4to6(
+                original, src4, dst4, src6, dst6, protocol, payload_len,
+            );
+
+            if let Some(checksum) = adjusted {
+                assert_ne!(
+                    checksum, 0,
+                    "adjust_checksum_4to6 must not return 0x0000 for UDP (original=0x{:04X})",
+                    original
+                );
+            }
+        }
+    }
+
+    #[test]
     fn test_adjust_checksum_6to4_udp_zero_checksum() {
         // Test that UDP zero-checksum is preserved (means "no checksum" in IPv4)
         let src6: Ipv6Addr = "fd00::2".parse().unwrap();
