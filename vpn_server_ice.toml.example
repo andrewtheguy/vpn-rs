@@ -53,7 +53,7 @@ nsec_file = "./server.nsec"
 
 # Authorized client's Nostr public key (npub format)
 # Only connections from this peer will be accepted
-# peer_npub = "npub1your_client_public_key_here"
+peer_npub = "npub1your_client_public_key_here"
 
 # =============================================================================
 # Signaling and Transport (Optional)

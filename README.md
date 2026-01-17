@@ -828,8 +828,8 @@ network = "10.0.0.0/24"
 server_ip = "10.0.0.1"
 nsec_file = "server_nsec.txt"
 
-# Whitelist allowed client npubs
-peers = ["npub1client..."] 
+# Authorized client npub
+peer_npub = "npub1client..."
 ```
 
 Start server:
