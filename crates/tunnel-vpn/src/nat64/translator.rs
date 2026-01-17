@@ -464,6 +464,14 @@ impl Nat64Translator {
         payload: &[u8],
         ttl: u8,
     ) -> VpnResult<Vec<u8>> {
+        let max_payload = u16::MAX as usize - IPV4_HEADER_SIZE;
+        if payload.len() > max_payload {
+            return Err(VpnError::Nat64(format!(
+                "IPv4 payload too large: {} bytes (max {})",
+                payload.len(),
+                max_payload
+            )));
+        }
         let total_length = (IPV4_HEADER_SIZE + payload.len()) as u16;
 
         let mut packet = Vec::with_capacity(total_length as usize);
@@ -547,7 +555,7 @@ impl Nat64Translator {
         new_payload[16] = (new_checksum >> 8) as u8;
         new_payload[17] = new_checksum as u8;
 
-        let packet = self.build_ipv6_packet(src_ip6, dst_ip6, 6, &new_payload, hop_limit);
+        let packet = self.build_ipv6_packet(src_ip6, dst_ip6, 6, &new_payload, hop_limit)?;
         Ok(Nat64TranslateResult::Translated {
             client_ip6,
             packet,
@@ -618,7 +626,7 @@ impl Nat64Translator {
         new_payload[6] = (new_checksum >> 8) as u8;
         new_payload[7] = new_checksum as u8;
 
-        let packet = self.build_ipv6_packet(src_ip6, dst_ip6, 17, &new_payload, hop_limit);
+        let packet = self.build_ipv6_packet(src_ip6, dst_ip6, 17, &new_payload, hop_limit)?;
         Ok(Nat64TranslateResult::Translated {
             client_ip6,
             packet,
@@ -679,7 +687,7 @@ impl Nat64Translator {
         icmpv6[2] = (checksum >> 8) as u8;
         icmpv6[3] = checksum as u8;
 
-        let packet = self.build_ipv6_packet(src_ip6, dst_ip6, 58, &icmpv6, hop_limit); // ICMPv6 = 58
+        let packet = self.build_ipv6_packet(src_ip6, dst_ip6, 58, &icmpv6, hop_limit)?; // ICMPv6 = 58
         Ok(Nat64TranslateResult::Translated {
             client_ip6,
             packet,
@@ -694,7 +702,14 @@ impl Nat64Translator {
         next_header: u8,
         payload: &[u8],
         hop_limit: u8,
-    ) -> Vec<u8> {
+    ) -> VpnResult<Vec<u8>> {
+        if payload.len() > u16::MAX as usize {
+            return Err(VpnError::Nat64(format!(
+                "IPv6 payload too large: {} bytes (max {})",
+                payload.len(),
+                u16::MAX
+            )));
+        }
         let payload_length = payload.len() as u16;
 
         let mut packet = Vec::with_capacity(IPV6_HEADER_SIZE + payload.len());
@@ -711,7 +726,7 @@ impl Nat64Translator {
         // Append payload
         packet.extend_from_slice(payload);
 
-        packet
+        Ok(packet)
     }
 
     /// Compute UDP checksum for IPv6 (mandatory, unlike IPv4).
@@ -823,7 +838,9 @@ mod tests {
         let payload = vec![0x12, 0x34, 0x56, 0x78];
         let hop_limit = 63u8;
 
-        let packet = translator.build_ipv6_packet(src, dst, 17, &payload, hop_limit);
+        let packet = translator
+            .build_ipv6_packet(src, dst, 17, &payload, hop_limit)
+            .expect("build_ipv6_packet should succeed for valid payload");
 
         // Verify header
         assert_eq!(packet[0] >> 4, 6); // Version
