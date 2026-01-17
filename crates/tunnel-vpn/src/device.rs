@@ -80,8 +80,12 @@ impl TunConfig {
     /// Create IPv6-only TUN configuration.
     ///
     /// For IPv6-only VPN networks, this creates a TUN configuration with
-    /// a placeholder IPv4 address (169.254.254.254 link-local) that satisfies
-    /// the device creation requirements but won't interfere with real traffic.
+    /// a unique placeholder IPv4 address in the link-local range (169.254.x.x)
+    /// that satisfies the device creation requirements but won't interfere
+    /// with real traffic.
+    ///
+    /// The placeholder IP is derived from the IPv6 address to ensure uniqueness
+    /// when multiple IPv6-only TUN devices are created on the same host.
     ///
     /// # Errors
     /// Returns an error if `prefix_len6` is greater than 128.
@@ -90,7 +94,15 @@ impl TunConfig {
         // Use a link-local placeholder address that won't conflict with real traffic.
         // This satisfies TUN creation on platforms that require IPv4 (macOS/Windows
         // in tun 0.8.x), but won't affect IPv4 routing.
-        let placeholder_ip = Ipv4Addr::new(169, 254, 254, 254);
+        //
+        // Derive unique placeholder from IPv6 address to avoid conflicts when
+        // multiple IPv6-only TUN devices exist on the same host.
+        let octets = address6.octets();
+        // Use last two bytes of IPv6 address for uniqueness, but ensure we stay
+        // in the 169.254.1.0 - 169.254.254.255 range (avoiding .0 and .255).
+        let third = octets[14].wrapping_add(1).max(1); // 1-255, biased toward low values
+        let fourth = octets[15].wrapping_add(1).max(1); // 1-255, biased toward low values
+        let placeholder_ip = Ipv4Addr::new(169, 254, third, fourth);
         let placeholder_netmask = Ipv4Addr::new(255, 255, 255, 255);
         Ok(Self {
             name: None,
