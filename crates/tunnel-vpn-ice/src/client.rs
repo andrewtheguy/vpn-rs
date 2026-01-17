@@ -287,8 +287,7 @@ impl VpnIceClient {
         }
 
         // Run VPN loop with ICE disconnect monitoring
-        let result =
-            self.run_vpn_loop(tun_device, data_send, data_recv, ice_disconnect_rx.clone());
+        let result = self.run_vpn_loop(tun_device, data_send, data_recv);
 
         // Wait for either VPN loop to end or ICE to disconnect
         tokio::select! {
@@ -495,7 +494,6 @@ impl VpnIceClient {
         tun_device: TunDevice,
         data_send: quinn::SendStream,
         data_recv: quinn::RecvStream,
-        _ice_disconnect_rx: tokio::sync::watch::Receiver<bool>,
     ) -> VpnIceResult<()> {
         let (mut tun_reader, mut tun_writer) = tun_device
             .split()
