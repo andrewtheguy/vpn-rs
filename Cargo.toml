@@ -13,8 +13,8 @@ members = [
 [workspace.package]
 version = "0.1.67"
 
-# [profile.release]
-# strip = true
-# lto = "fat"
-# codegen-units = 1
-# panic = "abort"
+[profile.release]
+strip = true
+lto = "fat"
+codegen-units = 1
+panic = "abort"
