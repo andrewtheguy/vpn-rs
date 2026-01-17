@@ -169,7 +169,7 @@ impl PortAllocator {
                     }
                     // Port was out of range (shouldn't happen normally).
                     assert!(
-                        false,
+                        current >= self.start && current <= self.end,
                         "PortAllocator::next_candidate: current {} outside {}..={} (attempts={})",
                         current,
                         self.start,
