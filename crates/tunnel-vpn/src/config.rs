@@ -8,6 +8,50 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 /// Default MTU for VPN tunnel (1500 - 60 bytes overhead for QUIC/TLS + framing).
 pub const DEFAULT_MTU: u16 = 1440;
 
+/// NAT64 configuration for IPv6-only clients to access IPv4 resources.
+///
+/// When enabled, the VPN server translates IPv6 packets destined for the
+/// well-known NAT64 prefix `64:ff9b::/96` to IPv4 packets, performs NAPT
+/// (Network Address Port Translation), and routes them to the IPv4 destination.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Nat64Config {
+    /// Enable NAT64 translation.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Port range for NAPT (default: 32768-65535).
+    /// The first value is the start port, the second is the end port (inclusive).
+    #[serde(default = "default_nat64_port_range")]
+    pub port_range: (u16, u16),
+
+    /// TCP connection timeout in seconds (default: 300).
+    /// TCP connections without activity for this duration are removed.
+    #[serde(default = "default_nat64_tcp_timeout")]
+    pub tcp_timeout_secs: u64,
+
+    /// UDP session timeout in seconds (default: 30).
+    /// UDP sessions without activity for this duration are removed.
+    #[serde(default = "default_nat64_udp_timeout")]
+    pub udp_timeout_secs: u64,
+
+    /// ICMP session timeout in seconds (default: 30).
+    /// ICMP sessions without activity for this duration are removed.
+    #[serde(default = "default_nat64_icmp_timeout")]
+    pub icmp_timeout_secs: u64,
+}
+
+impl Default for Nat64Config {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            port_range: default_nat64_port_range(),
+            tcp_timeout_secs: default_nat64_tcp_timeout(),
+            udp_timeout_secs: default_nat64_udp_timeout(),
+            icmp_timeout_secs: default_nat64_icmp_timeout(),
+        }
+    }
+}
+
 /// VPN server configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VpnServerConfig {
@@ -96,6 +140,11 @@ pub struct VpnServerConfig {
     /// Increase to 2048-4096 for high-bandwidth servers with many active clients.
     #[serde(default = "default_tun_writer_channel_size")]
     pub tun_writer_channel_size: usize,
+
+    /// NAT64 configuration for IPv6-only clients to access IPv4 resources.
+    /// When enabled, clients can access IPv4 addresses via the `64:ff9b::/96` prefix.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nat64: Option<Nat64Config>,
 }
 
 /// VPN client configuration.
@@ -164,4 +213,20 @@ fn default_client_channel_size() -> usize {
 
 fn default_tun_writer_channel_size() -> usize {
     512
+}
+
+fn default_nat64_port_range() -> (u16, u16) {
+    (32768, 65535)
+}
+
+fn default_nat64_tcp_timeout() -> u64 {
+    300
+}
+
+fn default_nat64_udp_timeout() -> u64 {
+    30
+}
+
+fn default_nat64_icmp_timeout() -> u64 {
+    30
 }

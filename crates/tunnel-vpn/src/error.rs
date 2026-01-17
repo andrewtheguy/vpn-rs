@@ -50,6 +50,18 @@ pub enum VpnError {
     /// Maximum reconnection attempts exceeded.
     #[error("Max reconnection attempts ({0}) exceeded")]
     MaxReconnectAttemptsExceeded(NonZeroU32),
+
+    /// NAT64 translation error.
+    #[error("NAT64 error: {0}")]
+    Nat64(String),
+
+    /// NAT64 port pool exhausted.
+    #[error("NAT64 port pool exhausted")]
+    Nat64PortExhausted,
+
+    /// NAT64 unsupported protocol.
+    #[error("NAT64 unsupported protocol: {0}")]
+    Nat64UnsupportedProtocol(u8),
 }
 
 impl VpnError {

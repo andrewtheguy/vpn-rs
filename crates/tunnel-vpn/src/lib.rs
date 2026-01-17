@@ -31,6 +31,7 @@ pub mod config;
 pub mod device;
 pub mod error;
 pub mod lock;
+pub mod nat64;
 pub mod server;
 pub mod signaling;
 

@@ -9,6 +9,7 @@ use crate::buffer::{as_mut_byte_slice, uninitialized_vec};
 use crate::config::VpnServerConfig;
 use crate::device::{TunConfig, TunDevice};
 use crate::error::{VpnError, VpnResult};
+use crate::nat64::{is_nat64_address, Nat64Translator};
 use crate::signaling::{
     frame_ip_packet, read_message, write_message, DataMessageType, VpnHandshake,
     VpnHandshakeResponse, HEARTBEAT_PONG_BYTE, MAX_HANDSHAKE_SIZE,
@@ -50,6 +51,12 @@ pub struct VpnServerStats {
     pub packets_tun_write_failed: AtomicU64,
     /// Packets dropped due to invalid source IP (anti-spoofing).
     pub packets_spoofed: AtomicU64,
+    /// Packets translated via NAT64 (IPv6 -> IPv4).
+    pub packets_nat64_6to4: AtomicU64,
+    /// Packets translated via NAT64 (IPv4 -> IPv6).
+    pub packets_nat64_4to6: AtomicU64,
+    /// NAT64 translation errors.
+    pub packets_nat64_errors: AtomicU64,
 }
 
 impl VpnServerStats {
@@ -70,6 +77,9 @@ impl VpnServerStats {
             packets_from_clients: self.packets_from_clients.load(Ordering::Relaxed),
             packets_tun_write_failed: self.packets_tun_write_failed.load(Ordering::Relaxed),
             packets_spoofed: self.packets_spoofed.load(Ordering::Relaxed),
+            packets_nat64_6to4: self.packets_nat64_6to4.load(Ordering::Relaxed),
+            packets_nat64_4to6: self.packets_nat64_4to6.load(Ordering::Relaxed),
+            packets_nat64_errors: self.packets_nat64_errors.load(Ordering::Relaxed),
         }
     }
 }
@@ -86,6 +96,9 @@ pub struct VpnServerStatsSnapshot {
     pub packets_from_clients: u64,
     pub packets_tun_write_failed: u64,
     pub packets_spoofed: u64,
+    pub packets_nat64_6to4: u64,
+    pub packets_nat64_4to6: u64,
+    pub packets_nat64_errors: u64,
 }
 
 // Channel buffer sizes are now configurable via VpnServerConfig:
@@ -331,6 +344,8 @@ pub struct VpnServer {
     next_session_id: AtomicU64,
     /// Performance statistics (atomic counters, no locking overhead).
     stats: Arc<VpnServerStats>,
+    /// NAT64 translator for IPv6-only clients to access IPv4 resources.
+    nat64: Option<Arc<Nat64Translator>>,
 }
 
 impl VpnServer {
@@ -353,6 +368,26 @@ impl VpnServer {
             log::info!("IPv6 dual-stack enabled: {}", pool_guard.network());
         }
 
+        // Initialize NAT64 translator if configured
+        let server_ip = config.server_ip.unwrap_or_else(|| {
+            let net_addr: u32 = config.network.network().into();
+            Ipv4Addr::from(net_addr + 1)
+        });
+
+        let nat64 = config.nat64.as_ref().and_then(|nat64_config| {
+            if nat64_config.enabled {
+                log::info!(
+                    "NAT64 enabled: translating 64:ff9b::/96 -> {} with ports {}-{}",
+                    server_ip,
+                    nat64_config.port_range.0,
+                    nat64_config.port_range.1
+                );
+                Some(Arc::new(Nat64Translator::new(nat64_config, server_ip)))
+            } else {
+                None
+            }
+        });
+
         Ok(Self {
             config,
             ip_pool,
@@ -364,6 +399,7 @@ impl VpnServer {
             active_connections: AtomicUsize::new(0),
             next_session_id: AtomicU64::new(1),
             stats: Arc::new(VpnServerStats::new()),
+            nat64,
         })
     }
 
@@ -791,6 +827,7 @@ impl VpnServer {
             tun_write_tx,
             writer_error_rx,
             self.stats.clone(),
+            self.nat64.clone(),
         )
         .await;
 
@@ -851,6 +888,10 @@ impl VpnServer {
     ///
     /// TUN writes are sent through the `tun_write_tx` channel to a dedicated writer task,
     /// eliminating mutex contention. Backpressure is applied when the channel is full.
+    ///
+    /// If NAT64 is enabled, IPv6 packets destined for `64:ff9b::/96` are translated to
+    /// IPv4 before being written to the TUN device.
+    #[allow(clippy::too_many_arguments)]
     async fn handle_client_data(
         packet_tx: mpsc::Sender<Bytes>,
         mut data_recv: iroh::endpoint::RecvStream,
@@ -859,6 +900,7 @@ impl VpnServer {
         tun_write_tx: mpsc::Sender<Bytes>,
         writer_error_rx: oneshot::Receiver<String>,
         stats: Arc<VpnServerStats>,
+        nat64: Option<Arc<Nat64Translator>>,
     ) -> VpnResult<()> {
         // Spawn inbound task (QUIC stream -> TUN via channel)
         let mut inbound_handle = tokio::spawn(async move {
@@ -995,10 +1037,43 @@ impl VpnServer {
                     continue;
                 }
 
-                // Send validated packet to TUN writer task via channel.
-                // This eliminates mutex contention - the channel handles synchronization.
-                // Copy into Bytes since data_buf is reused for the next packet.
-                let packet_bytes = Bytes::copy_from_slice(packet);
+                // Check for NAT64 translation (IPv6 -> IPv4)
+                let packet_bytes = if let Some(ref nat64) = nat64 {
+                    // Check if this is an IPv6 packet destined for NAT64 prefix
+                    if packet.len() >= 40 && (packet[0] >> 4) == 6 {
+                        // Extract destination IPv6 address
+                        let dest_ip6 = Ipv6Addr::from(
+                            <[u8; 16]>::try_from(&packet[24..40]).unwrap()
+                        );
+
+                        if is_nat64_address(&dest_ip6) {
+                            // Translate IPv6 to IPv4
+                            match nat64.translate_6to4(packet) {
+                                Ok(ipv4_packet) => {
+                                    stats.packets_nat64_6to4.fetch_add(1, Ordering::Relaxed);
+                                    Bytes::from(ipv4_packet)
+                                }
+                                Err(e) => {
+                                    log::debug!(
+                                        "NAT64 translation error for client {}: {}",
+                                        assigned_ip, e
+                                    );
+                                    stats.packets_nat64_errors.fetch_add(1, Ordering::Relaxed);
+                                    continue;
+                                }
+                            }
+                        } else {
+                            // Not a NAT64 packet, pass through
+                            Bytes::copy_from_slice(packet)
+                        }
+                    } else {
+                        // IPv4 or other, pass through
+                        Bytes::copy_from_slice(packet)
+                    }
+                } else {
+                    // NAT64 not enabled, pass through
+                    Bytes::copy_from_slice(packet)
+                };
 
                 // Try non-blocking send first to avoid blocking on slow TUN writes
                 match tun_write_tx.try_send(packet_bytes) {
@@ -1093,30 +1168,66 @@ impl VpnServer {
             let packet = &buf_slice[..n];
             self.stats.tun_packets_read.fetch_add(1, Ordering::Relaxed);
 
+            // Check for NAT64 reverse translation (IPv4 -> IPv6 response)
+            // If this is an IPv4 packet and NAT64 is enabled, try to translate
+            let (final_packet, dest_client_ip6) = if let Some(ref nat64) = self.nat64 {
+                if packet.len() >= 20 && (packet[0] >> 4) == 4 {
+                    // This is an IPv4 packet - try NAT64 reverse translation
+                    match nat64.translate_4to6(packet) {
+                        Ok((client_ip6, ipv6_packet)) => {
+                            self.stats.packets_nat64_4to6.fetch_add(1, Ordering::Relaxed);
+                            (ipv6_packet, Some(client_ip6))
+                        }
+                        Err(_) => {
+                            // Not a NAT64 response, continue with normal routing
+                            (packet.to_vec(), None)
+                        }
+                    }
+                } else {
+                    (packet.to_vec(), None)
+                }
+            } else {
+                (packet.to_vec(), None)
+            };
+
+            let packet_ref = final_packet.as_slice();
+
             // Extract destination IP from packet (IPv4 or IPv6)
             // DashMap lookups are lock-free - no async await needed
-            let (endpoint_id, device_id) = match extract_dest_ip(packet) {
-                Some(PacketIp::V4(dest_ip)) => {
-                    match self.ip_to_endpoint.get(&dest_ip).map(|r| *r) {
-                        Some(res) => res,
-                        None => {
-                            self.stats.packets_no_route.fetch_add(1, Ordering::Relaxed);
-                            continue;
-                        }
+            let (endpoint_id, device_id) = if let Some(client_ip6) = dest_client_ip6 {
+                // NAT64 translated packet - route to the client IPv6 address
+                match self.ip6_to_endpoint.get(&client_ip6).map(|r| *r) {
+                    Some(res) => res,
+                    None => {
+                        self.stats.packets_no_route.fetch_add(1, Ordering::Relaxed);
+                        continue;
                     }
                 }
-                Some(PacketIp::V6(dest_ip)) => {
-                    match self.ip6_to_endpoint.get(&dest_ip).map(|r| *r) {
-                        Some(res) => res,
-                        None => {
-                            self.stats.packets_no_route.fetch_add(1, Ordering::Relaxed);
-                            continue;
+            } else {
+                // Normal packet routing
+                match extract_dest_ip(packet_ref) {
+                    Some(PacketIp::V4(dest_ip)) => {
+                        match self.ip_to_endpoint.get(&dest_ip).map(|r| *r) {
+                            Some(res) => res,
+                            None => {
+                                self.stats.packets_no_route.fetch_add(1, Ordering::Relaxed);
+                                continue;
+                            }
                         }
                     }
-                }
-                None => {
-                    self.stats.packets_unknown_version.fetch_add(1, Ordering::Relaxed);
-                    continue;
+                    Some(PacketIp::V6(dest_ip)) => {
+                        match self.ip6_to_endpoint.get(&dest_ip).map(|r| *r) {
+                            Some(res) => res,
+                            None => {
+                                self.stats.packets_no_route.fetch_add(1, Ordering::Relaxed);
+                                continue;
+                            }
+                        }
+                    }
+                    None => {
+                        self.stats.packets_unknown_version.fetch_add(1, Ordering::Relaxed);
+                        continue;
+                    }
                 }
             };
 
@@ -1133,11 +1244,12 @@ impl VpnServer {
 
             // Allocate buffer sized to actual packet (1 byte type + 4 byte length + packet).
             // Avoids over-allocation for small packets; allocator serves from thread-local caches.
-            let frame_size = 1 + 4 + n;
+            let packet_len = packet_ref.len();
+            let frame_size = 1 + 4 + packet_len;
             let mut write_buf = BytesMut::with_capacity(frame_size);
 
             // Frame packet for transmission (writes into write_buf)
-            if let Err(e) = frame_ip_packet(&mut write_buf, packet) {
+            if let Err(e) = frame_ip_packet(&mut write_buf, packet_ref) {
                 log::warn!(
                     "Failed to frame packet for {} dev {}: {}",
                     endpoint_id,
@@ -1574,6 +1686,9 @@ mod tests {
         assert_eq!(stats.packets_from_clients.load(Ordering::Relaxed), 0);
         assert_eq!(stats.packets_tun_write_failed.load(Ordering::Relaxed), 0);
         assert_eq!(stats.packets_spoofed.load(Ordering::Relaxed), 0);
+        assert_eq!(stats.packets_nat64_6to4.load(Ordering::Relaxed), 0);
+        assert_eq!(stats.packets_nat64_4to6.load(Ordering::Relaxed), 0);
+        assert_eq!(stats.packets_nat64_errors.load(Ordering::Relaxed), 0);
     }
 
     #[test]
@@ -1586,6 +1701,8 @@ mod tests {
         stats.packets_no_route.fetch_add(5, Ordering::Relaxed);
         stats.packets_spoofed.fetch_add(3, Ordering::Relaxed);
         stats.packets_backpressure.fetch_add(2, Ordering::Relaxed);
+        stats.packets_nat64_6to4.fetch_add(10, Ordering::Relaxed);
+        stats.packets_nat64_4to6.fetch_add(8, Ordering::Relaxed);
 
         // Take a snapshot and verify values
         let snapshot = stats.snapshot();
@@ -1598,6 +1715,9 @@ mod tests {
         assert_eq!(snapshot.packets_dropped_full, 0);
         assert_eq!(snapshot.packets_from_clients, 0);
         assert_eq!(snapshot.packets_tun_write_failed, 0);
+        assert_eq!(snapshot.packets_nat64_6to4, 10);
+        assert_eq!(snapshot.packets_nat64_4to6, 8);
+        assert_eq!(snapshot.packets_nat64_errors, 0);
     }
 
     #[test]

@@ -45,6 +45,9 @@ ipnet = { version = "2", features = ["serde"] }
 # Lock-free concurrent hashmap for hot-path lookups
 dashmap = "6"
 
+# Packet parsing for NAT64 translation
+etherparse = "0.15"
+
 # Zero-copy byte buffers for efficient packet handling
 bytes = "1"
 
