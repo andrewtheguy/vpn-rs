@@ -21,7 +21,7 @@ use tunnel_ice::signaling::{
 };
 use tunnel_ice::transport::ice::{IceEndpoint, IceRole};
 use tunnel_ice::transport::quic;
-use tunnel_ice::tunnel_common::{current_timestamp, generate_session_id};
+use tunnel_ice::tunnel_common::{current_timestamp, generate_session_id, MAX_REQUEST_AGE_SECS};
 use tunnel_vpn::buffer::{as_mut_byte_slice, uninitialized_vec};
 use tunnel_vpn::device::{
     add_routes, add_routes6_with_src, Route6Guard, RouteGuard, TunConfig, TunDevice,
@@ -319,15 +319,17 @@ impl VpnIceClient {
         request: &ManualRequest,
     ) -> VpnIceResult<ManualOffer> {
         const REPUBLISH_INTERVAL_SECS: u64 = 5;
-        const MAX_WAIT_SECS: u64 = 120;
+        const MAX_WAIT_SECS: u64 = MAX_REQUEST_AGE_SECS;
         const MAX_INTERVAL: u64 = 60;
 
         let start_time = Instant::now();
-        let session_id = &request.session_id;
+        let mut request = request.clone();
+        let session_id = request.session_id.clone();
         let mut current_interval = REPUBLISH_INTERVAL_SECS;
 
+        request.timestamp = current_timestamp();
         signaling
-            .publish_request(request)
+            .publish_request(&request)
             .await
             .map_err(|e| VpnIceError::Signaling(e.to_string()))?;
 
@@ -340,7 +342,7 @@ impl VpnIceClient {
 
         loop {
             match signaling
-                .try_wait_for_offer_or_rejection(session_id, current_interval)
+                .try_wait_for_offer_or_rejection(&session_id, current_interval)
                 .await
             {
                 Ok(Some(offer)) => return Ok(offer),
@@ -366,8 +368,9 @@ impl VpnIceClient {
 
             let next_interval = (current_interval * 2).min(MAX_INTERVAL);
             log::info!("Re-publishing request (next wait: {}s)...", next_interval);
+            request.timestamp = current_timestamp();
             signaling
-                .publish_request(request)
+                .publish_request(&request)
                 .await
                 .map_err(|e| VpnIceError::Signaling(e.to_string()))?;
             current_interval = next_interval;

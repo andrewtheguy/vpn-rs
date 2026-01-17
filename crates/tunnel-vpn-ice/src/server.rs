@@ -165,6 +165,61 @@ impl SimpleIp6Pool {
 
 }
 
+struct IpAllocationGuard<'a> {
+    ip_pool: Option<&'a mut SimpleIpPool>,
+    ip6_pool: Option<&'a mut SimpleIp6Pool>,
+    assigned_ip: Option<Ipv4Addr>,
+    assigned_ip6: Option<Ipv6Addr>,
+    armed: bool,
+}
+
+impl<'a> IpAllocationGuard<'a> {
+    fn new(
+        ip_pool: &'a mut Option<SimpleIpPool>,
+        ip6_pool: &'a mut Option<SimpleIp6Pool>,
+        assigned_ip: Option<Ipv4Addr>,
+        assigned_ip6: Option<Ipv6Addr>,
+    ) -> Self {
+        Self {
+            ip_pool: ip_pool.as_mut(),
+            ip6_pool: ip6_pool.as_mut(),
+            assigned_ip,
+            assigned_ip6,
+            armed: true,
+        }
+    }
+
+    fn release(&mut self) {
+        if let Some(ip) = self.assigned_ip {
+            if let Some(pool) = self.ip_pool.as_mut() {
+                pool.release(ip);
+            }
+        }
+        if let Some(ip6) = self.assigned_ip6 {
+            if let Some(pool) = self.ip6_pool.as_mut() {
+                pool.release(ip6);
+            }
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+
+    fn release_and_disarm(&mut self) {
+        self.release();
+        self.disarm();
+    }
+}
+
+impl Drop for IpAllocationGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            self.release();
+        }
+    }
+}
+
 /// VPN server using ICE/Nostr transport.
 pub struct VpnIceServer {
     /// Server configuration.
@@ -415,6 +470,12 @@ impl VpnIceServer {
         // Perform VPN handshake
         let (handshake_result, _device_id) =
             self.perform_handshake(&conn, ip_pool, ip6_pool).await?;
+        let mut allocation_guard = IpAllocationGuard::new(
+            ip_pool,
+            ip6_pool,
+            handshake_result.assigned_ip,
+            handshake_result.assigned_ip6,
+        );
 
         log::info!("[{}] VPN handshake complete:", short_id);
         if let Some(ip) = handshake_result.assigned_ip {
@@ -445,20 +506,13 @@ impl VpnIceServer {
             })
             .await;
 
-        if let Some(ip) = handshake_result.assigned_ip {
-            if let Some(pool) = ip_pool.as_mut() {
-                pool.release(ip);
-            }
-        }
-        if let Some(ip6) = handshake_result.assigned_ip6 {
-            if let Some(pool) = ip6_pool.as_mut() {
-                pool.release(ip6);
-            }
-        }
-
         // Cleanup
         ice_keeper_handle.abort();
         let _ = ice_keeper_handle.await;
+
+        if result.is_ok() {
+            allocation_guard.release_and_disarm();
+        }
 
         log::info!("[{}] VPN session ended", short_id);
         result
@@ -536,6 +590,9 @@ impl VpnIceServer {
             .as_mut()
             .and_then(|pool| pool.allocate());
 
+        let mut allocation_guard =
+            IpAllocationGuard::new(ip_pool, ip6_pool, assigned_ip, assigned_ip6);
+
         // At least one IP must be assigned
         if assigned_ip.is_none() && assigned_ip6.is_none() {
             let response = VpnHandshakeResponse::rejected("No IP addresses available");
@@ -586,6 +643,8 @@ impl VpnIceServer {
         if let Err(e) = send.finish() {
             log::debug!("Failed to finish handshake stream: {}", e);
         }
+
+        allocation_guard.disarm();
 
         Ok((
             HandshakeResult {

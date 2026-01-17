@@ -125,6 +125,62 @@ impl VpnIceServerConfig {
             return Err("'server_ip6' requires 'network6' to be set".to_string());
         }
 
+        if let Some(network) = self.network {
+            if network.prefix_len() > 30 {
+                return Err(format!(
+                    "'network' {} is too small; IPv4 networks must be /30 or larger",
+                    network
+                ));
+            }
+
+            let server_ip = self.server_ip.unwrap_or_else(|| default_server_ip4(network));
+            if !network.contains(&server_ip) {
+                return Err(format!(
+                    "'server_ip' {} is not within 'network' {}",
+                    server_ip, network
+                ));
+            }
+            if server_ip == network.network() || server_ip == network.broadcast() {
+                return Err(format!(
+                    "'server_ip' {} cannot be the network or broadcast address for 'network' {}",
+                    server_ip, network
+                ));
+            }
+
+            let capacity = ipv4_client_capacity(network, server_ip);
+            if capacity == 0 {
+                return Err(format!(
+                    "'network' {} has no usable client IPv4 addresses after excluding server {}",
+                    network, server_ip
+                ));
+            }
+        }
+
+        if let Some(network6) = self.network6 {
+            if network6.prefix_len() > 126 {
+                return Err(format!(
+                    "'network6' {} is too small; IPv6 networks must be /126 or larger",
+                    network6
+                ));
+            }
+
+            let server_ip6 = self.server_ip6.unwrap_or_else(|| default_server_ip6(network6));
+            if !network6.contains(&server_ip6) {
+                return Err(format!(
+                    "'server_ip6' {} is not within 'network6' {}",
+                    server_ip6, network6
+                ));
+            }
+
+            let capacity = ipv6_client_capacity(network6, server_ip6);
+            if capacity == 0 {
+                return Err(format!(
+                    "'network6' {} has no usable client IPv6 addresses after excluding server {}",
+                    network6, server_ip6
+                ));
+            }
+        }
+
         // Nostr identity required (either nsec or nsec_file)
         if self.nsec.is_none() && self.nsec_file.is_none() {
             return Err("Either 'nsec' or 'nsec_file' is required for Nostr identity".to_string());
@@ -232,6 +288,57 @@ fn read_nsec(nsec: &Option<String>, nsec_file: &Option<PathBuf>) -> Result<Strin
     Err(VpnIceError::Config(
         "No nsec or nsec_file configured".to_string(),
     ))
+}
+
+fn default_server_ip4(net: Ipv4Net) -> Ipv4Addr {
+    net.hosts().next().unwrap_or_else(|| net.network())
+}
+
+fn default_server_ip6(net: Ipv6Net) -> Ipv6Addr {
+    let base = net.network();
+    if net.prefix_len() == 128 {
+        return base;
+    }
+    let segments = base.segments();
+    Ipv6Addr::new(
+        segments[0],
+        segments[1],
+        segments[2],
+        segments[3],
+        segments[4],
+        segments[5],
+        segments[6],
+        segments[7].saturating_add(1),
+    )
+}
+
+fn ipv4_client_capacity(net: Ipv4Net, server_ip: Ipv4Addr) -> u64 {
+    let host_bits = 32u32.saturating_sub(net.prefix_len() as u32);
+    let total = if host_bits >= 32 {
+        u64::MAX
+    } else {
+        1u64 << host_bits
+    };
+    let reserved = if total >= 2 { 2 } else { total };
+    let mut available = total.saturating_sub(reserved);
+    if server_ip != net.network() && server_ip != net.broadcast() {
+        available = available.saturating_sub(1);
+    }
+    available
+}
+
+fn ipv6_client_capacity(net: Ipv6Net, server_ip: Ipv6Addr) -> u128 {
+    let host_bits = 128u32.saturating_sub(net.prefix_len() as u32);
+    let total = if host_bits >= 128 {
+        u128::MAX
+    } else {
+        1u128 << host_bits
+    };
+    let mut available = total.saturating_sub(1);
+    if server_ip != net.network() {
+        available = available.saturating_sub(1);
+    }
+    available
 }
 
 impl Default for VpnIceClientConfig {
