@@ -386,17 +386,21 @@ pub async fn connect_to_server(
             last_error.unwrap_or_else(|| "No relay URLs provided".to_string())
         )
     } else {
-        // Include relay URL in EndpointAddr if available, allowing iroh to use
+        // Include relay URLs in EndpointAddr if available, allowing iroh to use
         // the relay for initial connection when DNS discovery is disabled.
         // Iroh will still attempt hole punching for direct P2P connections.
         let endpoint_addr = if !relay_urls.is_empty() {
-            let relay_url: RelayUrl = relay_urls[0].parse().context("Invalid relay URL")?;
+            let mut addr = EndpointAddr::new(server_id);
+            for relay_url_str in relay_urls {
+                let relay_url: RelayUrl = relay_url_str.parse().context("Invalid relay URL")?;
+                addr = addr.with_relay_url(relay_url);
+            }
             info!(
-                "Connecting with relay hint {} (timeout: {}s)...",
-                relay_url,
+                "Connecting with {} relay hint(s) (timeout: {}s)...",
+                relay_urls.len(),
                 RELAY_CONNECT_TIMEOUT.as_secs()
             );
-            EndpointAddr::new(server_id).with_relay_url(relay_url)
+            addr
         } else {
             info!(
                 "Connecting (timeout: {}s)...",

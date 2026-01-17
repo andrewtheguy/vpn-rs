@@ -472,13 +472,13 @@ async fn run_vpn_client(resolved: ResolvedVpnClientConfig) -> Result<()> {
     // Connect with or without auto-reconnect
     if resolved.auto_reconnect {
         client
-            .run_with_reconnect(&endpoint, resolved.max_reconnect_attempts)
+            .run_with_reconnect(&endpoint, &resolved.relay_urls, resolved.max_reconnect_attempts)
             .await
             .map_err(|e| anyhow::anyhow!("VPN connection error: {}", e))
     } else {
         log::info!("Auto-reconnect disabled, single connection attempt");
         client
-            .connect(&endpoint)
+            .connect(&endpoint, &resolved.relay_urls)
             .await
             .map_err(|e| anyhow::anyhow!("VPN connection error: {}", e))
     }
