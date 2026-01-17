@@ -92,15 +92,15 @@ sequenceDiagram
     C->>S: VpnHandshake {device_id, auth_token}
     S->>S: Validate auth token
     S->>S: Store client (EndpointId, device_id)
-    S->>S: Allocate IP from pool
-    S-->>C: VpnHandshakeResponse {assigned_ip, network}
+    S->>S: Allocate IP(s) from pool(s)
+    S-->>C: VpnHandshakeResponse {assigned_ip, network, server_ip, ...}
 
     Note over C,S: TUN Device Setup
     C->>C: Create TUN device (tun0)
-    C->>C: Assign IP (10.0.0.2)
+    C->>C: Assign IP(s) (10.0.0.2, fd00::2)
     C->>C: Configure routes
     S->>S: Create TUN device (tun0)
-    S->>S: Assign IP (10.0.0.1)
+    S->>S: Assign IP(s) (10.0.0.1, fd00::1)
 
     Note over C,S: Direct IP Tunnel Active
     loop Packet Flow
@@ -112,6 +112,18 @@ sequenceDiagram
         S->>S: Forward to destination
     end
 ```
+
+**`VpnHandshakeResponse` Fields:**
+
+The response includes different fields depending on the server's address configuration:
+
+| Mode | Fields in Response |
+|------|-------------------|
+| IPv4-only | `assigned_ip`, `network`, `server_ip` |
+| IPv6-only | `assigned_ip6`, `network6`, `server_ip6` |
+| Dual-stack | All six fields: `assigned_ip`, `network`, `server_ip`, `assigned_ip6`, `network6`, `server_ip6` |
+
+When `network6` is configured on the server, clients receive IPv6 addresses alongside IPv4 (dual-stack) or IPv6-only if `network` is omitted.
 
 ### Direct IP over QUIC Integration
 
