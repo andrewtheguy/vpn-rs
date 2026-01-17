@@ -41,6 +41,9 @@ pub use translator::Nat64Translator;
 /// IPv6 addresses in this range embed IPv4 addresses in the last 32 bits.
 pub const NAT64_PREFIX: [u8; 12] = [0x00, 0x64, 0xff, 0x9b, 0, 0, 0, 0, 0, 0, 0, 0];
 
+/// The well-known NAT64 prefix as a CIDR string for display/logging purposes.
+pub const NAT64_PREFIX_CIDR: &str = "64:ff9b::/96";
+
 /// Check if an IPv6 address is in the NAT64 prefix `64:ff9b::/96`.
 #[inline]
 pub fn is_nat64_address(addr: &std::net::Ipv6Addr) -> bool {

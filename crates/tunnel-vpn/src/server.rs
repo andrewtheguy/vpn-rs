@@ -9,7 +9,7 @@ use crate::buffer::{as_mut_byte_slice, uninitialized_vec};
 use crate::config::VpnServerConfig;
 use crate::device::{TunConfig, TunDevice};
 use crate::error::{VpnError, VpnResult};
-use crate::nat64::{is_nat64_address, Nat64Translator};
+use crate::nat64::{is_nat64_address, Nat64Translator, NAT64_PREFIX_CIDR};
 use crate::signaling::{
     frame_ip_packet, read_message, write_message, DataMessageType, VpnHandshake,
     VpnHandshakeResponse, HEARTBEAT_PONG_BYTE, MAX_HANDSHAKE_SIZE,
@@ -370,18 +370,16 @@ impl VpnServer {
         }
 
         // Initialize NAT64 translator if configured
-        let server_ip = config.server_ip.unwrap_or_else(|| {
-            let net_addr: u32 = config.network.network().into();
-            Ipv4Addr::from(net_addr + 1)
-        });
-
+        // Reuse the server_ip from IpPool to avoid duplicating the default IP computation
         let nat64 = match config.nat64.as_ref() {
             Some(nat64_config) if nat64_config.enabled => {
                 // Validate NAT64 configuration before creating translator
                 nat64_config.validate().map_err(VpnError::Config)?;
 
+                let server_ip = ip_pool.read().await.server_ip();
                 log::info!(
-                    "NAT64 enabled: translating 64:ff9b::/96 -> {} with ports {}-{}",
+                    "NAT64 enabled: translating {} -> {} with ports {}-{}",
+                    NAT64_PREFIX_CIDR,
                     server_ip,
                     nat64_config.port_range.0,
                     nat64_config.port_range.1
