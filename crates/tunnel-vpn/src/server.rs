@@ -1152,13 +1152,12 @@ impl VpnServer {
                             // Check if this IP belongs to another client
                             match ctx.ip_to_endpoint.get(&src_ip) {
                                 Some(ref owner) if *owner.value() == ctx.client_key => true, // Our own assigned IP
-                                Some(ref owner) => {
+                                Some(_) => {
                                     // IP belongs to another client - actual spoofing
                                     log::warn!(
                                         "IPv4 inter-client spoofing from client {}: source {} belongs to another client",
                                         client_id, src_ip
                                     );
-                                    let _ = owner; // silence unused warning
                                     false
                                 }
                                 None => true, // Not a VPN-assigned IP - allow (e.g., client's public IP)
@@ -1176,13 +1175,12 @@ impl VpnServer {
                                 // Check if this IP belongs to another client
                                 match ctx.ip6_to_endpoint.get(&src_ip) {
                                     Some(ref owner) if *owner.value() == ctx.client_key => true, // Our own assigned IP
-                                    Some(ref owner) => {
+                                    Some(_) => {
                                         // IP belongs to another client - actual spoofing
                                         log::warn!(
                                             "IPv6 inter-client spoofing from client {}: source {} belongs to another client",
                                             client_id, src_ip
                                         );
-                                        let _ = owner; // silence unused warning
                                         false
                                     }
                                     None => true, // Not a VPN-assigned IP - allow (e.g., client's public IP)
