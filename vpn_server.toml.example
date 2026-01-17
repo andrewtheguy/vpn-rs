@@ -168,6 +168,7 @@ auth_tokens = ["iXXXXXXXXXXXXXXXXX"]  # Replace with real token from generate-to
 # NAT64 Configuration (Optional)
 # ============================================================================
 # NAT64 allows IPv6-only clients to access IPv4 resources.
+# NOTE: NAT64 support is experimental.
 # When enabled, the server translates IPv6 packets destined for the well-known
 # NAT64 prefix (64:ff9b::/96) to IPv4 and performs NAPT.
 #

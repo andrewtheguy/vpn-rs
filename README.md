@@ -669,6 +669,10 @@ secret_file = "./server.key"
 auth_tokens = ["<YOUR_AUTH_TOKEN>"]  # Replace with token from step 1
 ```
 
+Notes:
+- The IPv4 VPN network is optional; you can run IPv6-only by setting `network6` instead.
+- NAT64 support is available but **experimental**.
+
 ### 3. Start VPN Server
 
 ```bash
