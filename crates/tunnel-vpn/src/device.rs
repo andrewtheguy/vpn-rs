@@ -29,6 +29,17 @@ pub struct TunConfig {
     pub mtu: u16,
 }
 
+/// Validate IPv6 prefix length (must be 0-128).
+fn validate_prefix_len6(prefix_len6: u8) -> VpnResult<()> {
+    if prefix_len6 > 128 {
+        return Err(VpnError::Config(format!(
+            "Invalid IPv6 prefix length {}: must be 0-128",
+            prefix_len6
+        )));
+    }
+    Ok(())
+}
+
 impl TunConfig {
     /// Create a new TUN configuration.
     pub fn new(address: Ipv4Addr, netmask: Ipv4Addr, destination: Ipv4Addr) -> Self {
@@ -60,12 +71,7 @@ impl TunConfig {
     /// # Errors
     /// Returns an error if `prefix_len6` is greater than 128.
     pub fn with_ipv6(mut self, address6: Ipv6Addr, prefix_len6: u8) -> VpnResult<Self> {
-        if prefix_len6 > 128 {
-            return Err(VpnError::Config(format!(
-                "Invalid IPv6 prefix length {}: must be 0-128",
-                prefix_len6
-            )));
-        }
+        validate_prefix_len6(prefix_len6)?;
         self.address6 = Some(address6);
         self.prefix_len6 = Some(prefix_len6);
         Ok(self)
@@ -80,12 +86,7 @@ impl TunConfig {
     /// # Errors
     /// Returns an error if `prefix_len6` is greater than 128.
     pub fn ipv6_only(address6: Ipv6Addr, prefix_len6: u8, mtu: u16) -> VpnResult<Self> {
-        if prefix_len6 > 128 {
-            return Err(VpnError::Config(format!(
-                "Invalid IPv6 prefix length {}: must be 0-128",
-                prefix_len6
-            )));
-        }
+        validate_prefix_len6(prefix_len6)?;
         // Use a link-local placeholder address that won't conflict with real traffic.
         // This satisfies TUN creation on platforms that require IPv4 (macOS/Windows
         // in tun 0.8.x), but won't affect IPv4 routing.

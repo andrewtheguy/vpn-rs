@@ -850,11 +850,11 @@ impl VpnServer {
 
         // Spawn dedicated writer task that owns the SendStream.
         // Returns error through oneshot channel for immediate cleanup propagation.
-        // Use endpoint ID for logging when no IPv4 is assigned
+        // At least one of assigned_ip or assigned_ip6 must be set at this point
         let writer_client_id = assigned_ip
             .map(|ip| ip.to_string())
             .or_else(|| assigned_ip6.map(|ip| ip.to_string()))
-            .unwrap_or_else(|| remote_id.to_string());
+            .expect("at least one IP must be assigned");
         let mut data_send = data_send;
         let writer_handle = tokio::spawn(async move {
             let error = loop {
@@ -1028,10 +1028,11 @@ impl VpnServer {
         nat64: Option<Arc<Nat64Translator>>,
     ) -> VpnResult<()> {
         // Create client identifier string for logging (used both in spawned task and select!)
+        // At least one of assigned_ip or assigned_ip6 must be set (enforced by caller)
         let client_id = assigned_ip
             .map(|ip| ip.to_string())
             .or_else(|| assigned_ip6.map(|ip| ip.to_string()))
-            .unwrap_or_else(|| "unknown".to_string());
+            .expect("at least one IP must be assigned");
         let client_id_outer = client_id.clone(); // For use in select! block
 
         // Spawn inbound task (QUIC stream -> TUN via channel)
