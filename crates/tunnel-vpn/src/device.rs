@@ -5,7 +5,7 @@
 
 use crate::error::{VpnError, VpnResult};
 use ipnet::{Ipv4Net, Ipv6Net};
-use std::net::{Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 use tun::{AbstractDevice, AsyncDevice, Configuration, DeviceReader, DeviceWriter};
@@ -1124,8 +1124,6 @@ impl Drop for Route6Guard {
 // Bypass Route Management (for ICE peer addresses)
 // ============================================================================
 
-use std::net::{IpAddr, SocketAddr};
-
 /// Information about a bypass route for an ICE peer.
 #[derive(Debug)]
 struct BypassRouteInfo {
@@ -1334,11 +1332,7 @@ pub async fn add_bypass_route(peer_addr: SocketAddr) -> VpnResult<BypassRouteGua
 /// Implementation of adding a bypass route (Linux).
 #[cfg(target_os = "linux")]
 async fn add_bypass_route_impl(info: &BypassRouteInfo) -> VpnResult<()> {
-    let host_route = if info.peer_ip.is_ipv4() {
-        format!("{}/32", info.peer_ip)
-    } else {
-        format!("{}/128", info.peer_ip)
-    };
+    let prefix = if info.peer_ip.is_ipv4() { 32 } else { 128 };
 
     let mut args: Vec<String> = Vec::new();
     if info.peer_ip.is_ipv6() {
@@ -1347,7 +1341,7 @@ async fn add_bypass_route_impl(info: &BypassRouteInfo) -> VpnResult<()> {
     args.extend([
         "route".to_string(),
         "add".to_string(),
-        host_route.clone(),
+        format!("{}/{}", info.peer_ip, prefix),
     ]);
 
     if let Some(gw) = info.gateway {
@@ -1363,22 +1357,29 @@ async fn add_bypass_route_impl(info: &BypassRouteInfo) -> VpnResult<()> {
         .map_err(|e| VpnError::TunDevice(format!("Failed to add bypass route: {}", e)))?;
 
     if output.status.success() {
-        log::info!("Added bypass route {} via {}", host_route, info.device);
+        log::info!(
+            "Added bypass route {}/{} via {}",
+            info.peer_ip,
+            prefix,
+            info.device
+        );
         return Ok(());
     }
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     if is_already_exists_error(&stderr) {
         log::warn!(
-            "Bypass route {} already exists (treating as success)",
-            host_route
+            "Bypass route {}/{} already exists (treating as success)",
+            info.peer_ip,
+            prefix
         );
         return Ok(());
     }
 
     Err(VpnError::TunDevice(format!(
-        "Failed to add bypass route {}: {}",
-        host_route,
+        "Failed to add bypass route {}/{}: {}",
+        info.peer_ip,
+        prefix,
         stderr.trim()
     )))
 }
@@ -1551,12 +1552,17 @@ fn remove_bypass_route_sync(
 /// Remove a bypass route (Windows stub, blocking).
 #[cfg(target_os = "windows")]
 fn remove_bypass_route_sync(
-    _peer_ip: IpAddr,
-    _device: &str,
-    _gateway: Option<IpAddr>,
+    peer_ip: IpAddr,
+    device: &str,
+    gateway: Option<IpAddr>,
     _gateway_str: Option<&str>,
 ) {
-    // Not implemented
+    log::debug!(
+        "Bypass route removal not implemented on Windows (peer: {}, device: {}, gateway: {:?})",
+        peer_ip,
+        device,
+        gateway
+    );
 }
 
 /// Remove a bypass route (unsupported platforms, blocking).

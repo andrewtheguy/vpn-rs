@@ -252,18 +252,23 @@ impl VpnIceClient {
         // Add bypass route for ICE peer BEFORE adding VPN routes.
         // This ensures ICE keepalive traffic continues to use the original
         // network path even if the peer's IP falls within a VPN route prefix.
-        let _bypass_guard: Option<BypassRouteGuard> =
-            if !self.config.routes.is_empty() || !self.config.routes6.is_empty() {
-                match add_bypass_route(ice_remote_addr).await {
-                    Ok(guard) => Some(guard),
-                    Err(e) => {
-                        log::warn!("Failed to add bypass route for ICE peer (continuing anyway): {}", e);
-                        None
-                    }
+        let will_add_routes =
+            (server_info.assigned_ip.is_some() && !self.config.routes.is_empty())
+                || (server_info.assigned_ip6.is_some() && !self.config.routes6.is_empty());
+        let _bypass_guard: Option<BypassRouteGuard> = if will_add_routes {
+            match add_bypass_route(ice_remote_addr).await {
+                Ok(guard) => Some(guard),
+                Err(e) => {
+                    log::warn!(
+                        "Failed to add bypass route for ICE peer (continuing anyway): {}",
+                        e
+                    );
+                    None
                 }
-            } else {
-                None
-            };
+            }
+        } else {
+            None
+        };
 
         // Add routes
         let _route_guard: Option<RouteGuard> =
