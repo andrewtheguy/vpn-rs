@@ -44,11 +44,11 @@ const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(30);
 /// latency under congestion. The value 1024 matches the server's default
 /// client channel size for symmetric buffering.
 ///
-/// Memory impact (typical): ~1024 * ~1500 bytes (standard MTU) = ~1.5 MB.
-/// Memory impact (max): ~1024 * ~65KB (MAX_IP_PACKET_SIZE) = ~64 MB if jumbo packets allowed.
+/// Memory impact (typical): ~65536 * ~1500 bytes (standard MTU) = ~98 MB.
+/// Memory impact (max): ~65536 * ~65KB (MAX_IP_PACKET_SIZE) = ~4 GB if jumbo packets allowed.
 /// Actual memory depends on the TUN device's configured MTU (usually 1440-1500 bytes).
-/// Latency impact: At 100 Mbps, a full 1024-packet buffer adds ~120ms latency.
-const OUTBOUND_CHANNEL_SIZE: usize = 1024;
+/// Latency impact: At 100 Mbps, a full 65536-packet buffer adds ~7.8s latency.
+const OUTBOUND_CHANNEL_SIZE: usize = 65536;
 
 /// VPN client instance.
 pub struct VpnClient {

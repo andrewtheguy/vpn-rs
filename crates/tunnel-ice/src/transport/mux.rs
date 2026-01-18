@@ -49,7 +49,7 @@ pub struct ReceivedPacket {
 /// 1. Increasing this value (up to 256-512 for complex network topologies)
 /// 2. Investigating why the ICE agent is processing packets slowly
 /// 3. Reducing the number of configured STUN servers
-const STUN_CHANNEL_CAPACITY: usize = 128;
+const STUN_CHANNEL_CAPACITY: usize = 512;
 
 /// Global counter for dropped STUN packets due to channel backpressure.
 /// Non-zero values indicate potential ICE negotiation issues.
@@ -257,7 +257,7 @@ impl IceKeeper {
     ///
     /// This should be spawned as a background task.
     pub async fn run(mut self) {
-        let mut interval = tokio::time::interval(Duration::from_millis(50));
+        let mut interval = tokio::time::interval(Duration::from_millis(5000));
 
         loop {
             tokio::select! {

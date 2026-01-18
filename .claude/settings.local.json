@@ -37,7 +37,8 @@
       "Bash(cargo check:*)",
       "Bash(cargo clippy:*)",
       "mcp__github__get_file_contents",
-      "Bash(git show-branch:*)"
+      "Bash(git show-branch:*)",
+      "Bash(xargs:*)"
     ]
   }
 }

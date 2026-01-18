@@ -40,7 +40,7 @@ const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
 const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(45);
 
 /// Channel buffer size for outbound packets.
-const OUTBOUND_CHANNEL_SIZE: usize = 1024;
+const OUTBOUND_CHANNEL_SIZE: usize = 65536;
 
 /// QUIC connection timeout.
 const QUIC_CONNECTION_TIMEOUT: Duration = Duration::from_secs(10);
