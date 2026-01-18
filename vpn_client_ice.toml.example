@@ -39,9 +39,9 @@ peer_npub = "npub1..."
 # MTU for TUN device (default: 1420)
 mtu = 1420
 
-# IPv4 routes to send through the VPN (CIDR notation)
+# IPv4 routes to send through the VPN (CIDR notation) (optional)
 # Full tunnel: routes all traffic through VPN
-routes = ["0.0.0.0/0"]
+# routes = ["0.0.0.0/0"]
 
 # Split tunnel examples:
 # routes = [
