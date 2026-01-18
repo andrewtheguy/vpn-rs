@@ -52,12 +52,14 @@ Tunnel-rs enables you to forward TCP and UDP traffic—or tunnel entire networks
 | Route all traffic through tunnel | VPN Mode (requires root/admin) | `tunnel-rs-vpn` |
 | Access an entire remote subnet | VPN Mode (requires root/admin) | `tunnel-rs-vpn` |
 
-### Alternative Modes (Niche Use Cases)
+### Alternative Port Forwarding Modes (Niche Use Cases)
+
+For port forwarding without iroh infrastructure. Download `tunnel-rs-ice` from [GitHub releases](https://github.com/andrewtheguy/tunnel-rs/releases) or build from source.
 
 | Need | Recommended | Binary |
 |------|-------------|--------|
-| Decentralized signaling (no iroh dependency) | Port Forwarding (nostr mode) | `tunnel-rs-ice` |
-| Offline/LAN-only operation | Port Forwarding (manual mode) | `tunnel-rs-ice` |
+| Decentralized signaling (no iroh dependency) | nostr mode | `tunnel-rs-ice` |
+| Offline/LAN-only operation | manual mode | `tunnel-rs-ice` |
 
 > See [docs/ALTERNATIVE-MODES.md](docs/ALTERNATIVE-MODES.md) for detailed documentation on manual and nostr modes.
 
@@ -69,9 +71,9 @@ tunnel-rs provides multiple modes for establishing tunnels. **Use `iroh` mode** 
 
 **Binary layout:**
 - `tunnel-rs`: Port forwarding with iroh mode (prebuilt in releases)
-- `tunnel-rs-ice`: Port forwarding with manual and nostr modes (**build from source**)
+- `tunnel-rs-ice`: Port forwarding with manual and nostr modes (prebuilt in releases)
 - `tunnel-rs-vpn`: VPN mode (iroh) (prebuilt in releases)
-- `tunnel-rs-vpn-ice`: VPN mode (Nostr/ICE, **experimental**, **build from source**)
+- `tunnel-rs-vpn-ice`: VPN mode (Nostr/ICE) (**experimental**, build from source)
 
 ### Port Forwarding Modes
 
@@ -119,7 +121,7 @@ curl -sSL https://andrewtheguy.github.io/tunnel-rs/install.sh | bash
 irm https://andrewtheguy.github.io/tunnel-rs/install.ps1 | iex
 ```
 
-This installs `tunnel-rs` (iroh mode). For nostr/manual ICE modes (`tunnel-rs-ice`), build from source (see [From Source](#from-source)).
+This installs `tunnel-rs` (iroh mode). For nostr/manual ICE modes, download `tunnel-rs-ice` separately from [GitHub releases](https://github.com/andrewtheguy/tunnel-rs/releases).
 
 <details>
 <summary>Advanced installation options</summary>
@@ -212,15 +214,15 @@ curl -sSL https://andrewtheguy.github.io/tunnel-rs/install-vpn.sh | sudo bash -s
 # Port forwarding (iroh mode)
 cargo install --path . -p tunnel-rs
 
+# Port forwarding (nostr/manual modes)
+cargo install --path . -p tunnel-rs-ice
+
 # VPN mode (requires root/admin to run)
 cargo install --path . -p tunnel-rs-vpn
 ```
 
-**ICE binaries (not included in releases — build manually):**
+**Experimental (not included in releases):**
 ```bash
-# Port forwarding (nostr/manual modes)
-cargo install --path . -p tunnel-rs-ice
-
 # VPN mode with Nostr/ICE (experimental)
 cargo install --path . -p tunnel-rs-vpn-ice
 ```
