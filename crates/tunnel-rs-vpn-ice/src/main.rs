@@ -345,15 +345,6 @@ async fn main() -> Result<()> {
                     .with_context(|| format!("Failed to write to {}", expanded.display()))?;
                 file.write_all(format!("{}\n", nsec).as_bytes())
                     .with_context(|| format!("Failed to write to {}", expanded.display()))?;
-                #[cfg(not(unix))]
-                {
-                    // Note: read-only on Windows only prevents modification, not reading.
-                    // Users should ensure the file is in a directory with appropriate ACLs.
-                    let perms = std::fs::Permissions::from_readonly(true);
-                    std::fs::set_permissions(&expanded, perms).with_context(|| {
-                        format!("Failed to set permissions on {}", expanded.display())
-                    })?;
-                }
                 println!("Private key saved to: {}", expanded.display());
                 println!("Public key (npub): {}", npub);
                 println!("\nShare the npub with your peer, keep the nsec file secret!");
