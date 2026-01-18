@@ -40,7 +40,14 @@ const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
 const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(45);
 
 /// Channel buffer size for outbound packets.
-const OUTBOUND_CHANNEL_SIZE: usize = 65536;
+///
+/// Sized to handle moderate bursts without masking backpressure. Smaller buffers
+/// ensure the sender receives timely backpressure signals when the network is
+/// congested, preventing excessive memory usage and latency buildup.
+///
+/// Memory impact (typical): ~1024 * ~1500 bytes (standard MTU) = ~1.5 MB per client.
+/// Latency impact: At 100 Mbps, a full 1024-packet buffer adds ~120ms latency.
+const OUTBOUND_CHANNEL_SIZE: usize = 1024;
 
 /// QUIC connection timeout.
 const QUIC_CONNECTION_TIMEOUT: Duration = Duration::from_secs(10);
