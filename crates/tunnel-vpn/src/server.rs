@@ -202,34 +202,35 @@ impl IpPool {
     }
 
     /// Reserve a specific IP address so it will not be assigned to clients.
-    fn reserve_ip(&mut self, ip: Ipv4Addr) -> Result<(), String> {
+    fn reserve_ip(&mut self, ip: Ipv4Addr, label: &str) -> Result<(), String> {
         if !self.network.contains(&ip) {
             return Err(format!(
-                "NAT64 source_ip {} is not within VPN network {}",
-                ip, self.network
+                "{} {} is not within VPN network {}",
+                label, ip, self.network
             ));
         }
         if ip == self.server_ip {
             return Err(format!(
-                "NAT64 source_ip {} must not equal server_ip {}",
-                ip, self.server_ip
+                "{} {} must not equal server_ip {}",
+                label, ip, self.server_ip
             ));
         }
         let network_addr = self.network.network();
         let broadcast = self.network.broadcast();
         if ip == network_addr || ip == broadcast {
             return Err(format!(
-                "NAT64 source_ip {} is not a usable host address in {}",
-                ip, self.network
+                "{} {} is not a usable host address in {}",
+                label, ip, self.network
             ));
         }
         if self.reserved.contains(&ip) {
             return Ok(());
         }
+        // O(n) scan of in_use: small in practice, avoids extra lookup map.
         if self.in_use.values().any(|assigned| *assigned == ip) {
             return Err(format!(
-                "NAT64 source_ip {} is already assigned to a client",
-                ip
+                "{} {} is already assigned to a client",
+                label, ip
             ));
         }
         self.released.retain(|released_ip| *released_ip != ip);
@@ -468,7 +469,8 @@ impl VpnServer {
                     (Some(explicit_ip), Some(ip_pool_arc)) => {
                         let mut pool = ip_pool_arc.write().await;
                         if pool.network().contains(&explicit_ip) {
-                            pool.reserve_ip(explicit_ip).map_err(VpnError::Config)?;
+                            pool.reserve_ip(explicit_ip, "source_ip")
+                                .map_err(VpnError::Config)?;
                         }
                         explicit_ip
                     }
