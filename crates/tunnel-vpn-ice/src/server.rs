@@ -677,17 +677,23 @@ impl VpnIceServer {
         let mut writer_handle: tokio::task::JoinHandle<Option<String>> = tokio::spawn(async move {
             let mut data_send = data_send;
             let mut batch = Vec::with_capacity(64);
+            let mut write_buf = BytesMut::with_capacity(64 * 1500);
             loop {
                 let count = outbound_rx.recv_many(&mut batch, 64).await;
                 if count == 0 {
                     break;
                 }
-                for data in batch.drain(..) {
-                    if let Err(e) = data_send.write_all(&data).await {
-                        log::warn!("QUIC write error: {}", e);
-                        return Some(format!("QUIC write error: {}", e));
-                    }
+                let total_len: usize = batch.iter().map(|data| data.len()).sum();
+                write_buf.clear();
+                write_buf.reserve(total_len);
+                for data in &batch {
+                    write_buf.extend_from_slice(data);
                 }
+                if let Err(e) = data_send.write_all(&write_buf).await {
+                    log::warn!("QUIC write error: {}", e);
+                    return Some(format!("QUIC write error: {}", e));
+                }
+                batch.clear();
             }
             None
         });
