@@ -510,17 +510,46 @@ impl VpnIceClient {
         let mut writer_handle: tokio::task::JoinHandle<Option<String>> = tokio::spawn(async move {
             let mut data_send = data_send;
             let mut batch = Vec::with_capacity(64);
+            let mut write_buf = BytesMut::with_capacity(64 * 1500);
+            let mut last_report = Instant::now();
+            let mut interval_bytes: usize = 0;
+            let mut interval_packets: usize = 0;
+            let mut interval_batches: usize = 0;
             loop {
                 let count = outbound_rx.recv_many(&mut batch, 64).await;
                 if count == 0 {
                     break;
                 }
-                for data in batch.drain(..) {
-                    if let Err(e) = data_send.write_all(&data).await {
-                        log::warn!("QUIC write error: {}", e);
-                        return Some(format!("QUIC write error: {}", e));
-                    }
+                let total_len: usize = batch.iter().map(|data| data.len()).sum();
+                write_buf.clear();
+                write_buf.reserve(total_len);
+                for data in &batch {
+                    write_buf.extend_from_slice(data);
                 }
+                if let Err(e) = data_send.write_all(&write_buf).await {
+                    log::warn!("QUIC write error: {}", e);
+                    return Some(format!("QUIC write error: {}", e));
+                }
+                interval_bytes += total_len;
+                interval_packets += count;
+                interval_batches += 1;
+                if last_report.elapsed() >= Duration::from_secs(5) {
+                    let elapsed = last_report.elapsed().as_secs_f64();
+                    let mib_per_sec = (interval_bytes as f64 / (1024.0 * 1024.0)) / elapsed;
+                    log::info!(
+                        "QUIC writer throughput: {:.2} MiB/s ({} bytes, {} packets, {} batches in {:.2}s)",
+                        mib_per_sec,
+                        interval_bytes,
+                        interval_packets,
+                        interval_batches,
+                        elapsed
+                    );
+                    last_report = Instant::now();
+                    interval_bytes = 0;
+                    interval_packets = 0;
+                    interval_batches = 0;
+                }
+                batch.clear();
             }
             None
         });
