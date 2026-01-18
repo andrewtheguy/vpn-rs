@@ -69,7 +69,7 @@ tunnel-rs provides multiple modes for establishing tunnels. **Use `iroh` mode** 
 - `tunnel-rs`: Port forwarding with iroh mode
 - `tunnel-rs-ice`: Port forwarding with manual and nostr modes
 - `tunnel-rs-vpn`: VPN mode (iroh)
-- `tunnel-rs-vpn-ice`: VPN mode (Nostr/ICE)
+- `tunnel-rs-vpn-ice`: VPN mode (Nostr/ICE, **experimental**)
 
 ### Port Forwarding Modes
 
@@ -84,7 +84,7 @@ tunnel-rs provides multiple modes for establishing tunnels. **Use `iroh` mode** 
 | Mode | NAT Traversal | Discovery | Platform | External Dependency |
 |------|---------------|-----------|----------|---------------------|
 | **vpn** (iroh) | Best (relay fallback) | Automatic | Linux/macOS/Windows | iroh relay infrastructure |
-| **vpn-ice** | STUN only | Nostr | Linux/macOS/Windows | Nostr relays (decentralized) |
+| **vpn-ice** (experimental) | STUN only | Nostr | Linux/macOS/Windows | Nostr relays (decentralized) |
 
 > See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for detailed diagrams and technical deep-dives.
 
@@ -785,9 +785,9 @@ Only one VPN client can run at a time per machine. This prevents routing conflic
 
 ---
 
-# VPN Mode (Nostr / ICE)
+# VPN Mode (Nostr / ICE, Experimental)
 
-For completely decentralized VPN without iroh infrastructure dependencies, use `tunnel-rs-vpn-ice`. This mode uses Nostr relays for signaling and ICE (STUN) for NAT traversal.
+For completely decentralized VPN without iroh infrastructure dependencies, use `tunnel-rs-vpn-ice`. This **experimental** mode uses Nostr relays for signaling and ICE (STUN) for NAT traversal.
 
 > [!WARNING]
 > **NAT Traversal Limitation:** This mode uses STUN-only NAT traversal. If both peers are behind symmetric NATs (common in enterprise/cellular networks), the connection will fail. Use `tunnel-rs-vpn` (iroh mode) for reliable connectivity with relay fallback.
