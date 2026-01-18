@@ -78,8 +78,8 @@ tunnel-rs provides multiple modes for establishing tunnels. **Use `iroh` mode** 
 | Mode | NAT Traversal | Discovery | External Dependency |
 |------|---------------|-----------|---------------------|
 | **iroh** (recommended) | Best (relay fallback) | Automatic | iroh relay infrastructure |
-| nostr | STUN only | Automatic (Nostr) | Nostr relays (decentralized) |
-| manual | STUN only | Manual copy-paste | None |
+| nostr (alternative mode) | STUN only | Automatic (Nostr) | Nostr relays (decentralized) |
+| manual (alternative mode) | STUN only | Manual copy-paste | None |
 
 ### VPN Mode
 
