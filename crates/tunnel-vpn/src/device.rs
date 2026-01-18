@@ -5,7 +5,7 @@
 
 use crate::error::{VpnError, VpnResult};
 use ipnet::{Ipv4Net, Ipv6Net};
-use std::net::{Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 use tun::{AbstractDevice, AsyncDevice, Configuration, DeviceReader, DeviceWriter};
@@ -1117,5 +1117,592 @@ impl Drop for Route6Guard {
         for route in self.routes.iter().rev() {
             remove_route6_sync(&self.tun_name, route);
         }
+    }
+}
+
+// ============================================================================
+// Bypass Route Management (for ICE peer addresses)
+// ============================================================================
+
+/// Information about a bypass route for an ICE peer.
+#[derive(Debug)]
+struct BypassRouteInfo {
+    /// The peer address to bypass.
+    peer_ip: IpAddr,
+    /// The device/interface to route through.
+    device: String,
+    /// The gateway (optional, for some routes it's direct).
+    gateway: Option<IpAddr>,
+    /// Raw gateway string with scope ID preserved (e.g., "fe80::1%en0").
+    /// Used on macOS where link-local addresses need the scope.
+    gateway_str: Option<String>,
+}
+
+/// Query the current route for a given IP address.
+///
+/// Returns the device and optional gateway that the OS would use to reach this IP.
+#[cfg(target_os = "linux")]
+async fn query_route_for_ip(ip: IpAddr) -> VpnResult<BypassRouteInfo> {
+    let ip_str = ip.to_string();
+    let args: Vec<&str> = if ip.is_ipv4() {
+        vec!["route", "get", &ip_str]
+    } else {
+        vec!["-6", "route", "get", &ip_str]
+    };
+
+    let output = Command::new("ip")
+        .args(&args)
+        .output()
+        .await
+        .map_err(|e| VpnError::TunDevice(format!("Failed to query route: {}", e)))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(VpnError::TunDevice(format!(
+            "Failed to query route for {}: {}",
+            ip,
+            stderr.trim()
+        )));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    parse_linux_route_get(&stdout, ip)
+}
+
+/// Validate that a gateway string contains only expected characters.
+///
+/// Gateway strings should only contain:
+/// - Hex digits (0-9, A-F, a-f) for IPv6 addresses
+/// - Decimal digits (0-9) for IPv4 addresses
+/// - Colons (:) for IPv6 separators
+/// - Dots (.) for IPv4 separators
+/// - Percent sign (%) for scope ID delimiter (e.g., fe80::1%en0)
+/// - Alphanumeric characters after % for interface names
+///
+/// This validation prevents command injection when the gateway string
+/// is passed to route commands.
+fn is_valid_gateway_str(s: &str) -> bool {
+    if s.is_empty() {
+        return false;
+    }
+
+    // Split on '%' to handle scope ID separately
+    let parts: Vec<&str> = s.splitn(2, '%').collect();
+    let addr_part = parts[0];
+    let scope_part = parts.get(1);
+
+    // Validate the address part: only hex digits, colons, and dots
+    let addr_valid = addr_part
+        .chars()
+        .all(|c| c.is_ascii_hexdigit() || c == ':' || c == '.');
+
+    if !addr_valid {
+        return false;
+    }
+
+    // If there's a scope part, validate it: alphanumeric and common interface chars
+    if let Some(scope) = scope_part {
+        // Interface names can contain alphanumeric chars, underscores, and hyphens
+        let scope_valid = !scope.is_empty()
+            && scope
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+        if !scope_valid {
+            return false;
+        }
+    }
+
+    true
+}
+
+/// Parse the output of `ip route get` on Linux.
+#[cfg(target_os = "linux")]
+fn parse_linux_route_get(output: &str, peer_ip: IpAddr) -> VpnResult<BypassRouteInfo> {
+    // Example output:
+    // 2600:1f13:adc:a0b1::1 from :: via fe80::1 dev eth0 proto static src 2603:8002:... metric 100
+    // or for direct routes:
+    // 10.0.0.1 dev eth0 src 10.0.0.2 uid 0
+
+    let mut device: Option<String> = None;
+    let mut gateway: Option<IpAddr> = None;
+    let mut gateway_str: Option<String> = None;
+
+    let tokens: Vec<&str> = output.split_whitespace().collect();
+    for i in 0..tokens.len() {
+        if tokens[i] == "dev" && i + 1 < tokens.len() {
+            device = Some(tokens[i + 1].to_string());
+        }
+        if tokens[i] == "via" && i + 1 < tokens.len() {
+            let gw_str = tokens[i + 1];
+            // Validate gateway string before using it
+            if is_valid_gateway_str(gw_str) {
+                gateway_str = Some(gw_str.to_string());
+                gateway = gw_str.parse().ok();
+            } else {
+                log::debug!(
+                    "Ignoring malformed gateway string in route output: {:?}",
+                    gw_str
+                );
+            }
+        }
+    }
+
+    let device = device.ok_or_else(|| {
+        VpnError::TunDevice(format!(
+            "Could not determine device for route to {}",
+            peer_ip
+        ))
+    })?;
+
+    Ok(BypassRouteInfo {
+        peer_ip,
+        device,
+        gateway,
+        gateway_str,
+    })
+}
+
+/// Query the current route for a given IP address (macOS).
+#[cfg(target_os = "macos")]
+async fn query_route_for_ip(ip: IpAddr) -> VpnResult<BypassRouteInfo> {
+    let ip_str = ip.to_string();
+    let args: Vec<&str> = if ip.is_ipv4() {
+        vec!["get", &ip_str]
+    } else {
+        vec!["get", "-inet6", &ip_str]
+    };
+
+    let output = Command::new("route")
+        .args(&args)
+        .output()
+        .await
+        .map_err(|e| VpnError::TunDevice(format!("Failed to query route: {}", e)))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(VpnError::TunDevice(format!(
+            "Failed to query route for {}: {}",
+            ip,
+            stderr.trim()
+        )));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    parse_macos_route_get(&stdout, ip)
+}
+
+/// Parse the output of `route get` on macOS.
+#[cfg(target_os = "macos")]
+fn parse_macos_route_get(output: &str, peer_ip: IpAddr) -> VpnResult<BypassRouteInfo> {
+    // Example output:
+    //    route to: 2600:1f13:adc:a0b1::1
+    // destination: default
+    //        mask: default
+    //     gateway: fe80::1%en0
+    //   interface: en0
+
+    let mut device: Option<String> = None;
+    let mut gateway: Option<IpAddr> = None;
+    let mut gateway_str: Option<String> = None;
+
+    for line in output.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("interface:") {
+            device = Some(rest.trim().to_string());
+        }
+        if let Some(rest) = line.strip_prefix("gateway:") {
+            let gw_str = rest.trim();
+            // Validate gateway string before using it to prevent command injection
+            if is_valid_gateway_str(gw_str) {
+                // Preserve raw gateway string (may include scope like fe80::1%en0)
+                gateway_str = Some(gw_str.to_string());
+                // Parse IpAddr by stripping scope (for non-route uses)
+                let gw_clean = gw_str.split('%').next().unwrap_or(gw_str);
+                gateway = gw_clean.parse().ok();
+            } else {
+                log::debug!(
+                    "Ignoring malformed gateway string in route output: {:?}",
+                    gw_str
+                );
+            }
+        }
+    }
+
+    let device = device.ok_or_else(|| {
+        VpnError::TunDevice(format!(
+            "Could not determine interface for route to {}",
+            peer_ip
+        ))
+    })?;
+
+    Ok(BypassRouteInfo {
+        peer_ip,
+        device,
+        gateway,
+        gateway_str,
+    })
+}
+
+/// Query the current route for a given IP address (Windows stub).
+#[cfg(target_os = "windows")]
+async fn query_route_for_ip(ip: IpAddr) -> VpnResult<BypassRouteInfo> {
+    // Windows route querying is more complex; for now return an error
+    Err(VpnError::TunDevice(
+        "Bypass route detection not yet implemented on Windows".into(),
+    ))
+}
+
+/// Query the current route for a given IP address (unsupported platforms).
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+async fn query_route_for_ip(ip: IpAddr) -> VpnResult<BypassRouteInfo> {
+    Err(VpnError::TunDevice(
+        "Bypass route detection not supported on this platform".into(),
+    ))
+}
+
+/// Add a bypass route for an ICE peer address.
+///
+/// This ensures that traffic to the ICE peer continues to use the original
+/// network path even after VPN routes are installed. This is critical because
+/// the ICE peer address may fall within a VPN route prefix, which would cause
+/// ICE keepalive traffic to be black-holed through the VPN tunnel.
+///
+/// Returns a guard that removes the bypass route when dropped.
+pub async fn add_bypass_route(peer_addr: SocketAddr) -> VpnResult<BypassRouteGuard> {
+    let peer_ip = peer_addr.ip();
+
+    // Query current route to this IP before adding any VPN routes
+    let route_info = query_route_for_ip(peer_ip).await?;
+
+    log::info!(
+        "Adding bypass route for ICE peer {} via {} (gateway: {:?})",
+        peer_ip,
+        route_info.device,
+        route_info.gateway
+    );
+
+    // Add host-specific route
+    add_bypass_route_impl(&route_info).await?;
+
+    Ok(BypassRouteGuard {
+        peer_ip,
+        device: route_info.device,
+        gateway: route_info.gateway,
+        gateway_str: route_info.gateway_str,
+    })
+}
+
+/// Implementation of adding a bypass route (Linux).
+#[cfg(target_os = "linux")]
+async fn add_bypass_route_impl(info: &BypassRouteInfo) -> VpnResult<()> {
+    let prefix = if info.peer_ip.is_ipv4() { 32 } else { 128 };
+
+    let mut args: Vec<String> = Vec::new();
+    if info.peer_ip.is_ipv6() {
+        args.push("-6".to_string());
+    }
+    args.extend([
+        "route".to_string(),
+        "add".to_string(),
+        format!("{}/{}", info.peer_ip, prefix),
+    ]);
+
+    if let Some(gw) = info.gateway {
+        args.extend(["via".to_string(), gw.to_string()]);
+    }
+    args.extend(["dev".to_string(), info.device.clone()]);
+
+    let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+    let output = Command::new("ip")
+        .args(&args_ref)
+        .output()
+        .await
+        .map_err(|e| VpnError::TunDevice(format!("Failed to add bypass route: {}", e)))?;
+
+    if output.status.success() {
+        log::info!(
+            "Added bypass route {}/{} via {}",
+            info.peer_ip,
+            prefix,
+            info.device
+        );
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if is_already_exists_error(&stderr) {
+        log::warn!(
+            "Bypass route {}/{} already exists (treating as success)",
+            info.peer_ip,
+            prefix
+        );
+        return Ok(());
+    }
+
+    Err(VpnError::TunDevice(format!(
+        "Failed to add bypass route {}/{}: {}",
+        info.peer_ip,
+        prefix,
+        stderr.trim()
+    )))
+}
+
+/// Implementation of adding a bypass route (macOS).
+#[cfg(target_os = "macos")]
+async fn add_bypass_route_impl(info: &BypassRouteInfo) -> VpnResult<()> {
+    let mut args: Vec<String> = vec!["add".to_string()];
+
+    if info.peer_ip.is_ipv6() {
+        args.push("-inet6".to_string());
+    }
+
+    args.push("-host".to_string());
+    args.push(info.peer_ip.to_string());
+
+    // Use raw gateway_str to preserve scope ID for link-local addresses (e.g., fe80::1%en0)
+    if let Some(ref gw_str) = info.gateway_str {
+        args.push(gw_str.clone());
+    } else {
+        args.extend(["-interface".to_string(), info.device.clone()]);
+    }
+
+    let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+    let output = Command::new("route")
+        .args(&args_ref)
+        .output()
+        .await
+        .map_err(|e| VpnError::TunDevice(format!("Failed to add bypass route: {}", e)))?;
+
+    if output.status.success() {
+        log::info!("Added bypass route for {} via {}", info.peer_ip, info.device);
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if is_already_exists_error(&stderr) {
+        log::warn!(
+            "Bypass route for {} already exists (treating as success)",
+            info.peer_ip
+        );
+        return Ok(());
+    }
+
+    Err(VpnError::TunDevice(format!(
+        "Failed to add bypass route for {}: {}",
+        info.peer_ip,
+        stderr.trim()
+    )))
+}
+
+/// Implementation of adding a bypass route (Windows stub).
+#[cfg(target_os = "windows")]
+async fn add_bypass_route_impl(_info: &BypassRouteInfo) -> VpnResult<()> {
+    Err(VpnError::TunDevice(
+        "Bypass route not yet implemented on Windows".into(),
+    ))
+}
+
+/// Implementation of adding a bypass route (unsupported platforms).
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+async fn add_bypass_route_impl(_info: &BypassRouteInfo) -> VpnResult<()> {
+    Err(VpnError::TunDevice(
+        "Bypass route not supported on this platform".into(),
+    ))
+}
+
+/// Guard that removes a bypass route when dropped.
+pub struct BypassRouteGuard {
+    peer_ip: IpAddr,
+    device: String,
+    gateway: Option<IpAddr>,
+    /// Raw gateway string with scope ID preserved (e.g., "fe80::1%en0").
+    gateway_str: Option<String>,
+}
+
+impl Drop for BypassRouteGuard {
+    fn drop(&mut self) {
+        log::info!("Removing bypass route for {}", self.peer_ip);
+        remove_bypass_route_sync(
+            self.peer_ip,
+            &self.device,
+            self.gateway,
+            self.gateway_str.as_deref(),
+        );
+    }
+}
+
+/// Remove a bypass route (Linux, blocking).
+#[cfg(target_os = "linux")]
+fn remove_bypass_route_sync(
+    peer_ip: IpAddr,
+    device: &str,
+    gateway: Option<IpAddr>,
+    _gateway_str: Option<&str>,
+) {
+    let host_route = if peer_ip.is_ipv4() {
+        format!("{}/32", peer_ip)
+    } else {
+        format!("{}/128", peer_ip)
+    };
+
+    let mut args: Vec<String> = Vec::new();
+    if peer_ip.is_ipv6() {
+        args.push("-6".to_string());
+    }
+    args.extend([
+        "route".to_string(),
+        "del".to_string(),
+        host_route.clone(),
+    ]);
+
+    if let Some(gw) = gateway {
+        args.extend(["via".to_string(), gw.to_string()]);
+    }
+    args.extend(["dev".to_string(), device.to_string()]);
+
+    let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+    match std::process::Command::new("ip").args(&args_ref).output() {
+        Ok(output) if output.status.success() => {
+            log::info!("Removed bypass route {}", host_route);
+        }
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            log::warn!("Failed to remove bypass route {}: {}", host_route, stderr.trim());
+        }
+        Err(e) => {
+            log::warn!("Failed to execute route delete: {}", e);
+        }
+    }
+}
+
+/// Remove a bypass route (macOS, blocking).
+#[cfg(target_os = "macos")]
+fn remove_bypass_route_sync(
+    peer_ip: IpAddr,
+    _device: &str,
+    _gateway: Option<IpAddr>,
+    gateway_str: Option<&str>,
+) {
+    let mut args: Vec<String> = vec!["delete".to_string()];
+
+    if peer_ip.is_ipv6() {
+        args.push("-inet6".to_string());
+    }
+
+    args.push("-host".to_string());
+    args.push(peer_ip.to_string());
+
+    // Use raw gateway_str to preserve scope ID for link-local addresses (e.g., fe80::1%en0)
+    if let Some(gw_str) = gateway_str {
+        args.push(gw_str.to_string());
+    }
+
+    let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+    match std::process::Command::new("route").args(&args_ref).output() {
+        Ok(output) if output.status.success() => {
+            log::info!("Removed bypass route for {}", peer_ip);
+        }
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            log::warn!("Failed to remove bypass route for {}: {}", peer_ip, stderr.trim());
+        }
+        Err(e) => {
+            log::warn!("Failed to execute route delete: {}", e);
+        }
+    }
+}
+
+/// Remove a bypass route (Windows stub, blocking).
+#[cfg(target_os = "windows")]
+fn remove_bypass_route_sync(
+    peer_ip: IpAddr,
+    device: &str,
+    gateway: Option<IpAddr>,
+    _gateway_str: Option<&str>,
+) {
+    log::debug!(
+        "Bypass route removal not implemented on Windows (peer: {}, device: {}, gateway: {:?})",
+        peer_ip,
+        device,
+        gateway
+    );
+}
+
+/// Remove a bypass route (unsupported platforms, blocking).
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+fn remove_bypass_route_sync(
+    _peer_ip: IpAddr,
+    _device: &str,
+    _gateway: Option<IpAddr>,
+    _gateway_str: Option<&str>,
+) {
+    // Not implemented
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_valid_ipv4_gateway() {
+        assert!(is_valid_gateway_str("192.168.1.1"));
+        assert!(is_valid_gateway_str("10.0.0.1"));
+        assert!(is_valid_gateway_str("0.0.0.0"));
+        assert!(is_valid_gateway_str("255.255.255.255"));
+    }
+
+    #[test]
+    fn test_valid_ipv6_gateway() {
+        assert!(is_valid_gateway_str("fe80::1"));
+        assert!(is_valid_gateway_str("2001:db8::1"));
+        assert!(is_valid_gateway_str("::1"));
+        assert!(is_valid_gateway_str("::"));
+        assert!(is_valid_gateway_str("2600:1f13:adc:a0b1::1"));
+    }
+
+    #[test]
+    fn test_valid_ipv6_with_scope() {
+        assert!(is_valid_gateway_str("fe80::1%en0"));
+        assert!(is_valid_gateway_str("fe80::1%eth0"));
+        assert!(is_valid_gateway_str("fe80::1%wlan0"));
+        assert!(is_valid_gateway_str("fe80::1%bridge-br0"));
+        assert!(is_valid_gateway_str("fe80::1%veth_123"));
+    }
+
+    #[test]
+    fn test_invalid_gateway_empty() {
+        assert!(!is_valid_gateway_str(""));
+    }
+
+    #[test]
+    fn test_invalid_gateway_command_injection() {
+        // Shell metacharacters
+        assert!(!is_valid_gateway_str("192.168.1.1; rm -rf /"));
+        assert!(!is_valid_gateway_str("$(whoami)"));
+        assert!(!is_valid_gateway_str("`whoami`"));
+        assert!(!is_valid_gateway_str("192.168.1.1 && echo pwned"));
+        assert!(!is_valid_gateway_str("192.168.1.1 | cat /etc/passwd"));
+        assert!(!is_valid_gateway_str("192.168.1.1\necho pwned"));
+        assert!(!is_valid_gateway_str("192.168.1.1'"));
+        assert!(!is_valid_gateway_str("192.168.1.1\""));
+        assert!(!is_valid_gateway_str("192.168.1.1>outfile"));
+        assert!(!is_valid_gateway_str("192.168.1.1<infile"));
+    }
+
+    #[test]
+    fn test_invalid_gateway_bad_scope() {
+        // Scope with invalid characters
+        assert!(!is_valid_gateway_str("fe80::1%"));
+        assert!(!is_valid_gateway_str("fe80::1%en0;rm"));
+        assert!(!is_valid_gateway_str("fe80::1%en0$(cmd)"));
+        assert!(!is_valid_gateway_str("fe80::1%en0`cmd`"));
+        assert!(!is_valid_gateway_str("fe80::1%en0 "));
+    }
+
+    #[test]
+    fn test_invalid_gateway_spaces() {
+        assert!(!is_valid_gateway_str("192.168.1.1 "));
+        assert!(!is_valid_gateway_str(" 192.168.1.1"));
+        assert!(!is_valid_gateway_str("192.168 .1.1"));
     }
 }
