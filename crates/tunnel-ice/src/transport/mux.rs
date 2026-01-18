@@ -256,7 +256,9 @@ impl IceKeeper {
     ///
     /// This should be spawned as a background task.
     pub async fn run(mut self) {
-        let mut interval = tokio::time::interval(Duration::from_millis(5000));
+        // 50ms interval for ICE timeout handling - needed for STUN retransmissions,
+        // consent freshness checks, and other time-sensitive ICE operations.
+        let mut interval = tokio::time::interval(Duration::from_millis(50));
 
         loop {
             tokio::select! {
