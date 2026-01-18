@@ -853,21 +853,22 @@ impl BypassRouteManager {
 
         // Add routes for new IP addresses
         for ip in required_ips {
-            if let std::collections::hash_map::Entry::Vacant(entry) = self.active_routes.entry(ip) {
-                // Use a dummy port (443) since bypass routes are per-IP
-                let socket_addr = SocketAddr::new(ip, 443);
-                match add_bypass_route(socket_addr).await {
-                    Ok(guard) => {
-                        log::info!("Added bypass route for iroh address {}", ip);
-                        entry.insert(guard);
-                    }
-                    Err(err) => {
-                        log::warn!(
-                            "Failed to add bypass route for {} (continuing anyway): {}",
-                            ip,
-                            err
-                        );
-                    }
+            if self.active_routes.contains_key(&ip) {
+                continue;
+            }
+            // Use a dummy port (443) since bypass routes are per-IP
+            let socket_addr = SocketAddr::new(ip, 443);
+            match add_bypass_route(socket_addr).await {
+                Ok(guard) => {
+                    log::info!("Added bypass route for iroh address {}", ip);
+                    self.active_routes.insert(ip, guard);
+                }
+                Err(err) => {
+                    log::warn!(
+                        "Failed to add bypass route for {} (continuing anyway): {}",
+                        ip,
+                        err
+                    );
                 }
             }
         }
@@ -988,6 +989,9 @@ async fn collect_addresses_from_conn_type(
 
 /// Resolve a relay URL to socket addresses using the endpoint's DNS resolver.
 ///
+/// Handles both IP-literal URLs (e.g., `https://192.168.1.1:443`) and hostname URLs.
+/// IP-literals are returned directly without DNS lookup.
+///
 /// Returns:
 /// - `Ok(addresses)` on successful resolution (may be empty if host has no addresses)
 /// - `Err(())` if DNS resolution failed (caller should preserve existing routes)
@@ -998,6 +1002,13 @@ async fn resolve_relay_url(endpoint: &Endpoint, relay_url: &RelayUrl) -> Result<
         return Ok(Vec::new()); // Not a DNS failure, just no host
     };
     let port = relay_url.port().unwrap_or(443);
+
+    // Handle IP-literal URLs without DNS lookup
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        let socket_addr = SocketAddr::new(ip, port);
+        log::debug!("Relay URL {} is IP-literal: {}", relay_url, socket_addr);
+        return Ok(vec![socket_addr]);
+    }
 
     // Try to resolve the hostname with a reasonable timeout
     let resolver = endpoint.dns_resolver();
