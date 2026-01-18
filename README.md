@@ -68,9 +68,9 @@ tunnel-rs provides multiple modes for establishing tunnels. **Use `iroh` mode** 
 **Identity reuse note:** Automatic peer discovery uses simple, shareable identities. For **VPN (iroh)**, the same client identity can be reused across multiple devices without conflicts because sessions are keyed by `(EndpointId, device_id)`, which is convenient for staging/homelab setups. For **port forwarding (iroh/nostr/manual)**, each session is handled independently—multiple concurrent sessions from the same identity (whether on one device or multiple devices) do not conflict. Clients use ephemeral identities by default, so identity reuse is typically not a concern.
 
 **Binary layout:**
-- `tunnel-rs`: Port forwarding with iroh mode (prebuilt in releases)
-- `tunnel-rs-ice`: Port forwarding with manual and nostr modes (prebuilt in releases)
-- `tunnel-rs-vpn`: VPN mode (iroh) (prebuilt in releases)
+- `tunnel-rs`: Port forwarding with iroh mode (install script or download from releases)
+- `tunnel-rs-ice`: Port forwarding with manual and nostr modes (download from releases)
+- `tunnel-rs-vpn`: VPN mode (iroh) (install script or download from releases)
 - `tunnel-rs-vpn-ice`: VPN mode (Nostr/ICE) (**experimental**, build from source)
 
 ### Port Forwarding Modes
