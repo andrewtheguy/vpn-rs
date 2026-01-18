@@ -42,7 +42,11 @@ const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
 const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Channel buffer size for outbound packets.
-const OUTBOUND_CHANNEL_SIZE: usize = 65536;
+///
+/// Sized to handle moderate bursts without masking backpressure. Smaller buffers
+/// ensure the sender receives timely backpressure signals when the network is
+/// congested, preventing excessive memory usage and latency buildup.
+const OUTBOUND_CHANNEL_SIZE: usize = 1024;
 
 /// QUIC connection timeout.
 const QUIC_CONNECTION_TIMEOUT: Duration = Duration::from_secs(10);
@@ -508,6 +512,10 @@ impl VpnIceClient {
 
         // Writer task - uses batch receives for better throughput
         let mut writer_handle: tokio::task::JoinHandle<Option<String>> = tokio::spawn(async move {
+            // Cap write_buf capacity to prevent unbounded memory growth from occasional large batches.
+            // 256 KB accommodates ~170 standard MTU packets; shrink if capacity exceeds this.
+            const WRITE_BUF_MAX_CAPACITY: usize = 256 * 1024;
+
             let mut data_send = data_send;
             let mut batch = Vec::with_capacity(64);
             let mut write_buf = BytesMut::with_capacity(64 * 1500);
@@ -536,7 +544,7 @@ impl VpnIceClient {
                 if last_report.elapsed() >= Duration::from_secs(5) {
                     let elapsed = last_report.elapsed().as_secs_f64();
                     let mib_per_sec = (interval_bytes as f64 / (1024.0 * 1024.0)) / elapsed;
-                    log::info!(
+                    log::debug!(
                         "QUIC writer throughput: {:.2} MiB/s ({} bytes, {} packets, {} batches in {:.2}s)",
                         mib_per_sec,
                         interval_bytes,
@@ -548,6 +556,11 @@ impl VpnIceClient {
                     interval_bytes = 0;
                     interval_packets = 0;
                     interval_batches = 0;
+
+                    // Shrink write_buf if it has grown beyond the cap (e.g., from jumbo packets)
+                    if write_buf.capacity() > WRITE_BUF_MAX_CAPACITY {
+                        write_buf = BytesMut::with_capacity(64 * 1500);
+                    }
                 }
                 batch.clear();
             }

@@ -26,6 +26,7 @@ use std::num::NonZeroU32;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio::io::AsyncWriteExt;
 use tokio::sync::mpsc;
 
 /// Maximum IP packet size (MTU + overhead).
@@ -397,6 +398,11 @@ impl VpnClient {
                         log::warn!("Failed to write to QUIC stream: {}", e);
                         return Some(format!("QUIC write error: {}", e));
                     }
+                }
+                // Flush after each batch to ensure data is sent
+                if let Err(e) = data_send.flush().await {
+                    log::warn!("Failed to flush QUIC stream: {}", e);
+                    return Some(format!("QUIC write error: {}", e));
                 }
             }
             None
