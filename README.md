@@ -65,7 +65,7 @@ Tunnel-rs enables you to forward TCP and UDP traffic—or tunnel entire networks
 
 tunnel-rs provides multiple modes for establishing tunnels. **Use `iroh` mode** for most use cases — it provides the best NAT traversal with relay fallback, automatic discovery, and client authentication.
 
-**Identity reuse note:** Automatic peer discovery uses simple, shareable identities. For **VPN (iroh)**, the same client identity can be reused across multiple devices without conflicts because sessions are keyed by `(EndpointId, device_id)`, which is convenient for staging/homelab setups. For **port forwarding (iroh/nostr/manual)**, multiple sessions on the same device with one identity are supported, but reusing a single identity concurrently across multiple devices can cause conflicts.
+**Identity reuse note:** Automatic peer discovery uses simple, shareable identities. For **VPN (iroh)**, the same client identity can be reused across multiple devices without conflicts because sessions are keyed by `(EndpointId, device_id)`, which is convenient for staging/homelab setups. For **port forwarding (iroh/nostr/manual)**, each session is handled independently—multiple concurrent sessions from the same identity (whether on one device or multiple devices) do not conflict. Clients use ephemeral identities by default, so identity reuse is typically not a concern.
 
 **Binary layout:**
 - `tunnel-rs`: Port forwarding with iroh mode
