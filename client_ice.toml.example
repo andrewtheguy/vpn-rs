@@ -22,7 +22,6 @@ mode = "manual"  # or "nostr"
 stun_servers = [
     "stun.l.google.com:19302",
     "stun1.l.google.com:19302",
-    "stun.services.mozilla.com:3478",
 ]
 
 # [nostr]
@@ -49,7 +48,6 @@ stun_servers = [
 # stun_servers = [
 #     "stun.l.google.com:19302",
 #     "stun1.l.google.com:19302",
-#     "stun.services.mozilla.com:3478",
 # ]
 #
 # Source address to request from server (required if not specified via CLI --source)

@@ -16,7 +16,6 @@ pub fn default_stun_servers() -> Vec<String> {
     vec![
         "stun.l.google.com:19302".to_string(),
         "stun1.l.google.com:19302".to_string(),
-        "stun.services.mozilla.com:3478".to_string(),
     ]
 }
 

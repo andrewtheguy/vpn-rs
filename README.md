@@ -875,7 +875,7 @@ VPN ICE server requires a config file. Use `-c <FILE>` or `--default-config` for
 | `--nsec-file` | - | Path to file containing nsec |
 | `--peer-npub` | required | Server's Nostr public key (npub format) |
 | `--relay` | - | Nostr relay URL(s), repeatable (defaults to config if set) |
-| `--stun-server` | `stun.l.google.com:19302`, `stun1.l.google.com:19302`, `stun.services.mozilla.com:3478` | STUN server(s), repeatable (defaults to config if set) |
+| `--stun-server` | `stun.l.google.com:19302`, `stun1.l.google.com:19302` | STUN server(s), repeatable (defaults to config if set) |
 | `--mtu` | 1420 | MTU for VPN packets |
 | `--route` | required (at least one route/route6) | IPv4 routes to tunnel (repeatable) |
 | `--route6` | required (at least one route/route6) | IPv6 routes to tunnel (repeatable) |

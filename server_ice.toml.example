@@ -21,7 +21,6 @@ mode = "manual"  # or "nostr"
 stun_servers = [
     "stun.l.google.com:19302",
     "stun1.l.google.com:19302",
-    "stun.services.mozilla.com:3478",
 ]
 # Allowed source networks that clients can request (CIDR notation)
 [manual.allowed_sources]
@@ -55,7 +54,6 @@ udp = ["10.0.0.0/8"]
 # stun_servers = [
 #     "stun.l.google.com:19302",
 #     "stun1.l.google.com:19302",
-#     "stun.services.mozilla.com:3478",
 # ]
 #
 # Maximum concurrent sessions (server only, default: 10)
