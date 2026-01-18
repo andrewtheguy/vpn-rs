@@ -85,8 +85,8 @@ tunnel-rs provides multiple modes for establishing tunnels. **Use `iroh` mode** 
 
 | Mode | NAT Traversal | Discovery | Platform | External Dependency |
 |------|---------------|-----------|----------|---------------------|
-| **vpn** (iroh) | Best (relay fallback) | Automatic | Linux/macOS/Windows | iroh relay infrastructure |
-| **vpn-ice** (alternate mode, experimental) | STUN only | Nostr | Linux/macOS/Windows | Nostr relays (decentralized) |
+| **tunnel-rs-vpn** (iroh) | Best (relay fallback) | Automatic | Linux/macOS/Windows | iroh relay infrastructure |
+| **tunnel-rs-vpn-ice** (alternate mode, experimental) | STUN only | Nostr | Linux/macOS/Windows | Nostr relays (decentralized) |
 
 > See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for detailed diagrams and technical deep-dives.
 
