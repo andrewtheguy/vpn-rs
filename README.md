@@ -68,10 +68,10 @@ tunnel-rs provides multiple modes for establishing tunnels. **Use `iroh` mode** 
 **Identity reuse note:** Automatic peer discovery uses simple, shareable identities. For **VPN (iroh)**, the same client identity can be reused across multiple devices without conflicts because sessions are keyed by `(EndpointId, device_id)`, which is convenient for staging/homelab setups. For **port forwarding (iroh/nostr/manual)**, each session is handled independently—multiple concurrent sessions from the same identity (whether on one device or multiple devices) do not conflict. Clients use ephemeral identities by default, so identity reuse is typically not a concern.
 
 **Binary layout:**
-- `tunnel-rs`: Port forwarding with iroh mode
-- `tunnel-rs-ice`: Port forwarding with manual and nostr modes
-- `tunnel-rs-vpn`: VPN mode (iroh)
-- `tunnel-rs-vpn-ice`: VPN mode (Nostr/ICE, **experimental**)
+- `tunnel-rs`: Port forwarding with iroh mode (prebuilt in releases)
+- `tunnel-rs-ice`: Port forwarding with manual and nostr modes (**build from source**)
+- `tunnel-rs-vpn`: VPN mode (iroh) (prebuilt in releases)
+- `tunnel-rs-vpn-ice`: VPN mode (Nostr/ICE, **experimental**, **build from source**)
 
 ### Port Forwarding Modes
 
@@ -119,7 +119,7 @@ curl -sSL https://andrewtheguy.github.io/tunnel-rs/install.sh | bash
 irm https://andrewtheguy.github.io/tunnel-rs/install.ps1 | iex
 ```
 
-This installs `tunnel-rs` (iroh mode). For nostr/manual ICE modes, download `tunnel-rs-ice` separately from [GitHub releases](https://github.com/andrewtheguy/tunnel-rs/releases) or build from source.
+This installs `tunnel-rs` (iroh mode). For nostr/manual ICE modes (`tunnel-rs-ice`), build from source (see [From Source](#from-source)).
 
 <details>
 <summary>Advanced installation options</summary>
@@ -212,11 +212,17 @@ curl -sSL https://andrewtheguy.github.io/tunnel-rs/install-vpn.sh | sudo bash -s
 # Port forwarding (iroh mode)
 cargo install --path . -p tunnel-rs
 
+# VPN mode (requires root/admin to run)
+cargo install --path . -p tunnel-rs-vpn
+```
+
+**ICE binaries (not included in releases — build manually):**
+```bash
 # Port forwarding (nostr/manual modes)
 cargo install --path . -p tunnel-rs-ice
 
-# VPN mode (requires root/admin to run)
-cargo install --path . -p tunnel-rs-vpn
+# VPN mode with Nostr/ICE (experimental)
+cargo install --path . -p tunnel-rs-vpn-ice
 ```
 
 ### Feature Flags
@@ -798,7 +804,7 @@ For completely decentralized VPN without iroh infrastructure dependencies, use `
 
 ### 1. Installation
 
-Download `tunnel-rs-vpn-ice` from releases or build from source:
+Build `tunnel-rs-vpn-ice` from source (not included in prebuilt releases):
 ```bash
 cargo install --path . -p tunnel-rs-vpn-ice
 ```
