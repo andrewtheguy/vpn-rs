@@ -690,9 +690,7 @@ impl VpnIceServer {
                 if count == 0 {
                     break;
                 }
-                let total_len: usize = batch.iter().map(|data| data.len()).sum();
                 write_buf.clear();
-                write_buf.reserve(total_len);
                 for data in &batch {
                     write_buf.extend_from_slice(data);
                 }

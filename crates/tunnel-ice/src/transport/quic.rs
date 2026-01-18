@@ -40,7 +40,8 @@ fn create_base_transport_config() -> quinn::TransportConfig {
             .expect("300s is a valid IdleTimeout duration"),
     ));
     transport.keep_alive_interval(Some(Duration::from_secs(15)));
-    // Set receive and send windows for better throughput
+    // Set receive and send windows for better throughput.
+    // Different casts match Quinn's API: receive_window takes VarInt, send_window takes u64.
     transport.receive_window(VarInt::from_u32(DEFAULT_RECEIVE_WINDOW));
     transport.send_window(u64::from(DEFAULT_SEND_WINDOW));
     transport
