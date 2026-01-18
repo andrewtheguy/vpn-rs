@@ -8,7 +8,8 @@
 use crate::buffer::{as_mut_byte_slice, uninitialized_vec};
 use crate::config::VpnClientConfig;
 use crate::device::{
-    add_routes, add_routes6_with_src, Route6Guard, RouteGuard, TunConfig, TunDevice,
+    add_bypass_route, add_routes, add_routes6_with_src, BypassRouteGuard, Route6Guard, RouteGuard,
+    TunConfig, TunDevice,
 };
 use crate::error::{VpnError, VpnResult};
 use crate::lock::VpnLock;
@@ -19,9 +20,10 @@ use crate::signaling::{
 use bytes::{Bytes, BytesMut};
 use ipnet::{Ipv4Net, Ipv6Net};
 use iroh::endpoint::{RecvStream, SendStream};
-use iroh::{Endpoint, EndpointAddr, EndpointId, RelayUrl};
+use iroh::endpoint::ConnectionType;
+use iroh::{Endpoint, EndpointAddr, EndpointId, RelayUrl, Watcher};
 use rand::Rng;
-use std::net::{Ipv4Addr, Ipv6Addr};
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::num::NonZeroU32;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -181,6 +183,19 @@ impl VpnClient {
 
         // Create TUN device
         let tun_device = self.create_tun_device(&server_info)?;
+
+        // Add bypass routes for the iroh connection BEFORE adding VPN routes.
+        // This ensures the iroh connection (via relay or direct) continues to use
+        // the original network path even if VPN routes would otherwise capture it.
+        // Without this, VPN routes could black-hole the iroh connection traffic.
+        let will_add_routes =
+            (server_info.assigned_ip.is_some() && !self.config.routes.is_empty())
+                || (server_info.assigned_ip6.is_some() && !self.config.routes6.is_empty());
+        let _bypass_guards: Vec<BypassRouteGuard> = if will_add_routes {
+            self.add_iroh_bypass_routes(endpoint, server_id).await
+        } else {
+            Vec::new()
+        };
 
         // Add custom IPv4 routes through the VPN (guard ensures cleanup on drop)
         // Only add IPv4 routes if server provided IPv4 and client has routes configured
@@ -357,6 +372,104 @@ impl VpnClient {
         };
 
         TunDevice::create(tun_config)
+    }
+
+    /// Add bypass routes for iroh connection addresses.
+    ///
+    /// Queries the connection type from the endpoint and adds bypass routes for:
+    /// - Direct connection addresses (UDP socket addresses)
+    /// - Relay server addresses (resolved from relay URLs)
+    ///
+    /// This ensures iroh traffic continues to use the original network path
+    /// even after VPN routes are installed.
+    async fn add_iroh_bypass_routes(
+        &self,
+        endpoint: &Endpoint,
+        server_id: EndpointId,
+    ) -> Vec<BypassRouteGuard> {
+        let mut guards = Vec::new();
+        let mut addresses_to_bypass: Vec<SocketAddr> = Vec::new();
+
+        // Get current connection type to find addresses in use
+        if let Some(mut conn_type_watcher) = endpoint.conn_type(server_id) {
+            let conn_type = conn_type_watcher.get();
+            match conn_type {
+                ConnectionType::Direct(addr) => {
+                    log::debug!("iroh using direct connection to {}", addr);
+                    addresses_to_bypass.push(addr);
+                }
+                ConnectionType::Relay(ref relay_url) => {
+                    log::debug!("iroh using relay connection via {}", relay_url);
+                    if let Some(addrs) = self.resolve_relay_url(endpoint, relay_url).await {
+                        addresses_to_bypass.extend(addrs);
+                    }
+                }
+                ConnectionType::Mixed(addr, ref relay_url) => {
+                    log::debug!(
+                        "iroh using mixed connection: direct {} and relay {}",
+                        addr,
+                        relay_url
+                    );
+                    addresses_to_bypass.push(addr);
+                    if let Some(addrs) = self.resolve_relay_url(endpoint, relay_url).await {
+                        addresses_to_bypass.extend(addrs);
+                    }
+                }
+                ConnectionType::None => {
+                    log::debug!("iroh connection type is None, no bypass routes needed yet");
+                }
+            }
+        }
+
+        // Add bypass routes for all collected addresses
+        for addr in addresses_to_bypass {
+            match add_bypass_route(addr).await {
+                Ok(guard) => {
+                    log::info!("Added bypass route for iroh address {}", addr);
+                    guards.push(guard);
+                }
+                Err(e) => {
+                    log::warn!(
+                        "Failed to add bypass route for iroh address {} (continuing anyway): {}",
+                        addr,
+                        e
+                    );
+                }
+            }
+        }
+
+        guards
+    }
+
+    /// Resolve a relay URL to socket addresses using the endpoint's DNS resolver.
+    async fn resolve_relay_url(
+        &self,
+        endpoint: &Endpoint,
+        relay_url: &RelayUrl,
+    ) -> Option<Vec<SocketAddr>> {
+        // Extract host from relay URL
+        let host = relay_url.host_str()?;
+        let port = relay_url.port().unwrap_or(443);
+
+        // Try to resolve the hostname with a reasonable timeout
+        let resolver = endpoint.dns_resolver();
+        let timeout = Duration::from_secs(5);
+        match resolver.lookup_ipv4_ipv6(host, timeout).await {
+            Ok(addrs) => {
+                let socket_addrs: Vec<SocketAddr> =
+                    addrs.map(|ip| SocketAddr::new(ip, port)).collect();
+                log::debug!(
+                    "Resolved relay {} to {} address(es)",
+                    relay_url,
+                    socket_addrs.len()
+                );
+                Some(socket_addrs)
+            }
+            Err(e) => {
+                log::warn!("Failed to resolve relay URL {}: {}", relay_url, e);
+                None
+            }
+        }
     }
 
     /// Run the VPN packet processing loop (tunneled over iroh QUIC).
