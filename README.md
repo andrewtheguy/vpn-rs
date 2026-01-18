@@ -54,8 +54,6 @@ Tunnel-rs enables you to forward TCP and UDP traffic—or tunnel entire networks
 
 ### Alternative Port Forwarding Modes (Niche Use Cases)
 
-For port forwarding without iroh infrastructure. Download `tunnel-rs-ice` from [GitHub releases](https://github.com/andrewtheguy/tunnel-rs/releases) or build from source.
-
 | Need | Recommended | Binary |
 |------|-------------|--------|
 | Decentralized signaling (no iroh dependency) | nostr mode | `tunnel-rs-ice` |
@@ -242,7 +240,7 @@ All modes (iroh, manual, nostr) work across all platforms, enabling cross-platfo
 
 ### Docker & Kubernetes
 
-Container images are available at `ghcr.io/andrewtheguy/tunnel-rs:latest` (iroh-only).
+Container images are available at `ghcr.io/andrewtheguy/tunnel-rs` (iroh-only).
 
 Access services running in Docker or Kubernetes remotely — without opening ports, configuring ingress, or requiring `kubectl`. See [container-deploy/](container-deploy/) for Docker Compose and Kubernetes configurations.
 
