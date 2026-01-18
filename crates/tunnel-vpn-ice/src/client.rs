@@ -506,13 +506,20 @@ impl VpnIceClient {
         let (outbound_tx, mut outbound_rx) = mpsc::channel::<Bytes>(OUTBOUND_CHANNEL_SIZE);
         let outbound_tx_heartbeat = outbound_tx.clone();
 
-        // Writer task
+        // Writer task - uses batch receives for better throughput
         let mut writer_handle: tokio::task::JoinHandle<Option<String>> = tokio::spawn(async move {
             let mut data_send = data_send;
-            while let Some(data) = outbound_rx.recv().await {
-                if let Err(e) = data_send.write_all(&data).await {
-                    log::warn!("QUIC write error: {}", e);
-                    return Some(format!("QUIC write error: {}", e));
+            let mut batch = Vec::with_capacity(64);
+            loop {
+                let count = outbound_rx.recv_many(&mut batch, 64).await;
+                if count == 0 {
+                    break;
+                }
+                for data in batch.drain(..) {
+                    if let Err(e) = data_send.write_all(&data).await {
+                        log::warn!("QUIC write error: {}", e);
+                        return Some(format!("QUIC write error: {}", e));
+                    }
                 }
             }
             None
