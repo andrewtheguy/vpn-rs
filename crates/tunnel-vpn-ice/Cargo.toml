@@ -1,0 +1,59 @@
+[package]
+name = "tunnel-vpn-ice"
+version.workspace = true
+edition = "2021"
+description = "IP-over-QUIC VPN mode with ICE/Nostr transport"
+
+[lib]
+name = "tunnel_vpn_ice"
+path = "src/lib.rs"
+
+[dependencies]
+# Shared VPN components
+tunnel-vpn = { path = "../tunnel-vpn" }
+tunnel-common = { path = "../tunnel-common" }
+tunnel-ice = { path = "../tunnel-ice" }
+
+# TUN device
+tun = { version = "0.8", features = ["async"] }
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Error handling
+anyhow = "1"
+thiserror = "1"
+
+# Logging
+log = "0.4"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Randomness
+rand = "0.8"
+
+# IP handling
+ipnet = { version = "2", features = ["serde"] }
+
+# Zero-copy buffers
+bytes = "1"
+
+# Futures
+futures = "0.3"
+
+# File locking
+fs2 = "0.4"
+
+# Packet parsing (for NAT64 compatibility)
+etherparse = "0.18"
+
+# DashMap for concurrent client state
+dashmap = "6"
+
+# ICE transport
+str0m = "0.14"
+
+# QUIC transport
+quinn = "0.11"

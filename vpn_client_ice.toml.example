@@ -1,0 +1,78 @@
+# tunnel-rs-vpn-ice client configuration
+#
+# VPN client using ICE/Nostr transport for decentralized signaling.
+# Uses Nostr relays for peer discovery and STUN for NAT traversal.
+#
+# Usage:
+#   tunnel-rs-vpn-ice client -c vpn_client_ice.toml
+#   tunnel-rs-vpn-ice client --default-config
+#
+# Generate identity:
+#   tunnel-rs-vpn-ice generate-nostr-key -o client.nsec
+
+role = "vpnclient"
+mode = "nostr"
+
+[nostr]
+# =============================================================================
+# Nostr Identity (Required)
+# =============================================================================
+
+# Your client's Nostr private key
+# Generate with: tunnel-rs-vpn-ice generate-nostr-key -o client.nsec
+# Use only ONE of nsec or nsec_file:
+
+# Option 1: Direct nsec (less secure, visible in config)
+# nsec = "nsec1..."
+
+# Option 2: Path to nsec file (recommended)
+nsec_file = "./client.nsec"
+
+# Server's Nostr public key (npub format)
+# Get this from the server operator
+peer_npub = "npub1..."
+
+# =============================================================================
+# VPN Configuration
+# =============================================================================
+
+# MTU for TUN device (default: 1420)
+mtu = 1420
+
+# IPv4 routes to send through the VPN (CIDR notation) (optional)
+# Full tunnel: routes all traffic through VPN
+# routes = ["0.0.0.0/0"]
+
+# Split tunnel examples:
+# routes = [
+#     "10.0.0.0/8",      # Route 10.x.x.x through VPN
+#     "192.168.1.0/24",  # Route specific subnet
+# ]
+
+# IPv6 routes (optional)
+# Full tunnel: send all IPv6 through VPN
+# routes6 = ["::/0"]
+
+# Split tunnel IPv6:
+# routes6 = [
+#     "fd00::/8",        # Route private IPv6 through VPN
+# ]
+
+# =============================================================================
+# Signaling and Transport (Optional)
+# =============================================================================
+
+# Nostr relay URLs for signaling
+# Default: uses tunnel-rs default relays
+# relays = [
+#     "wss://relay.damus.io",
+#     "wss://nos.lol",
+#     "wss://relay.nostr.band",
+# ]
+
+# STUN servers for ICE candidate gathering
+# Default: Google and Mozilla STUN servers
+# stun_servers = [
+#     "stun.l.google.com:19302",
+#     "stun1.l.google.com:19302",
+# ]

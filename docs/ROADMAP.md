@@ -9,6 +9,7 @@ tunnel-rs currently supports four operational modes:
 - **vpn**: Native TUN-based VPN with automatic IP assignment (Linux/macOS/Windows)
 - **nostr**: Full ICE with automated Nostr relay signaling and receiver-requested sources
 - **manual**: Full ICE with manual signaling (single-target)
+- **vpn-ice (experimental)**: VPN over ICE with Nostr relay signaling
 
 Port forwarding modes (iroh, nostr, manual) support TCP and UDP tunneling with end-to-end encryption via QUIC/TLS 1.3. VPN mode provides full network access via direct IP-over-QUIC using iroh's TLS 1.3 transport.
 

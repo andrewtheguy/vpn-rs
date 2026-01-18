@@ -1,0 +1,79 @@
+# tunnel-rs-vpn-ice server configuration
+#
+# VPN server using ICE/Nostr transport for decentralized signaling.
+# Uses Nostr relays for peer discovery and STUN for NAT traversal.
+#
+# Usage:
+#   tunnel-rs-vpn-ice server -c vpn_server_ice.toml
+#   tunnel-rs-vpn-ice server --default-config
+#
+# Generate identity:
+#   tunnel-rs-vpn-ice generate-nostr-key -o server.nsec
+
+role = "vpnserver"
+mode = "nostr"
+
+[nostr]
+# =============================================================================
+# VPN Network Configuration
+# =============================================================================
+
+# IPv4 VPN network CIDR (required for IPv4 or dual-stack)
+network = "10.0.0.0/24"
+
+# Server's IPv4 address within the VPN network
+# Default: first usable address in network (e.g., 10.0.0.1)
+# server_ip = "10.0.0.1"
+
+# IPv6 VPN network CIDR (optional, for dual-stack or IPv6-only)
+# network6 = "fd00:1::/64"
+
+# Server's IPv6 address within the VPN network
+# server_ip6 = "fd00:1::1"
+
+# MTU for TUN device (default: 1420)
+mtu = 1420
+
+# Maximum number of clients (default: 254)
+# max_clients = 253
+
+# Disable source IP spoofing checks (default: false)
+# When true, all source IP validation is disabled. Use with caution.
+# disable_spoofing_check = false
+
+# =============================================================================
+# Nostr Identity (Required)
+# =============================================================================
+
+# Your server's Nostr private key
+# Generate with: tunnel-rs-vpn-ice generate-nostr-key -o server.nsec
+# Use only ONE of nsec or nsec_file:
+
+# Option 1: Direct nsec (less secure, visible in config)
+# nsec = "nsec1..."
+
+# Option 2: Path to nsec file (recommended)
+nsec_file = "./server.nsec"
+
+# Authorized client's Nostr public key (npub format)
+# Only connections from this peer will be accepted
+peer_npub = "npub1your_client_public_key_here"
+
+# =============================================================================
+# Signaling and Transport (Optional)
+# =============================================================================
+
+# Nostr relay URLs for signaling
+# Default: uses tunnel-rs default relays
+# relays = [
+#     "wss://relay.damus.io",
+#     "wss://nos.lol",
+#     "wss://relay.nostr.band",
+# ]
+
+# STUN servers for ICE candidate gathering
+# Default: Google and Mozilla STUN servers
+# stun_servers = [
+#     "stun.l.google.com:19302",
+#     "stun1.l.google.com:19302",
+# ]

@@ -4976,7 +4976,7 @@ dependencies = [
 
 [[package]]
 name = "tunnel-common"
-version = "0.1.67"
+version = "0.1.68"
 dependencies = [
  "anyhow",
  "base64",
@@ -4993,7 +4993,7 @@ dependencies = [
 
 [[package]]
 name = "tunnel-ice"
-version = "0.1.67"
+version = "0.1.68"
 dependencies = [
  "anyhow",
  "base64",
@@ -5018,7 +5018,7 @@ dependencies = [
 
 [[package]]
 name = "tunnel-iroh"
-version = "0.1.67"
+version = "0.1.68"
 dependencies = [
  "anyhow",
  "base64",
@@ -5039,7 +5039,7 @@ dependencies = [
 
 [[package]]
 name = "tunnel-rs"
-version = "0.1.67"
+version = "0.1.68"
 dependencies = [
  "anyhow",
  "clap",
@@ -5053,7 +5053,7 @@ dependencies = [
 
 [[package]]
 name = "tunnel-rs-ice"
-version = "0.1.67"
+version = "0.1.68"
 dependencies = [
  "anyhow",
  "clap",
@@ -5067,7 +5067,7 @@ dependencies = [
 
 [[package]]
 name = "tunnel-rs-vpn"
-version = "0.1.67"
+version = "0.1.68"
 dependencies = [
  "anyhow",
  "clap",
@@ -5082,8 +5082,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "tunnel-rs-vpn-ice"
+version = "0.1.68"
+dependencies = [
+ "anyhow",
+ "clap",
+ "dirs 5.0.1",
+ "env_logger",
+ "ipnet",
+ "log",
+ "nostr-sdk",
+ "serde",
+ "tikv-jemallocator",
+ "tokio",
+ "toml 0.8.23",
+ "tunnel-common",
+ "tunnel-vpn-ice",
+]
+
+[[package]]
 name = "tunnel-vpn"
-version = "0.1.67"
+version = "0.1.68"
 dependencies = [
  "anyhow",
  "bytes",
@@ -5104,6 +5123,31 @@ dependencies = [
  "tun",
  "tunnel-common",
  "tunnel-iroh",
+]
+
+[[package]]
+name = "tunnel-vpn-ice"
+version = "0.1.68"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "dashmap",
+ "etherparse",
+ "fs2",
+ "futures",
+ "ipnet",
+ "log",
+ "quinn",
+ "rand 0.8.5",
+ "serde",
+ "serde_json",
+ "str0m",
+ "thiserror 1.0.69",
+ "tokio",
+ "tun",
+ "tunnel-common",
+ "tunnel-ice",
+ "tunnel-vpn",
 ]
 
 [[package]]

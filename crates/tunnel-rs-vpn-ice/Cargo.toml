@@ -1,0 +1,40 @@
+[package]
+name = "tunnel-rs-vpn-ice"
+version.workspace = true
+edition = "2021"
+description = "IP-over-QUIC VPN tunnel via ICE/Nostr P2P"
+
+[[bin]]
+name = "tunnel-rs-vpn-ice"
+path = "src/main.rs"
+
+[features]
+default = ["jemalloc"]
+jemalloc = ["dep:tikv-jemallocator"]
+
+[dependencies]
+tunnel-common = { path = "../tunnel-common" }
+tunnel-vpn-ice = { path = "../tunnel-vpn-ice" }
+
+# CLI + runtime
+clap = { version = "4", features = ["derive"] }
+tokio = { version = "1", features = ["full"] }
+
+# Config + serialization
+toml = "0.8"
+serde = { version = "1", features = ["derive"] }
+
+# Utilities
+anyhow = "1"
+log = "0.4"
+env_logger = "0.11"
+ipnet = "2"
+dirs = "5"
+
+# Nostr signaling
+nostr-sdk = "0.44.1"
+
+# Performance: jemalloc allocator for better multi-threaded allocation
+# Exclude musl (static linking issues) and Windows (not supported)
+[target.'cfg(all(not(target_env = "musl"), not(target_os = "windows")))'.dependencies]
+tikv-jemallocator = { version = "0.6", optional = true }
