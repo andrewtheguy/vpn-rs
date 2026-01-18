@@ -1761,6 +1761,26 @@ mod tests {
     }
 
     #[test]
+    fn test_ip_pool_reserve_ip_validation_and_idempotency() {
+        let network: Ipv4Net = "10.0.0.0/24".parse().unwrap();
+        let mut pool = IpPool::new(network, None);
+
+        assert!(pool.reserve_ip(Ipv4Addr::new(10, 0, 0, 1), "ip").is_err());
+        assert!(pool.reserve_ip(Ipv4Addr::new(10, 0, 0, 0), "ip").is_err());
+        assert!(pool.reserve_ip(Ipv4Addr::new(10, 0, 0, 255), "ip").is_err());
+        assert!(pool.reserve_ip(Ipv4Addr::new(192, 168, 1, 1), "ip").is_err());
+
+        let reserved = pool.reserve_next_available().unwrap();
+        let id1 = random_endpoint_id();
+        let assigned = pool.allocate(id1, 1).unwrap();
+        assert!(pool.reserve_ip(assigned, "ip").is_err());
+
+        let free_ip = reserved;
+        assert!(pool.reserve_ip(free_ip, "ip").is_ok());
+        assert!(pool.reserve_ip(free_ip, "ip").is_ok());
+    }
+
+    #[test]
     fn test_ip_pool_exhaustion() {
         // Use a tiny /30 network (2 usable hosts)
         let network: Ipv4Net = "10.0.0.0/30".parse().unwrap();
