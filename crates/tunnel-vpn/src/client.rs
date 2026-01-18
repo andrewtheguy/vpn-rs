@@ -24,8 +24,8 @@ use iroh::endpoint::ConnectionType;
 use iroh::{Endpoint, EndpointAddr, EndpointId, RelayUrl, Watcher};
 use futures::StreamExt;
 use rand::Rng;
-use std::collections::HashMap;
-use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::collections::{HashMap, HashSet};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::num::NonZeroU32;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -391,6 +391,10 @@ impl VpnClient {
     /// - Direct connection addresses (UDP socket addresses)
     /// - Relay server addresses (resolved from relay URLs)
     ///
+    /// This function waits for the initial bypass route setup to complete before
+    /// returning, ensuring VPN routes are not added until bypass routes are in place.
+    /// This prevents the iroh connection from being black-holed by VPN routes.
+    ///
     /// Also spawns a background task that monitors connection type changes and
     /// dynamically updates bypass routes as the connection type evolves
     /// (e.g., from relay to direct, or when ICE peer addresses change).
@@ -409,10 +413,19 @@ impl VpnClient {
         // Clone endpoint for the spawned task
         let endpoint_clone = endpoint.clone();
 
+        // Create oneshot channel to signal when initial setup is complete
+        let (setup_done_tx, setup_done_rx) = tokio::sync::oneshot::channel();
+
         // Spawn a task that manages bypass routes dynamically
         let handle = tokio::spawn(async move {
-            run_bypass_route_manager(endpoint_clone, conn_type_watcher).await;
+            run_bypass_route_manager(endpoint_clone, conn_type_watcher, Some(setup_done_tx)).await;
         });
+
+        // Wait for initial bypass route setup to complete before returning.
+        // This ensures VPN routes are not added until bypass routes are in place.
+        if setup_done_rx.await.is_err() {
+            log::warn!("Bypass route manager task ended before initial setup completed");
+        }
 
         Some(handle)
     }
@@ -803,12 +816,13 @@ impl VpnClient {
 
 /// Manages bypass routes dynamically based on connection type changes.
 ///
-/// Tracks active bypass routes in a HashMap and updates them when the
-/// connection type changes (e.g., relay -> direct, new ICE candidates).
+/// Tracks active bypass routes in a HashMap keyed by IP address (not socket address).
+/// This is because bypass routes are per-IP, not per-port - multiple socket addresses
+/// on the same IP should share a single bypass route.
 struct BypassRouteManager {
-    /// Currently active bypass route guards, keyed by socket address.
+    /// Currently active bypass route guards, keyed by IP address.
     /// Dropping a guard removes the corresponding route.
-    active_routes: HashMap<SocketAddr, BypassRouteGuard>,
+    active_routes: HashMap<IpAddr, BypassRouteGuard>,
 }
 
 impl BypassRouteManager {
@@ -818,40 +832,39 @@ impl BypassRouteManager {
         }
     }
 
-    /// Update bypass routes based on a new set of required addresses.
+    /// Update bypass routes based on a new set of required IP addresses.
     ///
     /// - Removes routes for addresses no longer needed (by dropping guards)
     /// - Adds routes for new addresses
-    async fn update(&mut self, required_addresses: Vec<SocketAddr>) {
-        let required_set: std::collections::HashSet<_> = required_addresses.iter().collect();
-
+    async fn update(&mut self, required_ips: HashSet<IpAddr>) {
         // Remove routes for addresses no longer in the required set
         let to_remove: Vec<_> = self
             .active_routes
             .keys()
-            .filter(|addr| !required_set.contains(addr))
+            .filter(|ip| !required_ips.contains(ip))
             .cloned()
             .collect();
 
-        for addr in to_remove {
-            log::info!("Removing stale bypass route for {}", addr);
-            self.active_routes.remove(&addr);
+        for ip in to_remove {
+            log::info!("Removing stale bypass route for {}", ip);
+            self.active_routes.remove(&ip);
             // Guard is dropped here, which removes the route
         }
 
-        // Add routes for new addresses
-        for addr in required_addresses {
-            if let std::collections::hash_map::Entry::Vacant(entry) = self.active_routes.entry(addr)
-            {
-                match add_bypass_route(addr).await {
+        // Add routes for new IP addresses
+        for ip in required_ips {
+            if let std::collections::hash_map::Entry::Vacant(entry) = self.active_routes.entry(ip) {
+                // Use a dummy port (443) since bypass routes are per-IP
+                let socket_addr = SocketAddr::new(ip, 443);
+                match add_bypass_route(socket_addr).await {
                     Ok(guard) => {
-                        log::info!("Added bypass route for iroh address {}", addr);
+                        log::info!("Added bypass route for iroh address {}", ip);
                         entry.insert(guard);
                     }
                     Err(err) => {
                         log::warn!(
                             "Failed to add bypass route for {} (continuing anyway): {}",
-                            addr,
+                            ip,
                             err
                         );
                     }
@@ -865,24 +878,43 @@ impl BypassRouteManager {
 ///
 /// Monitors connection type changes via the watcher stream and dynamically
 /// updates bypass routes as the connection evolves.
+///
+/// Returns after initial setup is complete, continuing to monitor in background.
+/// The returned oneshot receiver signals when initial setup is done.
 async fn run_bypass_route_manager(
     endpoint: Endpoint,
     mut conn_type_watcher: impl Watcher<Value = ConnectionType> + Send + Unpin,
+    initial_setup_done: Option<tokio::sync::oneshot::Sender<()>>,
 ) {
     let mut manager = BypassRouteManager::new();
 
-    // Process initial connection type
+    // Process initial connection type (always apply, even if DNS partially fails)
     let initial_conn_type = conn_type_watcher.get();
-    let initial_addrs = collect_addresses_from_conn_type(&endpoint, &initial_conn_type).await;
-    manager.update(initial_addrs).await;
+    let initial_result = collect_addresses_from_conn_type(&endpoint, &initial_conn_type).await;
+    manager.update(initial_result.ips).await;
+
+    // Signal that initial setup is complete
+    if let Some(tx) = initial_setup_done {
+        let _ = tx.send(());
+    }
 
     // Watch for changes using stream_updates_only (skips initial value we already processed)
     let mut stream = conn_type_watcher.stream_updates_only();
 
     while let Some(conn_type) = stream.next().await {
         log::debug!("Connection type changed: {:?}", conn_type);
-        let addrs = collect_addresses_from_conn_type(&endpoint, &conn_type).await;
-        manager.update(addrs).await;
+        let result = collect_addresses_from_conn_type(&endpoint, &conn_type).await;
+
+        // Skip update if DNS resolution failed - keep existing routes to avoid
+        // disconnecting the relay during transient DNS outages
+        if result.dns_failed {
+            log::warn!(
+                "Skipping bypass route update due to DNS resolution failure - keeping existing routes"
+            );
+            continue;
+        }
+
+        manager.update(result.ips).await;
     }
 
     log::debug!("Bypass route manager task ending (watcher disconnected)");
@@ -890,22 +922,42 @@ async fn run_bypass_route_manager(
     // and removes all bypass routes
 }
 
-/// Extract socket addresses from a ConnectionType that need bypass routes.
+/// Result of collecting addresses from a connection type.
+struct CollectAddressesResult {
+    /// Set of unique IP addresses that need bypass routes.
+    ips: HashSet<IpAddr>,
+    /// Whether DNS resolution failed for any relay URL.
+    /// When true, the caller should preserve existing routes rather than updating.
+    dns_failed: bool,
+}
+
+/// Extract IP addresses from a ConnectionType that need bypass routes.
+///
+/// Returns a set of unique IP addresses (deduplicated from socket addresses)
+/// and a flag indicating whether DNS resolution failed.
 async fn collect_addresses_from_conn_type(
     endpoint: &Endpoint,
     conn_type: &ConnectionType,
-) -> Vec<SocketAddr> {
-    let mut addresses = Vec::new();
+) -> CollectAddressesResult {
+    let mut ips = HashSet::new();
+    let mut dns_failed = false;
 
     match conn_type {
         ConnectionType::Direct(addr) => {
             log::debug!("iroh using direct connection to {}", addr);
-            addresses.push(*addr);
+            ips.insert(addr.ip());
         }
         ConnectionType::Relay(relay_url) => {
             log::debug!("iroh using relay connection via {}", relay_url);
-            if let Some(addrs) = resolve_relay_url(endpoint, relay_url).await {
-                addresses.extend(addrs);
+            match resolve_relay_url(endpoint, relay_url).await {
+                Ok(addrs) => {
+                    for addr in addrs {
+                        ips.insert(addr.ip());
+                    }
+                }
+                Err(()) => {
+                    dns_failed = true;
+                }
             }
         }
         ConnectionType::Mixed(addr, relay_url) => {
@@ -914,9 +966,16 @@ async fn collect_addresses_from_conn_type(
                 addr,
                 relay_url
             );
-            addresses.push(*addr);
-            if let Some(addrs) = resolve_relay_url(endpoint, relay_url).await {
-                addresses.extend(addrs);
+            ips.insert(addr.ip());
+            match resolve_relay_url(endpoint, relay_url).await {
+                Ok(addrs) => {
+                    for addr in addrs {
+                        ips.insert(addr.ip());
+                    }
+                }
+                Err(()) => {
+                    dns_failed = true;
+                }
             }
         }
         ConnectionType::None => {
@@ -924,13 +983,20 @@ async fn collect_addresses_from_conn_type(
         }
     }
 
-    addresses
+    CollectAddressesResult { ips, dns_failed }
 }
 
 /// Resolve a relay URL to socket addresses using the endpoint's DNS resolver.
-async fn resolve_relay_url(endpoint: &Endpoint, relay_url: &RelayUrl) -> Option<Vec<SocketAddr>> {
+///
+/// Returns:
+/// - `Ok(addresses)` on successful resolution (may be empty if host has no addresses)
+/// - `Err(())` if DNS resolution failed (caller should preserve existing routes)
+async fn resolve_relay_url(endpoint: &Endpoint, relay_url: &RelayUrl) -> Result<Vec<SocketAddr>, ()> {
     // Extract host from relay URL
-    let host = relay_url.host_str()?;
+    let Some(host) = relay_url.host_str() else {
+        log::warn!("Relay URL {} has no host", relay_url);
+        return Ok(Vec::new()); // Not a DNS failure, just no host
+    };
     let port = relay_url.port().unwrap_or(443);
 
     // Try to resolve the hostname with a reasonable timeout
@@ -944,11 +1010,11 @@ async fn resolve_relay_url(endpoint: &Endpoint, relay_url: &RelayUrl) -> Option<
                 relay_url,
                 socket_addrs.len()
             );
-            Some(socket_addrs)
+            Ok(socket_addrs)
         }
         Err(e) => {
             log::warn!("Failed to resolve relay URL {}: {}", relay_url, e);
-            None
+            Err(()) // Signal DNS failure
         }
     }
 }
