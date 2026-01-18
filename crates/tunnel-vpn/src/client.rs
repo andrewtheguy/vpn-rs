@@ -52,6 +52,9 @@ const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(30);
 /// Latency impact: At 100 Mbps, a full 1024-packet buffer adds ~120ms latency.
 const OUTBOUND_CHANNEL_SIZE: usize = 1024;
 
+/// Timeout for resolving relay URLs via DNS.
+const RESOLVE_RELAY_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// VPN client instance.
 pub struct VpnClient {
     /// Client configuration.
@@ -932,8 +935,7 @@ async fn resolve_relay_url(endpoint: &Endpoint, relay_url: &RelayUrl) -> Option<
 
     // Try to resolve the hostname with a reasonable timeout
     let resolver = endpoint.dns_resolver();
-    let timeout = Duration::from_secs(5);
-    match resolver.lookup_ipv4_ipv6(host, timeout).await {
+    match resolver.lookup_ipv4_ipv6(host, RESOLVE_RELAY_TIMEOUT).await {
         Ok(addrs) => {
             let socket_addrs: Vec<SocketAddr> =
                 addrs.map(|ip| SocketAddr::new(ip, port)).collect();
