@@ -220,8 +220,10 @@ auth_tokens = ["iXXXXXXXXXXXXXXXXX"]  # Replace with real token from generate-to
 #             source_ip = "10.0.0.100"  # Different from server_ip
 #
 # 2. IPv6-only VPN (network6 only):
-#    Use the host's WAN IPv4 address or a routable IPv4 that reaches TUN.
-#    Example: source_ip = "203.0.113.5"  # Host's WAN IPv4
+#    Use an IPv4 address that is routed back through the TUN interface.
+#    This often requires an explicit route/policy rule (e.g., /32) so replies
+#    to source_ip are delivered via TUN for 4→6 translation.
+#    Example: source_ip = "203.0.113.5"  # Host's WAN IPv4 (only if routed via TUN)
 #
 # Dynamic default (recommended for dual-stack private networks):
 # If 'network' is set and source_ip is omitted, the server automatically reserves
