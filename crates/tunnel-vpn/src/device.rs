@@ -1135,6 +1135,9 @@ struct BypassRouteInfo {
     device: String,
     /// The gateway (optional, for some routes it's direct).
     gateway: Option<IpAddr>,
+    /// Raw gateway string with scope ID preserved (e.g., "fe80::1%en0").
+    /// Used on macOS where link-local addresses need the scope.
+    gateway_str: Option<String>,
 }
 
 /// Query the current route for a given IP address.
@@ -1178,6 +1181,7 @@ fn parse_linux_route_get(output: &str, peer_ip: IpAddr) -> VpnResult<BypassRoute
 
     let mut device: Option<String> = None;
     let mut gateway: Option<IpAddr> = None;
+    let mut gateway_str: Option<String> = None;
 
     let tokens: Vec<&str> = output.split_whitespace().collect();
     for i in 0..tokens.len() {
@@ -1185,6 +1189,7 @@ fn parse_linux_route_get(output: &str, peer_ip: IpAddr) -> VpnResult<BypassRoute
             device = Some(tokens[i + 1].to_string());
         }
         if tokens[i] == "via" && i + 1 < tokens.len() {
+            gateway_str = Some(tokens[i + 1].to_string());
             gateway = tokens[i + 1].parse().ok();
         }
     }
@@ -1200,6 +1205,7 @@ fn parse_linux_route_get(output: &str, peer_ip: IpAddr) -> VpnResult<BypassRoute
         peer_ip,
         device,
         gateway,
+        gateway_str,
     })
 }
 
@@ -1244,6 +1250,7 @@ fn parse_macos_route_get(output: &str, peer_ip: IpAddr) -> VpnResult<BypassRoute
 
     let mut device: Option<String> = None;
     let mut gateway: Option<IpAddr> = None;
+    let mut gateway_str: Option<String> = None;
 
     for line in output.lines() {
         let line = line.trim();
@@ -1252,7 +1259,9 @@ fn parse_macos_route_get(output: &str, peer_ip: IpAddr) -> VpnResult<BypassRoute
         }
         if let Some(rest) = line.strip_prefix("gateway:") {
             let gw_str = rest.trim();
-            // macOS may include interface suffix like fe80::1%en0
+            // Preserve raw gateway string (may include scope like fe80::1%en0)
+            gateway_str = Some(gw_str.to_string());
+            // Parse IpAddr by stripping scope (for non-route uses)
             let gw_clean = gw_str.split('%').next().unwrap_or(gw_str);
             gateway = gw_clean.parse().ok();
         }
@@ -1269,6 +1278,7 @@ fn parse_macos_route_get(output: &str, peer_ip: IpAddr) -> VpnResult<BypassRoute
         peer_ip,
         device,
         gateway,
+        gateway_str,
     })
 }
 
@@ -1317,6 +1327,7 @@ pub async fn add_bypass_route(peer_addr: SocketAddr) -> VpnResult<BypassRouteGua
         peer_ip,
         device: route_info.device,
         gateway: route_info.gateway,
+        gateway_str: route_info.gateway_str,
     })
 }
 
@@ -1384,8 +1395,9 @@ async fn add_bypass_route_impl(info: &BypassRouteInfo) -> VpnResult<()> {
     args.push("-host".to_string());
     args.push(info.peer_ip.to_string());
 
-    if let Some(gw) = info.gateway {
-        args.push(gw.to_string());
+    // Use raw gateway_str to preserve scope ID for link-local addresses (e.g., fe80::1%en0)
+    if let Some(ref gw_str) = info.gateway_str {
+        args.push(gw_str.clone());
     } else {
         args.extend(["-interface".to_string(), info.device.clone()]);
     }
@@ -1439,18 +1451,30 @@ pub struct BypassRouteGuard {
     peer_ip: IpAddr,
     device: String,
     gateway: Option<IpAddr>,
+    /// Raw gateway string with scope ID preserved (e.g., "fe80::1%en0").
+    gateway_str: Option<String>,
 }
 
 impl Drop for BypassRouteGuard {
     fn drop(&mut self) {
         log::info!("Removing bypass route for {}", self.peer_ip);
-        remove_bypass_route_sync(self.peer_ip, &self.device, self.gateway);
+        remove_bypass_route_sync(
+            self.peer_ip,
+            &self.device,
+            self.gateway,
+            self.gateway_str.as_deref(),
+        );
     }
 }
 
 /// Remove a bypass route (Linux, blocking).
 #[cfg(target_os = "linux")]
-fn remove_bypass_route_sync(peer_ip: IpAddr, device: &str, gateway: Option<IpAddr>) {
+fn remove_bypass_route_sync(
+    peer_ip: IpAddr,
+    device: &str,
+    gateway: Option<IpAddr>,
+    _gateway_str: Option<&str>,
+) {
     let host_route = if peer_ip.is_ipv4() {
         format!("{}/32", peer_ip)
     } else {
@@ -1489,7 +1513,12 @@ fn remove_bypass_route_sync(peer_ip: IpAddr, device: &str, gateway: Option<IpAdd
 
 /// Remove a bypass route (macOS, blocking).
 #[cfg(target_os = "macos")]
-fn remove_bypass_route_sync(peer_ip: IpAddr, _device: &str, gateway: Option<IpAddr>) {
+fn remove_bypass_route_sync(
+    peer_ip: IpAddr,
+    _device: &str,
+    _gateway: Option<IpAddr>,
+    gateway_str: Option<&str>,
+) {
     let mut args: Vec<String> = vec!["delete".to_string()];
 
     if peer_ip.is_ipv6() {
@@ -1499,8 +1528,9 @@ fn remove_bypass_route_sync(peer_ip: IpAddr, _device: &str, gateway: Option<IpAd
     args.push("-host".to_string());
     args.push(peer_ip.to_string());
 
-    if let Some(gw) = gateway {
-        args.push(gw.to_string());
+    // Use raw gateway_str to preserve scope ID for link-local addresses (e.g., fe80::1%en0)
+    if let Some(gw_str) = gateway_str {
+        args.push(gw_str.to_string());
     }
 
     let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
@@ -1520,12 +1550,22 @@ fn remove_bypass_route_sync(peer_ip: IpAddr, _device: &str, gateway: Option<IpAd
 
 /// Remove a bypass route (Windows stub, blocking).
 #[cfg(target_os = "windows")]
-fn remove_bypass_route_sync(_peer_ip: IpAddr, _device: &str, _gateway: Option<IpAddr>) {
+fn remove_bypass_route_sync(
+    _peer_ip: IpAddr,
+    _device: &str,
+    _gateway: Option<IpAddr>,
+    _gateway_str: Option<&str>,
+) {
     // Not implemented
 }
 
 /// Remove a bypass route (unsupported platforms, blocking).
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
-fn remove_bypass_route_sync(_peer_ip: IpAddr, _device: &str, _gateway: Option<IpAddr>) {
+fn remove_bypass_route_sync(
+    _peer_ip: IpAddr,
+    _device: &str,
+    _gateway: Option<IpAddr>,
+    _gateway_str: Option<&str>,
+) {
     // Not implemented
 }
