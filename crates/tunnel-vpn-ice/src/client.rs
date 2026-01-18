@@ -24,7 +24,8 @@ use tunnel_ice::transport::quic;
 use tunnel_ice::tunnel_common::{current_timestamp, generate_session_id, MAX_REQUEST_AGE_SECS};
 use tunnel_vpn::buffer::{as_mut_byte_slice, uninitialized_vec};
 use tunnel_vpn::device::{
-    add_routes, add_routes6_with_src, Route6Guard, RouteGuard, TunConfig, TunDevice,
+    add_bypass_route, add_routes, add_routes6_with_src, BypassRouteGuard, Route6Guard, RouteGuard,
+    TunConfig, TunDevice,
 };
 use tunnel_vpn::lock::VpnLock;
 use tunnel_vpn::signaling::{
@@ -193,10 +194,10 @@ impl VpnIceClient {
             .await
             .map_err(|e| VpnIceError::Ice(e.to_string()))?;
 
-        log::info!(
-            "ICE connected: -> {}",
-            ice_conn.remote_addr
-        );
+        // Save remote address before ice_conn is partially moved
+        let ice_remote_addr = ice_conn.remote_addr;
+
+        log::info!("ICE connected: -> {}", ice_remote_addr);
 
         // Spawn ICE keeper
         let mut ice_disconnect_rx = ice_conn.disconnect_rx.clone();
@@ -212,7 +213,7 @@ impl VpnIceClient {
         );
 
         let connecting = endpoint
-            .connect(ice_conn.remote_addr, "vpn-ice")
+            .connect(ice_remote_addr, "vpn-ice")
             .map_err(|e| VpnIceError::Quic(format!("Failed to start QUIC connection: {}", e)))?;
 
         let conn = tokio::time::timeout(QUIC_CONNECTION_TIMEOUT, connecting)
@@ -247,6 +248,22 @@ impl VpnIceClient {
 
         // Create TUN device
         let tun_device = self.create_tun_device(&server_info)?;
+
+        // Add bypass route for ICE peer BEFORE adding VPN routes.
+        // This ensures ICE keepalive traffic continues to use the original
+        // network path even if the peer's IP falls within a VPN route prefix.
+        let _bypass_guard: Option<BypassRouteGuard> =
+            if !self.config.routes.is_empty() || !self.config.routes6.is_empty() {
+                match add_bypass_route(ice_remote_addr).await {
+                    Ok(guard) => Some(guard),
+                    Err(e) => {
+                        log::warn!("Failed to add bypass route for ICE peer (continuing anyway): {}", e);
+                        None
+                    }
+                }
+            } else {
+                None
+            };
 
         // Add routes
         let _route_guard: Option<RouteGuard> =
