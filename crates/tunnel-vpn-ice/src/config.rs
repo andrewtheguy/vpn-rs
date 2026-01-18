@@ -379,7 +379,7 @@ fn default_mtu() -> u16 {
 }
 
 fn default_max_clients() -> usize {
-    254
+    253
 }
 
 #[cfg(test)]
@@ -412,7 +412,7 @@ mod tests {
             server_ip: None,
             server_ip6: None,
             mtu: DEFAULT_MTU,
-            max_clients: 254,
+            max_clients: 253,
             nsec: Some("nsec1test".to_string()),
             nsec_file: None,
             peer_npub: "npub1test".to_string(),
@@ -432,7 +432,7 @@ mod tests {
             server_ip: Some("10.0.0.1".parse().unwrap()),
             server_ip6: None,
             mtu: DEFAULT_MTU,
-            max_clients: 254,
+            max_clients: 253,
             nsec: Some("nsec1test".to_string()),
             nsec_file: None,
             peer_npub: "npub1test".to_string(),
@@ -452,7 +452,7 @@ mod tests {
             server_ip: None,
             server_ip6: Some("fd00::1".parse().unwrap()),
             mtu: DEFAULT_MTU,
-            max_clients: 254,
+            max_clients: 253,
             nsec: Some("nsec1test".to_string()),
             nsec_file: None,
             peer_npub: "npub1test".to_string(),
@@ -561,7 +561,7 @@ mod tests {
             server_ip: None,
             server_ip6: None,
             mtu: DEFAULT_MTU,
-            max_clients: 254,
+            max_clients: 253,
             nsec: Some("nsec1test".to_string()),
             nsec_file: Some(PathBuf::from("nsec.txt")),
             peer_npub: "npub1test".to_string(),

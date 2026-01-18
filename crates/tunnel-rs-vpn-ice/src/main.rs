@@ -426,7 +426,7 @@ async fn run_vpn_server(config_path: &std::path::Path) -> Result<()> {
         server_ip,
         server_ip6,
         mtu: nostr.mtu.unwrap_or(DEFAULT_MTU),
-        max_clients: nostr.max_clients.unwrap_or(254),
+        max_clients: nostr.max_clients.unwrap_or(253),
         nsec: nostr.nsec,
         nsec_file: nostr.nsec_file,
         peer_npub,

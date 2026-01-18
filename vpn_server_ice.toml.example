@@ -35,7 +35,7 @@ network = "10.0.0.0/24"
 mtu = 1420
 
 # Maximum number of clients (default: 254)
-# max_clients = 254
+# max_clients = 253
 
 # Disable source IP spoofing checks (default: false)
 # When true, all source IP validation is disabled. Use with caution.
