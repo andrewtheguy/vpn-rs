@@ -229,8 +229,9 @@ auth_tokens = ["iXXXXXXXXXXXXXXXXX"]  # Replace with real token from generate-to
 # If 'network' is set and source_ip is omitted, the server automatically reserves
 # an unused IPv4 from the VPN network (not server_ip) for NAT64.
 #
-# If your IPv4 network is too small to spare an extra address, set source_ip
-# explicitly or use a larger IPv4 network.
+# Failure mode: if the IPv4 pool is too small to spare an extra address (i.e.,
+# no free IP besides server_ip), the server fails to start with a config error
+# and NAT64 is not enabled. Set source_ip explicitly or use a larger IPv4 network.
 #
 # source_ip = "10.0.0.100"
 
