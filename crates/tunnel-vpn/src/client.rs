@@ -39,14 +39,11 @@ const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Channel buffer size for outbound packets.
 ///
-/// Sized to handle bursts without blocking the TUN reader. Larger buffers
-/// improve throughput for bursty traffic but increase memory usage and
-/// latency under congestion. The value 1024 matches the server's default
-/// client channel size for symmetric buffering.
+/// Sized to handle moderate bursts without masking backpressure. Smaller buffers
+/// ensure the sender receives timely backpressure signals when the network is
+/// congested, preventing excessive memory usage and latency buildup.
 ///
 /// Memory impact (typical): ~1024 * ~1500 bytes (standard MTU) = ~1.5 MB.
-/// Memory impact (max): ~1024 * ~65KB (MAX_IP_PACKET_SIZE) = ~64 MB if jumbo packets allowed.
-/// Actual memory depends on the TUN device's configured MTU (usually 1440-1500 bytes).
 /// Latency impact: At 100 Mbps, a full 1024-packet buffer adds ~120ms latency.
 const OUTBOUND_CHANNEL_SIZE: usize = 1024;
 
@@ -381,16 +378,24 @@ impl VpnClient {
         let outbound_tx_heartbeat = outbound_tx.clone();
 
         // Spawn dedicated writer task that owns the SendStream.
+        // Uses batch receives for better throughput - receives up to 64 packets at once.
         // Returns error context if write fails for inclusion in shutdown reason.
         let mut writer_handle: tokio::task::JoinHandle<Option<String>> = tokio::spawn(async move {
             let mut data_send = data_send;
-            while let Some(data) = outbound_rx.recv().await {
-                if let Err(e) = data_send.write_all(&data).await {
-                    log::warn!("Failed to write to QUIC stream: {}", e);
-                    return Some(format!("QUIC write error: {}", e));
+            let mut batch = Vec::with_capacity(64);
+            loop {
+                let count = outbound_rx.recv_many(&mut batch, 64).await;
+                if count == 0 {
+                    log::trace!("Writer task exiting");
+                    break;
+                }
+                for data in batch.drain(..) {
+                    if let Err(e) = data_send.write_all(&data).await {
+                        log::warn!("Failed to write to QUIC stream: {}", e);
+                        return Some(format!("QUIC write error: {}", e));
+                    }
                 }
             }
-            log::trace!("Writer task exiting");
             None
         });
 

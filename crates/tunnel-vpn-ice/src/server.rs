@@ -40,6 +40,13 @@ const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
 const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(45);
 
 /// Channel buffer size for outbound packets.
+///
+/// Sized to handle moderate bursts without masking backpressure. Smaller buffers
+/// ensure the sender receives timely backpressure signals when the network is
+/// congested, preventing excessive memory usage and latency buildup.
+///
+/// Memory impact (typical): ~1024 * ~1500 bytes (standard MTU) = ~1.5 MB per client.
+/// Latency impact: At 100 Mbps, a full 1024-packet buffer adds ~120ms latency.
 const OUTBOUND_CHANNEL_SIZE: usize = 1024;
 
 /// QUIC connection timeout.
@@ -673,14 +680,25 @@ impl VpnIceServer {
 
         let (outbound_tx, mut outbound_rx) = mpsc::channel::<Bytes>(OUTBOUND_CHANNEL_SIZE);
 
-        // Writer task
+        // Writer task - uses batch receives for better throughput
         let mut writer_handle: tokio::task::JoinHandle<Option<String>> = tokio::spawn(async move {
             let mut data_send = data_send;
-            while let Some(data) = outbound_rx.recv().await {
-                if let Err(e) = data_send.write_all(&data).await {
+            let mut batch = Vec::with_capacity(64);
+            let mut write_buf = BytesMut::with_capacity(64 * 1500);
+            loop {
+                let count = outbound_rx.recv_many(&mut batch, 64).await;
+                if count == 0 {
+                    break;
+                }
+                write_buf.clear();
+                for data in &batch {
+                    write_buf.extend_from_slice(data);
+                }
+                if let Err(e) = data_send.write_all(&write_buf).await {
                     log::warn!("QUIC write error: {}", e);
                     return Some(format!("QUIC write error: {}", e));
                 }
+                batch.clear();
             }
             None
         });

@@ -42,6 +42,10 @@ const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
 const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Channel buffer size for outbound packets.
+///
+/// Sized to handle moderate bursts without masking backpressure. Smaller buffers
+/// ensure the sender receives timely backpressure signals when the network is
+/// congested, preventing excessive memory usage and latency buildup.
 const OUTBOUND_CHANNEL_SIZE: usize = 1024;
 
 /// QUIC connection timeout.
@@ -506,14 +510,59 @@ impl VpnIceClient {
         let (outbound_tx, mut outbound_rx) = mpsc::channel::<Bytes>(OUTBOUND_CHANNEL_SIZE);
         let outbound_tx_heartbeat = outbound_tx.clone();
 
-        // Writer task
+        // Writer task - uses batch receives for better throughput
         let mut writer_handle: tokio::task::JoinHandle<Option<String>> = tokio::spawn(async move {
+            // Cap write_buf capacity to prevent unbounded memory growth from occasional large batches.
+            // 256 KB accommodates ~170 standard MTU packets; shrink if capacity exceeds this.
+            const WRITE_BUF_MAX_CAPACITY: usize = 256 * 1024;
+
             let mut data_send = data_send;
-            while let Some(data) = outbound_rx.recv().await {
-                if let Err(e) = data_send.write_all(&data).await {
+            let mut batch = Vec::with_capacity(64);
+            let mut write_buf = BytesMut::with_capacity(64 * 1500);
+            let mut last_report = Instant::now();
+            let mut interval_bytes: usize = 0;
+            let mut interval_packets: usize = 0;
+            let mut interval_batches: usize = 0;
+            loop {
+                let count = outbound_rx.recv_many(&mut batch, 64).await;
+                if count == 0 {
+                    break;
+                }
+                let total_len: usize = batch.iter().map(|data| data.len()).sum();
+                write_buf.clear();
+                write_buf.reserve(total_len);
+                for data in &batch {
+                    write_buf.extend_from_slice(data);
+                }
+                if let Err(e) = data_send.write_all(&write_buf).await {
                     log::warn!("QUIC write error: {}", e);
                     return Some(format!("QUIC write error: {}", e));
                 }
+                interval_bytes += total_len;
+                interval_packets += count;
+                interval_batches += 1;
+                if last_report.elapsed() >= Duration::from_secs(5) {
+                    let elapsed = last_report.elapsed().as_secs_f64();
+                    let mib_per_sec = (interval_bytes as f64 / (1024.0 * 1024.0)) / elapsed;
+                    log::debug!(
+                        "QUIC writer throughput: {:.2} MiB/s ({} bytes, {} packets, {} batches in {:.2}s)",
+                        mib_per_sec,
+                        interval_bytes,
+                        interval_packets,
+                        interval_batches,
+                        elapsed
+                    );
+                    last_report = Instant::now();
+                    interval_bytes = 0;
+                    interval_packets = 0;
+                    interval_batches = 0;
+
+                    // Shrink write_buf if it has grown beyond the cap (e.g., from jumbo packets)
+                    if write_buf.capacity() > WRITE_BUF_MAX_CAPACITY {
+                        write_buf = BytesMut::with_capacity(64 * 1500);
+                    }
+                }
+                batch.clear();
             }
             None
         });

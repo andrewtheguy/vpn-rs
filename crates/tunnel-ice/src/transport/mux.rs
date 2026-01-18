@@ -43,13 +43,12 @@ pub struct ReceivedPacket {
 /// - Too small: drops during ICE negotiation bursts, causing connectivity failures
 /// - Too large: wastes memory and masks underlying processing bottlenecks
 ///
-/// 128 packets provides headroom for typical ICE candidate gathering bursts
-/// (multiple STUN servers × multiple local interfaces × retransmissions).
-/// If warn logs show significant STUN drops in production, consider:
-/// 1. Increasing this value (up to 256-512 for complex network topologies)
-/// 2. Investigating why the ICE agent is processing packets slowly
-/// 3. Reducing the number of configured STUN servers
-const STUN_CHANNEL_CAPACITY: usize = 128;
+/// 512 packets provides ample headroom for ICE candidate gathering bursts
+/// (multiple STUN servers × multiple local interfaces × retransmissions)
+/// and complex network topologies. If warn logs show significant STUN drops
+/// in production, investigate why the ICE agent is processing packets slowly
+/// or consider reducing the number of configured STUN servers.
+const STUN_CHANNEL_CAPACITY: usize = 512;
 
 /// Global counter for dropped STUN packets due to channel backpressure.
 /// Non-zero values indicate potential ICE negotiation issues.
@@ -257,6 +256,8 @@ impl IceKeeper {
     ///
     /// This should be spawned as a background task.
     pub async fn run(mut self) {
+        // 50ms interval for ICE timeout handling - needed for STUN retransmissions,
+        // consent freshness checks, and other time-sensitive ICE operations.
         let mut interval = tokio::time::interval(Duration::from_millis(50));
 
         loop {
