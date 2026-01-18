@@ -4,7 +4,6 @@ use anyhow::{Context, Result};
 use quinn::crypto::rustls::QuicClientConfig;
 use quinn::{
     AsyncUdpSocket, ClientConfig, Endpoint, EndpointConfig, IdleTimeout, Runtime, ServerConfig,
-    VarInt,
 };
 use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer, ServerName, UnixTime};
 use sha2::{Digest, Sha256};
@@ -19,20 +18,11 @@ pub fn ensure_crypto_provider() {
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 }
 
-/// Default QUIC receive window size (64 MB) - tuned for high BDP links.
-const DEFAULT_RECEIVE_WINDOW: u32 = 64 * 1024 * 1024;
-
-/// Default QUIC send window size (64 MB) - tuned for high BDP links.
-const DEFAULT_SEND_WINDOW: u32 = 64 * 1024 * 1024;
-
 /// Create base transport config with common settings for both server and client.
 ///
 /// Configures 5 minute idle timeout with 15s keepalive. Active connections send
 /// pings every 15s, so idle timeout only triggers for truly dead/unresponsive
 /// connections.
-///
-/// Also configures receive and send windows to 64MB each to better cover
-/// high-bandwidth, higher-latency paths without artificial flow control limits.
 fn create_base_transport_config() -> quinn::TransportConfig {
     let mut transport = quinn::TransportConfig::default();
     transport.max_idle_timeout(Some(
@@ -40,10 +30,6 @@ fn create_base_transport_config() -> quinn::TransportConfig {
             .expect("300s is a valid IdleTimeout duration"),
     ));
     transport.keep_alive_interval(Some(Duration::from_secs(15)));
-    // Set receive and send windows for better throughput.
-    // Different casts match Quinn's API: receive_window takes VarInt, send_window takes u64.
-    transport.receive_window(VarInt::from_u32(DEFAULT_RECEIVE_WINDOW));
-    transport.send_window(u64::from(DEFAULT_SEND_WINDOW));
     transport
 }
 
