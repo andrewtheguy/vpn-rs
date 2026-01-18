@@ -272,13 +272,6 @@ impl VpnIceClientConfig {
             return Err("'peer_npub' is required".to_string());
         }
 
-        // At least one route required
-        if self.routes.is_empty() && self.routes6.is_empty() {
-            return Err(
-                "At least one route is required: 'routes' (IPv4) or 'routes6' (IPv6)".to_string(),
-            );
-        }
-
         Ok(())
     }
 
@@ -522,21 +515,21 @@ mod tests {
     }
 
     #[test]
-    fn test_client_config_validation_no_routes() {
-        let config = VpnIceClientConfig {
-            nsec: Some("nsec1test".to_string()),
-            peer_npub: "npub1test".to_string(),
-            ..Default::default()
-        };
-        assert!(config.validate().is_err());
-    }
-
-    #[test]
     fn test_client_config_validation_ok() {
         let config = VpnIceClientConfig {
             nsec: Some("nsec1test".to_string()),
             peer_npub: "npub1test".to_string(),
             routes: vec!["0.0.0.0/0".parse().unwrap()],
+            ..Default::default()
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_client_config_validation_no_routes() {
+        let config = VpnIceClientConfig {
+            nsec: Some("nsec1test".to_string()),
+            peer_npub: "npub1test".to_string(),
             ..Default::default()
         };
         assert!(config.validate().is_ok());
