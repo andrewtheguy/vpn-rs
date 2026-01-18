@@ -146,9 +146,12 @@ pub struct Nat64Config {
 
     /// IPv4 source address for translated packets (optional).
     ///
-    /// If not set, the server's VPN IPv4 address is used (requires `network` to be configured).
-    /// Set this to allow NAT64 in IPv6-only VPN configurations where the host has
-    /// dual-stack connectivity but no IPv4 VPN network is needed.
+    /// If not set and an IPv4 VPN network is configured, the server reserves an
+    /// additional IPv4 address from that network (not the server_ip) for NAT64.
+    /// This is the default for dual-stack VPNs on private networks.
+    ///
+    /// If no IPv4 VPN network is configured (IPv6-only), you must set source_ip
+    /// to a routable IPv4 address on the host.
     ///
     /// This should be a routable IPv4 address on the host that can receive return traffic.
     #[serde(default)]
@@ -1372,7 +1375,7 @@ impl ResolvedVpnServerConfig {
             nat64.validate()?;
 
             // NAT64 requires an IPv4 source address for translated packets.
-            // This can come from either the VPN network (server_ip) or explicit nat64.source_ip
+            // This can come from either the VPN IPv4 network (auto-reserved) or explicit nat64.source_ip
             if nat64.enabled && nat64.source_ip.is_none() && cfg.network.is_none() {
                 anyhow::bail!(
                     "[config] NAT64 requires an IPv4 source address for translated packets.\n\
