@@ -1741,7 +1741,7 @@ mod tests {
         let mut pool = IpPool::new(network, None);
 
         let reserved_ip = Ipv4Addr::new(10, 0, 0, 5);
-        pool.reserve_ip(reserved_ip).unwrap();
+        pool.reserve_ip(reserved_ip, "reserved").unwrap();
 
         let mut assigned = Vec::new();
         for _ in 0..4 {
