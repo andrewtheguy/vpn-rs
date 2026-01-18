@@ -1169,6 +1169,52 @@ async fn query_route_for_ip(ip: IpAddr) -> VpnResult<BypassRouteInfo> {
     parse_linux_route_get(&stdout, ip)
 }
 
+/// Validate that a gateway string contains only expected characters.
+///
+/// Gateway strings should only contain:
+/// - Hex digits (0-9, A-F, a-f) for IPv6 addresses
+/// - Decimal digits (0-9) for IPv4 addresses
+/// - Colons (:) for IPv6 separators
+/// - Dots (.) for IPv4 separators
+/// - Percent sign (%) for scope ID delimiter (e.g., fe80::1%en0)
+/// - Alphanumeric characters after % for interface names
+///
+/// This validation prevents command injection when the gateway string
+/// is passed to route commands.
+fn is_valid_gateway_str(s: &str) -> bool {
+    if s.is_empty() {
+        return false;
+    }
+
+    // Split on '%' to handle scope ID separately
+    let parts: Vec<&str> = s.splitn(2, '%').collect();
+    let addr_part = parts[0];
+    let scope_part = parts.get(1);
+
+    // Validate the address part: only hex digits, colons, and dots
+    let addr_valid = addr_part
+        .chars()
+        .all(|c| c.is_ascii_hexdigit() || c == ':' || c == '.');
+
+    if !addr_valid {
+        return false;
+    }
+
+    // If there's a scope part, validate it: alphanumeric and common interface chars
+    if let Some(scope) = scope_part {
+        // Interface names can contain alphanumeric chars, underscores, and hyphens
+        let scope_valid = !scope.is_empty()
+            && scope
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+        if !scope_valid {
+            return false;
+        }
+    }
+
+    true
+}
+
 /// Parse the output of `ip route get` on Linux.
 #[cfg(target_os = "linux")]
 fn parse_linux_route_get(output: &str, peer_ip: IpAddr) -> VpnResult<BypassRouteInfo> {
@@ -1187,8 +1233,17 @@ fn parse_linux_route_get(output: &str, peer_ip: IpAddr) -> VpnResult<BypassRoute
             device = Some(tokens[i + 1].to_string());
         }
         if tokens[i] == "via" && i + 1 < tokens.len() {
-            gateway_str = Some(tokens[i + 1].to_string());
-            gateway = tokens[i + 1].parse().ok();
+            let gw_str = tokens[i + 1];
+            // Validate gateway string before using it
+            if is_valid_gateway_str(gw_str) {
+                gateway_str = Some(gw_str.to_string());
+                gateway = gw_str.parse().ok();
+            } else {
+                log::debug!(
+                    "Ignoring malformed gateway string in route output: {:?}",
+                    gw_str
+                );
+            }
         }
     }
 
@@ -1257,11 +1312,19 @@ fn parse_macos_route_get(output: &str, peer_ip: IpAddr) -> VpnResult<BypassRoute
         }
         if let Some(rest) = line.strip_prefix("gateway:") {
             let gw_str = rest.trim();
-            // Preserve raw gateway string (may include scope like fe80::1%en0)
-            gateway_str = Some(gw_str.to_string());
-            // Parse IpAddr by stripping scope (for non-route uses)
-            let gw_clean = gw_str.split('%').next().unwrap_or(gw_str);
-            gateway = gw_clean.parse().ok();
+            // Validate gateway string before using it to prevent command injection
+            if is_valid_gateway_str(gw_str) {
+                // Preserve raw gateway string (may include scope like fe80::1%en0)
+                gateway_str = Some(gw_str.to_string());
+                // Parse IpAddr by stripping scope (for non-route uses)
+                let gw_clean = gw_str.split('%').next().unwrap_or(gw_str);
+                gateway = gw_clean.parse().ok();
+            } else {
+                log::debug!(
+                    "Ignoring malformed gateway string in route output: {:?}",
+                    gw_str
+                );
+            }
         }
     }
 
@@ -1574,4 +1637,72 @@ fn remove_bypass_route_sync(
     _gateway_str: Option<&str>,
 ) {
     // Not implemented
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_valid_ipv4_gateway() {
+        assert!(is_valid_gateway_str("192.168.1.1"));
+        assert!(is_valid_gateway_str("10.0.0.1"));
+        assert!(is_valid_gateway_str("0.0.0.0"));
+        assert!(is_valid_gateway_str("255.255.255.255"));
+    }
+
+    #[test]
+    fn test_valid_ipv6_gateway() {
+        assert!(is_valid_gateway_str("fe80::1"));
+        assert!(is_valid_gateway_str("2001:db8::1"));
+        assert!(is_valid_gateway_str("::1"));
+        assert!(is_valid_gateway_str("::"));
+        assert!(is_valid_gateway_str("2600:1f13:adc:a0b1::1"));
+    }
+
+    #[test]
+    fn test_valid_ipv6_with_scope() {
+        assert!(is_valid_gateway_str("fe80::1%en0"));
+        assert!(is_valid_gateway_str("fe80::1%eth0"));
+        assert!(is_valid_gateway_str("fe80::1%wlan0"));
+        assert!(is_valid_gateway_str("fe80::1%bridge-br0"));
+        assert!(is_valid_gateway_str("fe80::1%veth_123"));
+    }
+
+    #[test]
+    fn test_invalid_gateway_empty() {
+        assert!(!is_valid_gateway_str(""));
+    }
+
+    #[test]
+    fn test_invalid_gateway_command_injection() {
+        // Shell metacharacters
+        assert!(!is_valid_gateway_str("192.168.1.1; rm -rf /"));
+        assert!(!is_valid_gateway_str("$(whoami)"));
+        assert!(!is_valid_gateway_str("`whoami`"));
+        assert!(!is_valid_gateway_str("192.168.1.1 && echo pwned"));
+        assert!(!is_valid_gateway_str("192.168.1.1 | cat /etc/passwd"));
+        assert!(!is_valid_gateway_str("192.168.1.1\necho pwned"));
+        assert!(!is_valid_gateway_str("192.168.1.1'"));
+        assert!(!is_valid_gateway_str("192.168.1.1\""));
+        assert!(!is_valid_gateway_str("192.168.1.1>outfile"));
+        assert!(!is_valid_gateway_str("192.168.1.1<infile"));
+    }
+
+    #[test]
+    fn test_invalid_gateway_bad_scope() {
+        // Scope with invalid characters
+        assert!(!is_valid_gateway_str("fe80::1%"));
+        assert!(!is_valid_gateway_str("fe80::1%en0;rm"));
+        assert!(!is_valid_gateway_str("fe80::1%en0$(cmd)"));
+        assert!(!is_valid_gateway_str("fe80::1%en0`cmd`"));
+        assert!(!is_valid_gateway_str("fe80::1%en0 "));
+    }
+
+    #[test]
+    fn test_invalid_gateway_spaces() {
+        assert!(!is_valid_gateway_str("192.168.1.1 "));
+        assert!(!is_valid_gateway_str(" 192.168.1.1"));
+        assert!(!is_valid_gateway_str("192.168 .1.1"));
+    }
 }
