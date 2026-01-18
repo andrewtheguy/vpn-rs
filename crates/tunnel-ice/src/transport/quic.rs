@@ -19,11 +19,11 @@ pub fn ensure_crypto_provider() {
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 }
 
-/// Default QUIC receive window size (2 MB) - matches iroh's default.
-const DEFAULT_RECEIVE_WINDOW: u32 = 2 * 1024 * 1024;
+/// Default QUIC receive window size (64 MB) - tuned for high BDP links.
+const DEFAULT_RECEIVE_WINDOW: u32 = 64 * 1024 * 1024;
 
-/// Default QUIC send window size (2 MB) - matches iroh's default.
-const DEFAULT_SEND_WINDOW: u32 = 2 * 1024 * 1024;
+/// Default QUIC send window size (64 MB) - tuned for high BDP links.
+const DEFAULT_SEND_WINDOW: u32 = 64 * 1024 * 1024;
 
 /// Create base transport config with common settings for both server and client.
 ///
@@ -31,8 +31,8 @@ const DEFAULT_SEND_WINDOW: u32 = 2 * 1024 * 1024;
 /// pings every 15s, so idle timeout only triggers for truly dead/unresponsive
 /// connections.
 ///
-/// Also configures receive and send windows to 2MB each to match iroh's defaults
-/// for optimal throughput on high-bandwidth connections.
+/// Also configures receive and send windows to 64MB each to better cover
+/// high-bandwidth, higher-latency paths without artificial flow control limits.
 fn create_base_transport_config() -> quinn::TransportConfig {
     let mut transport = quinn::TransportConfig::default();
     transport.max_idle_timeout(Some(
