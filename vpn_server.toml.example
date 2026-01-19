@@ -152,7 +152,8 @@ auth_tokens = ["iXXXXXXXXXXXXXXXXX"]  # Replace with real token from generate-to
 #     "https://relay2.example.com",
 # ]
 
-# Custom DNS server URL for peer discovery, or "none" to disable DNS discovery.
+# Custom DNS server URL for iroh endpoint discovery (pkarr), or "none" to disable DNS discovery.
+# This is NOT VPN DNS and does not affect client DNS resolution.
 # Must match client's dns_server configuration.
 # NOTE: URL must include the /pkarr path
 # dns_server = "https://dns.example.com/pkarr"

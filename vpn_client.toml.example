@@ -68,6 +68,14 @@ keepalive_secs = 25
 # Examples:
 #   - Full tunnel (all IPv6): ["::/0"]
 #   - Split tunnel (specific networks): ["2001:db8::/32", "fd00::/8"]
+# NAT64 client (IPv6-only) example:
+#   - Set your system DNS to a DNS64 resolver (Google Public DNS64):
+#       2001:4860:4860::6464
+#       2001:4860:4860::64
+#   - Route the NAT64 prefix through the VPN:
+# routes6 = [
+#     "64:ff9b::/96",  # NAT64
+# ]
 # routes6 = [
 #     "::/0",  # Full tunnel - route all IPv6 traffic through VPN
 # ]
@@ -97,7 +105,8 @@ keepalive_secs = 25
 #     "https://relay2.example.com",
 # ]
 
-# Custom DNS server URL for peer discovery, or "none" to disable DNS discovery.
+# Custom DNS server URL for iroh endpoint discovery (pkarr), or "none" to disable DNS discovery.
+# This is NOT VPN DNS and does not affect client DNS resolution.
 # Must match server's dns_server configuration.
 # NOTE: URL must include the /pkarr path
 # dns_server = "https://dns.example.com/pkarr"

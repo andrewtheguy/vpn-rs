@@ -25,9 +25,11 @@ cargo install iroh-relay
 iroh-relay --dev  # Local testing on http://localhost:3340
 ```
 
+The `--dns-server` flag (e.g., `https://dns.example.com/pkarr`) is a **pkarr peer-discovery service**, not a general-purpose DNS resolver.
+
 ## Self-Hosted DNS Discovery
 
-For fully independent operation without public infrastructure:
+For fully independent operation without public infrastructure. Note that `--dns-server` is for iroh node discovery via pkarr and does **not** provide ordinary DNS name resolution:
 
 ```bash
 # Both sides use custom DNS server
@@ -167,7 +169,8 @@ relay_urls = [
     "https://relay-backup.example.com",  # Optional failover
 ]
 
-# Self-hosted DNS server for peer discovery
+# Self-hosted DNS server for iroh endpoint discovery (pkarr)
+# This is NOT VPN DNS and does not affect client DNS resolution.
 # NOTE: URL must include the /pkarr path
 dns_server = "https://dns.example.com/pkarr"
 ```
