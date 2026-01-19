@@ -19,7 +19,7 @@ use dashmap::DashMap;
 use ipnet::{Ipv4Net, Ipv6Net};
 use iroh::{Endpoint, EndpointId};
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -159,6 +159,8 @@ struct IpPool {
     in_use: HashMap<(EndpointId, u64), Ipv4Addr>,
     /// Released IPs available for reuse.
     released: Vec<Ipv4Addr>,
+    /// Reserved IPs that should never be assigned to clients (e.g., NAT64 source).
+    reserved: HashSet<Ipv4Addr>,
 }
 
 impl IpPool {
@@ -185,6 +187,7 @@ impl IpPool {
             max_ip,
             in_use: HashMap::new(),
             released: Vec::new(),
+            reserved: HashSet::new(),
         }
     }
 
@@ -198,6 +201,62 @@ impl IpPool {
         self.network
     }
 
+    /// Reserve a specific IP address so it will not be assigned to clients.
+    fn reserve_ip(&mut self, ip: Ipv4Addr, label: &str) -> Result<(), String> {
+        if !self.network.contains(&ip) {
+            return Err(format!(
+                "{} {} is not within VPN network {}",
+                label, ip, self.network
+            ));
+        }
+        if ip == self.server_ip {
+            return Err(format!(
+                "{} {} must not equal server_ip {}",
+                label, ip, self.server_ip
+            ));
+        }
+        let network_addr = self.network.network();
+        let broadcast = self.network.broadcast();
+        if ip == network_addr || ip == broadcast {
+            return Err(format!(
+                "{} {} is not a usable host address in {}",
+                label, ip, self.network
+            ));
+        }
+        if self.reserved.contains(&ip) {
+            return Ok(());
+        }
+        // O(n) scan of in_use: small in practice, avoids extra lookup map.
+        if self.in_use.values().any(|assigned| *assigned == ip) {
+            return Err(format!(
+                "{} {} is already assigned to a client",
+                label, ip
+            ));
+        }
+        self.released.retain(|released_ip| *released_ip != ip);
+        self.reserved.insert(ip);
+        Ok(())
+    }
+
+    /// Reserve the next available IP address for internal use (e.g., NAT64 source).
+    fn reserve_next_available(&mut self) -> Option<Ipv4Addr> {
+        let ip = self.next_unreserved_ip()?;
+        self.reserved.insert(ip);
+        Some(ip)
+    }
+
+    fn next_unreserved_ip(&mut self) -> Option<Ipv4Addr> {
+        while self.next_ip <= self.max_ip {
+            let ip = Ipv4Addr::from(self.next_ip);
+            self.next_ip += 1;
+            if self.reserved.contains(&ip) {
+                continue;
+            }
+            return Some(ip);
+        }
+        None
+    }
+
     /// Allocate an IP address for a client.
     fn allocate(&mut self, endpoint_id: EndpointId, device_id: u64) -> Option<Ipv4Addr> {
         let key = (endpoint_id, device_id);
@@ -207,15 +266,16 @@ impl IpPool {
         }
 
         // Try to reuse a released IP first
-        if let Some(ip) = self.released.pop() {
+        while let Some(ip) = self.released.pop() {
+            if self.reserved.contains(&ip) {
+                continue;
+            }
             self.in_use.insert(key, ip);
             return Some(ip);
         }
 
         // Allocate new IP if available
-        if self.next_ip <= self.max_ip {
-            let ip = Ipv4Addr::from(self.next_ip);
-            self.next_ip += 1;
+        if let Some(ip) = self.next_unreserved_ip() {
             self.in_use.insert(key, ip);
             Some(ip)
         } else {
@@ -396,7 +456,7 @@ impl VpnServer {
 
         // Initialize NAT64 translator if configured
         // NAT64 needs an IPv4 source address for translated packets.
-        // This can come from either nat64.source_ip or the VPN server_ip.
+        // This can come from either nat64.source_ip or an auto-reserved VPN IPv4 address.
         let nat64 = match &config.nat64 {
             Some(nat64_config) if nat64_config.enabled => {
                 // Validate NAT64 configuration before creating translator
@@ -404,10 +464,27 @@ impl VpnServer {
 
                 // Determine the IPv4 source address for NAT64:
                 // 1. Use explicit nat64.source_ip if configured
-                // 2. Fall back to VPN server_ip if available
+                // 2. Auto-reserve an unused IP from the VPN IPv4 pool
                 let source_ip = match (nat64_config.source_ip, &ip_pool) {
-                    (Some(explicit_ip), _) => explicit_ip,
-                    (None, Some(ip_pool_arc)) => ip_pool_arc.read().await.server_ip(),
+                    (Some(explicit_ip), Some(ip_pool_arc)) => {
+                        let mut pool = ip_pool_arc.write().await;
+                        if pool.network().contains(&explicit_ip) {
+                            pool.reserve_ip(explicit_ip, "source_ip")
+                                .map_err(VpnError::Config)?;
+                        }
+                        explicit_ip
+                    }
+                    (Some(explicit_ip), None) => explicit_ip,
+                    (None, Some(ip_pool_arc)) => {
+                        let mut pool = ip_pool_arc.write().await;
+                        pool.reserve_next_available().ok_or_else(|| {
+                            VpnError::Config(
+                                "NAT64 requires an available IPv4 address in the VPN network (different from server_ip). \
+Set 'nat64.source_ip' explicitly or use a larger IPv4 network."
+                                    .to_string(),
+                            )
+                        })?
+                    }
                     (None, None) => {
                         // This should be caught by config validation, but handle it as a safety net
                         return Err(VpnError::Config(
@@ -1643,6 +1720,64 @@ mod tests {
         let id3 = random_endpoint_id();
         let ip3 = pool.allocate(id3, 1).unwrap();
         assert_eq!(ip3, ip1); // Should reuse released IP
+    }
+
+    #[test]
+    fn test_ip_pool_reserve_next_available() {
+        let network: Ipv4Net = "10.0.0.0/24".parse().unwrap();
+        let mut pool = IpPool::new(network, None);
+
+        let reserved = pool.reserve_next_available().unwrap();
+        assert_eq!(reserved, Ipv4Addr::new(10, 0, 0, 2));
+
+        let id1 = random_endpoint_id();
+        let ip1 = pool.allocate(id1, 1).unwrap();
+        assert_eq!(ip1, Ipv4Addr::new(10, 0, 0, 3));
+    }
+
+    #[test]
+    fn test_ip_pool_reserve_specific_ip_skips_allocation() {
+        let network: Ipv4Net = "10.0.0.0/24".parse().unwrap();
+        let mut pool = IpPool::new(network, None);
+
+        let reserved_ip = Ipv4Addr::new(10, 0, 0, 5);
+        pool.reserve_ip(reserved_ip, "reserved").unwrap();
+
+        let mut assigned = Vec::new();
+        for _ in 0..4 {
+            let id = random_endpoint_id();
+            assigned.push(pool.allocate(id, 1).unwrap());
+        }
+
+        assert_eq!(
+            assigned,
+            vec![
+                Ipv4Addr::new(10, 0, 0, 2),
+                Ipv4Addr::new(10, 0, 0, 3),
+                Ipv4Addr::new(10, 0, 0, 4),
+                Ipv4Addr::new(10, 0, 0, 6),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_ip_pool_reserve_ip_validation_and_idempotency() {
+        let network: Ipv4Net = "10.0.0.0/24".parse().unwrap();
+        let mut pool = IpPool::new(network, None);
+
+        assert!(pool.reserve_ip(Ipv4Addr::new(10, 0, 0, 1), "ip").is_err());
+        assert!(pool.reserve_ip(Ipv4Addr::new(10, 0, 0, 0), "ip").is_err());
+        assert!(pool.reserve_ip(Ipv4Addr::new(10, 0, 0, 255), "ip").is_err());
+        assert!(pool.reserve_ip(Ipv4Addr::new(192, 168, 1, 1), "ip").is_err());
+
+        let reserved = pool.reserve_next_available().unwrap();
+        let id1 = random_endpoint_id();
+        let assigned = pool.allocate(id1, 1).unwrap();
+        assert!(pool.reserve_ip(assigned, "ip").is_err());
+
+        let free_ip = reserved;
+        assert!(pool.reserve_ip(free_ip, "ip").is_ok());
+        assert!(pool.reserve_ip(free_ip, "ip").is_ok());
     }
 
     #[test]

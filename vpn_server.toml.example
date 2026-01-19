@@ -213,16 +213,25 @@ auth_tokens = ["iXXXXXXXXXXXXXXXXX"]  # Replace with real token from generate-to
 # Recommended configurations:
 #
 # 1. Dual-stack VPN (network + network6):
-#    Use an IP from the VPN range that is NOT the server's IP.
+#    source_ip can be omitted; the server auto-reserves an unused IP from the
+#    VPN network (not server_ip). If you prefer explicit, use an IP from the
+#    VPN range that is NOT the server's IP.
 #    Example: network = "10.0.0.0/24", server_ip = "10.0.0.1"
 #             source_ip = "10.0.0.100"  # Different from server_ip
 #
 # 2. IPv6-only VPN (network6 only):
-#    Use the host's WAN IPv4 address or a routable IPv4 that reaches TUN.
-#    Example: source_ip = "203.0.113.5"  # Host's WAN IPv4
+#    Use an IPv4 address that is routed back through the TUN interface.
+#    This often requires an explicit route/policy rule (e.g., /32) so replies
+#    to source_ip are delivered via TUN for 4→6 translation.
+#    Example: source_ip = "203.0.113.5"  # Host's WAN IPv4 (only if routed via TUN)
 #
-# If not set, defaults to server_ip from the VPN network, which will NOT work
-# for NAT64 response translation. Always set this explicitly when using NAT64.
+# Dynamic default (recommended for dual-stack private networks):
+# If 'network' is set and source_ip is omitted, the server automatically reserves
+# an unused IPv4 from the VPN network (not server_ip) for NAT64.
+#
+# Failure mode: if the IPv4 pool is too small to spare an extra address (i.e.,
+# no free IP besides server_ip), the server fails to start with a config error
+# and NAT64 is not enabled. Set source_ip explicitly or use a larger IPv4 network.
 #
 # source_ip = "10.0.0.100"
 
