@@ -194,7 +194,7 @@ pub async fn run_multi_source_server(config: MultiSourceServerConfig) -> Result<
 
     log::info!("\nOn the client side, run:");
     log::info!(
-        "  tunnel-rs client iroh --auth-token <token> --node-id {} --source tcp://target:port --target 127.0.0.1:port\n",
+        "  tunnel-rs client --auth-token <token> --server-node-id {} --source tcp://target:port --target 127.0.0.1:port\n",
         endpoint_id
     );
     log::info!("Note: Clients must provide a valid --auth-token for authentication");
