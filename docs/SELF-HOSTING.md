@@ -167,7 +167,8 @@ relay_urls = [
     "https://relay-backup.example.com",  # Optional failover
 ]
 
-# Self-hosted DNS server for peer discovery
+# Self-hosted DNS server for iroh endpoint discovery (pkarr)
+# This is NOT VPN DNS and does not affect client DNS resolution.
 # NOTE: URL must include the /pkarr path
 dns_server = "https://dns.example.com/pkarr"
 ```

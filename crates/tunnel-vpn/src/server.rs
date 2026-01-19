@@ -465,6 +465,7 @@ impl VpnServer {
                 // Determine the IPv4 source address for NAT64:
                 // 1. Use explicit nat64.source_ip if configured
                 // 2. Auto-reserve an unused IP from the VPN IPv4 pool
+                let mut auto_reserved = false;
                 let source_ip = match (nat64_config.source_ip, &ip_pool) {
                     (Some(explicit_ip), Some(ip_pool_arc)) => {
                         let mut pool = ip_pool_arc.write().await;
@@ -477,13 +478,15 @@ impl VpnServer {
                     (Some(explicit_ip), None) => explicit_ip,
                     (None, Some(ip_pool_arc)) => {
                         let mut pool = ip_pool_arc.write().await;
-                        pool.reserve_next_available().ok_or_else(|| {
+                        let reserved = pool.reserve_next_available().ok_or_else(|| {
                             VpnError::Config(
                                 "NAT64 requires an available IPv4 address in the VPN network (different from server_ip). \
 Set 'nat64.source_ip' explicitly or use a larger IPv4 network."
                                     .to_string(),
                             )
-                        })?
+                        })?;
+                        auto_reserved = true;
+                        reserved
                     }
                     (None, None) => {
                         // This should be caught by config validation, but handle it as a safety net
@@ -493,6 +496,9 @@ Set 'nat64.source_ip' explicitly or use a larger IPv4 network."
                     }
                 };
 
+                if auto_reserved {
+                    log::info!("NAT64 source_ip auto-reserved from VPN pool: {}", source_ip);
+                }
                 log::info!(
                     "NAT64 enabled: translating {} -> {} with ports {}-{}",
                     NAT64_PREFIX_CIDR,
