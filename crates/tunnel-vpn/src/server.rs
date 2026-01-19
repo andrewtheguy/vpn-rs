@@ -1785,6 +1785,19 @@ mod tests {
     }
 
     #[test]
+    fn test_ip_pool_reserve_last_available_slash30() {
+        let network: Ipv4Net = "10.0.0.0/30".parse().unwrap();
+        let mut pool = IpPool::new(network, None);
+
+        let reserved = pool.reserve_last_available().unwrap();
+        assert_eq!(reserved, Ipv4Addr::new(10, 0, 0, 2));
+
+        let id1 = random_endpoint_id();
+        let ip1 = pool.allocate(id1, 1);
+        assert!(ip1.is_none());
+    }
+
+    #[test]
     fn test_ip_pool_reserve_specific_ip_skips_allocation() {
         let network: Ipv4Net = "10.0.0.0/24".parse().unwrap();
         let mut pool = IpPool::new(network, None);

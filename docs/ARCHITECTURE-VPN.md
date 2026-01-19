@@ -94,6 +94,8 @@ VPN mode supports optional IPv6 alongside IPv4. When `network6` is configured on
 
 IPv4 is optional: the server can run IPv6-only with `network6` and no `network`. **IPv6-only mode is experimental.** In that mode, IPv4 reachability is only available via **experimental** NAT64.
 
+**Note:** VPN mode is not intended for stable client-to-client communications. Client IPs are dynamically assigned and may change between sessions.
+
 ### Key Components
 
 ```mermaid
@@ -257,9 +259,9 @@ This is intended for IPv6-only server deployments where `network6` is set and `n
 is omitted. NAT64 requires an IPv4 source address for translated packets, provided by
 either the VPN IPv4 network (when configured) or an explicit `nat64.source_ip`. When
 `network` is set and `nat64.source_ip` is omitted, the server auto-reserves the highest
-available IPv4 address (other than the server's IP) from the VPN pool for NAT64. If the
-VPN IPv4 pool cannot spare an extra address, server startup fails with a config error;
-set `nat64.source_ip` explicitly in that case.
+available IPv4 address (excluding the server's own IP address) from the VPN pool for
+NAT64. If the VPN IPv4 pool cannot spare an extra address, server startup fails with a
+config error; set `nat64.source_ip` explicitly in that case.
 
 ```mermaid
 sequenceDiagram
