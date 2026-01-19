@@ -255,7 +255,10 @@ NAT64 allows IPv6-only VPN clients to reach IPv4 destinations by translating IPv
 destined for the well-known NAT64 prefix `64:ff9b::/96` into IPv4 and performing NAPT.
 This is intended for IPv6-only server deployments where `network6` is set and `network`
 is omitted. NAT64 requires an IPv4 source address for translated packets, provided by
-either the VPN IPv4 network (when configured) or an explicit `nat64.source_ip`.
+either the VPN IPv4 network (when configured) or an explicit `nat64.source_ip`. When
+`network` is set and `nat64.source_ip` is omitted, the server auto-reserves a non-`server_ip`
+IPv4 address from the VPN pool for NAT64. If the IPv4 pool cannot spare an extra address,
+startup fails with a config error; set `nat64.source_ip` explicitly in that case.
 
 ```mermaid
 sequenceDiagram
