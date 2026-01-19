@@ -4976,7 +4976,7 @@ dependencies = [
 
 [[package]]
 name = "tunnel-common"
-version = "0.1.72"
+version = "0.1.73"
 dependencies = [
  "anyhow",
  "base64",
@@ -4993,7 +4993,7 @@ dependencies = [
 
 [[package]]
 name = "tunnel-ice"
-version = "0.1.72"
+version = "0.1.73"
 dependencies = [
  "anyhow",
  "base64",
@@ -5018,7 +5018,7 @@ dependencies = [
 
 [[package]]
 name = "tunnel-iroh"
-version = "0.1.72"
+version = "0.1.73"
 dependencies = [
  "anyhow",
  "base64",
@@ -5039,7 +5039,7 @@ dependencies = [
 
 [[package]]
 name = "tunnel-rs"
-version = "0.1.72"
+version = "0.1.73"
 dependencies = [
  "anyhow",
  "clap",
@@ -5053,7 +5053,7 @@ dependencies = [
 
 [[package]]
 name = "tunnel-rs-ice"
-version = "0.1.72"
+version = "0.1.73"
 dependencies = [
  "anyhow",
  "clap",
@@ -5067,7 +5067,7 @@ dependencies = [
 
 [[package]]
 name = "tunnel-rs-vpn"
-version = "0.1.72"
+version = "0.1.73"
 dependencies = [
  "anyhow",
  "clap",
@@ -5083,7 +5083,7 @@ dependencies = [
 
 [[package]]
 name = "tunnel-rs-vpn-ice"
-version = "0.1.72"
+version = "0.1.73"
 dependencies = [
  "anyhow",
  "clap",
@@ -5102,7 +5102,7 @@ dependencies = [
 
 [[package]]
 name = "tunnel-vpn"
-version = "0.1.72"
+version = "0.1.73"
 dependencies = [
  "anyhow",
  "bytes",
@@ -5127,7 +5127,7 @@ dependencies = [
 
 [[package]]
 name = "tunnel-vpn-ice"
-version = "0.1.72"
+version = "0.1.73"
 dependencies = [
  "anyhow",
  "bytes",

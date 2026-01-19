@@ -239,8 +239,38 @@ impl IpPool {
     }
 
     /// Reserve the next available IP address for internal use (e.g., NAT64 source).
+    #[cfg(test)]
     fn reserve_next_available(&mut self) -> Option<Ipv4Addr> {
         let ip = self.next_unreserved_ip()?;
+        self.reserved.insert(ip);
+        Some(ip)
+    }
+
+    /// Reserve the highest available IP address for internal use (e.g., NAT64 source).
+    fn reserve_last_available(&mut self) -> Option<Ipv4Addr> {
+        if self.next_ip > self.max_ip {
+            return None;
+        }
+
+        let mut candidate = None;
+        for ip_u32 in (self.next_ip..=self.max_ip).rev() {
+            let ip = Ipv4Addr::from(ip_u32);
+            if ip == self.server_ip {
+                continue;
+            }
+            if self.reserved.contains(&ip) {
+                continue;
+            }
+            // O(n) scan of in_use: small in practice, avoids extra lookup map.
+            if self.in_use.values().any(|assigned| *assigned == ip) {
+                continue;
+            }
+            candidate = Some(ip);
+            break;
+        }
+
+        let ip = candidate?;
+        self.released.retain(|released_ip| *released_ip != ip);
         self.reserved.insert(ip);
         Some(ip)
     }
@@ -478,7 +508,7 @@ impl VpnServer {
                     (Some(explicit_ip), None) => explicit_ip,
                     (None, Some(ip_pool_arc)) => {
                         let mut pool = ip_pool_arc.write().await;
-                        let reserved = pool.reserve_next_available().ok_or_else(|| {
+                        let reserved = pool.reserve_last_available().ok_or_else(|| {
                             VpnError::Config(
                                 "NAT64 requires an available IPv4 address in the VPN network (different from server_ip). \
 Set 'nat64.source_ip' explicitly or use a larger IPv4 network."
@@ -1739,6 +1769,32 @@ mod tests {
         let id1 = random_endpoint_id();
         let ip1 = pool.allocate(id1, 1).unwrap();
         assert_eq!(ip1, Ipv4Addr::new(10, 0, 0, 3));
+    }
+
+    #[test]
+    fn test_ip_pool_reserve_last_available() {
+        let network: Ipv4Net = "10.0.0.0/24".parse().unwrap();
+        let mut pool = IpPool::new(network, None);
+
+        let reserved = pool.reserve_last_available().unwrap();
+        assert_eq!(reserved, Ipv4Addr::new(10, 0, 0, 254));
+
+        let id1 = random_endpoint_id();
+        let ip1 = pool.allocate(id1, 1).unwrap();
+        assert_eq!(ip1, Ipv4Addr::new(10, 0, 0, 2));
+    }
+
+    #[test]
+    fn test_ip_pool_reserve_last_available_slash30() {
+        let network: Ipv4Net = "10.0.0.0/30".parse().unwrap();
+        let mut pool = IpPool::new(network, None);
+
+        let reserved = pool.reserve_last_available().unwrap();
+        assert_eq!(reserved, Ipv4Addr::new(10, 0, 0, 2));
+
+        let id1 = random_endpoint_id();
+        let ip1 = pool.allocate(id1, 1);
+        assert!(ip1.is_none());
     }
 
     #[test]
