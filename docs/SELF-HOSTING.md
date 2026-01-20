@@ -25,6 +25,9 @@ cargo install iroh-relay
 iroh-relay --dev  # Local testing on http://localhost:3340
 ```
 
+> [!NOTE]
+> **No relay-level client whitelisting:** The self-hosted relay server must allow all client IDs (like the public iroh relay) because tunnel-rs clients use ephemeral EndpointIds that change on each run. Rely on tunnel-rs auth tokens for access control instead. See [Dynamic Client Whitelisting](ROADMAP.md#dynamic-client-whitelisting-for-self-hosted-relay) for a planned enhancement.
+
 The `--dns-server` flag (e.g., `https://dns.example.com/pkarr`) is a **pkarr peer-discovery service**, not a general-purpose DNS resolver.
 
 ## Self-Hosted DNS Discovery
