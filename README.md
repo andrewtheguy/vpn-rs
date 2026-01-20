@@ -86,6 +86,8 @@ tunnel-rs provides multiple modes for establishing tunnels. **Use `iroh` mode** 
 |------|---------------|-----------|----------|---------------------|
 | **tunnel-rs-vpn** (iroh) | Best (relay fallback) | Automatic | Linux/macOS/Windows | iroh relay infrastructure |
 
+> **Historical note:** VPN with Nostr/ICE (`tunnel-rs-vpn-ice`) was removed. For historical reference, see the [before-ice-vpn-removal](https://github.com/andrewtheguy/tunnel-rs/releases/tag/before-ice-vpn-removal) tag.
+
 > See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for detailed diagrams and technical deep-dives.
 
 ### When to Use Alternative Modes
