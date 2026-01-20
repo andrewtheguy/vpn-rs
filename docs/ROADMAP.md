@@ -96,6 +96,59 @@ See [RATE_LIMITING_PROPOSAL.md](RATE_LIMITING_PROPOSAL.md) for detailed design.
 
 ---
 
+#### Dynamic Client Whitelisting for Self-Hosted Relay
+
+**Status:** Idea
+
+When self-hosting an iroh relay server, there is currently no easy way to whitelist specific clients at the relay level because clients use ephemeral identities by default.
+
+**Problem:**
+- Clients use ephemeral identities (new EndpointId each run)
+- Self-hosted relay servers cannot restrict which clients are allowed to connect
+- No mechanism to dynamically authorize client identities
+
+**Proposed Solution:**
+
+The iroh-relay server supports dynamic access control via `AccessConfig::Restricted`, which takes a callback function that checks each `EndpointId` and returns `Access::Allow` or `Access::Deny`. The solution involves dynamic coordination between the tunnel-rs server and the self-hosted relay:
+
+1. **Client connects to tunnel-rs server** with ephemeral EndpointId
+2. **Tunnel-rs server authenticates client** via auth token (existing mechanism)
+3. **Server registers client's EndpointId** with the relay's dynamic whitelist
+4. **Client can now use the relay** for NAT traversal
+
+Clients continue to use ephemeral identities - the tunnel-rs server dynamically coordinates with the relay to authorize authenticated clients.
+
+**iroh-relay access control API** (from [iroh-relay](https://github.com/n0-computer/iroh/tree/main/iroh-relay)):
+```rust
+pub enum AccessConfig {
+    Everyone,
+    Restricted(Box<dyn Fn(EndpointId) -> Boxed<Access> + Send + Sync + 'static>),
+}
+
+pub enum Access {
+    Allow,
+    Deny,
+}
+```
+
+**Implementation approach:**
+- Relay server exposes an API or shared state for dynamic whitelist updates
+- Tunnel-rs server adds client EndpointIds after successful auth token validation
+- Tunnel-rs server removes EndpointIds when clients disconnect
+- The `AccessConfig::Restricted` callback queries this dynamic whitelist
+
+**Complexity:** Medium-High
+- Requires coordination protocol between tunnel-rs server and self-hosted relay
+- Relay needs to expose whitelist management API (file watch, HTTP API, or shared memory)
+- Cleanup logic for stale EndpointIds when clients disconnect
+
+**Use Cases:**
+- Private self-hosted relay infrastructure
+- Enterprise deployments requiring relay-level access control
+- Additional defense-in-depth beyond tunnel-rs auth tokens
+
+---
+
 #### macOS Localhost Multi-Binding (tunnel-ice only)
 
 **Status:** Idea
