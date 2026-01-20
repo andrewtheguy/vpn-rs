@@ -27,7 +27,6 @@ Binary layout:
 - `tunnel-rs`: iroh mode (port forwarding)
 - `tunnel-rs-vpn`: VPN mode (iroh)
 - `tunnel-rs-ice`: manual and nostr modes (port forwarding)
-- `tunnel-rs-vpn-ice`: VPN mode (nostr, experimental)
 
 > **Design Goal:** The project's primary goal is to provide a convenient way to connect to different networks for development or homelab purposes without the hassle and security risk of opening a port. It is **not** meant for production setups or designed to be performant at scale.
 
@@ -78,7 +77,6 @@ The project is split into separate binaries to isolate dependencies:
 | `tunnel-rs` | `iroh` | `iroh_mode`, `auth` |
 | `tunnel-rs-vpn` | `vpn` (iroh) | `tunnel_vpn`, `auth` |
 | `tunnel-rs-ice` | `manual`, `nostr` | `custom`, `nostr`, `transport` |
-| `tunnel-rs-vpn-ice` | `vpn` (nostr) | `tunnel_vpn_ice`, `tunnel_ice` |
 
 The `test-utils` feature is still available on the iroh crates/binary to enable `--relay-only` for testing.
 
@@ -747,7 +745,6 @@ graph TB
 |------|---------------|----------------|------------|----------|
 | `iroh` | **Yes** | **Yes** | QUIC/TLS 1.3 | Linux, macOS, Windows |
 | `vpn` (iroh) | **Yes** | N/A (full tunnel) | QUIC (TLS 1.3) | Linux, macOS, Windows |
-| `vpn` (nostr) | **Yes** | N/A (full tunnel) | QUIC (TLS 1.3) | Linux, macOS, Windows |
 | `nostr` | **Yes** | **Yes** | QUIC/TLS 1.3 | Linux, macOS, Windows |
 | `manual` | No | **Yes** | QUIC/TLS 1.3 | Linux, macOS, Windows |
 

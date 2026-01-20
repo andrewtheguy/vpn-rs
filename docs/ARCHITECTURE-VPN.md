@@ -7,8 +7,6 @@ See `docs/ARCHITECTURE.md` for common architecture components.
 
 VPN mode provides full network tunneling using direct IP-over-QUIC. Unlike port forwarding modes, VPN mode creates a TUN device and routes IP traffic directly through the encrypted Iroh QUIC connection. This eliminates double encryption overhead while maintaining strong security via TLS 1.3.
 
-> **Experimental:** `tunnel-rs-vpn-ice` provides VPN over ICE with Nostr signaling. It is experimental and uses STUN-only NAT traversal (no relay fallback).
-
 > **Note:** VPN mode requires root/admin privileges. On Windows, you also need `wintun.dll` from https://www.wintun.net/ (official WireGuard project) — download the zip, extract, and copy `wintun/bin/amd64/wintun.dll` to the same directory as the executable (or any directory in the system PATH).
 
 ### Architecture Overview
@@ -41,48 +39,6 @@ graph TB
     style B fill:#FFE0B2
     style H fill:#FFE0B2
     style E fill:#BBDEFB
-```
-
-### Architecture Overview (VPN-ICE / Nostr)
-
-```mermaid
-graph TB
-    subgraph "Client Side"
-        A[Applications]
-        B[TUN Device<br/>tun0: 10.0.0.2<br/>fd00::2]
-        C[VPN-ICE Client]
-        D[ICE Agent<br/>str0m]
-        E[QUIC Endpoint]
-    end
-
-    subgraph "Signaling"
-        S[Nostr Relays<br/>Signaling Only]
-    end
-
-    subgraph "Server Side"
-        F[QUIC Endpoint]
-        G[ICE Agent<br/>str0m]
-        H[VPN-ICE Server]
-        I[TUN Device<br/>tun0: 10.0.0.1<br/>fd00::1]
-        J[Target Network<br/>LAN / Internet]
-    end
-
-    C -->|Nostr request/answer| S
-    H -->|Nostr offer/reject| S
-
-    D <-->|ICE connectivity checks<br/>STUN only| G
-    E <-->|QUIC over ICE socket| F
-
-    A -->|IP packets| B
-    B -->|read & frame| C
-    C -->|handshake + data| E
-    F -->|handshake + data| H
-    H -->|write & unframe| I
-    I -->|forward| J
-
-    style B fill:#FFE0B2
-    style I fill:#FFE0B2
-    style S fill:#E1BEE7
 ```
 
 **IPv6 Dual-Stack Support:**
