@@ -101,7 +101,7 @@ echo "Build complete!"
 echo "==============="
 echo ""
 echo "Tunnel binaries:"
-ls -lh "$BUILD_DIR"/tunnel-rs-* 2>/dev/null || echo "  (none found)"
+ls -lh "$BUILD_DIR"/tunnel-rs-linux-* 2>/dev/null || echo "  (none found)"
 echo ""
 echo "ICE + VPN binaries:"
 ls -lh "$BUILD_DIR"/tunnel-rs-ice-* "$BUILD_DIR"/tunnel-rs-vpn-* 2>/dev/null || echo "  (none found)"
@@ -111,7 +111,7 @@ echo ""
 echo "Verifying binaries..."
 echo "---------------------"
 if command -v file &> /dev/null; then
-    file "$BUILD_DIR"/tunnel-rs-* "$BUILD_DIR"/tunnel-rs-ice-* "$BUILD_DIR"/tunnel-rs-vpn-* 2>/dev/null || true
+    file "$BUILD_DIR"/tunnel-rs-linux-* "$BUILD_DIR"/tunnel-rs-ice-* "$BUILD_DIR"/tunnel-rs-vpn-* 2>/dev/null || true
 else
     echo "Note: 'file' command not available, skipping binary verification"
 fi
