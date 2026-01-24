@@ -6,6 +6,12 @@
 
 Currently, there's no rate limiting for invalid token attempts. An attacker can brute-force tokens by making many connections/streams up to `max_sessions`, enabling online guessing or resource abuse.
 
+### Brute-Force Considerations
+
+- **Token strength**: Tokens are high-entropy (16 random chars from a 65‑symbol alphabet ≈ 2^96 possibilities), which is sufficient **if** online attempts are constrained.
+- **Online vs. offline**: There is no offline guessing path here; the risk is **online** guessing via repeated connections. Without rate limits, any secret can be brute‑forced eventually.
+- **Cost per attempt**: Authentication happens immediately after QUIC connection, but a determined attacker can still flood attempts and consume server resources.
+
 ## Current State
 
 - Token validation happens per-connection via dedicated auth stream in `multi_source.rs`
@@ -27,6 +33,8 @@ Two-tier protection:
 **Token normalization**: The rate limiter tracks tokens exactly as submitted (case-sensitive, no whitespace trimming). This matches the behavior of the token validator in `auth.rs`. Operators should ensure tokens in configuration are consistently formatted (e.g., all lowercase, no leading/trailing whitespace). The rate limiter does NOT normalize tokens because:
 - Attackers may probe with case/whitespace variations; treating them as distinct catches more attack patterns
 - Consistent with the token validator which does exact string comparison
+
+**Security rationale**: The intent is to make online guessing infeasible by capping attempts per token and per time window. With conservative defaults, expected online guesses before lockout are tiny relative to 2^96.
 
 ```rust
 struct AuthRateLimiter {
@@ -102,6 +110,12 @@ Config file options: `max_token_auth_failures`, `token_lockout_duration`, `globa
 - During lockout: Sampled at 1st and every 100th rejection to avoid log spam under attack
 
 **Operator note:** The sample interval (default 100) can be adjusted via `lockout_log_sample_interval`. For high-traffic deployments under sustained attack, operators may also configure external log filtering or rate limiting at the log aggregator level.
+
+## Optional Hardening (Future Enhancements)
+
+- **Hash stored tokens in the limiter**: Store a keyed hash (e.g., BLAKE3 with a server secret) instead of raw token strings in `token_failures` and `recent_failures` to reduce sensitive-data retention.
+- **Bounded memory**: Cap the number of tracked tokens and evict least‑recently‑seen entries to avoid unbounded growth under attack.
+- **Early reject on invalid format**: Reject tokens failing `validate_token()` without inserting into maps (prevents attackers from polluting the map with garbage). This is already implied by the auth flow but should be explicit in implementation.
 
 ## Implementation Plan
 
