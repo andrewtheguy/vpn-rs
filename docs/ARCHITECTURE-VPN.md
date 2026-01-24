@@ -133,7 +133,7 @@ The VPN mode sends raw IP packets directly over Iroh's QUIC streams (using TLS 1
 
 **Key Design Decisions:**
 - **Framing**: IP packets are length-prefixed and sent over the QUIC stream.
-- **Security**: Relies on Iroh/QUIC's built-in encryption (TLS 1.3) with Noise-derived keys.
+- **Security**: Relies on Iroh/QUIC's built-in encryption (TLS 1.3).
 - **Efficiency**: Zero-copy forwarding where possible between TUN and QUIC buffers.
 - **Identification**: Clients identify via a random `u64` `device_id` generated at startup, allowing multiple sessions per Iroh endpoint.
 - **Reconnects**: The server automatically manages session limits and cleanup, allowing seamless reconnects from the same device ID.
@@ -145,7 +145,7 @@ The `device_id` is generated using `rand::thread_rng()`, which in rand 0.8 provi
 **Security Considerations:**
 
 The `device_id` is used **purely for session tracking** within an already-authenticated iroh connection—it is NOT used for access control. Security relies on:
-1. Iroh's cryptographic `EndpointId` authentication (Noise protocol)
+1. Iroh's cryptographic `EndpointId` authentication
 2. Auth token validation (if configured)
 
 Clients are keyed by `(EndpointId, device_id)`, so an attacker cannot hijack a session by guessing a `device_id` without also possessing the victim's iroh private key.

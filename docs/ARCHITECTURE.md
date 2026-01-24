@@ -687,6 +687,8 @@ The `iroh::Endpoint` provides:
 
 ### Connection Establishment Times
 
+> **Note:** These are illustrative, environment-dependent ranges (network conditions, NAT type, relay availability, and DNS). Treat as rough guidance, not guarantees.
+
 ```mermaid
 graph LR
     subgraph "iroh"
