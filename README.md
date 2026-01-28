@@ -10,6 +10,10 @@ Tunnel-rs enables you to forward TCP and UDP traffic—or tunnel entire networks
 > [!WARNING]
 > **No Backward Compatibility (Pre-1.0):** During initial development before version 1.0, no backward compatibility or migration path is provided between minor versions (e.g., 0.1.x to 0.2.x). Expect to regenerate server keys and rebuild client/server configurations when upgrading.
 
+**Common Features:**
+- **No account or registration required** — Just download and run
+- **No publicly accessible IPs or port forwarding required** — Automatic NAT hole punching
+
 **Port Forwarding Features:**
 - **Full TCP and UDP support** — Seamlessly tunnel any TCP or UDP traffic
 - **Cross-platform** — Works on Linux, macOS, and Windows
@@ -22,10 +26,6 @@ Tunnel-rs enables you to forward TCP and UDP traffic—or tunnel entire networks
 **VPN Mode Features**
 - **Direct IP-over-QUIC** — High performance direct tunneling with TLS 1.3 encryption
 - **Automatic IP assignment** — No manual keypair or IP management
-
-**Common Features:**
-- **No publicly accessible IPs or port forwarding required** — Automatic NAT hole punching
- 
 
 **Common Use Cases:**
 - **SSH access** to machines behind NAT/firewalls
