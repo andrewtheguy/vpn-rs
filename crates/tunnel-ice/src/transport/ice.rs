@@ -269,7 +269,7 @@ impl IceEndpoint {
             .set_controlling(matches!(role, IceRole::Controlling));
         self.ice.set_remote_credentials(remote_creds);
 
-        info!(
+        eprintln!(
             "Starting ICE connectivity check with {} remote candidates",
             remote_candidates.len()
         );
@@ -428,9 +428,9 @@ impl IceEndpoint {
                             .get(&source)
                             .copied()
                             .unwrap_or(CandidateType::Host);
-                        info!("ICE connection established!");
-                        info!("   Connection: {}", conn_type);
-                        info!("   Local: {} -> Remote: {}", source, destination);
+                        eprintln!("ICE connection established!");
+                        eprintln!("   Connection: {}", conn_type);
+                        eprintln!("   Local: {} -> Remote: {}", source, destination);
 
                         return Ok(IceConnection {
                             socket: demux_socket,
@@ -537,7 +537,7 @@ fn drain_events(
     while let Some(event) = ice.poll_event() {
         match event {
             IceAgentEvent::IceConnectionStateChange(state) => {
-                info!("ICE state: {:?}", state);
+                eprintln!("ICE state: {:?}", state);
                 // Detect terminal failure state
                 // Note: str0m uses Disconnected for connectivity failures
                 // (Failed variant is not implemented in str0m)
