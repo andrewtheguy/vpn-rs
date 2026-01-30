@@ -28,7 +28,7 @@ pub struct MultiSourceServerConfig {
     pub secret: Option<SecretKey>,
     /// Iroh relay URLs.
     pub relay_urls: Vec<String>,
-    /// Whether to use relay-only mode (requires test-utils feature).
+    /// Whether to use relay-only mode (disables direct P2P).
     pub relay_only: bool,
     /// Custom DNS server for resolution, or "none" to disable DNS discovery.
     /// mDNS for local network discovery is unaffected.
@@ -68,7 +68,7 @@ pub struct MultiSourceClientConfig {
     pub target: String,
     /// Iroh relay URLs.
     pub relay_urls: Vec<String>,
-    /// Whether to use relay-only mode (requires test-utils feature).
+    /// Whether to use relay-only mode (disables direct P2P).
     pub relay_only: bool,
     /// Custom DNS server for resolution, or "none" to disable DNS discovery.
     /// mDNS for local network discovery is unaffected.
@@ -129,18 +129,7 @@ const AUTH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 /// This mode allows clients to request specific sources (tcp://host:port or udp://host:port).
 /// The server validates requests against allowed_tcp and allowed_udp CIDR lists.
 /// Authentication is enforced via pre-shared tokens - clients must provide a valid token in their request.
-/// Note: relay_only is only meaningful when the 'test-utils' feature is enabled.
 pub async fn run_multi_source_server(config: MultiSourceServerConfig) -> Result<()> {
-    // relay_only is only meaningful with test-utils feature
-    #[cfg(not(feature = "test-utils"))]
-    {
-        if config.relay_only {
-            log::warn!("relay_only=true requires 'test-utils' feature; ignoring and using relay_only=false");
-        }
-    }
-    #[cfg(not(feature = "test-utils"))]
-    let relay_only = false;
-    #[cfg(feature = "test-utils")]
     let relay_only = config.relay_only;
 
     // Validate CIDR notation at startup
@@ -522,19 +511,9 @@ async fn authenticate_connection(
 
 /// Connects to a server and requests a specific source (tcp://host:port or udp://host:port).
 /// The server validates the request and either accepts or rejects it.
-/// Note: relay_only is only meaningful when the 'test-utils' feature is enabled.
+/// Note: relay_only disables direct P2P transport.
 /// Authentication is done via dedicated auth stream immediately after connection.
 pub async fn run_multi_source_client(config: MultiSourceClientConfig) -> Result<()> {
-    // relay_only is only meaningful with test-utils feature
-    #[cfg(not(feature = "test-utils"))]
-    {
-        if config.relay_only {
-            log::warn!("relay_only=true requires 'test-utils' feature; ignoring and using relay_only=false");
-        }
-    }
-    #[cfg(not(feature = "test-utils"))]
-    let relay_only = false;
-    #[cfg(feature = "test-utils")]
     let relay_only = config.relay_only;
 
     validate_relay_only(relay_only, &config.relay_urls)?;

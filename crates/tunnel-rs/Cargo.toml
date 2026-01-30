@@ -8,11 +8,6 @@ description = "TCP/UDP port forwarding through iroh P2P connections"
 name = "tunnel-rs"
 path = "src/main.rs"
 
-[features]
-# Enable --relay-only CLI flag for testing. Requires iroh's test-utils feature.
-# Build with: cargo build --features test-utils
-test-utils = ["tunnel-iroh/test-utils"]
-
 [dependencies]
 tunnel-common = { path = "../tunnel-common" }
 tunnel-iroh = { path = "../tunnel-iroh" }

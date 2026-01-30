@@ -8,11 +8,6 @@ description = "Iroh mode for tunnel-rs"
 name = "tunnel_iroh"
 path = "src/lib.rs"
 
-[features]
-# Enable --relay-only CLI flag for testing. Requires iroh's test-utils feature.
-# Build with: cargo build --features test-utils
-test-utils = ["iroh/test-utils"]
-
 [dependencies]
 tunnel-common = { path = "../tunnel-common" }
 iroh = { version = "0.96.0", features = ["address-lookup-mdns"] }

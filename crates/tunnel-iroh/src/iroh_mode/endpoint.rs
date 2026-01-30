@@ -2,8 +2,6 @@
 
 use anyhow::{Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
-#[cfg(feature = "test-utils")]
-use iroh::endpoint::PathSelection;
 use iroh::{
     address_lookup::{DnsAddressLookup, MdnsAddressLookup, PkarrPublisher, PkarrResolver},
     endpoint::{Builder as EndpointBuilder, ControllerFactory, QuicTransportConfig},
@@ -102,12 +100,7 @@ pub fn parse_relay_mode(relay_urls: &[String]) -> Result<RelayMode> {
 }
 
 /// Validate that relay-only mode is used correctly.
-/// Note: relay_only is only meaningful when the 'test-utils' feature is enabled.
 pub fn validate_relay_only(relay_only: bool, relay_urls: &[String]) -> Result<()> {
-    #[cfg(not(feature = "test-utils"))]
-    let _ = relay_only; // suppress unused warning when feature disabled
-
-    #[cfg(feature = "test-utils")]
     if relay_only && relay_urls.is_empty() {
         anyhow::bail!(
             "--relay-only requires at least one --relay-url to be specified.\n\
@@ -115,14 +108,10 @@ pub fn validate_relay_only(relay_only: bool, relay_urls: &[String]) -> Result<()
         );
     }
 
-    #[cfg(not(feature = "test-utils"))]
-    let _ = relay_urls; // suppress unused warning when feature disabled
-
     Ok(())
 }
 
 /// Print relay configuration status messages.
-/// Note: relay_only logging is only active when the 'test-utils' feature is enabled.
 pub fn print_relay_status(relay_urls: &[String], relay_only: bool, using_custom_relay: bool) {
     if using_custom_relay {
         if relay_urls.len() == 1 {
@@ -134,19 +123,16 @@ pub fn print_relay_status(relay_urls: &[String], relay_only: bool, using_custom_
             );
         }
     }
-    #[cfg(feature = "test-utils")]
     if relay_only {
         info!("Relay-only mode: all traffic will go through the relay server");
     }
-    #[cfg(not(feature = "test-utils"))]
-    let _ = relay_only; // suppress unused warning when feature disabled
 }
 
 /// Create a base endpoint builder with common configuration.
 ///
 /// # Arguments
 /// * `relay_mode` - The relay mode to use
-/// * `relay_only` - If true, only use relay connections (no direct P2P). Only effective with 'test-utils' feature.
+/// * `relay_only` - If true, only use relay connections (no direct P2P).
 /// * `dns_server` - Optional custom DNS server URL (e.g., "https://dns.example.com"), or "none" to disable DNS discovery
 /// * `secret_key` - Optional secret key (required for publishing to custom DNS server)
 /// * `transport_tuning` - Optional transport layer tuning (congestion control, buffer sizes)
@@ -157,16 +143,6 @@ pub fn create_endpoint_builder(
     secret_key: Option<&SecretKey>,
     transport_tuning: Option<&TransportTuning>,
 ) -> Result<EndpointBuilder> {
-    // relay_only is only meaningful with test-utils feature
-    #[cfg(not(feature = "test-utils"))]
-    {
-        if relay_only {
-            log::warn!("relay_only=true requires 'test-utils' feature; ignoring and using relay_only=false");
-        }
-    }
-    #[cfg(not(feature = "test-utils"))]
-    let relay_only = false;
-
     // Configure transport with keep-alive and idle timeout.
     // See QUIC_KEEP_ALIVE_INTERVAL and QUIC_IDLE_TIMEOUT constants for rationale.
     let mut transport_config = QuicTransportConfig::builder();
@@ -220,9 +196,8 @@ pub fn create_endpoint_builder(
     let transport_config = transport_config.build();
     let mut builder = Endpoint::empty_builder(relay_mode).transport_config(transport_config);
 
-    #[cfg(feature = "test-utils")]
     if relay_only {
-        builder = builder.path_selection(PathSelection::RelayOnly);
+        builder = builder.clear_ip_transports();
     }
 
     if !relay_only {
@@ -346,7 +321,6 @@ pub async fn create_client_endpoint(
 }
 
 /// Connect to a server endpoint with relay failover support.
-/// Note: relay_only is only meaningful when the 'test-utils' feature is enabled.
 pub async fn connect_to_server(
     endpoint: &Endpoint,
     server_id: EndpointId,
@@ -354,14 +328,6 @@ pub async fn connect_to_server(
     relay_only: bool,
     alpn: &[u8],
 ) -> Result<iroh::endpoint::Connection> {
-    // relay_only is only meaningful with test-utils feature
-    #[cfg(not(feature = "test-utils"))]
-    {
-        let _ = relay_only;
-    }
-    #[cfg(not(feature = "test-utils"))]
-    let relay_only = false;
-
     info!("Connecting to server {}...", server_id);
 
     if relay_only {
