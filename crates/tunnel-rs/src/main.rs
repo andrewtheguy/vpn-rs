@@ -301,10 +301,7 @@ fn resolve_client_iroh_params(
     }
 }
 
-fn resolve_iroh_secret(
-    secret: Option<String>,
-    secret_file: Option<PathBuf>,
-) -> Result<Option<SecretKey>> {
+fn resolve_iroh_secret(secret: Option<String>, secret_file: Option<PathBuf>) -> Result<SecretKey> {
     match (secret, secret_file) {
         (Some(_), Some(_)) => {
             anyhow::bail!(
@@ -321,7 +318,7 @@ fn resolve_iroh_secret(
             let endpoint_id = secret_to_endpoint_id(&secret);
             log::info!("Loaded identity from inline secret");
             log::info!("EndpointId: {}", endpoint_id);
-            Ok(Some(secret))
+            Ok(secret)
         }
         (None, Some(path)) => {
             let expanded = expand_tilde(&path);
@@ -329,7 +326,7 @@ fn resolve_iroh_secret(
             let endpoint_id = secret_to_endpoint_id(&secret);
             log::info!("Loaded identity from: {}", expanded.display());
             log::info!("EndpointId: {}", endpoint_id);
-            Ok(Some(secret))
+            Ok(secret)
         }
         (None, None) => {
             anyhow::bail!(
@@ -443,7 +440,7 @@ async fn main() -> Result<()> {
                 allowed_tcp,
                 allowed_udp,
                 max_sessions,
-                secret,
+                secret: Some(secret),
                 relay_urls,
                 relay_only,
                 dns_server,

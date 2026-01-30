@@ -100,7 +100,7 @@ network = "10.0.0.0/24"
 # drop_on_full = false
 
 # ============================================================================
-# Server Identity (Optional)
+# Server Identity (Required)
 # ============================================================================
 
 # Path to secret key file for persistent iroh identity (REQUIRED)
