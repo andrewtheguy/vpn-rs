@@ -97,20 +97,9 @@ jobs:
           name: release-vpn-${{ matrix.suffix }}
           path: target/release/tunnel-rs-vpn-${{ matrix.suffix }}
 
-  build-other:
+  build-macos:
     needs: setup
-    strategy:
-      matrix:
-        include:
-          - os: macos-latest
-            target: aarch64-apple-darwin
-            suffix: macos-arm64
-            binary: tunnel-rs
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            suffix: windows-amd64
-            binary: tunnel-rs.exe
-    runs-on: ${{ matrix.os }}
+    runs-on: macos-latest
 
     steps:
       - name: Checkout code
@@ -121,68 +110,79 @@ jobs:
 
       - name: Build Release
         run: |
-          cargo build --release --target ${{ matrix.target }} -p tunnel-rs
-          cargo build --release --target ${{ matrix.target }} -p tunnel-rs-ice
-          cargo build --release --target ${{ matrix.target }} -p tunnel-rs-vpn
+          cargo build --release --target aarch64-apple-darwin -p tunnel-rs
+          cargo build --release --target aarch64-apple-darwin -p tunnel-rs-ice
+          cargo build --release --target aarch64-apple-darwin -p tunnel-rs-vpn
 
-      - name: Rename Binaries (Unix)
-        if: runner.os != 'Windows'
+      - name: Rename Binaries
         run: |
-          mv target/${{ matrix.target }}/release/${{ matrix.binary }} target/release/tunnel-rs-${{ matrix.suffix }}
-          mv target/${{ matrix.target }}/release/tunnel-rs-ice target/release/tunnel-rs-ice-${{ matrix.suffix }}
-          mv target/${{ matrix.target }}/release/tunnel-rs-vpn target/release/tunnel-rs-vpn-${{ matrix.suffix }}
+          mv target/aarch64-apple-darwin/release/tunnel-rs target/release/tunnel-rs-macos-arm64
+          mv target/aarch64-apple-darwin/release/tunnel-rs-ice target/release/tunnel-rs-ice-macos-arm64
+          mv target/aarch64-apple-darwin/release/tunnel-rs-vpn target/release/tunnel-rs-vpn-macos-arm64
 
-      - name: Rename Binaries (Windows)
-        if: runner.os == 'Windows'
+      - name: Upload release artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-macos-arm64
+          path: target/release/tunnel-rs-macos-arm64
+
+      - name: Upload release artifact (ice)
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-ice-macos-arm64
+          path: target/release/tunnel-rs-ice-macos-arm64
+
+      - name: Upload release artifact (vpn)
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-vpn-macos-arm64
+          path: target/release/tunnel-rs-vpn-macos-arm64
+
+  build-windows:
+    needs: setup
+    if: needs.setup.outputs.is_prerelease == 'false'
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build Release
         run: |
-          move target\${{ matrix.target }}\release\${{ matrix.binary }} target\release\tunnel-rs-${{ matrix.suffix }}.exe
-          move target\${{ matrix.target }}\release\tunnel-rs-ice.exe target\release\tunnel-rs-ice-${{ matrix.suffix }}.exe
-          move target\${{ matrix.target }}\release\tunnel-rs-vpn.exe target\release\tunnel-rs-vpn-${{ matrix.suffix }}.exe
+          cargo build --release --target x86_64-pc-windows-msvc -p tunnel-rs
+          cargo build --release --target x86_64-pc-windows-msvc -p tunnel-rs-ice
+          cargo build --release --target x86_64-pc-windows-msvc -p tunnel-rs-vpn
 
-      - name: Upload release artifact (Unix)
-        if: runner.os != 'Windows'
+      - name: Rename Binaries
+        run: |
+          move target\x86_64-pc-windows-msvc\release\tunnel-rs.exe target\release\tunnel-rs-windows-amd64.exe
+          move target\x86_64-pc-windows-msvc\release\tunnel-rs-ice.exe target\release\tunnel-rs-ice-windows-amd64.exe
+          move target\x86_64-pc-windows-msvc\release\tunnel-rs-vpn.exe target\release\tunnel-rs-vpn-windows-amd64.exe
+
+      - name: Upload release artifact
         uses: actions/upload-artifact@v4
         with:
-          name: release-${{ matrix.suffix }}
-          path: target/release/tunnel-rs-${{ matrix.suffix }}
+          name: release-windows-amd64
+          path: target/release/tunnel-rs-windows-amd64.exe
 
-      - name: Upload release artifact (ice, Unix)
-        if: runner.os != 'Windows'
+      - name: Upload release artifact (ice)
         uses: actions/upload-artifact@v4
         with:
-          name: release-ice-${{ matrix.suffix }}
-          path: target/release/tunnel-rs-ice-${{ matrix.suffix }}
+          name: release-ice-windows-amd64
+          path: target/release/tunnel-rs-ice-windows-amd64.exe
 
-      - name: Upload release artifact (vpn, Unix)
-        if: runner.os != 'Windows'
+      - name: Upload release artifact (vpn)
         uses: actions/upload-artifact@v4
         with:
-          name: release-vpn-${{ matrix.suffix }}
-          path: target/release/tunnel-rs-vpn-${{ matrix.suffix }}
-
-      - name: Upload release artifact (Windows)
-        if: runner.os == 'Windows'
-        uses: actions/upload-artifact@v4
-        with:
-          name: release-${{ matrix.suffix }}
-          path: target/release/tunnel-rs-${{ matrix.suffix }}.exe
-
-      - name: Upload release artifact (ice, Windows)
-        if: runner.os == 'Windows'
-        uses: actions/upload-artifact@v4
-        with:
-          name: release-ice-${{ matrix.suffix }}
-          path: target/release/tunnel-rs-ice-${{ matrix.suffix }}.exe
-
-      - name: Upload release artifact (vpn, Windows)
-        if: runner.os == 'Windows'
-        uses: actions/upload-artifact@v4
-        with:
-          name: release-vpn-${{ matrix.suffix }}
-          path: target/release/tunnel-rs-vpn-${{ matrix.suffix }}.exe
+          name: release-vpn-windows-amd64
+          path: target/release/tunnel-rs-vpn-windows-amd64.exe
 
   create-release:
-    needs: [setup, build-linux, build-other]
+    needs: [setup, build-linux, build-macos, build-windows]
+    if: always() && needs.setup.result == 'success' && needs.build-linux.result == 'success' && needs.build-macos.result == 'success' && (needs.build-windows.result == 'success' || needs.build-windows.result == 'skipped')
     runs-on: ubuntu-latest
     steps:
       - name: Download all release artifacts
