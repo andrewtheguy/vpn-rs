@@ -26,6 +26,11 @@ stun_servers = [
 [manual.allowed_sources]
 tcp = ["127.0.0.0/8", "192.168.0.0/16"]
 udp = ["10.0.0.0/8"]
+# Transport tuning (QUIC). Defaults are optimized for throughput on LAN/loopback.
+# [manual.transport]
+# congestion_controller = "cubic"  # or "bbr", "newreno"
+# receive_window = 8388608
+# send_window = 8388608
 
 # [nostr]
 # Do NOT set 'source' above - clients request sources dynamically.
@@ -58,6 +63,12 @@ udp = ["10.0.0.0/8"]
 #
 # Maximum concurrent sessions (server only, default: 10)
 # max_sessions = 10
+#
+# Transport tuning (QUIC). Defaults are optimized for throughput on LAN/loopback.
+# [nostr.transport]
+# congestion_controller = "cubic"  # or "bbr", "newreno"
+# receive_window = 8388608
+# send_window = 8388608
 #
 # Allowed source networks that clients can request (server only, CIDR notation)
 # Clients MUST specify --source which must match one of these networks

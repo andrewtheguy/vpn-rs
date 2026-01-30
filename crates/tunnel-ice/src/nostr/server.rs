@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::task::JoinSet;
+use tunnel_common::config::TransportTuning;
 
 /// Configuration for the nostr server.
 pub struct NostrServerConfig {
@@ -31,6 +32,8 @@ pub struct NostrServerConfig {
     pub max_wait_secs: u64,
     /// Maximum number of concurrent sessions.
     pub max_sessions: usize,
+    /// Transport tuning for QUIC (congestion control, buffers).
+    pub transport: TransportTuning,
 }
 
 impl std::fmt::Debug for NostrServerConfig {
@@ -45,6 +48,7 @@ impl std::fmt::Debug for NostrServerConfig {
             .field("republish_interval_secs", &self.republish_interval_secs)
             .field("max_wait_secs", &self.max_wait_secs)
             .field("max_sessions", &self.max_sessions)
+            .field("transport", &self.transport)
             .finish()
     }
 }
@@ -71,6 +75,7 @@ type SessionHandler = fn(
     allowed_tcp: Arc<Vec<String>>,
     allowed_udp: Arc<Vec<String>>,
     stun_servers: Vec<String>,
+    transport: Arc<TransportTuning>,
     republish_interval_secs: u64,
     max_wait_secs: u64,
 )
@@ -83,6 +88,7 @@ async fn run_nostr_server_loop(
     allowed_udp: Vec<String>,
     signaling: Arc<NostrSignaling>,
     stun_servers: Vec<String>,
+    transport: Arc<TransportTuning>,
     republish_interval_secs: u64,
     max_wait_secs: u64,
     max_sessions: usize,
@@ -248,6 +254,7 @@ async fn run_nostr_server_loop(
         let stun_servers_clone = stun_servers.clone();
         let allowed_tcp_clone = allowed_tcp.clone();
         let allowed_udp_clone = allowed_udp.clone();
+        let transport_clone = transport.clone();
 
         session_tasks.spawn(async move {
             let result = session_handler(
@@ -256,6 +263,7 @@ async fn run_nostr_server_loop(
                 allowed_tcp_clone,
                 allowed_udp_clone,
                 stun_servers_clone,
+                transport_clone,
                 republish_interval_secs,
                 max_wait_secs,
             )
@@ -273,12 +281,14 @@ async fn run_nostr_server_loop(
 // Session Handlers
 // ============================================================================
 
+#[allow(clippy::too_many_arguments)]
 fn handle_nostr_session(
     signaling: Arc<NostrSignaling>,
     request: ManualRequest,
     allowed_tcp: Arc<Vec<String>>,
     allowed_udp: Arc<Vec<String>>,
     stun_servers: Vec<String>,
+    transport: Arc<TransportTuning>,
     republish_interval_secs: u64,
     max_wait_secs: u64,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>> {
@@ -288,18 +298,21 @@ fn handle_nostr_session(
         allowed_tcp,
         allowed_udp,
         stun_servers,
+        transport,
         republish_interval_secs,
         max_wait_secs,
     ))
 }
 
 /// Handle a nostr session by routing to TCP or UDP based on source protocol.
+#[allow(clippy::too_many_arguments)]
 async fn handle_nostr_session_impl(
     signaling: Arc<NostrSignaling>,
     request: ManualRequest,
     allowed_tcp: Arc<Vec<String>>,
     allowed_udp: Arc<Vec<String>>,
     stun_servers: Vec<String>,
+    transport: Arc<TransportTuning>,
     republish_interval_secs: u64,
     max_wait_secs: u64,
 ) -> Result<()> {
@@ -331,6 +344,7 @@ async fn handle_nostr_session_impl(
                 signaling,
                 request,
                 stun_servers,
+                transport,
                 republish_interval_secs,
                 max_wait_secs,
             )
@@ -351,6 +365,7 @@ async fn handle_nostr_session_impl(
                 signaling,
                 request,
                 stun_servers,
+                transport,
                 republish_interval_secs,
                 max_wait_secs,
             )
@@ -377,6 +392,7 @@ async fn handle_nostr_tcp_session_impl(
     signaling: Arc<NostrSignaling>,
     request: ManualRequest,
     stun_servers: Vec<String>,
+    transport: Arc<TransportTuning>,
     _republish_interval_secs: u64,
     _max_wait_secs: u64,
 ) -> Result<()> {
@@ -423,7 +439,7 @@ async fn handle_nostr_tcp_session_impl(
         local_candidates.len()
     );
 
-    let quic_identity = quic::generate_server_identity()?;
+    let quic_identity = quic::generate_server_identity(&transport)?;
 
     let offer = ManualOffer {
         version: MANUAL_SIGNAL_VERSION,
@@ -524,6 +540,7 @@ async fn handle_nostr_udp_session_impl(
     signaling: Arc<NostrSignaling>,
     request: ManualRequest,
     stun_servers: Vec<String>,
+    transport: Arc<TransportTuning>,
     _republish_interval_secs: u64,
     _max_wait_secs: u64,
 ) -> Result<()> {
@@ -570,7 +587,7 @@ async fn handle_nostr_udp_session_impl(
         local_candidates.len()
     );
 
-    let quic_identity = quic::generate_server_identity()?;
+    let quic_identity = quic::generate_server_identity(&transport)?;
 
     let offer = ManualOffer {
         version: MANUAL_SIGNAL_VERSION,
@@ -735,6 +752,7 @@ pub async fn run_nostr_server(config: NostrServerConfig) -> Result<()> {
         config.allowed_udp,
         signaling,
         config.stun_servers,
+        Arc::new(config.transport),
         config.republish_interval_secs,
         config.max_wait_secs,
         config.max_sessions,
