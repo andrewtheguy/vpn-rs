@@ -12,6 +12,7 @@ use std::time::Duration;
 use tokio::net::{TcpListener, UdpSocket};
 use tokio::sync::Mutex;
 use tokio::task::JoinSet;
+use tunnel_common::config::TransportTuning;
 
 /// Configuration for the nostr client.
 pub struct NostrClientConfig {
@@ -31,6 +32,8 @@ pub struct NostrClientConfig {
     pub republish_interval_secs: u64,
     /// Maximum wait time in seconds for signaling responses.
     pub max_wait_secs: u64,
+    /// Transport tuning for QUIC (congestion control, buffers).
+    pub transport: TransportTuning,
 }
 
 impl std::fmt::Debug for NostrClientConfig {
@@ -44,6 +47,7 @@ impl std::fmt::Debug for NostrClientConfig {
             .field("relays", &self.relays)
             .field("republish_interval_secs", &self.republish_interval_secs)
             .field("max_wait_secs", &self.max_wait_secs)
+            .field("transport", &self.transport)
             .finish()
     }
 }
@@ -270,7 +274,8 @@ pub async fn run_nostr_tcp_client(config: NostrClientConfig) -> Result<()> {
     let mut ice_disconnect_rx = ice_conn.disconnect_rx.clone();
     let ice_keeper_handle = tokio::spawn(ice_conn.ice_keeper.run());
 
-    let endpoint = quic::make_client_endpoint(ice_conn.socket, &offer.quic_fingerprint)?;
+    let endpoint =
+        quic::make_client_endpoint(ice_conn.socket, &offer.quic_fingerprint, &config.transport)?;
     log::info!(
         "Connecting to server via QUIC (timeout: {:?})...",
         QUIC_CONNECTION_TIMEOUT
@@ -465,7 +470,8 @@ pub async fn run_nostr_udp_client(config: NostrClientConfig) -> Result<()> {
     let mut ice_disconnect_rx = ice_conn.disconnect_rx.clone();
     let ice_keeper_handle = tokio::spawn(ice_conn.ice_keeper.run());
 
-    let endpoint = quic::make_client_endpoint(ice_conn.socket, &offer.quic_fingerprint)?;
+    let endpoint =
+        quic::make_client_endpoint(ice_conn.socket, &offer.quic_fingerprint, &config.transport)?;
     log::info!(
         "Connecting to server via QUIC (timeout: {:?})...",
         QUIC_CONNECTION_TIMEOUT

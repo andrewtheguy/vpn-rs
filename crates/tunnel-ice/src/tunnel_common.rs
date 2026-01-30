@@ -9,7 +9,7 @@ use anyhow::{Context, Result};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{lookup_host, TcpStream, UdpSocket};
 
 // Re-export shared address resolution functions from tunnel-common
@@ -371,9 +371,22 @@ where
     R: AsyncRead + Unpin,
     W: AsyncWrite + Unpin,
 {
-    tokio::io::copy(reader, writer)
-        .await
-        .context("Stream copy failed")?;
+    const COPY_BUFFER_SIZE: usize = 64 * 1024;
+    let mut buf = vec![0u8; COPY_BUFFER_SIZE];
+    loop {
+        let read_len = reader
+            .read(&mut buf)
+            .await
+            .context("Stream read failed")?;
+        if read_len == 0 {
+            break;
+        }
+        writer
+            .write_all(&buf[..read_len])
+            .await
+            .context("Stream write failed")?;
+    }
+    writer.flush().await.context("Stream flush failed")?;
     Ok(())
 }
 

@@ -9,8 +9,8 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use tunnel_common::config::{
-    default_stun_servers, expand_tilde, load_client_config, load_server_config, ClientConfig,
-    ServerConfig,
+    default_ice_transport_tuning, default_stun_servers, expand_tilde, load_client_config,
+    load_server_config, ClientConfig, ServerConfig,
 };
 use tunnel_common::net::resolve_listen_addr;
 use tunnel_ice::{custom, nostr, secret};
@@ -414,6 +414,9 @@ async fn main() -> Result<()> {
             match effective_mode {
                 "manual" => {
                     let custom_cfg = cfg.manual.as_ref();
+                    let transport = custom_cfg
+                        .map(|c| c.transport.clone())
+                        .unwrap_or_else(default_ice_transport_tuning);
                     let (allowed_tcp, allowed_udp, stun_servers) = match &mode {
                         Some(ServerMode::CustomManual {
                             allowed_tcp: at,
@@ -462,10 +465,14 @@ async fn main() -> Result<()> {
                         anyhow::bail!("At least one of --allowed-tcp or --allowed-udp is required for custom-manual server");
                     }
 
-                    custom::run_manual_server(allowed_tcp, allowed_udp, stun_servers).await
+                    custom::run_manual_server(allowed_tcp, allowed_udp, stun_servers, transport)
+                        .await
                 }
                 "nostr" => {
                     let nostr_cfg = cfg.nostr();
+                    let transport = nostr_cfg
+                        .map(|c| c.transport.clone())
+                        .unwrap_or_else(default_ice_transport_tuning);
                     let (
                         allowed_tcp,
                         allowed_udp,
@@ -585,6 +592,7 @@ async fn main() -> Result<()> {
                         republish_interval_secs: republish_interval,
                         max_wait_secs: max_wait,
                         max_sessions,
+                        transport,
                     })
                     .await
                 }
@@ -618,6 +626,9 @@ async fn main() -> Result<()> {
             match effective_mode {
                 "manual" => {
                     let custom_cfg = cfg.manual.as_ref();
+                    let transport = custom_cfg
+                        .map(|c| c.transport.clone())
+                        .unwrap_or_else(default_ice_transport_tuning);
                     let (source, target, stun_servers) = match &mode {
                         Some(ClientMode::CustomManual {
                             source: src,
@@ -660,10 +671,13 @@ async fn main() -> Result<()> {
                         .await
                         .with_context(|| format!("Invalid target '{}'. Expected format: host:port (e.g., localhost:2222 or 127.0.0.1:2222)", target))?;
 
-                    custom::run_manual_client(source, listen, stun_servers).await
+                    custom::run_manual_client(source, listen, stun_servers, transport).await
                 }
                 "nostr" => {
                     let nostr_cfg = cfg.nostr();
+                    let transport = nostr_cfg
+                        .map(|c| c.transport.clone())
+                        .unwrap_or_else(default_ice_transport_tuning);
                     let (
                         target,
                         source,
@@ -770,6 +784,7 @@ async fn main() -> Result<()> {
                                     relays,
                                     republish_interval_secs: republish_interval,
                                     max_wait_secs: max_wait,
+                                    transport,
                                 })
                                 .await
                             }
@@ -783,6 +798,7 @@ async fn main() -> Result<()> {
                                     relays,
                                     republish_interval_secs: republish_interval,
                                     max_wait_secs: max_wait,
+                                    transport,
                                 })
                                 .await
                             }
@@ -797,6 +813,7 @@ async fn main() -> Result<()> {
                             relays,
                             republish_interval_secs: republish_interval,
                             max_wait_secs: max_wait,
+                            transport,
                         })
                         .await
                     }

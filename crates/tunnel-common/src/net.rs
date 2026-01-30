@@ -3,7 +3,7 @@
 use anyhow::{Context, Result};
 use std::net::SocketAddr;
 use std::time::Duration;
-use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{lookup_host, TcpStream, UdpSocket};
 
 /// Delay between starting connection attempts (Happy Eyeballs style).
@@ -481,15 +481,30 @@ where
 // Stream copy helper
 // ============================================================================
 
+/// Buffer size for stream copies (64 KB).
+const COPY_BUFFER_SIZE: usize = 64 * 1024;
+
 /// Copy a stream until EOF.
 pub async fn copy_stream<R, W>(reader: &mut R, writer: &mut W) -> Result<()>
 where
     R: AsyncRead + Unpin,
     W: AsyncWrite + Unpin,
 {
-    tokio::io::copy(reader, writer)
-        .await
-        .context("Failed to copy stream")?;
+    let mut buf = vec![0u8; COPY_BUFFER_SIZE];
+    loop {
+        let read_len = reader
+            .read(&mut buf)
+            .await
+            .context("Failed to read from stream")?;
+        if read_len == 0 {
+            break;
+        }
+        writer
+            .write_all(&buf[..read_len])
+            .await
+            .context("Failed to write to stream")?;
+    }
+    writer.flush().await.context("Failed to flush stream")?;
     Ok(())
 }
 

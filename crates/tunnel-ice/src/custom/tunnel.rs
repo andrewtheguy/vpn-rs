@@ -11,6 +11,8 @@ use tokio::net::{TcpListener, UdpSocket};
 use tokio::sync::Mutex;
 use tokio::task::JoinSet;
 
+use tunnel_common::config::TransportTuning;
+
 use crate::signaling::{
     display_answer, display_offer, read_answer_from_stdin, read_offer_from_stdin, ManualAnswer,
     ManualOffer, MANUAL_SIGNAL_VERSION,
@@ -34,6 +36,7 @@ pub async fn run_manual_server(
     allowed_tcp: Vec<String>,
     allowed_udp: Vec<String>,
     stun_servers: Vec<String>,
+    transport: TransportTuning,
 ) -> Result<()> {
     eprintln!("Manual Tunnel - Server Mode (Client-First)");
     eprintln!("===========================================");
@@ -44,7 +47,7 @@ pub async fn run_manual_server(
     let local_candidates = ice.local_candidates();
 
     // Generate QUIC server identity
-    let quic_identity = quic::generate_server_identity()?;
+    let quic_identity = quic::generate_server_identity(&transport)?;
 
     // Read offer from client (includes source)
     eprintln!("Paste client offer (include BEGIN/END markers), then press Enter:");
@@ -232,6 +235,7 @@ pub async fn run_manual_client(
     source: String,
     listen: SocketAddr,
     stun_servers: Vec<String>,
+    transport: TransportTuning,
 ) -> Result<()> {
     let is_tcp = source.starts_with("tcp://");
     let is_udp = source.starts_with("udp://");
@@ -294,7 +298,7 @@ pub async fn run_manual_client(
     let ice_keeper_handle = tokio::spawn(ice_conn.ice_keeper.run());
 
     // Create QUIC client endpoint
-    let endpoint = quic::make_client_endpoint(ice_conn.socket, &quic_fingerprint)?;
+    let endpoint = quic::make_client_endpoint(ice_conn.socket, &quic_fingerprint, &transport)?;
     eprintln!(
         "Connecting to server via QUIC (timeout: {:?})...",
         QUIC_CONNECTION_TIMEOUT

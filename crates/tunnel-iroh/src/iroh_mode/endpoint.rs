@@ -18,9 +18,7 @@ use log::{info, warn};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
-use tunnel_common::config::{
-    CongestionController, TransportTuning, DEFAULT_RECEIVE_WINDOW, DEFAULT_SEND_WINDOW,
-};
+use tunnel_common::config::{CongestionController, TransportTuning, DEFAULT_RECEIVE_WINDOW};
 use url::Url;
 
 /// ALPN for all iroh modes (client requests source)
@@ -189,18 +187,33 @@ pub fn create_endpoint_builder(
         transport_config.congestion_controller_factory(factory);
         info!("Using {:?} congestion controller", tuning.congestion_controller);
 
-        // Set receive window (flow control)
+        // Set receive window (flow control) for connection + streams
         let receive_window = tuning.receive_window.unwrap_or(DEFAULT_RECEIVE_WINDOW);
         transport_config.receive_window(receive_window.into());
+        transport_config.stream_receive_window(receive_window.into());
 
-        // Set send window
-        let send_window = tuning.send_window.unwrap_or(DEFAULT_SEND_WINDOW);
+        // Set send window (defaults to receive window if not specified)
+        let send_window = tuning.send_window.unwrap_or(receive_window);
         transport_config.send_window(send_window.into());
 
-        let recv_source = if tuning.receive_window.is_none() { "default" } else { "config" };
-        let send_source = if tuning.send_window.is_none() { "default" } else { "config" };
         info!(
-            "Transport windows: receive={}KB ({}), send={}KB ({})",
+            "Iroh transport: cc={:?}, stream/receive={}KB, send={}KB",
+            tuning.congestion_controller,
+            receive_window / 1024,
+            send_window / 1024
+        );
+        let recv_source = if tuning.receive_window.is_none() { "default" } else { "config" };
+        let send_source = if tuning.send_window.is_none() {
+            if tuning.receive_window.is_none() {
+                "default"
+            } else {
+                "derived"
+            }
+        } else {
+            "config"
+        };
+        info!(
+            "Transport windows: stream/receive={}KB ({}), send={}KB ({})",
             receive_window / 1024,
             recv_source,
             send_window / 1024,

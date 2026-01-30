@@ -84,6 +84,9 @@ pub struct CustomManualConfig {
     /// Local address to listen on (client only, required).
     /// Format: host:port (no protocol prefix)
     pub target: Option<String>,
+    /// Transport layer tuning (congestion control, buffer sizes).
+    #[serde(default = "default_ice_transport_tuning")]
+    pub transport: TransportTuning,
 }
 
 /// Allowed source networks for client-requested source feature.
@@ -129,6 +132,9 @@ pub struct NostrConfig {
     /// Local address to listen on (client only, required).
     /// Format: host:port (no protocol prefix)
     pub target: Option<String>,
+    /// Transport layer tuning (congestion control, buffer sizes).
+    #[serde(default = "default_ice_transport_tuning")]
+    pub transport: TransportTuning,
 }
 
 /// NAT64 configuration for IPv6-only clients to access IPv4 resources.
@@ -393,11 +399,17 @@ pub enum CongestionController {
     NewReno,
 }
 
-/// Default QUIC receive window size (2 MB).
-pub const DEFAULT_RECEIVE_WINDOW: u32 = 2 * 1024 * 1024;
+/// Default QUIC receive window size (8 MB).
+pub const DEFAULT_RECEIVE_WINDOW: u32 = 8 * 1024 * 1024;
 
-/// Default QUIC send window size (2 MB).
-pub const DEFAULT_SEND_WINDOW: u32 = 2 * 1024 * 1024;
+/// Default QUIC send window size (8 MB).
+pub const DEFAULT_SEND_WINDOW: u32 = 8 * 1024 * 1024;
+
+/// Default QUIC receive window size for ICE modes (8 MB).
+pub const DEFAULT_ICE_RECEIVE_WINDOW: u32 = 8 * 1024 * 1024;
+
+/// Default QUIC send window size for ICE modes (8 MB).
+pub const DEFAULT_ICE_SEND_WINDOW: u32 = 8 * 1024 * 1024;
 
 /// Transport tuning configuration for QUIC connections.
 ///
@@ -409,15 +421,24 @@ pub struct TransportTuning {
     #[serde(default)]
     pub congestion_controller: CongestionController,
 
-    /// QUIC receive window size in bytes (default: 2097152 = 2MB).
+    /// QUIC receive window size in bytes (default: 8388608 = 8MB).
     /// Controls flow control - larger values allow more in-flight data.
     /// Valid range: 1024 to 16777216 (16MB).
     pub receive_window: Option<u32>,
 
-    /// QUIC send window size in bytes (default: 2097152 = 2MB).
+    /// QUIC send window size in bytes (default: 8388608 = 8MB).
     /// Controls how much data can be sent before acknowledgment.
     /// Valid range: 1024 to 16777216 (16MB).
     pub send_window: Option<u32>,
+}
+
+/// Default transport tuning for ICE modes (manual/nostr).
+pub fn default_ice_transport_tuning() -> TransportTuning {
+    TransportTuning {
+        congestion_controller: CongestionController::Cubic,
+        receive_window: Some(DEFAULT_ICE_RECEIVE_WINDOW),
+        send_window: Some(DEFAULT_ICE_SEND_WINDOW),
+    }
 }
 
 fn parse_expected_mode(expected_mode: &str) -> Result<Mode> {
@@ -848,6 +869,7 @@ impl ServerConfig {
                 if let Some(ref allowed) = nostr.allowed_sources {
                     validate_allowed_sources(allowed)?;
                 }
+                validate_transport_tuning(&nostr.transport, "nostr.transport")?;
             }
             // Server nostr mode should not have top-level source
             if self.source.is_some() {
@@ -870,6 +892,7 @@ impl ServerConfig {
                 if let Some(ref allowed) = manual.allowed_sources {
                     validate_allowed_sources(allowed)?;
                 }
+                validate_transport_tuning(&manual.transport, "manual.transport")?;
             }
             // Reject top-level source for manual server
             if self.source.is_some() {
@@ -984,6 +1007,7 @@ impl ClientConfig {
                 if let Some(ref target) = nostr.target {
                     validate_host_port(target, "target")?;
                 }
+                validate_transport_tuning(&nostr.transport, "nostr.transport")?;
             }
         }
 
@@ -1004,6 +1028,7 @@ impl ClientConfig {
                 if let Some(ref target) = manual.target {
                     validate_host_port(target, "target")?;
                 }
+                validate_transport_tuning(&manual.transport, "manual.transport")?;
             }
         }
 
