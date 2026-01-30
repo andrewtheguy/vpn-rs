@@ -1,8 +1,10 @@
 # tunnel-rs
 
-**Cross-platform Secure Peer-to-Peer TCP/UDP port forwarding and VPN with NAT traversal.**
+**Cross-platform Secure Peer-to-Peer TCP/UDP port forwarding with NAT traversal.**
 
-Tunnel-rs enables you to forward TCP and UDP traffic—or tunnel entire networks via VPN mode—between machines without requiring public IP addresses, open ports, or VPN infrastructure. It establishes direct encrypted connections between peers using modern P2P networking techniques.
+Tunnel-rs enables you to forward TCP and UDP traffic between machines without requiring public IP addresses, open ports, or VPN infrastructure. It establishes direct encrypted connections between peers using modern P2P networking techniques.
+
+For the optional full-network VPN mode (requires root/admin), see [`crates/tunnel-rs-vpn/README.md`](crates/tunnel-rs-vpn/README.md).
 
 > [!IMPORTANT]
 > **Project Goal:** This tool provides a convenient way to connect to different networks for **development or homelab purposes** without the hassle and security risk of opening a port. It is **not** meant for production setups or designed to be performant at scale.
@@ -22,10 +24,6 @@ Tunnel-rs enables you to forward TCP and UDP traffic—or tunnel entire networks
 - **NAT traversal** with multiple strategies (relay fallback, STUN, full ICE)
 - **Flexible signaling** — Automated discovery (iroh), decentralized (Nostr), or manual exchange
 - **Offline/LAN support** — manual mode works without internet
-
-**VPN Mode Features**
-- **Direct IP-over-QUIC** — High performance direct tunneling with TLS 1.3 encryption
-- **Automatic IP assignment** — No manual keypair or IP management
 
 **Common Use Cases:**
 - **SSH access** to machines behind NAT/firewalls
@@ -52,6 +50,8 @@ Tunnel-rs enables you to forward TCP and UDP traffic—or tunnel entire networks
 | Route all traffic through tunnel | VPN Mode (requires root/admin) | `tunnel-rs-vpn` |
 | Access an entire remote subnet | VPN Mode (requires root/admin) | `tunnel-rs-vpn` |
 
+VPN mode docs live in [`crates/tunnel-rs-vpn/README.md`](crates/tunnel-rs-vpn/README.md).
+
 ### Alternative Port Forwarding Modes (Niche Use Cases)
 
 | Need | Recommended | Binary |
@@ -65,12 +65,12 @@ Tunnel-rs enables you to forward TCP and UDP traffic—or tunnel entire networks
 
 tunnel-rs provides multiple modes for establishing tunnels. **Use `iroh` mode** for most use cases — it provides the best NAT traversal with relay fallback, automatic discovery, and client authentication.
 
-**Identity reuse note:** Automatic peer discovery uses simple, shareable identities. For **VPN (iroh)**, the same client identity can be reused across multiple devices without conflicts because sessions are keyed by `(EndpointId, device_id)`, which is convenient for staging/homelab setups. For **port forwarding (iroh/nostr/manual)**, each session is handled independently—multiple concurrent sessions from the same identity (whether on one device or multiple devices) do not conflict. Clients use ephemeral identities by default, so identity reuse is typically not a concern.
+**Identity note:** iroh discovery uses shareable identities. Port-forwarding sessions are independent; VPN sessions are keyed by `(EndpointId, device_id)` to avoid conflicts. For VPN details, see [`crates/tunnel-rs-vpn/README.md`](crates/tunnel-rs-vpn/README.md).
 
 **Binary layout:**
 - `tunnel-rs`: Port forwarding with iroh mode (install script or download from releases)
 - `tunnel-rs-ice`: Port forwarding with manual and nostr modes (download from releases)
-- `tunnel-rs-vpn`: VPN mode (iroh) (install script or download from releases)
+- `tunnel-rs-vpn`: VPN mode (iroh) (see [`crates/tunnel-rs-vpn/README.md`](crates/tunnel-rs-vpn/README.md))
 
 ### Port Forwarding Modes
 
@@ -79,14 +79,6 @@ tunnel-rs provides multiple modes for establishing tunnels. **Use `iroh` mode** 
 | **iroh** (recommended) | Best (relay fallback) | Automatic | iroh relay infrastructure |
 | nostr (alternative mode) | STUN only | Automatic (Nostr) | Nostr relays (decentralized) |
 | manual (alternative mode) | STUN only | Manual copy-paste | None |
-
-### VPN Mode
-
-| Mode | NAT Traversal | Discovery | Platform | External Dependency |
-|------|---------------|-----------|----------|---------------------|
-| **tunnel-rs-vpn** (iroh) | Best (relay fallback) | Automatic | Linux/macOS/Windows | iroh relay infrastructure |
-
-> **Historical note:** VPN with Nostr/ICE (`tunnel-rs-vpn-ice`) was removed. For historical reference, see the [before-ice-vpn-removal](https://github.com/andrewtheguy/tunnel-rs/releases/tag/before-ice-vpn-removal) tag.
 
 > See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for detailed diagrams and technical deep-dives.
 
@@ -157,54 +149,8 @@ curl -sSL https://andrewtheguy.github.io/tunnel-rs/install.sh | bash -s 20251210
 
 ### VPN Mode (`tunnel-rs-vpn`)
 
-> VPN mode requires root/admin privileges to create TUN devices and configure routes.
-
-**Linux & macOS:**
-```bash
-curl -sSL https://andrewtheguy.github.io/tunnel-rs/install-vpn.sh | sudo bash
-```
-
-**Windows:**
-```powershell
-irm https://andrewtheguy.github.io/tunnel-rs/install-vpn.ps1 | iex
-```
-> [!NOTE]
-> **Windows Requirements:** Running `tunnel-rs-vpn.exe` requires the **WinTun driver** and **Administrator privileges** for TUN device creation.
->
-> 1. Download WinTun driver from https://www.wintun.net/ (official WireGuard project)
-> 2. Extract the zip and copy `wintun/bin/amd64/wintun.dll` to:
->    - The same directory as `tunnel-rs-vpn.exe` (default: `%LOCALAPPDATA%\Programs\tunnel-rs\`), OR
->    - Any directory in the system PATH
-> 3. **Run `tunnel-rs-vpn.exe` as Administrator:** Right-click PowerShell or Command Prompt → "Run as administrator", then execute the VPN command
->
-> **Troubleshooting:** If you see `Failed to create TUN device: LoadLibraryExW failed`, the `wintun.dll` is missing or not in a valid DLL search path.
-
-<details>
-<summary>Advanced installation options</summary>
-
-Install with custom release tag:
-```bash
-# Linux/macOS
-curl -sSL https://andrewtheguy.github.io/tunnel-rs/install-vpn.sh | sudo bash -s <RELEASE_TAG>
-```
-
-```powershell
-# Windows
-& ([scriptblock]::Create((irm https://andrewtheguy.github.io/tunnel-rs/install-vpn.ps1))) <RELEASE_TAG>
-```
-
-Latest prerelease:
-```bash
-# Linux/macOS
-curl -sSL https://andrewtheguy.github.io/tunnel-rs/install-vpn.sh | sudo bash -s -- --prerelease
-```
-
-```powershell
-# Windows
-& ([scriptblock]::Create((irm https://andrewtheguy.github.io/tunnel-rs/install-vpn.ps1))) -PreRelease
-```
-
-</details>
+VPN mode is optional/secondary and documented separately (installers, Windows WinTun requirements, usage):
+[`crates/tunnel-rs-vpn/README.md`](crates/tunnel-rs-vpn/README.md).
 
 ### From Source
 
@@ -216,6 +162,7 @@ cargo install --path . -p tunnel-rs
 cargo install --path . -p tunnel-rs-ice
 
 # VPN mode (requires root/admin to run)
+# See: crates/tunnel-rs-vpn/README.md
 cargo install --path . -p tunnel-rs-vpn
 ```
 
@@ -242,7 +189,7 @@ Access services running in Docker or Kubernetes remotely — without opening por
 
 # Common Configuration
 
-These settings apply to both Port Forwarding (`tunnel-rs`) and VPN (`tunnel-rs-vpn`) modes using iroh.
+These settings apply to Port Forwarding (`tunnel-rs`) using iroh. (VPN mode has similar concepts; see `crates/tunnel-rs-vpn/README.md`.)
 
 ## Persistent Server Identity
 
@@ -258,16 +205,12 @@ tunnel-rs show-server-id --secret-file ./server.key
 
 Then reference the key in your server config or CLI:
 
-**CLI** (both modes):
+**CLI**:
 ```bash
-# Port forwarding
 tunnel-rs server --secret-file ./server.key --allowed-tcp 127.0.0.0/8 --auth-tokens "$AUTH_TOKEN"
-
-# VPN
-sudo tunnel-rs-vpn server --secret-file ./server.key -c vpn_server.toml
 ```
 
-**Config file** (both modes - in `server.toml` or `vpn_server.toml`):
+**Config file** (`server.toml`):
 ```toml
 [iroh]
 secret_file = "./server.key"
@@ -326,7 +269,7 @@ iYYYYYYYYYYYYYYYYY
 
 ### Configuration File
 
-**Server** (`server.toml` or `vpn_server.toml`):
+**Server** (`server.toml`):
 ```toml
 [iroh]
 auth_tokens = [
@@ -374,16 +317,7 @@ Uses iroh's P2P network for automatic peer discovery and NAT traversal with rela
      Client Side                                            Server Side
 ```
 
-### Full Network Tunneling (VPN Mode)
-
-```
-+-----------------+        +-----------------+        +-----------------+        +-----------------+
-| System Network  |  IP    | client          |  iroh  | server          |  IP    | Target Network  |
-| Stack (tun0)    |<------>| (frame/unframe) |<======>| (frame/unframe) |<------>| (LAN/Internet)  |
-|                 |        |                 |  QUIC  |                 |        |                 |
-+-----------------+        +-----------------+        +-----------------+        +-----------------+
-     Client Side                                            Server Side
-```
+For full network tunneling (TUN/VPN), see [`crates/tunnel-rs-vpn/README.md`](crates/tunnel-rs-vpn/README.md).
 
 ## Quick Start
 
@@ -602,188 +536,8 @@ tunnel-rs client -c ./my-client.toml
 
 # VPN Mode
 
-Full network tunneling with Direct QUIC encryption. Requires root/admin privileges.
-
-Native direct TUN-based VPN mode for full network tunneling. Unlike port forwarding modes, VPN mode creates a TUN device and routes IP traffic directly through the encrypted Iroh QUIC connection, eliminating double encryption overhead.
-
-> **Note:** VPN mode requires root/admin privileges to create TUN devices and configure routes.
-
-<details>
-<summary><b>Windows Setup: WinTun Driver Required</b></summary>
-
-Windows VPN mode requires the WinTun driver DLL from https://www.wintun.net/ (official WireGuard project):
-
-1. Download and extract the zip file
-2. Copy `wintun/bin/amd64/wintun.dll` to the same directory as `tunnel-rs-vpn.exe` (or any directory in the system PATH)
-3. Run as Administrator
-
-If you see `Failed to create TUN device: LoadLibraryExW failed`, the DLL is missing or not in a valid DLL search path.
-
-</details>
-
-> **Similar Project:** This VPN mode is conceptually similar to [quincy](https://github.com/quincy-rs/quincy), a VPN implementation using the QUIC protocol. The key difference is that tunnel-rs uses iroh's NAT traversal infrastructure, so **no open port is required on the server** — connections work through NAT/firewalls without manual port forwarding.
-
-## Architecture
-
-```
-Client                                     Server
-┌─────────────────────┐                   ┌─────────────────────┐
-│  Applications       │                   │  Target Network     │
-│        ↓            │                   │        ↑            │
-│  [tun0: 10.0.0.2]   │                   │  [tun0: 10.0.0.1]   │
-│        ↓            │                   │        ↑            │
-│  Tunnel (VPN)       │                   │  Tunnel (VPN)       │
-│        ↓            │                   │        ↑            │
-│  iroh (transport)   │ ════════════════► │  iroh (transport)   │
-└─────────────────────┘   NAT traversal   └─────────────────────┘
-```
-
-- Creates a virtual network interface (TUN device)
-- Assigns VPN IP addresses automatically (no keypair management)
-- Routes entire IP subnets, not just individual ports
-- **Direct IP-over-QUIC** tunneling (TLS 1.3 encryption)
-- No double encryption (removes WireGuard overhead)
-
-## Quick Start
-
-### 1. Setup (One-Time)
-
-Generate a server key for persistent identity:
-
-```bash
-# On server machine
-tunnel-rs generate-server-key --output ./server.key
-
-# Create authentication token
-AUTH_TOKEN=$(tunnel-rs generate-token)
-echo $AUTH_TOKEN
-```
-
-### 2. Create Server Config
-
-Create `vpn_server.toml` (or copy from `vpn_server.toml.example`):
-
-```toml
-role = "vpnserver"
-mode = "iroh"
-
-[iroh]
-network = "10.0.0.0/24"
-secret_file = "./server.key"
-auth_tokens = ["<YOUR_AUTH_TOKEN>"]  # Replace with token from step 1
-```
-
-Notes:
-- The IPv4 VPN network is optional; you can run IPv6-only by setting `network6 = "fd00::/64"` instead (needs `dns_server = "none"` or your custom iroh DNS server that supports IPv6 because the default dns.iroh.link server does not support IPv6). **IPv6-only mode is experimental.**
-- Preliminary NAT64 support is available but **experimental** (not fully tested, may have stability or compatibility limitations).
-
-### 3. Start VPN Server
-
-```bash
-sudo tunnel-rs-vpn server -c vpn_server.toml
-```
-
-Output:
-```
-VPN Server Node ID: 2xnbkpbc7izsilvewd7c62w7wnwziacmpfwvhcrya5nt76dqkpga
-Clients connect with: tunnel-rs-vpn client --server-node-id <ID> --auth-token <TOKEN>
-```
-
-### 4. Connect VPN Client
-
-```bash
-sudo tunnel-rs-vpn client \
-  --server-node-id <SERVER_NODE_ID> \
-  --auth-token "$AUTH_TOKEN"
-```
-
-The client will:
-1. Connect to the server via iroh (NAT traversal)
-2. Receive an assigned IP (e.g., 10.0.0.2)
-3. Create a TUN device and configure routes
-
-### 5. Verify Connection
-
-```bash
-# Check assigned IP
-ip addr show tun0  # Linux
-ifconfig utun9     # macOS
-
-# Ping the server
-ping 10.0.0.1
-```
-
-## CLI Options
-
-### server (tunnel-rs-vpn)
-
-VPN server requires a config file. Use `-c <FILE>` or `--default-config` for `~/.config/tunnel-rs/vpn_server.toml`.
-
-| Option | Description |
-|--------|-------------|
-| `-c, --config <FILE>` | Path to config file (required unless --default-config) |
-| `--default-config` | Use `~/.config/tunnel-rs/vpn_server.toml` |
-
-See [`vpn_server.toml.example`](vpn_server.toml.example) for all available configuration options.
-
-### client (tunnel-rs-vpn)
-
-| Option | Default | Description |
-|--------|---------|-------------|
-| `--server-node-id`, `-n` | required | EndpointId of the VPN server |
-| `--mtu` | 1420 | MTU for VPN packets |
-| `--keepalive-secs` | 25 | Keepalive interval |
-| `--relay-url` | public | Custom relay server URL(s), repeatable |
-| `--dns-server` | public | Custom DNS server URL, or "none" to disable DNS discovery |
-| `--auth-token` | required | Authentication token |
-| `--auth-token-file` | - | Path to file containing token |
-| `--route` | - | Additional CIDRs to route through VPN (repeatable) |
-| `--auto-reconnect` | true | Enable auto-reconnect on connection loss |
-| `--no-auto-reconnect` | - | Disable auto-reconnect (exit on first disconnection) |
-| `--max-reconnect-attempts` | unlimited | Maximum reconnect attempts (unlimited if not specified) |
-
-## Split Tunneling
-
-By default, only traffic to the VPN network (e.g., 10.0.0.0/24) is routed through the tunnel. Use `--route` to add additional networks:
-
-```bash
-sudo tunnel-rs-vpn client \
-  --server-node-id <ID> \
-  --auth-token "$AUTH_TOKEN" \
-  --route 192.168.1.0/24 \
-  --route 172.16.0.0/12
-```
-
-## How It Works
-
-1. **Signaling via iroh**: Client connects to server using iroh for peer discovery and NAT traversal
-2. **Handshake**: Client and server exchange device IDs and session parameters (TLS 1.3 secured)
-3. **IP Assignment**: Server assigns client an IP from the VPN network pool
-4. **TUN Device**: Both sides create TUN devices for packet capture
-5. **Packet Flow**: IP packets are framed and sent directly over the encrypted Iroh QUIC stream
-
-**Advantages over traditional WireGuard:**
-| Feature | WireGuard | tunnel-rs VPN |
-|---------|-----------|---------------|
-| Identity | Static keypair per device | Ephemeral `device_id` (per session) |
-| Config conflict | Same keypair = conflict | Each session unique via `device_id` |
-| NAT traversal | Manual endpoint config | Automatic via iroh |
-| IP assignment | Static in config | Dynamic from server |
-
-### About `device_id`
-
-The `device_id` is a random 64-bit integer generated fresh each time the VPN client starts (ephemeral per session). It is used purely for **session tracking** on the server, not for security or access control.
-
-- **Format**: Random `u64` (displayed as 16 hex characters in logs, e.g., `a1b2c3d4e5f67890`)
-- **Lifecycle**: Generated at client startup using CSPRNG; not persisted across restarts
-- **Purpose**: Allows multiple VPN sessions from the same iroh endpoint (the server keys clients by `(EndpointId, device_id)`)
-- **Security**: Authentication relies on iroh's cryptographic EndpointId + auth tokens, not on device_id unpredictability
-
-This differs from WireGuard where a static public key identifies each device and conflicts arise if the same key is used from multiple locations.
-
-## Single Instance Lock
-
-Only one VPN client can run at a time per machine. This prevents routing conflicts and TUN device issues. The lock is automatically released when the client exits.
+VPN mode (`tunnel-rs-vpn`) is documented separately (installers, Windows WinTun requirements, quick start, config, and CLI):
+[`crates/tunnel-rs-vpn/README.md`](crates/tunnel-rs-vpn/README.md).
 
 ---
 

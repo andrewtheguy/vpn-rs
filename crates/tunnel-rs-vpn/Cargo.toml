@@ -3,6 +3,7 @@ name = "tunnel-rs-vpn"
 version.workspace = true
 edition = "2021"
 description = "IP-over-QUIC VPN tunnel via iroh P2P"
+readme = "README.md"
 
 [features]
 default = ["jemalloc"]
