@@ -4,7 +4,7 @@
 
 Tunnel-rs enables you to forward TCP and UDP traffic between machines without requiring public IP addresses, open ports, or VPN infrastructure. It establishes direct encrypted connections between peers using modern P2P networking techniques.
 
-For the optional full-network VPN mode (requires root/admin), see [`crates/tunnel-rs-vpn/README.md`](crates/tunnel-rs-vpn/README.md).
+For full-network VPN mode (requires root/admin), see [`crates/tunnel-rs-vpn/README.md`](crates/tunnel-rs-vpn/README.md).
 
 > [!IMPORTANT]
 > **Project Goal:** This tool provides a convenient way to connect to different networks for **development or homelab purposes** without the hassle and security risk of opening a port. It is **not** meant for production setups or designed to be performant at scale.
@@ -149,7 +149,7 @@ curl -sSL https://andrewtheguy.github.io/tunnel-rs/install.sh | bash -s 20251210
 
 ### VPN Mode (`tunnel-rs-vpn`)
 
-VPN mode is optional/secondary and documented separately (installers, Windows WinTun requirements, usage):
+VPN mode is documented separately (installers, Windows WinTun requirements, usage):
 [`crates/tunnel-rs-vpn/README.md`](crates/tunnel-rs-vpn/README.md).
 
 ### From Source
