@@ -207,21 +207,19 @@ pub fn create_endpoint_builder(
                 // Explicitly disabled
                 info!("DNS discovery disabled (dns_server=none)");
             }
-            Some(dns_url) if secret_key.is_some() => {
+            Some(dns_url) => {
                 // Custom DNS server with publishing and resolving via HTTP (pkarr)
                 let pkarr_url: Url = dns_url.parse().context("Invalid DNS server URL")?;
-                info!("Using custom DNS server: {}", dns_url);
-                builder = builder
-                    .address_lookup(
-                        PkarrPublisher::builder(pkarr_url.clone()).build(secret_key.unwrap().clone()),
-                    )
-                    .address_lookup(PkarrResolver::builder(pkarr_url));
-            }
-            Some(dns_url) => {
-                // Custom DNS server, resolve only via HTTP (no secret = can't publish)
-                let pkarr_url: Url = dns_url.parse().context("Invalid DNS server URL")?;
-                info!("Using custom DNS server (resolve only): {}", dns_url);
-                builder = builder.address_lookup(PkarrResolver::builder(pkarr_url));
+                if let Some(secret) = secret_key {
+                    info!("Using custom DNS server: {}", dns_url);
+                    builder = builder
+                        .address_lookup(PkarrPublisher::builder(pkarr_url.clone()).build(secret.clone()))
+                        .address_lookup(PkarrResolver::builder(pkarr_url));
+                } else {
+                    // Custom DNS server, resolve only via HTTP (no secret = can't publish)
+                    info!("Using custom DNS server (resolve only): {}", dns_url);
+                    builder = builder.address_lookup(PkarrResolver::builder(pkarr_url));
+                }
             }
             None => {
                 // Default n0 DNS
