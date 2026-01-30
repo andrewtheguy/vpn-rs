@@ -8,6 +8,8 @@ Use a custom relay server instead of the public iroh relay infrastructure.
 
 > **Note:** When using `--relay-url`, you only need a custom relay server. The `--dns-server` option is **not required** — DNS discovery is only needed if you also want to avoid the public iroh DNS infrastructure (see [Self-Hosted DNS Discovery](#self-hosted-dns-discovery)).
 
+> **Note:** The public iroh DNS endpoint is now dual-stack (IPv4 + IPv6). IPv6-only environments no longer need a custom DNS server just to reach the default discovery service.
+
 ```bash
 # Both sides must use the same relay
 tunnel-rs server --relay-url https://relay.example.com --allowed-tcp 127.0.0.0/8 --auth-tokens "$AUTH_TOKEN"
@@ -42,6 +44,8 @@ tunnel-rs client --dns-server https://dns.example.com/pkarr --server-node-id <ID
 ## Disabling DNS Discovery
 
 You can disable DNS-based peer discovery entirely by setting `--dns-server none`:
+
+> **Note:** This used to be a common workaround for IPv6-only networks when the public iroh DNS endpoint was IPv4-only. Since it is now dual-stack, only use `--dns-server none` if you intentionally want to disable DNS discovery.
 
 ```bash
 # Both sides disable DNS discovery
