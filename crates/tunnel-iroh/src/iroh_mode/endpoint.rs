@@ -196,6 +196,12 @@ pub fn create_endpoint_builder(
         let send_window = tuning.send_window.unwrap_or(receive_window);
         transport_config.send_window(send_window.into());
 
+        info!(
+            "Iroh transport: cc={:?}, stream/receive={}KB, send={}KB",
+            tuning.congestion_controller,
+            receive_window / 1024,
+            send_window / 1024
+        );
         let recv_source = if tuning.receive_window.is_none() { "default" } else { "config" };
         let send_source = if tuning.send_window.is_none() {
             if tuning.receive_window.is_none() {

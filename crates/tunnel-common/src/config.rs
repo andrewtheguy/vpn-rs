@@ -399,11 +399,11 @@ pub enum CongestionController {
     NewReno,
 }
 
-/// Default QUIC receive window size (2 MB).
-pub const DEFAULT_RECEIVE_WINDOW: u32 = 2 * 1024 * 1024;
+/// Default QUIC receive window size (8 MB).
+pub const DEFAULT_RECEIVE_WINDOW: u32 = 8 * 1024 * 1024;
 
-/// Default QUIC send window size (2 MB).
-pub const DEFAULT_SEND_WINDOW: u32 = 2 * 1024 * 1024;
+/// Default QUIC send window size (8 MB).
+pub const DEFAULT_SEND_WINDOW: u32 = 8 * 1024 * 1024;
 
 /// Default QUIC receive window size for ICE modes (8 MB).
 pub const DEFAULT_ICE_RECEIVE_WINDOW: u32 = 8 * 1024 * 1024;
@@ -421,12 +421,12 @@ pub struct TransportTuning {
     #[serde(default)]
     pub congestion_controller: CongestionController,
 
-    /// QUIC receive window size in bytes (default: 2097152 = 2MB).
+    /// QUIC receive window size in bytes (default: 8388608 = 8MB).
     /// Controls flow control - larger values allow more in-flight data.
     /// Valid range: 1024 to 16777216 (16MB).
     pub receive_window: Option<u32>,
 
-    /// QUIC send window size in bytes (default: 2097152 = 2MB).
+    /// QUIC send window size in bytes (default: 8388608 = 8MB).
     /// Controls how much data can be sent before acknowledgment.
     /// Valid range: 1024 to 16777216 (16MB).
     pub send_window: Option<u32>,
