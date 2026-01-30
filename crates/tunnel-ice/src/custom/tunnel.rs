@@ -35,8 +35,8 @@ pub async fn run_manual_server(
     allowed_udp: Vec<String>,
     stun_servers: Vec<String>,
 ) -> Result<()> {
-    log::info!("Manual Tunnel - Server Mode (Client-First)");
-    log::info!("===========================================");
+    eprintln!("Manual Tunnel - Server Mode (Client-First)");
+    eprintln!("===========================================");
 
     // Gather ICE candidates
     let ice = IceEndpoint::gather(&stun_servers).await?;
@@ -47,7 +47,7 @@ pub async fn run_manual_server(
     let quic_identity = quic::generate_server_identity()?;
 
     // Read offer from client (includes source)
-    log::info!("Paste client offer (include BEGIN/END markers), then press Enter:");
+    eprintln!("Paste client offer (include BEGIN/END markers), then press Enter:");
     let offer = read_offer_from_stdin()?;
     if offer.version != MANUAL_SIGNAL_VERSION {
         anyhow::bail!(
@@ -98,7 +98,7 @@ pub async fn run_manual_server(
         session_id: None,
         quic_fingerprint: Some(quic_identity.fingerprint.clone()),
     };
-    log::info!("\nManual Answer (copy to client):");
+    eprintln!("\nManual Answer (copy to client):");
     display_answer(&answer)?;
 
     // Connect via ICE (server is Controlled in client-first pattern)
@@ -116,7 +116,7 @@ pub async fn run_manual_server(
 
     // Create QUIC server endpoint
     let endpoint = quic::make_server_endpoint(ice_conn.socket, quic_identity.server_config)?;
-    log::info!(
+    eprintln!(
         "Waiting for client QUIC connection (timeout: {:?})...",
         QUIC_CONNECTION_TIMEOUT
     );
@@ -129,12 +129,12 @@ pub async fn run_manual_server(
         .await
         .context("Timeout during QUIC handshake")?
         .context("Failed to accept QUIC connection")?;
-    log::info!("Client connected over QUIC.");
+    eprintln!("Client connected over QUIC.");
 
     // Handle connections based on protocol
     if is_tcp {
         let primary_addr = target_addrs.first().copied().unwrap();
-        log::info!(
+        eprintln!(
             "Forwarding TCP connections to {} ({} address(es) resolved)",
             primary_addr,
             target_addrs.len()
@@ -145,7 +145,7 @@ pub async fn run_manual_server(
                     let (send_stream, recv_stream) = match accept_result {
                         Ok(streams) => streams,
                         Err(e) => {
-                            log::info!("Client disconnected: {}", e);
+                            eprintln!("Client disconnected: {}", e);
                             break;
                         }
                     };
@@ -177,7 +177,7 @@ pub async fn run_manual_server(
     } else {
         // UDP mode
         let primary_addr = target_addrs.first().copied().unwrap();
-        log::info!(
+        eprintln!(
             "Forwarding UDP traffic to {} ({} address(es) resolved)",
             primary_addr,
             target_addrs.len()
@@ -222,7 +222,7 @@ pub async fn run_manual_server(
         Err(e) => log::warn!("ICE keeper task failed: {}", e),
     }
 
-    log::info!("Connection closed.");
+    eprintln!("Connection closed.");
     Ok(())
 }
 
@@ -242,9 +242,9 @@ pub async fn run_manual_client(
         );
     }
 
-    log::info!("Manual Tunnel - Client Mode (Client-First)");
-    log::info!("==========================================");
-    log::info!("Requesting source: {}", source);
+    eprintln!("Manual Tunnel - Client Mode (Client-First)");
+    eprintln!("==========================================");
+    eprintln!("Requesting source: {}", source);
 
     // Gather ICE candidates
     let ice = IceEndpoint::gather(&stun_servers).await?;
@@ -261,11 +261,11 @@ pub async fn run_manual_client(
         session_id: None,
         source: Some(source.clone()),
     };
-    log::info!("\nManual Offer (copy to server):");
+    eprintln!("\nManual Offer (copy to server):");
     display_offer(&offer)?;
 
     // Read answer from server (includes QUIC fingerprint)
-    log::info!("Paste server answer (include BEGIN/END markers), then press Enter:");
+    eprintln!("Paste server answer (include BEGIN/END markers), then press Enter:");
     let answer = read_answer_from_stdin()?;
     if answer.version != MANUAL_SIGNAL_VERSION {
         anyhow::bail!(
@@ -295,7 +295,7 @@ pub async fn run_manual_client(
 
     // Create QUIC client endpoint
     let endpoint = quic::make_client_endpoint(ice_conn.socket, &quic_fingerprint)?;
-    log::info!(
+    eprintln!(
         "Connecting to server via QUIC (timeout: {:?})...",
         QUIC_CONNECTION_TIMEOUT
     );
@@ -306,7 +306,7 @@ pub async fn run_manual_client(
         .await
         .context("Timeout during QUIC connection")?
         .context("Failed to connect to server")?;
-    log::info!("Connected to server over QUIC.");
+    eprintln!("Connected to server over QUIC.");
 
     if is_tcp {
         let conn = Arc::new(conn);
@@ -315,7 +315,7 @@ pub async fn run_manual_client(
         let listener = TcpListener::bind(listen)
             .await
             .context("Failed to bind TCP listener")?;
-        log::info!(
+        eprintln!(
             "Listening on TCP {} - configure your client to connect here",
             listen
         );
@@ -333,7 +333,7 @@ pub async fn run_manual_client(
                         }
                     };
 
-                    log::info!("New local connection from {}", peer_addr);
+                    eprintln!("New local connection from {}", peer_addr);
                     let conn_clone = conn.clone();
                     let established = tunnel_established.clone();
 
@@ -352,7 +352,7 @@ pub async fn run_manual_client(
                     });
                 }
                 error = conn.closed() => {
-                    log::info!("QUIC connection closed: {}", error);
+                    eprintln!("QUIC connection closed: {}", error);
                     break;
                 }
                 result = ice_disconnect_rx.changed() => {
@@ -394,7 +394,7 @@ pub async fn run_manual_client(
             Err(e) => log::warn!("ICE keeper task failed: {}", e),
         }
 
-        log::info!("TCP client stopped.");
+        eprintln!("TCP client stopped.");
     } else {
         // UDP mode
         let (send_stream, recv_stream) = open_bi_with_retry(&conn).await?;
@@ -404,7 +404,7 @@ pub async fn run_manual_client(
                 .await
                 .context("Failed to bind UDP socket")?,
         );
-        log::info!(
+        eprintln!(
             "Listening on UDP {} - configure your client to connect here",
             listen
         );
@@ -448,7 +448,7 @@ pub async fn run_manual_client(
             Err(e) => log::warn!("ICE keeper task failed: {}", e),
         }
 
-        log::info!("UDP client stopped.");
+        eprintln!("UDP client stopped.");
     }
 
     Ok(())

@@ -118,28 +118,36 @@ struct Args {
 #[derive(Subcommand)]
 enum Command {
     /// Run as server (accepts connections and forwards to source)
-    #[command(subcommand_negates_reqs = true, subcommand_required = false)]
+    #[command(
+        subcommand_negates_reqs = true,
+        subcommand_required = false,
+        after_help = "Examples:\n  tunnel-rs-ice server -c server_ice.toml\n  tunnel-rs-ice server manual --allowed-tcp 127.0.0.0/8\n  tunnel-rs-ice server -c server_ice.toml manual\n\nNotes:\n  - --config/--default-config can appear before or after the subcommand.\n"
+    )]
     Server {
         /// Path to config file
-        #[arg(short, long)]
+        #[arg(short, long, global = true)]
         config: Option<PathBuf>,
 
         /// Load config from default location (~/.config/tunnel-rs/server_ice.toml)
-        #[arg(long)]
+        #[arg(long, global = true)]
         default_config: bool,
 
         #[command(subcommand)]
         mode: Option<ServerMode>,
     },
     /// Run as client (connects to server and exposes local port)
-    #[command(subcommand_negates_reqs = true, subcommand_required = false)]
+    #[command(
+        subcommand_negates_reqs = true,
+        subcommand_required = false,
+        after_help = "Examples:\n  tunnel-rs-ice client -c client_ice.toml\n  tunnel-rs-ice client manual --source tcp://127.0.0.1:5000 --target 127.0.0.1:6000\n  tunnel-rs-ice client -c client_ice.toml manual --source tcp://127.0.0.1:5000 --target 127.0.0.1:6000\n\nNotes:\n  - --config/--default-config can appear before or after the subcommand.\n  - Manual mode prints an OFFER; paste the server's ANSWER to continue.\n"
+    )]
     Client {
         /// Path to config file
-        #[arg(short, long)]
+        #[arg(short, long, global = true)]
         config: Option<PathBuf>,
 
         /// Load config from default location (~/.config/tunnel-rs/client_ice.toml)
-        #[arg(long)]
+        #[arg(long, global = true)]
         default_config: bool,
 
         #[command(subcommand)]
@@ -166,7 +174,10 @@ enum Command {
 #[derive(Subcommand)]
 enum ServerMode {
     /// Client-initiated mode: Full ICE with manual signaling (str0m+quinn)
-    #[command(name = "manual")]
+    #[command(
+        name = "manual",
+        after_help = "Manual mode uses copy/paste signaling:\n  1) Client prints an OFFER\n  2) Paste OFFER into server\n  3) Server prints an ANSWER\n  4) Paste ANSWER into client"
+    )]
     CustomManual {
         /// Allowed TCP source networks in CIDR notation (repeatable)
         /// E.g., --allowed-tcp 127.0.0.0/8 --allowed-tcp 192.168.0.0/16
@@ -240,7 +251,10 @@ enum ServerMode {
 #[derive(Subcommand)]
 enum ClientMode {
     /// Client-initiated mode: Full ICE with manual signaling (str0m+quinn)
-    #[command(name = "manual")]
+    #[command(
+        name = "manual",
+        after_help = "Manual mode uses copy/paste signaling:\n  1) Client prints an OFFER\n  2) Paste OFFER into server\n  3) Server prints an ANSWER\n  4) Paste ANSWER into client"
+    )]
     CustomManual {
         /// Source address to request from server (tcp://host:port or udp://host:port)
         /// The server must have this in its --allowed-tcp or --allowed-udp list
@@ -366,7 +380,8 @@ fn resolve_client_config(
 #[tokio::main]
 async fn main() -> Result<()> {
     let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn"))
-        .filter_module("tunnel_rs", log::LevelFilter::Info)
+        .filter_module("tunnel_rs_ice", log::LevelFilter::Info)
+        .filter_module("tunnel_ice", log::LevelFilter::Info)
         .try_init();
     let args = Args::parse();
 
