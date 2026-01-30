@@ -78,7 +78,7 @@ The project is split into separate binaries to isolate dependencies:
 | `tunnel-rs-vpn` | `vpn` (iroh) | `tunnel_vpn`, `auth` |
 | `tunnel-rs-ice` | `manual`, `nostr` | `custom`, `nostr`, `transport` |
 
-Relay-only is a CLI-only flag intended for testing or special scenarios. It is not supported in config files to avoid accidental activation.
+Relay-only is a CLI-only flag that forces connections through relay servers instead of attempting direct connections. It is intended for testing or special scenarios and is not supported in config files to avoid accidental activation. See `tunnel-rs --help` for usage.
 
 ### Core Components
 

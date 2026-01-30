@@ -168,7 +168,7 @@ cargo install --path . -p tunnel-rs-vpn
 
 ### Feature Flags
 
-Relay-only is a **CLI-only** flag intended for testing or special scenarios. It is **not supported in config files** to avoid accidental activation.
+Relay-only is a **CLI-only** flag that forces connections through relay servers instead of attempting direct connections. It is intended for testing or special scenarios and is **not supported in config files** to avoid accidental activation. See `tunnel-rs --help` for usage.
 
 ### Supported Platforms
 
