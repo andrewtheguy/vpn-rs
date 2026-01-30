@@ -13,8 +13,7 @@ Use a custom relay server instead of the public iroh relay infrastructure.
 tunnel-rs server --relay-url https://relay.example.com --allowed-tcp 127.0.0.0/8 --auth-tokens "$AUTH_TOKEN"
 tunnel-rs client --relay-url https://relay.example.com --server-node-id <ID> --source tcp://127.0.0.1:22 --target 127.0.0.1:2222 --auth-token "$AUTH_TOKEN"
 
-# Force relay-only (no direct P2P) - requires test-utils feature
-# Build with: cargo build --features test-utils
+# Force relay-only (no direct P2P) - CLI-only flag (not supported in config files)
 tunnel-rs server --relay-url https://relay.example.com --relay-only --allowed-tcp 127.0.0.0/8 --auth-tokens "$AUTH_TOKEN"
 ```
 

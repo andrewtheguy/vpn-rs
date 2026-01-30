@@ -183,10 +183,10 @@ graph TB
         B --> C{Relay URLs?}
         C -->|Yes| D[Add Custom Relays]
         C -->|No| E[Use Default Relays]
-        D --> F{Relay Only?}
+        D --> F{Relay Only? (CLI-only)}
         E --> F
-        F -->|Yes| G[Set RelayOnly Mode]
-        F -->|No| H[Set RelayAndDirect Mode]
+        F -->|Yes| G[Disable IP transports]
+        F -->|No| H[Keep IP + relay transports]
         G --> I{DNS Server?}
         H --> I
         I -->|Yes| J[Add Custom DNS]
@@ -738,4 +738,3 @@ graph TB
 ```
 
 ---
-

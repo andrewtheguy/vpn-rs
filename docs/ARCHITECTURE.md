@@ -78,7 +78,7 @@ The project is split into separate binaries to isolate dependencies:
 | `tunnel-rs-vpn` | `vpn` (iroh) | `tunnel_vpn`, `auth` |
 | `tunnel-rs-ice` | `manual`, `nostr` | `custom`, `nostr`, `transport` |
 
-The `test-utils` feature is still available on the iroh crates/binary to enable `--relay-only` for testing.
+Relay-only is a CLI-only flag intended for testing or special scenarios. It is not supported in config files to avoid accidental activation.
 
 ### Core Components
 
@@ -240,7 +240,6 @@ graph TB
         I2[auth_tokens - server only]
         I3[auth_token - client only]
         J[relay_urls]
-        K[relay_only]
         L[dns_server]
         M[server_node_id - client only]
     end
@@ -266,7 +265,6 @@ graph TB
     E --> I2
     E --> I3
     E --> J
-    E --> K
     E --> L
     E --> M
 
