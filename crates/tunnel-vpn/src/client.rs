@@ -19,9 +19,8 @@ use crate::signaling::{
 };
 use bytes::{Bytes, BytesMut};
 use ipnet::{Ipv4Net, Ipv6Net};
-use iroh::endpoint::{RecvStream, SendStream};
-use iroh::endpoint::ConnectionType;
-use iroh::{Endpoint, EndpointAddr, EndpointId, RelayUrl, Watcher};
+use iroh::endpoint::{PathInfoList, RecvStream, SendStream};
+use iroh::{Endpoint, EndpointAddr, EndpointId, RelayUrl, TransportAddr, Watcher};
 use futures::StreamExt;
 use rand::Rng;
 use std::collections::{HashMap, HashSet};
@@ -196,12 +195,12 @@ impl VpnClient {
         // Without this, VPN routes could black-hole the iroh connection traffic.
         //
         // This spawns a monitoring task that dynamically updates bypass routes as
-        // the connection type changes (e.g., relay -> direct, new ICE candidates).
+        // the connection paths change (e.g., relay -> direct, new paths discovered).
         let will_add_routes =
             (server_info.assigned_ip.is_some() && !self.config.routes.is_empty())
                 || (server_info.assigned_ip6.is_some() && !self.config.routes6.is_empty());
         let bypass_route_task: Option<JoinHandle<()>> = if will_add_routes {
-            self.add_iroh_bypass_routes(endpoint, server_id).await
+            self.add_iroh_bypass_routes(endpoint, &connection).await
         } else {
             None
         };
@@ -387,7 +386,7 @@ impl VpnClient {
 
     /// Add bypass routes for iroh connection addresses and spawn a monitoring task.
     ///
-    /// Queries the connection type from the endpoint and adds bypass routes for:
+    /// Queries the connection paths from the iroh connection and adds bypass routes for:
     /// - Direct connection addresses (UDP socket addresses)
     /// - Relay server addresses (resolved from relay URLs)
     ///
@@ -395,9 +394,9 @@ impl VpnClient {
     /// returning, ensuring VPN routes are not added until bypass routes are in place.
     /// This prevents the iroh connection from being black-holed by VPN routes.
     ///
-    /// Also spawns a background task that monitors connection type changes and
-    /// dynamically updates bypass routes as the connection type evolves
-    /// (e.g., from relay to direct, or when ICE peer addresses change).
+    /// Also spawns a background task that monitors path changes and dynamically
+    /// updates bypass routes as the connection evolves
+    /// (e.g., from relay to direct, or when new paths are discovered).
     ///
     /// Returns:
     /// - A task handle for the monitoring task (caller should abort on shutdown)
@@ -405,10 +404,10 @@ impl VpnClient {
     async fn add_iroh_bypass_routes(
         &self,
         endpoint: &Endpoint,
-        server_id: EndpointId,
+        connection: &iroh::endpoint::Connection,
     ) -> Option<JoinHandle<()>> {
-        // Get the connection type watcher
-        let conn_type_watcher = endpoint.conn_type(server_id)?;
+        // Get the paths watcher
+        let paths_watcher = connection.paths();
 
         // Clone endpoint for the spawned task
         let endpoint_clone = endpoint.clone();
@@ -418,7 +417,7 @@ impl VpnClient {
 
         // Spawn a task that manages bypass routes dynamically
         let handle = tokio::spawn(async move {
-            run_bypass_route_manager(endpoint_clone, conn_type_watcher, Some(setup_done_tx)).await;
+            run_bypass_route_manager(endpoint_clone, paths_watcher, Some(setup_done_tx)).await;
         });
 
         // Wait for initial bypass route setup to complete before returning.
@@ -814,7 +813,7 @@ impl VpnClient {
 // Bypass Route Management
 // ============================================================================
 
-/// Manages bypass routes dynamically based on connection type changes.
+/// Manages bypass routes dynamically based on connection path changes.
 ///
 /// Tracks active bypass routes in a HashMap keyed by IP address (not socket address).
 /// This is because bypass routes are per-IP, not per-port - multiple socket addresses
@@ -877,21 +876,21 @@ impl BypassRouteManager {
 
 /// Run the bypass route manager task.
 ///
-/// Monitors connection type changes via the watcher stream and dynamically
+/// Monitors path changes via the watcher stream and dynamically
 /// updates bypass routes as the connection evolves.
 ///
 /// Returns after initial setup is complete, continuing to monitor in background.
 /// The returned oneshot receiver signals when initial setup is done.
 async fn run_bypass_route_manager(
     endpoint: Endpoint,
-    mut conn_type_watcher: impl Watcher<Value = ConnectionType> + Send + Unpin,
+    mut paths_watcher: impl Watcher<Value = PathInfoList> + Send + Unpin + 'static,
     initial_setup_done: Option<tokio::sync::oneshot::Sender<()>>,
 ) {
     let mut manager = BypassRouteManager::new();
 
-    // Process initial connection type (always apply, even if DNS partially fails)
-    let initial_conn_type = conn_type_watcher.get();
-    let initial_result = collect_addresses_from_conn_type(&endpoint, &initial_conn_type).await;
+    // Process initial connection paths (always apply, even if DNS partially fails)
+    let initial_paths = paths_watcher.get();
+    let initial_result = collect_addresses_from_paths(&endpoint, &initial_paths).await;
     manager.update(initial_result.ips).await;
 
     // Signal that initial setup is complete
@@ -900,18 +899,17 @@ async fn run_bypass_route_manager(
     }
 
     // Watch for changes using stream_updates_only (skips initial value we already processed)
-    let mut stream = conn_type_watcher.stream_updates_only();
+    let mut stream = paths_watcher.stream_updates_only();
 
-    while let Some(conn_type) = stream.next().await {
-        log::debug!("Connection type changed: {:?}", conn_type);
-        let result = collect_addresses_from_conn_type(&endpoint, &conn_type).await;
+    while let Some(paths) = stream.next().await {
+        log::debug!("Connection paths changed: {:?}", paths);
+        let result = collect_addresses_from_paths(&endpoint, &paths).await;
 
-        // Skip update if DNS resolution failed - keep existing routes to avoid
-        // disconnecting the relay during transient DNS outages
-        if result.dns_failed {
-            log::warn!(
-                "Skipping bypass route update due to DNS resolution failure - keeping existing routes"
-            );
+        // Skip update if we should preserve existing routes (e.g., no paths yet or DNS failure)
+        // to avoid disconnecting the relay during transient outages
+        if result.preserve_routes {
+            log::debug!("Bypass route update skipped: no paths yet or DNS resolution failed");
+            log::warn!("Skipping bypass route update - keeping existing routes");
             continue;
         }
 
@@ -923,68 +921,65 @@ async fn run_bypass_route_manager(
     // and removes all bypass routes
 }
 
-/// Result of collecting addresses from a connection type.
+/// Result of collecting addresses from active connection paths.
 struct CollectAddressesResult {
     /// Set of unique IP addresses that need bypass routes.
     ips: HashSet<IpAddr>,
-    /// Whether DNS resolution failed for any relay URL.
-    /// When true, the caller should preserve existing routes rather than updating.
-    dns_failed: bool,
+    /// Whether to preserve existing routes rather than updating.
+    preserve_routes: bool,
 }
 
-/// Extract IP addresses from a ConnectionType that need bypass routes.
+/// Extract IP addresses from the active iroh paths that need bypass routes.
 ///
 /// Returns a set of unique IP addresses (deduplicated from socket addresses)
 /// and a flag indicating whether DNS resolution failed.
-async fn collect_addresses_from_conn_type(
+async fn collect_addresses_from_paths(
     endpoint: &Endpoint,
-    conn_type: &ConnectionType,
+    paths: &PathInfoList,
 ) -> CollectAddressesResult {
     let mut ips = HashSet::new();
-    let mut dns_failed = false;
+    let mut preserve_routes = false;
 
-    match conn_type {
-        ConnectionType::Direct(addr) => {
-            log::debug!("iroh using direct connection to {}", addr);
-            ips.insert(addr.ip());
-        }
-        ConnectionType::Relay(relay_url) => {
-            log::debug!("iroh using relay connection via {}", relay_url);
-            match resolve_relay_url(endpoint, relay_url).await {
-                Ok(addrs) => {
-                    for addr in addrs {
-                        ips.insert(addr.ip());
+    if paths.is_empty() {
+        log::debug!("iroh connection has no paths yet; preserving existing bypass routes");
+        preserve_routes = true;
+        return CollectAddressesResult {
+            ips,
+            preserve_routes,
+        };
+    }
+
+    for path in paths.iter() {
+        let selected = if path.is_selected() { " (selected)" } else { "" };
+        let remote = path.remote_addr();
+        match remote {
+            TransportAddr::Ip(addr) => {
+                log::debug!("iroh path{} direct {}", selected, addr);
+                ips.insert(addr.ip());
+            }
+            TransportAddr::Relay(relay_url) => {
+                log::debug!("iroh path{} relay {}", selected, relay_url);
+                match resolve_relay_url(endpoint, relay_url).await {
+                    Ok(addrs) => {
+                        for addr in addrs {
+                            ips.insert(addr.ip());
+                        }
+                    }
+                    Err(()) => {
+                        preserve_routes = true;
                     }
                 }
-                Err(()) => {
-                    dns_failed = true;
-                }
             }
-        }
-        ConnectionType::Mixed(addr, relay_url) => {
-            log::debug!(
-                "iroh using mixed connection: direct {} and relay {}",
-                addr,
-                relay_url
-            );
-            ips.insert(addr.ip());
-            match resolve_relay_url(endpoint, relay_url).await {
-                Ok(addrs) => {
-                    for addr in addrs {
-                        ips.insert(addr.ip());
-                    }
-                }
-                Err(()) => {
-                    dns_failed = true;
-                }
+            _ => {
+                log::debug!("iroh path{} unknown {:?}", selected, remote);
             }
-        }
-        ConnectionType::None => {
-            log::debug!("iroh connection type is None, no bypass routes needed");
         }
     }
 
-    CollectAddressesResult { ips, dns_failed }
+    CollectAddressesResult {
+        ips,
+        preserve_routes,
+    }
 }
 
 /// Resolve a relay URL to socket addresses using the endpoint's DNS resolver.

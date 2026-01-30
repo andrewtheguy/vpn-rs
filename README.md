@@ -168,7 +168,7 @@ cargo install --path . -p tunnel-rs-vpn
 
 ### Feature Flags
 
-`test-utils` is available on the iroh crates/binary for enabling `--relay-only` during testing.
+Relay-only is a **CLI-only** flag that forces connections through relay servers instead of attempting direct connections. It is intended for testing or special scenarios and is **not supported in config files** to avoid accidental activation. See `tunnel-rs --help` for usage.
 
 ### Supported Platforms
 
@@ -404,7 +404,7 @@ tunnel-rs client \
 | `--secret` | - | Base64-encoded secret key for persistent server identity |
 | `--secret-file` | - | Path to secret key file for persistent server identity |
 | `--relay-url` | public | Custom relay server URL(s), repeatable |
-| `--relay-only` | false | Force all traffic through relay (requires `test-utils` feature) |
+| `--relay-only` | false | Force all traffic through relay (CLI-only; not supported in config files) |
 | `--dns-server` | public | Custom DNS server URL, or "none" to disable DNS discovery |
 
 ### client
@@ -424,7 +424,7 @@ tunnel-rs client \
 | `--auth-token` | required | Authentication token to send to server |
 | `--auth-token-file` | - | Path to file containing authentication token |
 | `--relay-url` | public | Custom relay server URL(s), repeatable |
-| `--relay-only` | false | Force all traffic through relay (requires `test-utils` feature) |
+| `--relay-only` | false | Force all traffic through relay (CLI-only; not supported in config files) |
 | `--dns-server` | public | Custom DNS server URL, or "none" to disable DNS discovery |
 
 ## Configuration Files
@@ -443,6 +443,8 @@ tunnel-rs-ice client -c client_ice.toml
 **Default locations:**
 - Server: `~/.config/tunnel-rs/server.toml` (`tunnel-rs`) or `~/.config/tunnel-rs/server_ice.toml` (`tunnel-rs-ice`)
 - Client: `~/.config/tunnel-rs/client.toml` (`tunnel-rs`) or `~/.config/tunnel-rs/client_ice.toml` (`tunnel-rs-ice`)
+
+> **Note:** `--relay-only` is intentionally **CLI-only** and is not supported in config files to avoid accidental activation.
 
 ### Overriding Config Values
 

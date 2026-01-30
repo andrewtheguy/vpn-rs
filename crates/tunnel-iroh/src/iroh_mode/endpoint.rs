@@ -2,15 +2,9 @@
 
 use anyhow::{Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
-#[cfg(feature = "test-utils")]
-use iroh::endpoint::PathSelection;
 use iroh::{
-    discovery::{
-        dns::DnsDiscovery,
-        mdns::MdnsDiscovery,
-        pkarr::{PkarrPublisher, PkarrResolver},
-    },
-    endpoint::{Builder as EndpointBuilder, ControllerFactory},
+    address_lookup::{DnsAddressLookup, MdnsAddressLookup, PkarrPublisher, PkarrResolver},
+    endpoint::{Builder as EndpointBuilder, ControllerFactory, QuicTransportConfig},
     Endpoint, EndpointAddr, EndpointId, RelayMap, RelayMode, RelayUrl, SecretKey, Watcher,
 };
 use iroh_quinn_proto::congestion::{BbrConfig, CubicConfig, NewRenoConfig};
@@ -106,12 +100,7 @@ pub fn parse_relay_mode(relay_urls: &[String]) -> Result<RelayMode> {
 }
 
 /// Validate that relay-only mode is used correctly.
-/// Note: relay_only is only meaningful when the 'test-utils' feature is enabled.
 pub fn validate_relay_only(relay_only: bool, relay_urls: &[String]) -> Result<()> {
-    #[cfg(not(feature = "test-utils"))]
-    let _ = relay_only; // suppress unused warning when feature disabled
-
-    #[cfg(feature = "test-utils")]
     if relay_only && relay_urls.is_empty() {
         anyhow::bail!(
             "--relay-only requires at least one --relay-url to be specified.\n\
@@ -119,14 +108,10 @@ pub fn validate_relay_only(relay_only: bool, relay_urls: &[String]) -> Result<()
         );
     }
 
-    #[cfg(not(feature = "test-utils"))]
-    let _ = relay_urls; // suppress unused warning when feature disabled
-
     Ok(())
 }
 
 /// Print relay configuration status messages.
-/// Note: relay_only logging is only active when the 'test-utils' feature is enabled.
 pub fn print_relay_status(relay_urls: &[String], relay_only: bool, using_custom_relay: bool) {
     if using_custom_relay {
         if relay_urls.len() == 1 {
@@ -138,19 +123,16 @@ pub fn print_relay_status(relay_urls: &[String], relay_only: bool, using_custom_
             );
         }
     }
-    #[cfg(feature = "test-utils")]
     if relay_only {
         info!("Relay-only mode: all traffic will go through the relay server");
     }
-    #[cfg(not(feature = "test-utils"))]
-    let _ = relay_only; // suppress unused warning when feature disabled
 }
 
 /// Create a base endpoint builder with common configuration.
 ///
 /// # Arguments
 /// * `relay_mode` - The relay mode to use
-/// * `relay_only` - If true, only use relay connections (no direct P2P). Only effective with 'test-utils' feature.
+/// * `relay_only` - If true, only use relay connections (no direct P2P).
 /// * `dns_server` - Optional custom DNS server URL (e.g., "https://dns.example.com"), or "none" to disable DNS discovery
 /// * `secret_key` - Optional secret key (required for publishing to custom DNS server)
 /// * `transport_tuning` - Optional transport layer tuning (congestion control, buffer sizes)
@@ -161,40 +143,30 @@ pub fn create_endpoint_builder(
     secret_key: Option<&SecretKey>,
     transport_tuning: Option<&TransportTuning>,
 ) -> Result<EndpointBuilder> {
-    // relay_only is only meaningful with test-utils feature
-    #[cfg(not(feature = "test-utils"))]
-    {
-        if relay_only {
-            log::warn!("relay_only=true requires 'test-utils' feature; ignoring and using relay_only=false");
-        }
-    }
-    #[cfg(not(feature = "test-utils"))]
-    let relay_only = false;
-
     // Configure transport with keep-alive and idle timeout.
     // See QUIC_KEEP_ALIVE_INTERVAL and QUIC_IDLE_TIMEOUT constants for rationale.
-    let mut transport_config = iroh::endpoint::TransportConfig::default();
+    let mut transport_config = QuicTransportConfig::builder();
     let idle_timeout = QUIC_IDLE_TIMEOUT
         .try_into()
         .context("converting QUIC_IDLE_TIMEOUT to IdleTimeout")?;
-    transport_config.max_idle_timeout(Some(idle_timeout));
-    transport_config.keep_alive_interval(Some(QUIC_KEEP_ALIVE_INTERVAL));
+    transport_config = transport_config.max_idle_timeout(Some(idle_timeout));
+    transport_config = transport_config.keep_alive_interval(QUIC_KEEP_ALIVE_INTERVAL);
 
     // Apply transport tuning if provided
     if let Some(tuning) = transport_tuning {
         // Set congestion controller
         let factory = create_congestion_controller_factory(tuning.congestion_controller);
-        transport_config.congestion_controller_factory(factory);
+        transport_config = transport_config.congestion_controller_factory(factory);
         info!("Using {:?} congestion controller", tuning.congestion_controller);
 
         // Set receive window (flow control) for connection + streams
         let receive_window = tuning.receive_window.unwrap_or(DEFAULT_RECEIVE_WINDOW);
-        transport_config.receive_window(receive_window.into());
-        transport_config.stream_receive_window(receive_window.into());
+        transport_config = transport_config.receive_window(receive_window.into());
+        transport_config = transport_config.stream_receive_window(receive_window.into());
 
         // Set send window (defaults to receive window if not specified)
         let send_window = tuning.send_window.unwrap_or(receive_window);
-        transport_config.send_window(send_window.into());
+        transport_config = transport_config.send_window(send_window.into());
 
         info!(
             "Iroh transport: cc={:?}, stream/receive={}KB, send={}KB",
@@ -221,11 +193,11 @@ pub fn create_endpoint_builder(
         );
     }
 
+    let transport_config = transport_config.build();
     let mut builder = Endpoint::empty_builder(relay_mode).transport_config(transport_config);
 
-    #[cfg(feature = "test-utils")]
     if relay_only {
-        builder = builder.path_selection(PathSelection::RelayOnly);
+        builder = builder.clear_ip_transports();
     }
 
     if !relay_only {
@@ -235,29 +207,29 @@ pub fn create_endpoint_builder(
                 // Explicitly disabled
                 info!("DNS discovery disabled (dns_server=none)");
             }
-            Some(dns_url) if secret_key.is_some() => {
+            Some(dns_url) => {
                 // Custom DNS server with publishing and resolving via HTTP (pkarr)
                 let pkarr_url: Url = dns_url.parse().context("Invalid DNS server URL")?;
-                info!("Using custom DNS server: {}", dns_url);
-                builder = builder
-                    .discovery(PkarrPublisher::builder(pkarr_url.clone()).build(secret_key.unwrap().clone()))
-                    .discovery(PkarrResolver::builder(pkarr_url));
-            }
-            Some(dns_url) => {
-                // Custom DNS server, resolve only via HTTP (no secret = can't publish)
-                let pkarr_url: Url = dns_url.parse().context("Invalid DNS server URL")?;
-                info!("Using custom DNS server (resolve only): {}", dns_url);
-                builder = builder.discovery(PkarrResolver::builder(pkarr_url));
+                if let Some(secret) = secret_key {
+                    info!("Using custom DNS server: {}", dns_url);
+                    builder = builder
+                        .address_lookup(PkarrPublisher::builder(pkarr_url.clone()).build(secret.clone()))
+                        .address_lookup(PkarrResolver::builder(pkarr_url));
+                } else {
+                    // Custom DNS server, resolve only via HTTP (no secret = can't publish)
+                    info!("Using custom DNS server (resolve only): {}", dns_url);
+                    builder = builder.address_lookup(PkarrResolver::builder(pkarr_url));
+                }
             }
             None => {
                 // Default n0 DNS
                 builder = builder
-                    .discovery(PkarrPublisher::n0_dns())
-                    .discovery(DnsDiscovery::n0_dns());
+                    .address_lookup(PkarrPublisher::n0_dns())
+                    .address_lookup(DnsAddressLookup::n0_dns());
             }
         }
         // mDNS always enabled for local network discovery
-        builder = builder.discovery(MdnsDiscovery::builder());
+        builder = builder.address_lookup(MdnsAddressLookup::builder());
     }
 
     Ok(builder)
@@ -347,7 +319,6 @@ pub async fn create_client_endpoint(
 }
 
 /// Connect to a server endpoint with relay failover support.
-/// Note: relay_only is only meaningful when the 'test-utils' feature is enabled.
 pub async fn connect_to_server(
     endpoint: &Endpoint,
     server_id: EndpointId,
@@ -355,14 +326,6 @@ pub async fn connect_to_server(
     relay_only: bool,
     alpn: &[u8],
 ) -> Result<iroh::endpoint::Connection> {
-    // relay_only is only meaningful with test-utils feature
-    #[cfg(not(feature = "test-utils"))]
-    {
-        let _ = relay_only;
-    }
-    #[cfg(not(feature = "test-utils"))]
-    let relay_only = false;
-
     info!("Connecting to server {}...", server_id);
 
     if relay_only {
@@ -435,9 +398,25 @@ pub async fn connect_to_server(
 }
 
 /// Print connection type information.
-pub fn print_connection_type(endpoint: &Endpoint, remote_id: EndpointId) {
-    if let Some(mut conn_type_watcher) = endpoint.conn_type(remote_id) {
-        let conn_type = conn_type_watcher.get();
-        info!("Connection type: {:?}", conn_type);
+pub fn print_connection_paths(conn: &iroh::endpoint::Connection) {
+    let paths = conn.paths().get();
+    if paths.is_empty() {
+        info!("Connection paths: none");
+        return;
+    }
+    for path in paths.iter() {
+        let selected = if path.is_selected() { " (selected)" } else { "" };
+        let remote = path.remote_addr();
+        match remote {
+            iroh::TransportAddr::Ip(addr) => {
+                info!("Connection path: direct {}{}", addr, selected);
+            }
+            iroh::TransportAddr::Relay(relay_url) => {
+                info!("Connection path: relay {}{}", relay_url, selected);
+            }
+            _ => {
+                info!("Connection path: other {:?}{}", remote, selected);
+            }
+        }
     }
 }

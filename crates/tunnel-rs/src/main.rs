@@ -65,8 +65,6 @@ enum Command {
         relay_urls: Vec<String>,
 
         /// Force all connections through the relay server (disables direct P2P).
-        /// Only available with the 'test-utils' feature: cargo build --features test-utils
-        #[cfg(feature = "test-utils")]
         #[arg(long)]
         relay_only: bool,
 
@@ -113,8 +111,6 @@ enum Command {
         relay_urls: Vec<String>,
 
         /// Force all connections through the relay server (disables direct P2P).
-        /// Only available with the 'test-utils' feature: cargo build --features test-utils
-        #[cfg(feature = "test-utils")]
         #[arg(long)]
         relay_only: bool,
 
@@ -387,6 +383,7 @@ async fn main() -> Result<()> {
         Command::Server {
             config,
             default_config,
+            relay_only,
             ..
         } => {
             let (cfg, from_file) = resolve_server_config(config.clone(), *default_config)?;
@@ -409,13 +406,7 @@ async fn main() -> Result<()> {
                 transport,
             } = resolve_server_iroh_params(&command, iroh_cfg);
 
-            #[cfg(feature = "test-utils")]
-            let relay_only = match &command {
-                Command::Server { relay_only, .. } => *relay_only,
-                _ => false,
-            };
-            #[cfg(not(feature = "test-utils"))]
-            let relay_only = false;
+            let relay_only = *relay_only;
 
             let secret = resolve_iroh_secret(secret, secret_file)?;
 
@@ -452,6 +443,7 @@ async fn main() -> Result<()> {
         Command::Client {
             config,
             default_config,
+            relay_only,
             ..
         } => {
             let (cfg, from_file) = resolve_client_config(config.clone(), *default_config)?;
@@ -472,13 +464,7 @@ async fn main() -> Result<()> {
                 transport,
             } = resolve_client_iroh_params(&command, iroh_cfg);
 
-            #[cfg(feature = "test-utils")]
-            let relay_only = match &command {
-                Command::Client { relay_only, .. } => *relay_only,
-                _ => false,
-            };
-            #[cfg(not(feature = "test-utils"))]
-            let relay_only = false;
+            let relay_only = *relay_only;
 
             let server_node_id = server_node_id.context(
                 "server_node_id is required. Provide via --server-node-id or in config file.",
