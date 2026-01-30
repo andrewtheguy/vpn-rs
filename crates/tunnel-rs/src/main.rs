@@ -331,7 +331,13 @@ fn resolve_iroh_secret(
             log::info!("EndpointId: {}", endpoint_id);
             Ok(Some(secret))
         }
-        (None, None) => Ok(None),
+        (None, None) => {
+            anyhow::bail!(
+                "Server identity is required. Generate a key with:\n\
+                 tunnel-rs generate-server-key --output ./server.key\n\
+                 Then pass --secret-file ./server.key or set [iroh].secret_file in server.toml."
+            );
+        }
     }
 }
 

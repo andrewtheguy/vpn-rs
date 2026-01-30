@@ -18,9 +18,9 @@ mode = "iroh"
 # Base64-encoded secret key for persistent identity (inline)
 # secret = "base64..."
 #
-# Path to secret key file for persistent identity (use either secret or secret_file)
+# Path to secret key file for persistent identity (required; use either secret or secret_file)
 # Generate with: tunnel-rs generate-server-key --output server.key
-# secret_file = "./server.key"
+secret_file = "./server.key"
 
 # Custom relay server URL(s) for failover
 # If not provided, uses iroh's default public relays
