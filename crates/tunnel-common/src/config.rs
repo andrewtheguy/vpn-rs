@@ -1046,6 +1046,11 @@ impl VpnServerConfig {
         }
 
         if let Some(ref iroh) = self.iroh {
+            if iroh.secret_file.is_none() {
+                anyhow::bail!(
+                    "[iroh] 'secret_file' is required for VPN server identity. Generate with: tunnel-rs-vpn generate-server-key -o ./vpn-server.key"
+                );
+            }
             // Validate auth_tokens mutual exclusion
             let has_inline_tokens = iroh.auth_tokens.as_ref().is_some_and(|t| !t.is_empty());
             if has_inline_tokens && iroh.auth_tokens_file.is_some() {
@@ -1318,6 +1323,7 @@ pub const DEFAULT_TUN_WRITER_CHANNEL_SIZE: usize = 512;
 /// fn main() -> anyhow::Result<()> {
 ///     let toml_config = VpnServerIrohConfig {
 ///         network: Some("10.0.0.0/24".to_string()),
+///         secret_file: Some("vpn-server.key".into()),
 ///         ..Default::default()
 ///     };
 ///
@@ -1360,6 +1366,11 @@ impl ResolvedVpnServerConfig {
     /// - MTU range, channel sizes, transport tuning window sizes
     /// - Auth tokens mutual exclusion
     pub fn from_config(cfg: &VpnServerIrohConfig) -> Result<Self> {
+        if cfg.secret_file.is_none() {
+            anyhow::bail!(
+                "[config] 'secret_file' is required for VPN server identity. Generate with: tunnel-rs-vpn generate-server-key -o ./vpn-server.key"
+            );
+        }
         // Validate network configuration (presence, containment, format)
         validate_vpn_networks(
             cfg.network.as_deref(),

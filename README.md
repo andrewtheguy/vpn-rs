@@ -193,7 +193,7 @@ These settings apply to Port Forwarding (`tunnel-rs`) using iroh. (VPN mode has 
 
 ## Persistent Server Identity
 
-By default, a new EndpointId is generated each run. For long-running setups, use persistent identity for the **server**:
+Server identity is required. Configure a persistent identity for the **server** so clients can reconnect reliably:
 
 ```bash
 # Generate key and output EndpointId

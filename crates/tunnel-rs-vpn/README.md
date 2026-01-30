@@ -6,6 +6,8 @@ Full network tunneling (TUN) over encrypted QUIC, with NAT traversal via iroh.
 
 > [!NOTE]
 > VPN mode requires root/admin privileges to create TUN devices and configure routes.
+>
+> Server identity is required. Configure `secret_file` in `vpn_server.toml`.
 
 ## When To Use This
 
@@ -100,7 +102,7 @@ Related: this is conceptually similar to [quincy](https://github.com/quincy-rs/q
 
 ### 1. Setup (One-Time)
 
-On the server machine, generate a persistent identity and an auth token:
+On the server machine, generate a persistent identity (required) and an auth token:
 
 ```bash
 tunnel-rs-vpn generate-server-key --output ./server.key
@@ -126,6 +128,7 @@ Notes:
 - At least one of `network` (IPv4) or `network6` (IPv6) is required.
 - IPv6-only mode is supported but still experimental; see `../../vpn_server.toml.example` for details.
 - NAT64 support exists for IPv6-only setups but is still experimental; see `../../vpn_server.toml.example`.
+- `secret_file` is required for a stable server `EndpointId`.
 
 ### 3. Start VPN Server
 

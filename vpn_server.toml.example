@@ -100,13 +100,13 @@ network = "10.0.0.0/24"
 # drop_on_full = false
 
 # ============================================================================
-# Server Identity (Optional)
+# Server Identity (Required)
 # ============================================================================
 
-# Path to secret key file for persistent iroh identity
+# Path to secret key file for persistent iroh identity (REQUIRED)
 # Generates same EndpointId across restarts
 # Create with: tunnel-rs-vpn generate-server-key -o ./vpn-server.key
-# secret_file = "./vpn-server.key"
+secret_file = "./vpn-server.key"
 
 # ============================================================================
 # Authentication (REQUIRED)
