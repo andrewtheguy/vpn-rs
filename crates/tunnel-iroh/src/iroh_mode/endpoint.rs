@@ -5,12 +5,8 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 #[cfg(feature = "test-utils")]
 use iroh::endpoint::PathSelection;
 use iroh::{
-    discovery::{
-        dns::DnsDiscovery,
-        mdns::MdnsDiscovery,
-        pkarr::{PkarrPublisher, PkarrResolver},
-    },
-    endpoint::{Builder as EndpointBuilder, ControllerFactory},
+    address_lookup::{DnsAddressLookup, MdnsAddressLookup, PkarrPublisher, PkarrResolver},
+    endpoint::{Builder as EndpointBuilder, ControllerFactory, QuicTransportConfig},
     Endpoint, EndpointAddr, EndpointId, RelayMap, RelayMode, RelayUrl, SecretKey, Watcher,
 };
 use iroh_quinn_proto::congestion::{BbrConfig, CubicConfig, NewRenoConfig};
@@ -173,28 +169,28 @@ pub fn create_endpoint_builder(
 
     // Configure transport with keep-alive and idle timeout.
     // See QUIC_KEEP_ALIVE_INTERVAL and QUIC_IDLE_TIMEOUT constants for rationale.
-    let mut transport_config = iroh::endpoint::TransportConfig::default();
+    let mut transport_config = QuicTransportConfig::builder();
     let idle_timeout = QUIC_IDLE_TIMEOUT
         .try_into()
         .context("converting QUIC_IDLE_TIMEOUT to IdleTimeout")?;
-    transport_config.max_idle_timeout(Some(idle_timeout));
-    transport_config.keep_alive_interval(Some(QUIC_KEEP_ALIVE_INTERVAL));
+    transport_config = transport_config.max_idle_timeout(Some(idle_timeout));
+    transport_config = transport_config.keep_alive_interval(QUIC_KEEP_ALIVE_INTERVAL);
 
     // Apply transport tuning if provided
     if let Some(tuning) = transport_tuning {
         // Set congestion controller
         let factory = create_congestion_controller_factory(tuning.congestion_controller);
-        transport_config.congestion_controller_factory(factory);
+        transport_config = transport_config.congestion_controller_factory(factory);
         info!("Using {:?} congestion controller", tuning.congestion_controller);
 
         // Set receive window (flow control) for connection + streams
         let receive_window = tuning.receive_window.unwrap_or(DEFAULT_RECEIVE_WINDOW);
-        transport_config.receive_window(receive_window.into());
-        transport_config.stream_receive_window(receive_window.into());
+        transport_config = transport_config.receive_window(receive_window.into());
+        transport_config = transport_config.stream_receive_window(receive_window.into());
 
         // Set send window (defaults to receive window if not specified)
         let send_window = tuning.send_window.unwrap_or(receive_window);
-        transport_config.send_window(send_window.into());
+        transport_config = transport_config.send_window(send_window.into());
 
         info!(
             "Iroh transport: cc={:?}, stream/receive={}KB, send={}KB",
@@ -221,6 +217,7 @@ pub fn create_endpoint_builder(
         );
     }
 
+    let transport_config = transport_config.build();
     let mut builder = Endpoint::empty_builder(relay_mode).transport_config(transport_config);
 
     #[cfg(feature = "test-utils")]
@@ -240,24 +237,26 @@ pub fn create_endpoint_builder(
                 let pkarr_url: Url = dns_url.parse().context("Invalid DNS server URL")?;
                 info!("Using custom DNS server: {}", dns_url);
                 builder = builder
-                    .discovery(PkarrPublisher::builder(pkarr_url.clone()).build(secret_key.unwrap().clone()))
-                    .discovery(PkarrResolver::builder(pkarr_url));
+                    .address_lookup(
+                        PkarrPublisher::builder(pkarr_url.clone()).build(secret_key.unwrap().clone()),
+                    )
+                    .address_lookup(PkarrResolver::builder(pkarr_url));
             }
             Some(dns_url) => {
                 // Custom DNS server, resolve only via HTTP (no secret = can't publish)
                 let pkarr_url: Url = dns_url.parse().context("Invalid DNS server URL")?;
                 info!("Using custom DNS server (resolve only): {}", dns_url);
-                builder = builder.discovery(PkarrResolver::builder(pkarr_url));
+                builder = builder.address_lookup(PkarrResolver::builder(pkarr_url));
             }
             None => {
                 // Default n0 DNS
                 builder = builder
-                    .discovery(PkarrPublisher::n0_dns())
-                    .discovery(DnsDiscovery::n0_dns());
+                    .address_lookup(PkarrPublisher::n0_dns())
+                    .address_lookup(DnsAddressLookup::n0_dns());
             }
         }
         // mDNS always enabled for local network discovery
-        builder = builder.discovery(MdnsDiscovery::builder());
+        builder = builder.address_lookup(MdnsAddressLookup::builder());
     }
 
     Ok(builder)
@@ -435,9 +434,25 @@ pub async fn connect_to_server(
 }
 
 /// Print connection type information.
-pub fn print_connection_type(endpoint: &Endpoint, remote_id: EndpointId) {
-    if let Some(mut conn_type_watcher) = endpoint.conn_type(remote_id) {
-        let conn_type = conn_type_watcher.get();
-        info!("Connection type: {:?}", conn_type);
+pub fn print_connection_paths(conn: &iroh::endpoint::Connection) {
+    let paths = conn.paths().get();
+    if paths.is_empty() {
+        info!("Connection paths: none");
+        return;
+    }
+    for path in paths.iter() {
+        let selected = if path.is_selected() { " (selected)" } else { "" };
+        let remote = path.remote_addr();
+        match remote {
+            iroh::TransportAddr::Ip(addr) => {
+                info!("Connection path: direct {}{}", addr, selected);
+            }
+            iroh::TransportAddr::Relay(relay_url) => {
+                info!("Connection path: relay {}{}", relay_url, selected);
+            }
+            _ => {
+                info!("Connection path: other {:?}{}", remote, selected);
+            }
+        }
     }
 }

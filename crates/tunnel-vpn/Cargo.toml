@@ -21,7 +21,7 @@ tun = { version = "0.8", features = ["async"] }
 tokio = { version = "1", features = ["full"] }
 
 # iroh for signaling and NAT traversal
-iroh = { version = "0.95.1", features = ["discovery-local-network"] }
+iroh = { version = "0.96.0", features = ["address-lookup-mdns"] }
 
 # Error handling
 anyhow = "1"

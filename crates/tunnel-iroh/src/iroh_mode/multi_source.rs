@@ -97,7 +97,7 @@ impl std::fmt::Debug for MultiSourceClientConfig {
 use crate::auth::is_token_valid;
 
 use crate::iroh_mode::endpoint::{
-    connect_to_server, create_client_endpoint, create_server_endpoint, print_connection_type,
+    connect_to_server, create_client_endpoint, create_server_endpoint, print_connection_paths,
     validate_relay_only, MULTI_ALPN,
 };
 use crate::iroh_mode::helpers::{
@@ -585,7 +585,7 @@ pub async fn run_multi_source_client(config: MultiSourceClientConfig) -> Result<
     .await?;
 
     log::info!("Connected to server!");
-    print_connection_type(&endpoint, conn.remote_id());
+    print_connection_paths(&conn);
 
     // Authenticate immediately after connection
     authenticate_connection(&conn, &config.auth_token).await?;
