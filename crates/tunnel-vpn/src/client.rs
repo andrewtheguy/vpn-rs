@@ -905,12 +905,11 @@ async fn run_bypass_route_manager(
         log::debug!("Connection paths changed: {:?}", paths);
         let result = collect_addresses_from_paths(&endpoint, &paths).await;
 
-        // Skip update if DNS resolution failed - keep existing routes to avoid
-        // disconnecting the relay during transient DNS outages
-        if result.dns_failed {
-            log::warn!(
-                "Skipping bypass route update due to DNS resolution failure - keeping existing routes"
-            );
+        // Skip update if we should preserve existing routes (e.g., no paths yet or DNS failure)
+        // to avoid disconnecting the relay during transient outages
+        if result.preserve_routes {
+            log::debug!("Bypass route update skipped: no paths yet or DNS resolution failed");
+            log::warn!("Skipping bypass route update - keeping existing routes");
             continue;
         }
 
@@ -926,9 +925,8 @@ async fn run_bypass_route_manager(
 struct CollectAddressesResult {
     /// Set of unique IP addresses that need bypass routes.
     ips: HashSet<IpAddr>,
-    /// Whether DNS resolution failed for any relay URL.
-    /// When true, the caller should preserve existing routes rather than updating.
-    dns_failed: bool,
+    /// Whether to preserve existing routes rather than updating.
+    preserve_routes: bool,
 }
 
 /// Extract IP addresses from the active iroh paths that need bypass routes.
@@ -940,12 +938,15 @@ async fn collect_addresses_from_paths(
     paths: &PathInfoList,
 ) -> CollectAddressesResult {
     let mut ips = HashSet::new();
-    let mut dns_failed = false;
+    let mut preserve_routes = false;
 
     if paths.is_empty() {
         log::debug!("iroh connection has no paths yet; preserving existing bypass routes");
-        dns_failed = true;
-        return CollectAddressesResult { ips, dns_failed };
+        preserve_routes = true;
+        return CollectAddressesResult {
+            ips,
+            preserve_routes,
+        };
     }
 
     for path in paths.iter() {
@@ -965,7 +966,7 @@ async fn collect_addresses_from_paths(
                         }
                     }
                     Err(()) => {
-                        dns_failed = true;
+                        preserve_routes = true;
                     }
                 }
             }
@@ -975,7 +976,10 @@ async fn collect_addresses_from_paths(
         }
     }
 
-    CollectAddressesResult { ips, dns_failed }
+    CollectAddressesResult {
+        ips,
+        preserve_routes,
+    }
 }
 
 /// Resolve a relay URL to socket addresses using the endpoint's DNS resolver.
