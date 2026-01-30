@@ -943,7 +943,8 @@ async fn collect_addresses_from_paths(
     let mut dns_failed = false;
 
     if paths.is_empty() {
-        log::debug!("iroh connection has no paths yet; no bypass routes needed");
+        log::debug!("iroh connection has no paths yet; preserving existing bypass routes");
+        dns_failed = true;
         return CollectAddressesResult { ips, dns_failed };
     }
 
