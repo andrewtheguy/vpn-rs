@@ -472,7 +472,7 @@ mode = "iroh"  # or "manual", or "nostr"
 
 [iroh]
 secret_file = "./server.key"
-relay_urls = ["https://relay.example.com"]
+# relay_urls = ["https://relay.example.com"]
 dns_server = "https://dns.example.com/pkarr"
 max_sessions = 100
 
@@ -513,7 +513,7 @@ mode = "iroh"
 server_node_id = "2xnbkpbc7izsilvewd7c62w7wnwziacmpfwvhcrya5nt76dqkpga"
 request_source = "tcp://127.0.0.1:22"
 target = "127.0.0.1:2222"
-relay_urls = ["https://relay.example.com"]
+# relay_urls = ["https://relay.example.com"]
 dns_server = "https://dns.example.com/pkarr"
 
 # Authentication token (get from server admin, 18 chars)
