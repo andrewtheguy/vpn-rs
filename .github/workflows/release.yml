@@ -199,6 +199,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.setup.outputs.release_tag }}
+          target_commitish: ${{ github.sha }}
           name: Release ${{ needs.setup.outputs.release_tag }}
           prerelease: ${{ needs.setup.outputs.is_prerelease }}
           generate_release_notes: true
