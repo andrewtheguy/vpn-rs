@@ -70,17 +70,9 @@ struct ClientState {
     /// Used to detect stale cleanup operations when a client reconnects quickly.
     session_id: u64,
     /// Client's assigned VPN IP (IPv4). None for IPv6-only mode.
-    #[allow(dead_code)]
     assigned_ip: Option<Ipv4Addr>,
     /// Client's assigned IPv6 VPN address (optional, for dual-stack or IPv6-only).
-    #[allow(dead_code)]
     assigned_ip6: Option<Ipv6Addr>,
-    /// Client's device ID.
-    #[allow(dead_code)]
-    device_id: u64,
-    /// Client's iroh endpoint ID.
-    #[allow(dead_code)]
-    endpoint_id: EndpointId,
     /// Channel to send framed packets to the client's dedicated writer task.
     /// The writer task owns the SendStream and performs actual I/O.
     /// Uses Bytes for zero-copy sends (freeze BytesMut instead of cloning Vec).
@@ -908,8 +900,6 @@ impl VpnServer {
             session_id,
             assigned_ip,
             assigned_ip6,
-            device_id,
-            endpoint_id: remote_id,
             packet_tx: packet_tx.clone(),
         };
 

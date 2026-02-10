@@ -24,7 +24,6 @@ pub struct VpnLock {
     /// Path to the lock file.
     path: PathBuf,
     /// The lock file handle (kept open to maintain lock).
-    #[allow(dead_code)]
     file: File,
 }
 
@@ -93,6 +92,10 @@ impl VpnLock {
 
 impl Drop for VpnLock {
     fn drop(&mut self) {
+        if let Err(e) = self.file.unlock() {
+            log::warn!("Failed to unlock VPN lock file {}: {}", self.path.display(), e);
+        }
+
         // The lock is automatically released when the file is closed,
         // which happens when self.file is dropped. We don't remove the lock file
         // to avoid a race condition where another process could acquire a lock
