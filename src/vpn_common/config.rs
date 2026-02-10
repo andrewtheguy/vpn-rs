@@ -57,64 +57,6 @@ pub struct TransportTuning {
     pub send_window: Option<u32>,
 }
 
-/// NAT64 configuration for IPv6-only clients to access IPv4 resources.
-#[derive(Deserialize, Default, Clone, Debug)]
-pub struct Nat64Config {
-    #[serde(default)]
-    pub enabled: bool,
-    #[serde(default)]
-    pub source_ip: Option<std::net::Ipv4Addr>,
-    #[serde(default = "default_nat64_port_range")]
-    pub port_range: (u16, u16),
-    #[serde(default = "default_nat64_tcp_timeout")]
-    pub tcp_timeout_secs: u64,
-    #[serde(default = "default_nat64_udp_timeout")]
-    pub udp_timeout_secs: u64,
-    #[serde(default = "default_nat64_icmp_timeout")]
-    pub icmp_timeout_secs: u64,
-}
-
-fn default_nat64_port_range() -> (u16, u16) {
-    (32768, 65535)
-}
-
-fn default_nat64_tcp_timeout() -> u64 {
-    300
-}
-
-fn default_nat64_udp_timeout() -> u64 {
-    30
-}
-
-fn default_nat64_icmp_timeout() -> u64 {
-    30
-}
-
-impl Nat64Config {
-    pub fn validate(&self) -> Result<()> {
-        if self.port_range.0 == 0 {
-            anyhow::bail!("[nat64] port_range start must be > 0 (port 0 is reserved)");
-        }
-        if self.port_range.0 > self.port_range.1 {
-            anyhow::bail!(
-                "[nat64] port_range start ({}) must be <= end ({})",
-                self.port_range.0,
-                self.port_range.1
-            );
-        }
-        if self.tcp_timeout_secs == 0 {
-            anyhow::bail!("[nat64] tcp_timeout_secs must be > 0");
-        }
-        if self.udp_timeout_secs == 0 {
-            anyhow::bail!("[nat64] udp_timeout_secs must be > 0");
-        }
-        if self.icmp_timeout_secs == 0 {
-            anyhow::bail!("[nat64] icmp_timeout_secs must be > 0");
-        }
-        Ok(())
-    }
-}
-
 /// Shared VPN iroh configuration fields (used by both server and client).
 #[derive(Deserialize, Default, Clone)]
 pub struct VpnIrohSharedConfig {
@@ -138,7 +80,6 @@ pub struct VpnServerIrohConfig {
     pub drop_on_full: bool,
     pub client_channel_size: Option<usize>,
     pub tun_writer_channel_size: Option<usize>,
-    pub nat64: Option<Nat64Config>,
     #[serde(default)]
     pub disable_spoofing_check: bool,
     #[serde(flatten)]
@@ -548,7 +489,6 @@ pub struct ResolvedVpnServerConfig {
     pub client_channel_size: usize,
     pub tun_writer_channel_size: usize,
     pub transport: TransportTuning,
-    pub nat64: Option<Nat64Config>,
     pub disable_spoofing_check: bool,
 }
 
@@ -567,16 +507,6 @@ impl ResolvedVpnServerConfig {
             cfg.server_ip6.as_deref(),
             "config",
         )?;
-
-        if let Some(ref nat64) = cfg.nat64 {
-            nat64.validate()?;
-
-            if nat64.enabled && nat64.source_ip.is_none() && cfg.network.is_none() {
-                anyhow::bail!(
-                    "[config] NAT64 requires an IPv4 source address. Set 'network' or 'nat64.source_ip'."
-                );
-            }
-        }
 
         let mtu = cfg.shared.mtu.unwrap_or(DEFAULT_VPN_MTU);
         validate_mtu(mtu, "config")?;
@@ -615,7 +545,6 @@ impl ResolvedVpnServerConfig {
             client_channel_size,
             tun_writer_channel_size,
             transport: cfg.shared.transport.clone(),
-            nat64: cfg.nat64.clone(),
             disable_spoofing_check: cfg.disable_spoofing_check,
         })
     }

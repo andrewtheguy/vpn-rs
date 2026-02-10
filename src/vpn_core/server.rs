@@ -9,9 +9,6 @@ use crate::vpn_core::buffer::{as_mut_byte_slice, uninitialized_vec};
 use crate::vpn_core::config::VpnServerConfig;
 use crate::vpn_core::device::{TunConfig, TunDevice};
 use crate::vpn_core::error::{VpnError, VpnResult};
-use crate::vpn_core::nat64::{
-    is_nat64_address, Nat64TranslateResult, Nat64Translator, NAT64_PREFIX_CIDR,
-};
 use crate::vpn_core::signaling::{
     frame_ip_packet, read_message, write_message, DataMessageType, VpnHandshake,
     VpnHandshakeResponse, HEARTBEAT_PONG_BYTE, MAX_HANDSHAKE_SIZE,
@@ -20,7 +17,6 @@ use bytes::{Bytes, BytesMut};
 use dashmap::DashMap;
 use ipnet::{Ipv4Net, Ipv6Net};
 use iroh::{Endpoint, EndpointId};
-use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -54,12 +50,6 @@ pub struct VpnServerStats {
     pub packets_tun_write_failed: AtomicU64,
     /// Packets dropped due to invalid source IP (anti-spoofing).
     pub packets_spoofed: AtomicU64,
-    /// Packets translated via NAT64 (IPv6 -> IPv4).
-    pub packets_nat64_6to4: AtomicU64,
-    /// Packets translated via NAT64 (IPv4 -> IPv6).
-    pub packets_nat64_4to6: AtomicU64,
-    /// NAT64 translation errors.
-    pub packets_nat64_errors: AtomicU64,
 }
 
 impl VpnServerStats {
@@ -80,9 +70,6 @@ impl VpnServerStats {
             packets_from_clients: self.packets_from_clients.load(Ordering::Relaxed),
             packets_tun_write_failed: self.packets_tun_write_failed.load(Ordering::Relaxed),
             packets_spoofed: self.packets_spoofed.load(Ordering::Relaxed),
-            packets_nat64_6to4: self.packets_nat64_6to4.load(Ordering::Relaxed),
-            packets_nat64_4to6: self.packets_nat64_4to6.load(Ordering::Relaxed),
-            packets_nat64_errors: self.packets_nat64_errors.load(Ordering::Relaxed),
         }
     }
 }
@@ -99,9 +86,6 @@ pub struct VpnServerStatsSnapshot {
     pub packets_from_clients: u64,
     pub packets_tun_write_failed: u64,
     pub packets_spoofed: u64,
-    pub packets_nat64_6to4: u64,
-    pub packets_nat64_4to6: u64,
-    pub packets_nat64_errors: u64,
 }
 
 // Channel buffer sizes are now configurable via VpnServerConfig:
@@ -136,7 +120,6 @@ struct ClientState {
 struct ClientContext {
     assigned_ip: Option<Ipv4Addr>,
     assigned_ip6: Option<Ipv6Addr>,
-    nat64: Option<Arc<Nat64Translator>>,
     /// Current client's key for identifying self in spoofing checks.
     client_key: (EndpointId, u64),
     /// Reverse lookup: IPv4 address -> client key (for inter-client spoofing detection).
@@ -161,7 +144,7 @@ struct IpPool {
     in_use: HashMap<(EndpointId, u64), Ipv4Addr>,
     /// Released IPs available for reuse.
     released: Vec<Ipv4Addr>,
-    /// Reserved IPs that should never be assigned to clients (e.g., NAT64 source).
+    /// Reserved IPs that should never be assigned to clients.
     reserved: HashSet<Ipv4Addr>,
 }
 
@@ -204,6 +187,7 @@ impl IpPool {
     }
 
     /// Reserve a specific IP address so it will not be assigned to clients.
+    #[cfg(test)]
     fn reserve_ip(&mut self, ip: Ipv4Addr, label: &str) -> Result<(), String> {
         if !self.network.contains(&ip) {
             return Err(format!(
@@ -237,7 +221,7 @@ impl IpPool {
         Ok(())
     }
 
-    /// Reserve the next available IP address for internal use (e.g., NAT64 source).
+    /// Reserve the next available IP address for internal use.
     #[cfg(test)]
     fn reserve_next_available(&mut self) -> Option<Ipv4Addr> {
         let ip = self.next_unreserved_ip()?;
@@ -245,7 +229,8 @@ impl IpPool {
         Some(ip)
     }
 
-    /// Reserve the highest available IP address for internal use (e.g., NAT64 source).
+    /// Reserve the highest available IP address for internal use.
+    #[cfg(test)]
     fn reserve_last_available(&mut self) -> Option<Ipv4Addr> {
         if self.next_ip > self.max_ip {
             return None;
@@ -449,8 +434,6 @@ pub struct VpnServer {
     next_session_id: AtomicU64,
     /// Performance statistics (atomic counters, no locking overhead).
     stats: Arc<VpnServerStats>,
-    /// NAT64 translator for IPv6-only clients to access IPv4 resources.
-    nat64: Option<Arc<Nat64Translator>>,
 }
 
 impl VpnServer {
@@ -486,63 +469,6 @@ impl VpnServer {
             }
         }
 
-        // Initialize NAT64 translator if configured
-        // NAT64 needs an IPv4 source address for translated packets.
-        // This can come from either nat64.source_ip or an auto-reserved VPN IPv4 address.
-        let nat64 = match &config.nat64 {
-            Some(nat64_config) if nat64_config.enabled => {
-                // Validate NAT64 configuration before creating translator
-                nat64_config.validate().map_err(VpnError::config)?;
-
-                // Determine the IPv4 source address for NAT64:
-                // 1. Use explicit nat64.source_ip if configured
-                // 2. Auto-reserve an unused IP from the VPN IPv4 pool
-                let mut auto_reserved = false;
-                let source_ip = match (nat64_config.source_ip, &ip_pool) {
-                    (Some(explicit_ip), Some(ip_pool_arc)) => {
-                        let mut pool = ip_pool_arc.write().await;
-                        if pool.network().contains(&explicit_ip) {
-                            pool.reserve_ip(explicit_ip, "source_ip")
-                                .map_err(VpnError::config)?;
-                        }
-                        explicit_ip
-                    }
-                    (Some(explicit_ip), None) => explicit_ip,
-                    (None, Some(ip_pool_arc)) => {
-                        let mut pool = ip_pool_arc.write().await;
-                        let reserved = pool.reserve_last_available().ok_or_else(|| {
-                            VpnError::config(
-                                "NAT64 requires an available IPv4 address in the VPN network (different from server_ip). \
-Set 'nat64.source_ip' explicitly or use a larger IPv4 network."
-                                    .to_string(),
-                            )
-                        })?;
-                        auto_reserved = true;
-                        reserved
-                    }
-                    (None, None) => {
-                        // This should be caught by config validation, but handle it as a safety net
-                        return Err(VpnError::config(
-                            "NAT64 requires either 'network' (IPv4) or 'nat64.source_ip' to be configured".to_string(),
-                        ));
-                    }
-                };
-
-                if auto_reserved {
-                    log::info!("NAT64 source_ip auto-reserved from VPN pool: {}", source_ip);
-                }
-                log::info!(
-                    "NAT64 enabled: translating {} -> {} with ports {}-{}",
-                    NAT64_PREFIX_CIDR,
-                    source_ip,
-                    nat64_config.port_range.0,
-                    nat64_config.port_range.1
-                );
-                Some(Arc::new(Nat64Translator::new(nat64_config, source_ip)))
-            }
-            _ => None,
-        };
-
         Ok(Self {
             config,
             ip_pool,
@@ -554,7 +480,6 @@ Set 'nat64.source_ip' explicitly or use a larger IPv4 network."
             active_connections: AtomicUsize::new(0),
             next_session_id: AtomicU64::new(1),
             stats: Arc::new(VpnServerStats::new()),
-            nat64,
         })
     }
 
@@ -1075,7 +1000,6 @@ Set 'nat64.source_ip' explicitly or use a larger IPv4 network."
         let ctx = ClientContext {
             assigned_ip,
             assigned_ip6,
-            nat64: self.nat64.clone(),
             client_key,
             ip_to_endpoint: ip_to_endpoint.clone(),
             ip6_to_endpoint: ip6_to_endpoint.clone(),
@@ -1159,9 +1083,6 @@ Set 'nat64.source_ip' explicitly or use a larger IPv4 network."
     ///
     /// TUN writes are sent through the `tun_write_tx` channel to a dedicated writer task,
     /// eliminating mutex contention. Backpressure is applied when the channel is full.
-    ///
-    /// If NAT64 is enabled, IPv6 packets destined for `64:ff9b::/96` are translated to
-    /// IPv4 before being written to the TUN device.
     ///
     /// At least one of `ctx.assigned_ip` (IPv4) or `ctx.assigned_ip6` (IPv6) must be provided.
     async fn handle_client_data(
@@ -1321,47 +1242,7 @@ Set 'nat64.source_ip' explicitly or use a larger IPv4 network."
                     continue;
                 }
 
-                // Check for NAT64 translation (IPv6 -> IPv4)
-                let mut packet_bytes = Cow::Borrowed(packet);
-                if let Some(ref nat64) = ctx.nat64 {
-                    // Check if this is an IPv6 packet destined for NAT64 prefix
-                    if packet.len() >= 40 && (packet[0] >> 4) == 6 {
-                        // Extract destination IPv6 address
-                        let dest_ip6 =
-                            Ipv6Addr::from(<[u8; 16]>::try_from(&packet[24..40]).unwrap());
-
-                        if is_nat64_address(&dest_ip6) {
-                            log::info!("NAT64: translating packet to {}", dest_ip6);
-                            // Translate IPv6 to IPv4
-                            match nat64.translate_6to4(packet) {
-                                Ok(ipv4_packet) => {
-                                    stats.packets_nat64_6to4.fetch_add(1, Ordering::Relaxed);
-                                    log::info!(
-                                        "NAT64 6to4: translated {} bytes -> {} bytes for client {}",
-                                        packet.len(),
-                                        ipv4_packet.len(),
-                                        client_id
-                                    );
-                                    packet_bytes = Cow::Owned(ipv4_packet);
-                                }
-                                Err(e) => {
-                                    log::warn!(
-                                        "NAT64 translation error for client {}: {}",
-                                        client_id,
-                                        e
-                                    );
-                                    stats.packets_nat64_errors.fetch_add(1, Ordering::Relaxed);
-                                    continue;
-                                }
-                            }
-                        }
-                    }
-                }
-
-                let packet_bytes = match packet_bytes {
-                    Cow::Borrowed(packet) => Bytes::copy_from_slice(packet),
-                    Cow::Owned(packet) => Bytes::from(packet),
-                };
+                let packet_bytes = Bytes::copy_from_slice(packet);
 
                 // Try non-blocking send first to avoid blocking on slow TUN writes
                 match tun_write_tx.try_send(packet_bytes) {
@@ -1462,91 +1343,30 @@ Set 'nat64.source_ip' explicitly or use a larger IPv4 network."
 
             let packet = &buf_slice[..n];
             self.stats.tun_packets_read.fetch_add(1, Ordering::Relaxed);
-
-            // Check for NAT64 reverse translation (IPv4 -> IPv6 response)
-            // If this is an IPv4 packet and NAT64 is enabled, try to translate.
-            // Use Cow to avoid allocation when no translation is needed.
-            let (final_packet, dest_client_ip6): (Cow<'_, [u8]>, Option<Ipv6Addr>) =
-                if let Some(ref nat64) = self.nat64 {
-                    if packet.len() >= 20 && (packet[0] >> 4) == 4 {
-                        // This is an IPv4 packet - try NAT64 reverse translation
-                        match nat64.translate_4to6(packet) {
-                            Ok(Nat64TranslateResult::Translated { client_ip6, packet }) => {
-                                self.stats
-                                    .packets_nat64_4to6
-                                    .fetch_add(1, Ordering::Relaxed);
-                                log::info!(
-                                    "NAT64 4to6: translated response for client {}",
-                                    client_ip6
-                                );
-                                (Cow::Owned(packet), Some(client_ip6))
-                            }
-                            Ok(Nat64TranslateResult::NotNat64Packet) => {
-                                // Not a NAT64 response - route normally without allocation
-                                (Cow::Borrowed(packet), None)
-                            }
-                            Err(e) => {
-                                // Translation error (e.g., no mapping found, malformed packet).
-                                // Unlike 6→4 which drops on error (destination is definitively
-                                // NAT64 and unroutable without translation), here we forward the
-                                // original IPv4 packet. For dual-stack clients, this allows
-                                // fallback to IPv4 routing. For IPv6-only clients, the packet
-                                // will be dropped by normal no-route logic since there's no
-                                // IPv4 address to route to.
-                                self.stats
-                                    .packets_nat64_errors
-                                    .fetch_add(1, Ordering::Relaxed);
-                                log::debug!("NAT64 4to6 translation error: {}", e);
-                                (Cow::Borrowed(packet), None)
-                            }
-                        }
-                    } else {
-                        (Cow::Borrowed(packet), None)
-                    }
-                } else {
-                    (Cow::Borrowed(packet), None)
-                };
-
-            let packet_ref: &[u8] = &final_packet;
+            let packet_ref: &[u8] = packet;
 
             // Extract destination IP from packet (IPv4 or IPv6)
             // DashMap lookups are lock-free - no async await needed
-            let (endpoint_id, device_id) = if let Some(client_ip6) = dest_client_ip6 {
-                // NAT64 translated packet - route to the client IPv6 address
-                match self.ip6_to_endpoint.get(&client_ip6).map(|r| *r) {
+            let (endpoint_id, device_id) = match extract_dest_ip(packet_ref) {
+                Some(PacketIp::V4(dest_ip)) => match self.ip_to_endpoint.get(&dest_ip).map(|r| *r) {
                     Some(res) => res,
                     None => {
                         self.stats.packets_no_route.fetch_add(1, Ordering::Relaxed);
                         continue;
                     }
-                }
-            } else {
-                // Normal packet routing
-                match extract_dest_ip(packet_ref) {
-                    Some(PacketIp::V4(dest_ip)) => {
-                        match self.ip_to_endpoint.get(&dest_ip).map(|r| *r) {
-                            Some(res) => res,
-                            None => {
-                                self.stats.packets_no_route.fetch_add(1, Ordering::Relaxed);
-                                continue;
-                            }
-                        }
-                    }
-                    Some(PacketIp::V6(dest_ip)) => {
-                        match self.ip6_to_endpoint.get(&dest_ip).map(|r| *r) {
-                            Some(res) => res,
-                            None => {
-                                self.stats.packets_no_route.fetch_add(1, Ordering::Relaxed);
-                                continue;
-                            }
-                        }
-                    }
+                },
+                Some(PacketIp::V6(dest_ip)) => match self.ip6_to_endpoint.get(&dest_ip).map(|r| *r) {
+                    Some(res) => res,
                     None => {
-                        self.stats
-                            .packets_unknown_version
-                            .fetch_add(1, Ordering::Relaxed);
+                        self.stats.packets_no_route.fetch_add(1, Ordering::Relaxed);
                         continue;
                     }
+                },
+                None => {
+                    self.stats
+                        .packets_unknown_version
+                        .fetch_add(1, Ordering::Relaxed);
+                    continue;
                 }
             };
 
@@ -2097,9 +1917,6 @@ mod tests {
         assert_eq!(stats.packets_from_clients.load(Ordering::Relaxed), 0);
         assert_eq!(stats.packets_tun_write_failed.load(Ordering::Relaxed), 0);
         assert_eq!(stats.packets_spoofed.load(Ordering::Relaxed), 0);
-        assert_eq!(stats.packets_nat64_6to4.load(Ordering::Relaxed), 0);
-        assert_eq!(stats.packets_nat64_4to6.load(Ordering::Relaxed), 0);
-        assert_eq!(stats.packets_nat64_errors.load(Ordering::Relaxed), 0);
     }
 
     #[test]
@@ -2112,8 +1929,6 @@ mod tests {
         stats.packets_no_route.fetch_add(5, Ordering::Relaxed);
         stats.packets_spoofed.fetch_add(3, Ordering::Relaxed);
         stats.packets_backpressure.fetch_add(2, Ordering::Relaxed);
-        stats.packets_nat64_6to4.fetch_add(10, Ordering::Relaxed);
-        stats.packets_nat64_4to6.fetch_add(8, Ordering::Relaxed);
 
         // Take a snapshot and verify values
         let snapshot = stats.snapshot();
@@ -2126,9 +1941,6 @@ mod tests {
         assert_eq!(snapshot.packets_dropped_full, 0);
         assert_eq!(snapshot.packets_from_clients, 0);
         assert_eq!(snapshot.packets_tun_write_failed, 0);
-        assert_eq!(snapshot.packets_nat64_6to4, 10);
-        assert_eq!(snapshot.packets_nat64_4to6, 8);
-        assert_eq!(snapshot.packets_nat64_errors, 0);
     }
 
     #[test]

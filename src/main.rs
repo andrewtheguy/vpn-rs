@@ -345,9 +345,6 @@ async fn run_vpn_server(resolved: ResolvedVpnServerConfig) -> Result<()> {
         );
     };
 
-    // Convert NAT64 config from vpn_common to vpn_core types
-    let nat64: Option<crate::vpn_core::config::Nat64Config> = resolved.nat64.map(Into::into);
-
     // Create VPN server config
     let config = VpnServerConfig {
         network,
@@ -360,7 +357,6 @@ async fn run_vpn_server(resolved: ResolvedVpnServerConfig) -> Result<()> {
         drop_on_full: resolved.drop_on_full,
         client_channel_size: resolved.client_channel_size,
         tun_writer_channel_size: resolved.tun_writer_channel_size,
-        nat64,
         disable_spoofing_check: resolved.disable_spoofing_check,
     };
 

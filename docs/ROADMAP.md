@@ -10,33 +10,17 @@ This document outlines planned features and improvements for `vpn-rs`.
 - Token authentication
 - Dynamic per-session client IP assignment
 - Optional dual-stack IPv4/IPv6 operation
-- Experimental NAT64 for IPv6-only deployments
 - Auto-reconnect and heartbeat-based connection health
 
 ---
 
 ## Planned Features
 
-### NAT64 Enhancements
-
-**Status:** Experimental / Partial
-
-NAT64 translation is implemented for TCP, UDP, and ICMP echo (ping). The following features are still planned:
-
-| Feature | Status | Notes |
-|---------|--------|-------|
-| TCP/UDP translation | Implemented | Full NAPT with connection tracking |
-| ICMP Echo (ping) | Implemented | Echo request/reply |
-| ICMP error translation | Planned | Needed for PMTU and richer error propagation |
-| IPv6 extension headers | Planned | Parse/skip extension headers to find transport |
-| IPv4 fragmentation support | Planned | Improve compatibility for oversized packets |
-| PMTU discovery handling | Planned | Better behavior on constrained links |
-
 ### IPv6-Only Hardening
 
 **Status:** In progress
 
-Improve operational guidance and defaults for IPv6-only VPN deployments, including NAT64 source IP ergonomics and validation clarity.
+Improve operational guidance and defaults for IPv6-only VPN deployments, including external NAT64 setup guidance.
 
 ### Authentication Rate Limiting
 
