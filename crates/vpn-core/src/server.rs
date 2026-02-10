@@ -352,7 +352,7 @@ impl Ip6Pool {
         // /127 has only 2 addresses (server takes ::1, no room for clients)
         // /128 is a single address (unusable for server + clients)
         if prefix_len >= 127 {
-            return Err(VpnError::Config(format!(
+            return Err(VpnError::config(format!(
                 "IPv6 prefix /{} is too small for VPN pool (need at least /126 for 1 client)",
                 prefix_len
             )));
@@ -458,7 +458,7 @@ impl VpnServer {
     /// Create a new VPN server.
     pub async fn new(config: VpnServerConfig) -> VpnResult<Self> {
         // Validate configuration
-        config.validate().map_err(VpnError::Config)?;
+        config.validate().map_err(VpnError::config)?;
 
         // Create IPv4 pool if configured
         let ip_pool = match config.network {
@@ -490,7 +490,7 @@ impl VpnServer {
         let nat64 = match &config.nat64 {
             Some(nat64_config) if nat64_config.enabled => {
                 // Validate NAT64 configuration before creating translator
-                nat64_config.validate().map_err(VpnError::Config)?;
+                nat64_config.validate().map_err(VpnError::config)?;
 
                 // Determine the IPv4 source address for NAT64:
                 // 1. Use explicit nat64.source_ip if configured
@@ -501,7 +501,7 @@ impl VpnServer {
                         let mut pool = ip_pool_arc.write().await;
                         if pool.network().contains(&explicit_ip) {
                             pool.reserve_ip(explicit_ip, "source_ip")
-                                .map_err(VpnError::Config)?;
+                                .map_err(VpnError::config)?;
                         }
                         explicit_ip
                     }
@@ -509,7 +509,7 @@ impl VpnServer {
                     (None, Some(ip_pool_arc)) => {
                         let mut pool = ip_pool_arc.write().await;
                         let reserved = pool.reserve_last_available().ok_or_else(|| {
-                            VpnError::Config(
+                            VpnError::config(
                                 "NAT64 requires an available IPv4 address in the VPN network (different from server_ip). \
 Set 'nat64.source_ip' explicitly or use a larger IPv4 network."
                                     .to_string(),
@@ -520,7 +520,7 @@ Set 'nat64.source_ip' explicitly or use a larger IPv4 network."
                     }
                     (None, None) => {
                         // This should be caught by config validation, but handle it as a safety net
-                        return Err(VpnError::Config(
+                        return Err(VpnError::config(
                             "NAT64 requires either 'network' (IPv4) or 'nat64.source_ip' to be configured".to_string(),
                         ));
                     }
@@ -615,7 +615,7 @@ Set 'nat64.source_ip' explicitly or use a larger IPv4 network."
             }
             // Invalid: no networks configured (should be caught by validate())
             _ => {
-                return Err(VpnError::Config(
+                return Err(VpnError::config(
                     "No network configured (need at least IPv4 or IPv6)".to_string(),
                 ))
             }

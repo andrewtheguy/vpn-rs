@@ -38,7 +38,7 @@ impl VpnLock {
         // Ensure parent directory exists
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
-                .map_err(|e| VpnError::Config(format!("Failed to create lock directory: {}", e)))?;
+                .map_err(|e| VpnError::config_with_source("Failed to create lock directory", e))?;
         }
 
         // Open or create the lock file (do not truncate before acquiring lock)
@@ -47,22 +47,22 @@ impl VpnLock {
             .create(true)
             .truncate(false)
             .open(&path)
-            .map_err(|e| VpnError::Config(format!("Failed to open lock file: {}", e)))?;
+            .map_err(|e| VpnError::config_with_source("Failed to open lock file", e))?;
 
         // Try to acquire exclusive lock (non-blocking)
         file.try_lock_exclusive().map_err(|_| {
-            VpnError::Config(
-                "Another VPN client is already running. Only one instance allowed.".into(),
+            VpnError::config(
+                "Another VPN client is already running. Only one instance allowed.",
             )
         })?;
 
         // Now that we hold the lock, truncate and write our PID
         file.set_len(0)
-            .map_err(|e| VpnError::Config(format!("Failed to truncate lock file: {}", e)))?;
+            .map_err(|e| VpnError::config_with_source("Failed to truncate lock file", e))?;
         file.seek(SeekFrom::Start(0))
-            .map_err(|e| VpnError::Config(format!("Failed to seek lock file: {}", e)))?;
+            .map_err(|e| VpnError::config_with_source("Failed to seek lock file", e))?;
         writeln!(file, "{}", std::process::id())
-            .map_err(|e| VpnError::Config(format!("Failed to write PID to lock file: {}", e)))?;
+            .map_err(|e| VpnError::config_with_source("Failed to write PID to lock file", e))?;
 
         log::debug!("Acquired VPN lock: {}", path.display());
 

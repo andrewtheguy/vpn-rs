@@ -32,7 +32,7 @@ pub struct TunConfig {
 /// Validate IPv6 prefix length (must be 0-128).
 fn validate_prefix_len6(prefix_len6: u8) -> VpnResult<()> {
     if prefix_len6 > 128 {
-        return Err(VpnError::Config(format!(
+        return Err(VpnError::config(format!(
             "Invalid IPv6 prefix length {}: must be 0-128",
             prefix_len6
         )));
@@ -160,11 +160,11 @@ impl TunDevice {
 
         // Create the async device
         let device = tun::create_as_async(&tun_config)
-            .map_err(|e| VpnError::TunDevice(format!("Failed to create TUN device: {}", e)))?;
+            .map_err(|e| VpnError::tun_device_with_source("Failed to create TUN device", e))?;
 
         let name = device
             .tun_name()
-            .map_err(|e| VpnError::TunDevice(format!("Failed to get TUN name: {}", e)))?;
+            .map_err(|e| VpnError::tun_device_with_source("Failed to get TUN name", e))?;
 
         log::info!("Created TUN device: {} with IP {}", name, config.address);
 
@@ -205,7 +205,7 @@ impl TunDevice {
         let (writer, reader) = self
             .device
             .split()
-            .map_err(|e| VpnError::TunDevice(format!("Failed to split TUN device: {}", e)))?;
+            .map_err(|e| VpnError::tun_device_with_source("Failed to split TUN device", e))?;
 
         Ok((
             TunReader {
@@ -515,7 +515,7 @@ fn handle_route_add_output<R: Route>(
         );
         Ok(())
     } else {
-        Err(VpnError::TunDevice(format!(
+        Err(VpnError::tun_device(format!(
             "Failed to add {} {}: {}",
             R::LABEL,
             route,
@@ -544,7 +544,7 @@ async fn add_route_generic<R: Route>(tun_name: &str, route: &R) -> VpnResult<()>
             .args(&args_ref)
             .output()
             .await
-            .map_err(|e| VpnError::TunDevice(format!("Failed to execute route command: {}", e)))?;
+            .map_err(|e| VpnError::tun_device_with_source("Failed to execute route command", e))?;
 
         handle_route_add_output(output, route, tun_name)
     }
@@ -558,7 +558,7 @@ async fn add_route_generic<R: Route>(tun_name: &str, route: &R) -> VpnResult<()>
             .output()
             .await
             .map_err(|e| {
-                VpnError::TunDevice(format!("Failed to execute ip route command: {}", e))
+                VpnError::tun_device_with_source("Failed to execute ip route command", e)
             })?;
 
         handle_route_add_output(output, route, tun_name)
@@ -572,7 +572,7 @@ async fn add_route_generic<R: Route>(tun_name: &str, route: &R) -> VpnResult<()>
             .args(&args_ref)
             .output()
             .await
-            .map_err(|e| VpnError::TunDevice(format!("Failed to execute netsh command: {}", e)))?;
+            .map_err(|e| VpnError::tun_device_with_source("Failed to execute netsh command", e))?;
 
         handle_route_add_output(output, route, tun_name)
     }
@@ -580,7 +580,7 @@ async fn add_route_generic<R: Route>(tun_name: &str, route: &R) -> VpnResult<()>
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     {
         let _ = (tun_name, route);
-        Err(VpnError::TunDevice(
+        Err(VpnError::tun_device(
             "Route management not supported on this platform".into(),
         ))
     }
@@ -596,7 +596,7 @@ async fn remove_route_generic<R: Route>(tun_name: &str, route: &R) -> VpnResult<
             .args(&args_ref)
             .output()
             .await
-            .map_err(|e| VpnError::TunDevice(format!("Failed to execute route command: {}", e)))?;
+            .map_err(|e| VpnError::tun_device_with_source("Failed to execute route command", e))?;
 
         handle_route_remove_output(output, route, tun_name);
     }
@@ -610,7 +610,7 @@ async fn remove_route_generic<R: Route>(tun_name: &str, route: &R) -> VpnResult<
             .output()
             .await
             .map_err(|e| {
-                VpnError::TunDevice(format!("Failed to execute ip route command: {}", e))
+                VpnError::tun_device_with_source("Failed to execute ip route command", e)
             })?;
 
         handle_route_remove_output(output, route, tun_name);
@@ -624,7 +624,7 @@ async fn remove_route_generic<R: Route>(tun_name: &str, route: &R) -> VpnResult<
             .args(&args_ref)
             .output()
             .await
-            .map_err(|e| VpnError::TunDevice(format!("Failed to execute netsh command: {}", e)))?;
+            .map_err(|e| VpnError::tun_device_with_source("Failed to execute netsh command", e))?;
 
         handle_route_remove_output(output, route, tun_name);
     }
@@ -819,7 +819,7 @@ fn configure_tun_ipv6(tun_name: &str, addr: Ipv6Addr, prefix_len: u8) -> VpnResu
             &prefix_len.to_string(),
         ])
         .output()
-        .map_err(|e| VpnError::TunDevice(format!("Failed to configure IPv6: {}", e)))?;
+        .map_err(|e| VpnError::tun_device_with_source("Failed to configure IPv6", e))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -835,7 +835,7 @@ fn configure_tun_ipv6(tun_name: &str, addr: Ipv6Addr, prefix_len: u8) -> VpnResu
             );
             return Ok(());
         }
-        return Err(VpnError::TunDevice(format!(
+        return Err(VpnError::tun_device(format!(
             "IPv6 configuration failed: {}",
             stderr.trim()
         )));
@@ -857,7 +857,7 @@ fn configure_tun_ipv6(tun_name: &str, addr: Ipv6Addr, prefix_len: u8) -> VpnResu
             tun_name,
         ])
         .output()
-        .map_err(|e| VpnError::TunDevice(format!("Failed to configure IPv6: {}", e)))?;
+        .map_err(|e| VpnError::tun_device_with_source("Failed to configure IPv6", e))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -871,7 +871,7 @@ fn configure_tun_ipv6(tun_name: &str, addr: Ipv6Addr, prefix_len: u8) -> VpnResu
             );
             return Ok(());
         }
-        return Err(VpnError::TunDevice(format!(
+        return Err(VpnError::tun_device(format!(
             "IPv6 configuration failed: {}",
             stderr.trim()
         )));
@@ -893,7 +893,7 @@ fn configure_tun_ipv6(tun_name: &str, addr: Ipv6Addr, prefix_len: u8) -> VpnResu
             &format!("address={}/{}", addr, prefix_len),
         ])
         .output()
-        .map_err(|e| VpnError::TunDevice(format!("Failed to configure IPv6: {}", e)))?;
+        .map_err(|e| VpnError::tun_device_with_source("Failed to configure IPv6", e))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -907,7 +907,7 @@ fn configure_tun_ipv6(tun_name: &str, addr: Ipv6Addr, prefix_len: u8) -> VpnResu
             );
             return Ok(());
         }
-        return Err(VpnError::TunDevice(format!(
+        return Err(VpnError::tun_device(format!(
             "IPv6 configuration failed: {}",
             stderr.trim()
         )));
@@ -919,7 +919,7 @@ fn configure_tun_ipv6(tun_name: &str, addr: Ipv6Addr, prefix_len: u8) -> VpnResu
 /// Configure IPv6 address on TUN device (unsupported platform stub).
 #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 fn configure_tun_ipv6(_tun_name: &str, _addr: Ipv6Addr, _prefix_len: u8) -> VpnResult<()> {
-    Err(VpnError::TunDevice(
+    Err(VpnError::tun_device(
         "IPv6 configuration not supported on this platform".into(),
     ))
 }
@@ -970,7 +970,7 @@ pub async fn add_route6_with_src(
             .output()
             .await
             .map_err(|e| {
-                VpnError::TunDevice(format!("Failed to execute ip route command: {}", e))
+                VpnError::tun_device_with_source("Failed to execute ip route command", e)
             })?;
 
         if output.status.success() {
@@ -988,7 +988,7 @@ pub async fn add_route6_with_src(
             );
             Ok(())
         } else {
-            Err(VpnError::TunDevice(format!(
+            Err(VpnError::tun_device(format!(
                 "Failed to add IPv6 route {}: {}",
                 route, stderr_trimmed
             )))
@@ -1009,7 +1009,7 @@ pub async fn add_route6_with_src(
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     {
         let _ = (tun_name, route, src);
-        Err(VpnError::TunDevice(
+        Err(VpnError::tun_device(
             "Route management not supported on this platform".into(),
         ))
     }
@@ -1166,11 +1166,11 @@ async fn query_route_for_ip(ip: IpAddr) -> VpnResult<BypassRouteInfo> {
         .args(&args)
         .output()
         .await
-        .map_err(|e| VpnError::TunDevice(format!("Failed to query route: {}", e)))?;
+        .map_err(|e| VpnError::tun_device_with_source("Failed to query route", e))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(VpnError::TunDevice(format!(
+        return Err(VpnError::tun_device(format!(
             "Failed to query route for {}: {}",
             ip,
             stderr.trim()
@@ -1260,7 +1260,7 @@ fn parse_linux_route_get(output: &str, peer_ip: IpAddr) -> VpnResult<BypassRoute
     }
 
     let device = device.ok_or_else(|| {
-        VpnError::TunDevice(format!(
+        VpnError::tun_device(format!(
             "Could not determine device for route to {}",
             peer_ip
         ))
@@ -1288,11 +1288,11 @@ async fn query_route_for_ip(ip: IpAddr) -> VpnResult<BypassRouteInfo> {
         .args(&args)
         .output()
         .await
-        .map_err(|e| VpnError::TunDevice(format!("Failed to query route: {}", e)))?;
+        .map_err(|e| VpnError::tun_device_with_source("Failed to query route", e))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(VpnError::TunDevice(format!(
+        return Err(VpnError::tun_device(format!(
             "Failed to query route for {}: {}",
             ip,
             stderr.trim()
@@ -1341,7 +1341,7 @@ fn parse_macos_route_get(output: &str, peer_ip: IpAddr) -> VpnResult<BypassRoute
     }
 
     let device = device.ok_or_else(|| {
-        VpnError::TunDevice(format!(
+        VpnError::tun_device(format!(
             "Could not determine interface for route to {}",
             peer_ip
         ))
@@ -1359,7 +1359,7 @@ fn parse_macos_route_get(output: &str, peer_ip: IpAddr) -> VpnResult<BypassRoute
 #[cfg(target_os = "windows")]
 async fn query_route_for_ip(ip: IpAddr) -> VpnResult<BypassRouteInfo> {
     // Windows route querying is more complex; for now return an error
-    Err(VpnError::TunDevice(
+    Err(VpnError::tun_device(
         "Bypass route detection not yet implemented on Windows".into(),
     ))
 }
@@ -1367,7 +1367,7 @@ async fn query_route_for_ip(ip: IpAddr) -> VpnResult<BypassRouteInfo> {
 /// Query the current route for a given IP address (unsupported platforms).
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 async fn query_route_for_ip(ip: IpAddr) -> VpnResult<BypassRouteInfo> {
-    Err(VpnError::TunDevice(
+    Err(VpnError::tun_device(
         "Bypass route detection not supported on this platform".into(),
     ))
 }
@@ -1429,7 +1429,7 @@ async fn add_bypass_route_impl(info: &BypassRouteInfo) -> VpnResult<()> {
         .args(&args_ref)
         .output()
         .await
-        .map_err(|e| VpnError::TunDevice(format!("Failed to add bypass route: {}", e)))?;
+        .map_err(|e| VpnError::tun_device_with_source("Failed to add bypass route", e))?;
 
     if output.status.success() {
         log::info!(
@@ -1451,7 +1451,7 @@ async fn add_bypass_route_impl(info: &BypassRouteInfo) -> VpnResult<()> {
         return Ok(());
     }
 
-    Err(VpnError::TunDevice(format!(
+    Err(VpnError::tun_device(format!(
         "Failed to add bypass route {}/{}: {}",
         info.peer_ip,
         prefix,
@@ -1483,7 +1483,7 @@ async fn add_bypass_route_impl(info: &BypassRouteInfo) -> VpnResult<()> {
         .args(&args_ref)
         .output()
         .await
-        .map_err(|e| VpnError::TunDevice(format!("Failed to add bypass route: {}", e)))?;
+        .map_err(|e| VpnError::tun_device_with_source("Failed to add bypass route", e))?;
 
     if output.status.success() {
         log::info!("Added bypass route for {} via {}", info.peer_ip, info.device);
@@ -1499,7 +1499,7 @@ async fn add_bypass_route_impl(info: &BypassRouteInfo) -> VpnResult<()> {
         return Ok(());
     }
 
-    Err(VpnError::TunDevice(format!(
+    Err(VpnError::tun_device(format!(
         "Failed to add bypass route for {}: {}",
         info.peer_ip,
         stderr.trim()
@@ -1509,7 +1509,7 @@ async fn add_bypass_route_impl(info: &BypassRouteInfo) -> VpnResult<()> {
 /// Implementation of adding a bypass route (Windows stub).
 #[cfg(target_os = "windows")]
 async fn add_bypass_route_impl(_info: &BypassRouteInfo) -> VpnResult<()> {
-    Err(VpnError::TunDevice(
+    Err(VpnError::tun_device(
         "Bypass route not yet implemented on Windows".into(),
     ))
 }
@@ -1517,7 +1517,7 @@ async fn add_bypass_route_impl(_info: &BypassRouteInfo) -> VpnResult<()> {
 /// Implementation of adding a bypass route (unsupported platforms).
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 async fn add_bypass_route_impl(_info: &BypassRouteInfo) -> VpnResult<()> {
-    Err(VpnError::TunDevice(
+    Err(VpnError::tun_device(
         "Bypass route not supported on this platform".into(),
     ))
 }

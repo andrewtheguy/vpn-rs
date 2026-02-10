@@ -118,11 +118,14 @@ impl VpnClient {
     ///   to relay transport if needed.
     pub async fn connect(&self, endpoint: &Endpoint, relay_urls: &[String]) -> VpnResult<()> {
         // Parse server endpoint ID
-        let server_id: EndpointId = self.config.server_node_id.parse().map_err(|_| {
-            VpnError::Config(format!(
+        let server_id: EndpointId = self.config.server_node_id.parse().map_err(|e| {
+            VpnError::config_with_source(
+                format!(
                 "Invalid server node ID: {}",
                 self.config.server_node_id
-            ))
+                ),
+                e,
+            )
         })?;
 
         log::info!("Connecting to VPN server: {}", server_id);
@@ -134,8 +137,11 @@ impl VpnClient {
         let endpoint_addr = if !relay_urls.is_empty() {
             let mut addr = EndpointAddr::new(server_id);
             for relay_url_str in relay_urls {
-                let relay_url: RelayUrl = relay_url_str.parse().map_err(|_| {
-                    VpnError::Config(format!("Invalid relay URL: {}", relay_url_str))
+                let relay_url: RelayUrl = relay_url_str.parse().map_err(|e| {
+                    VpnError::config_with_source(
+                        format!("Invalid relay URL: {}", relay_url_str),
+                        e,
+                    )
                 })?;
                 addr = addr.with_relay_url(relay_url);
             }

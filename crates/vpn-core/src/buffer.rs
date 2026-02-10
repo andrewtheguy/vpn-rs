@@ -42,9 +42,10 @@ pub fn uninitialized_vec(capacity: usize) -> Vec<MaybeUninit<u8>> {
 /// 1. Only the portion written to is subsequently read (e.g., `&slice[..n]` after read returns `n`)
 /// 2. The unwritten portion is never read
 ///
-/// This is safe for read operations because:
-/// - `read()` writes data into the buffer before returning
-/// - Only the written portion (`&buf[..n]`) is accessed afterward
+/// Converting `&mut [MaybeUninit<u8>]` to `&mut [u8]` is sound here because
+/// `MaybeUninit<u8>` and `u8` have identical layout, and because the caller
+/// upholds the guarantees above: bytes are initialized before they are read.
+/// Reading any unwritten/uninitialized bytes is undefined behavior.
 #[inline]
 pub unsafe fn as_mut_byte_slice(buf: &mut [MaybeUninit<u8>]) -> &mut [u8] {
     // SAFETY: MaybeUninit<u8> has the same memory layout as u8.
