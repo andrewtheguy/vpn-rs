@@ -383,16 +383,6 @@ impl Nat64StateTable {
             };
 
             if let Some(reverse_key) = reverse_key {
-                // Remove reverse mapping first to avoid orphan entries if we panic later.
-                self.reverse.remove(&reverse_key);
-
-                // There is a small transient window where reverse_key has been removed
-                // but the forward entry may still exist. A concurrent lookup_reverse
-                // could miss the mapping and drop a packet; this is acceptable for NAT64.
-                // The conditional self.forward.remove_if and the restore via
-                // self.reverse.entry(reverse_key).or_insert(forward_key) close the window
-                // if the forward entry was refreshed.
-
                 // Use remove_if for atomic conditional removal:
                 // only remove if the entry is still expired
                 let maybe_removed = self.forward.remove_if(&forward_key, |_key, entry| {
@@ -401,10 +391,11 @@ impl Nat64StateTable {
                 });
 
                 if maybe_removed.is_some() {
+                    // Remove reverse mapping only after forward removal succeeds.
+                    // If remove_if returns None, the entry was refreshed and reverse
+                    // mapping must remain intact.
+                    self.reverse.remove(&reverse_key);
                     removed += 1;
-                } else {
-                    // Forward entry was refreshed; restore reverse mapping.
-                    self.reverse.entry(reverse_key).or_insert(forward_key);
                 }
             }
         }
@@ -463,7 +454,6 @@ mod tests {
         };
 
         if let Some(reverse_key) = reverse_key {
-            table.reverse.remove(&reverse_key);
             hook(&forward_key);
 
             let maybe_removed = table.forward.remove_if(&forward_key, |_key, entry| {
@@ -472,9 +462,8 @@ mod tests {
             });
 
             if maybe_removed.is_some() {
+                table.reverse.remove(&reverse_key);
                 removed += 1;
-            } else {
-                table.reverse.insert(reverse_key, forward_key);
             }
         }
 
@@ -600,7 +589,7 @@ mod tests {
     }
 
     #[test]
-    fn test_cleanup_expired_restores_reverse_on_refresh() {
+    fn test_cleanup_expired_keeps_reverse_on_refresh() {
         // Reset mock clock to a known state
         MockClock::set_time(Duration::ZERO);
 
@@ -626,8 +615,7 @@ mod tests {
 
         // Use the hook to simulate a concurrent refresh during cleanup.
         // The entry is "expired" when cleanup starts, but gets refreshed
-        // (via the hook) after the reverse key is removed but before
-        // the forward entry is conditionally removed.
+        // (via the hook) before the conditional remove_if executes.
         let removed = cleanup_single_expired_with_hook(&table, forward_key.clone(), |key| {
             if let Some(mut entry) = table.forward.get_mut(key) {
                 // Refresh the entry by updating last_activity to "now"
@@ -639,7 +627,7 @@ mod tests {
         assert_eq!(removed, 0);
         assert_eq!(table.active_mappings(), 1);
 
-        // Reverse mapping should be restored
+        // Reverse mapping should still be present
         let reverse_key = ReverseKey {
             translated_port,
             src_ip4: dest_ip4,
