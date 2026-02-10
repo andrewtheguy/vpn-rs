@@ -54,6 +54,9 @@ const OUTBOUND_CHANNEL_SIZE: usize = 1024;
 /// Timeout for resolving relay URLs via DNS.
 const RESOLVE_RELAY_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Maximum wait for initial bypass route setup before continuing startup.
+const INITIAL_BYPASS_SETUP_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// VPN client instance.
 pub struct VpnClient {
     /// Client configuration.
@@ -408,6 +411,7 @@ impl VpnClient {
         // Clone endpoint for the spawned task
         let endpoint_clone = endpoint.clone();
         let vpn_tun_name = vpn_tun_name.to_string();
+        let initial_routes = HashMap::new();
 
         // Create oneshot channel to signal when initial setup is complete
         let (setup_done_tx, setup_done_rx) = tokio::sync::oneshot::channel();
@@ -419,14 +423,24 @@ impl VpnClient {
                 paths_watcher,
                 Some(setup_done_tx),
                 vpn_tun_name,
+                initial_routes,
             )
             .await;
         });
 
         // Wait for initial bypass route setup to complete before returning.
         // This ensures VPN routes are not added until bypass routes are in place.
-        if setup_done_rx.await.is_err() {
-            log::warn!("Bypass route manager task ended before initial setup completed");
+        match tokio::time::timeout(INITIAL_BYPASS_SETUP_TIMEOUT, setup_done_rx).await {
+            Ok(Ok(())) => {}
+            Ok(Err(_)) => {
+                log::warn!("Bypass route manager task ended before initial setup completed");
+            }
+            Err(_) => {
+                log::warn!(
+                    "Initial bypass setup timed out after {:.1}s, continuing startup",
+                    INITIAL_BYPASS_SETUP_TIMEOUT.as_secs_f64()
+                );
+            }
         }
 
         Some(handle)
@@ -835,9 +849,9 @@ struct BypassRouteManager {
 }
 
 impl BypassRouteManager {
-    fn new(vpn_tun_name: String) -> Self {
+    fn new(vpn_tun_name: String, active_routes: HashMap<IpAddr, BypassRouteGuard>) -> Self {
         Self {
-            active_routes: HashMap::new(),
+            active_routes,
             vpn_tun_name,
         }
     }
@@ -910,21 +924,40 @@ async fn run_bypass_route_manager(
     mut paths_watcher: impl Watcher<Value = PathInfoList> + Send + Unpin + 'static,
     initial_setup_done: Option<tokio::sync::oneshot::Sender<()>>,
     vpn_tun_name: String,
+    initial_routes: HashMap<IpAddr, BypassRouteGuard>,
 ) {
-    let mut manager = BypassRouteManager::new(vpn_tun_name);
+    let mut manager = BypassRouteManager::new(vpn_tun_name, initial_routes);
 
-    // Process initial connection paths (always apply, even if DNS partially fails)
+    // Process initial connection paths.
     let initial_paths = paths_watcher.get();
     let initial_result = collect_addresses_from_paths(&endpoint, &initial_paths).await;
-    manager.update(initial_result.ips).await;
+    if initial_result.preserve_routes {
+        log::warn!("Initial bypass route update skipped - keeping existing routes");
+    } else {
+        manager.update(initial_result.ips).await;
+    }
+
+    // Watch for changes using stream_updates_only (skips initial value we already processed)
+    let mut stream = paths_watcher.stream_updates_only();
+
+    // Ensure initial setup does not report success until we have at least one
+    // active bypass route, unless the watcher ends.
+    while manager.active_routes.is_empty() {
+        let Some(paths) = stream.next().await else {
+            break;
+        };
+        let result = collect_addresses_from_paths(&endpoint, &paths).await;
+        if result.preserve_routes {
+            log::warn!("Initial bypass route update skipped - keeping existing routes");
+            continue;
+        }
+        manager.update(result.ips).await;
+    }
 
     // Signal that initial setup is complete
     if let Some(tx) = initial_setup_done {
         let _ = tx.send(());
     }
-
-    // Watch for changes using stream_updates_only (skips initial value we already processed)
-    let mut stream = paths_watcher.stream_updates_only();
 
     while let Some(paths) = stream.next().await {
         log::debug!("Connection paths changed: {:?}", paths);
