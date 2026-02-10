@@ -443,7 +443,7 @@ impl VpnClient {
         let outbound_tx_heartbeat = outbound_tx.clone();
 
         // Spawn dedicated writer task that owns the SendStream.
-        // Uses batch receives for better throughput - receives up to 64 packets at once.
+        // Uses batch receives and chunked QUIC writes for better throughput.
         // Returns error context if write fails for inclusion in shutdown reason.
         let mut writer_handle: tokio::task::JoinHandle<Option<String>> = tokio::spawn(async move {
             let mut data_send = data_send;
@@ -454,12 +454,11 @@ impl VpnClient {
                     log::trace!("Writer task exiting");
                     break;
                 }
-                for data in batch.drain(..) {
-                    if let Err(e) = data_send.write_all(&data).await {
-                        log::warn!("Failed to write to QUIC stream: {}", e);
-                        return Some(format!("QUIC write error: {}", e));
-                    }
+                if let Err(e) = data_send.write_all_chunks(batch.as_mut_slice()).await {
+                    log::warn!("Failed to write to QUIC stream: {}", e);
+                    return Some(format!("QUIC write error: {}", e));
                 }
+                batch.clear();
             }
             None
         });
