@@ -32,18 +32,9 @@ pub mod config;
 pub mod device;
 pub mod error;
 pub mod lock;
-pub mod nat64;
 pub mod server;
 pub mod signaling;
 
 // Re-exports for convenience
-pub use client::{VpnClient, VpnClientBuilder};
-pub use config::VpnConfig;
-pub use error::{VpnError, VpnResult};
-pub use lock::VpnLock;
-pub use nat64::{
-    embed_ipv4_in_nat64, extract_ipv4_from_nat64, is_nat64_address, Nat64Translator, NAT64_PREFIX,
-    NAT64_PREFIX_CIDR,
-};
-pub use server::{VpnServer, VpnServerStats, VpnServerStatsSnapshot};
-pub use signaling::{VpnHandshake, VpnHandshakeResponse};
+pub use client::VpnClient;
+pub use server::VpnServer;

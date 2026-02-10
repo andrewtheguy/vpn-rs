@@ -54,12 +54,6 @@ impl TunConfig {
         }
     }
 
-    /// Set the device name.
-    pub fn with_name(mut self, name: impl Into<String>) -> Self {
-        self.name = Some(name.into());
-        self
-    }
-
     /// Set the MTU.
     pub fn with_mtu(mut self, mtu: u16) -> Self {
         self.mtu = mtu;
@@ -186,11 +180,6 @@ impl TunDevice {
         &self.name
     }
 
-    /// Get the MTU.
-    pub fn mtu(&self) -> u16 {
-        self.mtu
-    }
-
     /// Get the buffer size for reading packets (MTU + packet info header).
     pub fn buffer_size(&self) -> usize {
         self.mtu as usize + tun::PACKET_INFORMATION_LENGTH
@@ -214,16 +203,6 @@ impl TunDevice {
             },
             TunWriter { writer },
         ))
-    }
-
-    /// Read a packet from the TUN device.
-    pub async fn read(&mut self, buf: &mut [u8]) -> VpnResult<usize> {
-        self.device.read(buf).await.map_err(VpnError::Network)
-    }
-
-    /// Write a packet to the TUN device.
-    pub async fn write(&mut self, buf: &[u8]) -> VpnResult<usize> {
-        self.device.write(buf).await.map_err(VpnError::Network)
     }
 }
 
@@ -251,11 +230,6 @@ pub struct TunWriter {
 }
 
 impl TunWriter {
-    /// Write a packet to the TUN device.
-    pub async fn write(&mut self, buf: &[u8]) -> VpnResult<usize> {
-        self.writer.write(buf).await.map_err(VpnError::Network)
-    }
-
     /// Write all bytes to the TUN device.
     pub async fn write_all(&mut self, buf: &[u8]) -> VpnResult<()> {
         self.writer.write_all(buf).await.map_err(VpnError::Network)
@@ -323,27 +297,34 @@ pub trait Route: std::fmt::Display + Copy {
     const LABEL: &'static str;
 
     /// Build command args for adding a route on macOS.
+    #[cfg(target_os = "macos")]
     fn macos_add_args(&self, tun_name: &str) -> Vec<String>;
 
     /// Build command args for removing a route on macOS.
+    #[cfg(target_os = "macos")]
     fn macos_delete_args(&self, tun_name: &str) -> Vec<String>;
 
     /// Build command args for adding a route on Linux.
+    #[cfg(target_os = "linux")]
     fn linux_add_args(&self, tun_name: &str) -> Vec<String>;
 
     /// Build command args for removing a route on Linux.
+    #[cfg(target_os = "linux")]
     fn linux_delete_args(&self, tun_name: &str) -> Vec<String>;
 
     /// Build command args for adding a route on Windows.
+    #[cfg(target_os = "windows")]
     fn windows_add_args(&self, tun_name: &str) -> Vec<String>;
 
     /// Build command args for removing a route on Windows.
+    #[cfg(target_os = "windows")]
     fn windows_delete_args(&self, tun_name: &str) -> Vec<String>;
 }
 
 impl Route for Ipv4Net {
     const LABEL: &'static str = "route";
 
+    #[cfg(target_os = "macos")]
     fn macos_add_args(&self, tun_name: &str) -> Vec<String> {
         vec![
             "add".into(),
@@ -356,6 +337,7 @@ impl Route for Ipv4Net {
         ]
     }
 
+    #[cfg(target_os = "macos")]
     fn macos_delete_args(&self, tun_name: &str) -> Vec<String> {
         vec![
             "delete".into(),
@@ -368,6 +350,7 @@ impl Route for Ipv4Net {
         ]
     }
 
+    #[cfg(target_os = "linux")]
     fn linux_add_args(&self, tun_name: &str) -> Vec<String> {
         vec![
             "route".into(),
@@ -378,6 +361,7 @@ impl Route for Ipv4Net {
         ]
     }
 
+    #[cfg(target_os = "linux")]
     fn linux_delete_args(&self, tun_name: &str) -> Vec<String> {
         vec![
             "route".into(),
@@ -388,6 +372,7 @@ impl Route for Ipv4Net {
         ]
     }
 
+    #[cfg(target_os = "windows")]
     fn windows_add_args(&self, tun_name: &str) -> Vec<String> {
         vec![
             "interface".into(),
@@ -401,6 +386,7 @@ impl Route for Ipv4Net {
         ]
     }
 
+    #[cfg(target_os = "windows")]
     fn windows_delete_args(&self, tun_name: &str) -> Vec<String> {
         vec![
             "interface".into(),
@@ -417,6 +403,7 @@ impl Route for Ipv4Net {
 impl Route for Ipv6Net {
     const LABEL: &'static str = "IPv6 route";
 
+    #[cfg(target_os = "macos")]
     fn macos_add_args(&self, tun_name: &str) -> Vec<String> {
         vec![
             "add".into(),
@@ -427,6 +414,7 @@ impl Route for Ipv6Net {
         ]
     }
 
+    #[cfg(target_os = "macos")]
     fn macos_delete_args(&self, tun_name: &str) -> Vec<String> {
         vec![
             "delete".into(),
@@ -437,6 +425,7 @@ impl Route for Ipv6Net {
         ]
     }
 
+    #[cfg(target_os = "linux")]
     fn linux_add_args(&self, tun_name: &str) -> Vec<String> {
         vec![
             "-6".into(),
@@ -448,6 +437,7 @@ impl Route for Ipv6Net {
         ]
     }
 
+    #[cfg(target_os = "linux")]
     fn linux_delete_args(&self, tun_name: &str) -> Vec<String> {
         vec![
             "-6".into(),
@@ -459,6 +449,7 @@ impl Route for Ipv6Net {
         ]
     }
 
+    #[cfg(target_os = "windows")]
     fn windows_add_args(&self, tun_name: &str) -> Vec<String> {
         vec![
             "interface".into(),
@@ -472,6 +463,7 @@ impl Route for Ipv6Net {
         ]
     }
 
+    #[cfg(target_os = "windows")]
     fn windows_delete_args(&self, tun_name: &str) -> Vec<String> {
         vec![
             "interface".into(),
@@ -779,11 +771,6 @@ impl RouteGuard {
     fn new(tun_name: String, routes: Vec<Ipv4Net>) -> Self {
         Self { tun_name, routes }
     }
-
-    /// Get the routes managed by this guard.
-    pub fn routes(&self) -> &[Ipv4Net] {
-        &self.routes
-    }
 }
 
 impl Drop for RouteGuard {
@@ -924,13 +911,6 @@ fn configure_tun_ipv6(_tun_name: &str, _addr: Ipv6Addr, _prefix_len: u8) -> VpnR
     ))
 }
 
-/// Add an IPv6 route through the VPN TUN interface.
-///
-/// If the route already exists, this is treated as idempotent success.
-pub async fn add_route6(tun_name: &str, route: &Ipv6Net) -> VpnResult<()> {
-    add_route_generic(tun_name, route).await
-}
-
 /// Add an IPv6 route with an explicit source address.
 ///
 /// This is important when the client has multiple IPv6 addresses (e.g., a real
@@ -1029,33 +1009,6 @@ fn remove_route6_sync(tun_name: &str, route: &Ipv6Net) {
 ///
 /// Returns a `Route6Guard` that automatically removes the routes when dropped.
 /// If any route fails to add, previously added routes are rolled back.
-pub async fn add_routes6(tun_name: &str, routes: &[Ipv6Net]) -> VpnResult<Route6Guard> {
-    let mut added: Vec<Ipv6Net> = Vec::with_capacity(routes.len());
-
-    for route in routes {
-        if let Err(e) = add_route6(tun_name, route).await {
-            // Rollback previously added routes
-            log::warn!(
-                "Failed to add IPv6 route {}, rolling back {} route(s)",
-                route,
-                added.len()
-            );
-            for added_route in added.iter().rev() {
-                if let Err(rollback_err) = remove_route6(tun_name, added_route).await {
-                    log::warn!(
-                        "Rollback failed for IPv6 route {}: {}",
-                        added_route,
-                        rollback_err
-                    );
-                }
-            }
-            return Err(e);
-        }
-        added.push(*route);
-    }
-    Ok(Route6Guard::new(tun_name.to_string(), added))
-}
-
 /// Add multiple IPv6 routes with an explicit source address.
 ///
 /// This variant specifies the source address for route selection, which is
@@ -1108,11 +1061,6 @@ impl Route6Guard {
     /// Create a new Route6Guard (internal use only).
     fn new(tun_name: String, routes: Vec<Ipv6Net>) -> Self {
         Self { tun_name, routes }
-    }
-
-    /// Get the routes managed by this guard.
-    pub fn routes(&self) -> &[Ipv6Net] {
-        &self.routes
     }
 }
 

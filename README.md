@@ -24,7 +24,6 @@
 - Token-based authentication
 - Optional dual-stack VPN (IPv4 + IPv6)
 - Optional split tunneling (`--route` / `--route6`)
-- Optional NAT64 for IPv6-only deployments (experimental)
 - Auto-reconnect with heartbeat-based health checks
 
 ## When To Use It
@@ -179,7 +178,7 @@ ping 10.0.0.1
 | `--no-auto-reconnect` | Disable reconnect |
 | `--max-reconnect-attempts <N>` | Limit reconnect attempts |
 
-Use `vpn_server.toml.example` and `vpn_client.toml.example` for full tunables (routes, keepalive, transport tuning, NAT64).
+Use `vpn_server.toml.example` and `vpn_client.toml.example` for full tunables (routes, keepalive, transport tuning).
 
 ## Split Tunneling
 
@@ -202,6 +201,14 @@ sudo vpn-rs client \
   --route 0.0.0.0/0 \
   --route6 ::/0
 ```
+
+## External NAT64 (Linux + TAYGA)
+
+`vpn-rs` no longer implements NAT64 translation internally.
+
+For IPv6-only clients that need IPv4 reachability, run TAYGA as external host infrastructure and route `64:ff9b::/96` through the VPN from clients. Full setup instructions:
+
+- [`docs/TAYGA_NAT64.md`](docs/TAYGA_NAT64.md)
 
 ## Self-Hosted Iroh Infrastructure
 

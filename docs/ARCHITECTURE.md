@@ -43,9 +43,9 @@ graph TB
 VPN mode supports optional IPv6 alongside IPv4. When `network6` is configured on the server, clients receive both an IPv4 address and an IPv6 address. This enables:
 - Native IPv6 connectivity through the VPN tunnel
 - Dual-stack applications (IPv4 and IPv6 simultaneously)
-- Backwards compatibility (IPv4-only configs continue to work)
+- IPv4-only operation when `network6` is not configured
 
-IPv4 is optional: the server can run IPv6-only with `network6` and no `network`. **IPv6-only mode is experimental.** In that mode, IPv4 reachability is only available via **experimental** NAT64.
+IPv4 is optional: the server can run IPv6-only with `network6` and no `network`. In that mode, IPv4 reachability can be provided by external TAYGA infrastructure. See `docs/TAYGA_NAT64.md`.
 
 **Note:** VPN mode is not intended for stable client-to-client communications. Client IPs are dynamically assigned and may change between sessions.
 
@@ -202,37 +202,11 @@ graph TB
     style D6 fill:#BBDEFB
 ```
 
-When `network6` is configured, each client receives both an IPv4 and IPv6 address. The IPv6 pool works identically to the IPv4 pool, with each client getting a single /128 address. Unlike IPv4, a /64 network provides an effectively unlimited address space (~18.4 quintillion (2^64) addresses), so pool exhaustion is not a practical concern for IPv6. If `network` is omitted, the IPv4 pool is not created and the server runs IPv6-only (experimental); NAT64 (also experimental) can be enabled to reach IPv4 destinations.
+When `network6` is configured, each client receives both an IPv4 and IPv6 address. The IPv6 pool works identically to the IPv4 pool, with each client getting a single /128 address. Unlike IPv4, a /64 network provides an effectively unlimited address space (~18.4 quintillion (2^64) addresses), so pool exhaustion is not a practical concern for IPv6. If `network` is omitted, the IPv4 pool is not created and the server runs IPv6-only.
 
-### NAT64 (Experimental)
+### External NAT64 (Linux)
 
-NAT64 allows IPv6-only VPN clients to reach IPv4 destinations by translating IPv6 packets
-destined for the well-known NAT64 prefix `64:ff9b::/96` into IPv4 and performing NAPT.
-This is intended for IPv6-only server deployments where `network6` is set and `network`
-is omitted. NAT64 requires an IPv4 source address for translated packets, provided by
-either the VPN IPv4 network (when configured) or an explicit `nat64.source_ip`. When
-`network` is set and `nat64.source_ip` is omitted, the server auto-reserves the highest
-available IPv4 address (excluding the server's own IP address) from the VPN pool for
-NAT64. If the VPN IPv4 pool cannot spare an extra address, server startup fails with a
-config error; set `nat64.source_ip` explicitly in that case.
-
-```mermaid
-sequenceDiagram
-    participant C as Client (IPv6)
-    participant S as Server
-    participant V4 as IPv4 Dest
-
-    C->>S: IPv6 packet to 64:ff9b::/96
-    S->>S: Translate IPv6->IPv4 + NAPT
-    S->>V4: IPv4 packet (src = nat64.source_ip)
-    V4-->>S: IPv4 response
-    S-->>C: IPv6 response (translated)
-```
-
-**Limitations (current):**
-- ICMP error translation is not implemented.
-- IPv6 extension headers are not parsed.
-- Fragmentation handling and PMTU discovery are not implemented.
+`vpn-rs` does not perform in-process NAT64 translation. For IPv6-only clients that need IPv4 egress, deploy TAYGA and Linux routing/NAT on the host and route `64:ff9b::/96` through the VPN from clients. Full setup is documented in `docs/TAYGA_NAT64.md`.
 
 ### Platform-Specific Details
 
