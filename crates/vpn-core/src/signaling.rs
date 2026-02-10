@@ -91,6 +91,13 @@ pub struct VpnHandshakeResponse {
 }
 
 impl VpnHandshakeResponse {
+    /// Validate handshake response invariants.
+    ///
+    /// Accepted responses must include at least one assigned address family.
+    pub fn is_valid(&self) -> bool {
+        !(self.accepted && self.assigned_ip.is_none() && self.assigned_ip6.is_none())
+    }
+
     /// Create an accepted response (IPv4 only).
     pub fn accepted(assigned_ip: Ipv4Addr, network: Ipv4Net, server_ip: Ipv4Addr) -> Self {
         Self {
@@ -166,14 +173,25 @@ impl VpnHandshakeResponse {
 
     /// Encode to bytes for transmission.
     pub fn encode(&self) -> VpnResult<Vec<u8>> {
+        if !self.is_valid() {
+            return Err(VpnError::Signaling(
+                "Invalid handshake response: accepted response must include assigned_ip or assigned_ip6".into(),
+            ));
+        }
         serde_json::to_vec(self)
             .map_err(|e| VpnError::Signaling(format!("Failed to encode response: {}", e)))
     }
 
     /// Decode from bytes.
     pub fn decode(data: &[u8]) -> VpnResult<Self> {
-        serde_json::from_slice(data)
-            .map_err(|e| VpnError::Signaling(format!("Failed to decode response: {}", e)))
+        let response: Self = serde_json::from_slice(data)
+            .map_err(|e| VpnError::Signaling(format!("Failed to decode response: {}", e)))?;
+        if !response.is_valid() {
+            return Err(VpnError::Signaling(
+                "Invalid handshake response: accepted response must include assigned_ip or assigned_ip6".into(),
+            ));
+        }
+        Ok(response)
     }
 }
 
@@ -390,6 +408,28 @@ mod tests {
         assert_eq!(decoded.network6, Some(network6));
         assert_eq!(decoded.server_ip6, Some(server_ip6));
         assert_eq!(decoded.reject_reason, None);
+    }
+
+    #[test]
+    fn test_response_invalid_when_accepted_without_assigned_ip() {
+        let response = VpnHandshakeResponse {
+            version: VPN_PROTOCOL_VERSION,
+            accepted: true,
+            assigned_ip: None,
+            network: None,
+            server_ip: None,
+            assigned_ip6: None,
+            network6: None,
+            server_ip6: None,
+            reject_reason: None,
+        };
+
+        assert!(!response.is_valid());
+        assert!(response.encode().is_err());
+
+        let raw = serde_json::to_vec(&response).unwrap();
+        let decoded = VpnHandshakeResponse::decode(&raw);
+        assert!(decoded.is_err());
     }
 
     #[test]
