@@ -87,13 +87,16 @@ impl VpnLock {
             }
         }
     }
-
 }
 
 impl Drop for VpnLock {
     fn drop(&mut self) {
         if let Err(e) = self.file.unlock() {
-            log::warn!("Failed to unlock VPN lock file {}: {}", self.path.display(), e);
+            log::warn!(
+                "Failed to unlock VPN lock file {}: {}",
+                self.path.display(),
+                e
+            );
         }
 
         // The lock is automatically released when the file is closed,

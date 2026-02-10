@@ -259,7 +259,9 @@ mod tests {
     }
 
     fn decode_payload(token: &str) -> Vec<u8> {
-        URL_SAFE_NO_PAD.decode(&token[TOKEN_PREFIX.len_utf8()..]).unwrap()
+        URL_SAFE_NO_PAD
+            .decode(&token[TOKEN_PREFIX.len_utf8()..])
+            .unwrap()
     }
 
     #[test]

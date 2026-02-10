@@ -72,7 +72,6 @@ pub enum VpnError {
     /// Maximum reconnection attempts exceeded.
     #[error("Max reconnection attempts ({0}) exceeded")]
     MaxReconnectAttemptsExceeded(NonZeroU32),
-
 }
 
 impl VpnError {
@@ -118,9 +117,7 @@ impl VpnError {
     pub fn is_recoverable(&self) -> bool {
         matches!(
             self,
-            VpnError::ConnectionLost(_)
-                | VpnError::Network(_)
-                | VpnError::Signaling(_)
+            VpnError::ConnectionLost(_) | VpnError::Network(_) | VpnError::Signaling(_)
         )
     }
 }

@@ -563,13 +563,21 @@ impl VpnServer {
         let tun_writer_stats = self.stats.clone();
         let tun_writer_handle = tokio::spawn(async move {
             log::info!("TUN writer task started");
-            while let Some(packet) = tun_write_rx.recv().await {
-                if let Err(e) = tun_writer.write_all(&packet).await {
-                    tun_writer_stats
-                        .packets_tun_write_failed
-                        .fetch_add(1, Ordering::Relaxed);
-                    log::warn!("Failed to write to TUN: {}", e);
-                    // Continue processing - individual write failures shouldn't stop the writer
+            let mut batch = Vec::with_capacity(64);
+            loop {
+                let count = tun_write_rx.recv_many(&mut batch, 64).await;
+                if count == 0 {
+                    break;
+                }
+
+                for packet in batch.drain(..) {
+                    if let Err(e) = tun_writer.write_all(&packet).await {
+                        tun_writer_stats
+                            .packets_tun_write_failed
+                            .fetch_add(1, Ordering::Relaxed);
+                        log::warn!("Failed to write to TUN: {}", e);
+                        // Continue processing - individual write failures shouldn't stop the writer
+                    }
                 }
             }
             log::info!("TUN writer task exiting (channel closed)");
@@ -862,27 +870,27 @@ impl VpnServer {
             .expect("at least one IP must be assigned");
         let mut data_send = data_send;
         let writer_handle = tokio::spawn(async move {
+            let mut batch = Vec::with_capacity(64);
             let error = loop {
-                match packet_rx.recv().await {
-                    Some(data) => {
-                        if let Err(e) = data_send.write_all(&data).await {
-                            log::warn!("Failed to write to client {}: {}", writer_client_id, e);
-                            break Some(format!("QUIC write error: {}", e));
-                        }
+                let count = packet_rx.recv_many(&mut batch, 64).await;
+                if count == 0 {
+                    // Channel closed (normal shutdown) - signal end of stream to peer
+                    if let Err(e) = data_send.finish() {
+                        log::warn!(
+                            "Failed to finish QUIC stream for client {}: {}",
+                            writer_client_id,
+                            e
+                        );
+                        break Some(format!("QUIC finish error: {}", e));
                     }
-                    None => {
-                        // Channel closed (normal shutdown) - signal end of stream to peer
-                        if let Err(e) = data_send.finish() {
-                            log::warn!(
-                                "Failed to finish QUIC stream for client {}: {}",
-                                writer_client_id,
-                                e
-                            );
-                            break Some(format!("QUIC finish error: {}", e));
-                        }
-                        break None;
-                    }
+                    break None;
                 }
+
+                if let Err(e) = data_send.write_all_chunks(batch.as_mut_slice()).await {
+                    log::warn!("Failed to write to client {}: {}", writer_client_id, e);
+                    break Some(format!("QUIC write error: {}", e));
+                }
+                batch.clear();
             };
             log::trace!("Writer task for {} exiting", writer_client_id);
             // Signal error to trigger immediate cleanup (ignore send error if receiver dropped)
@@ -1284,14 +1292,17 @@ impl VpnServer {
             // Extract destination IP from packet (IPv4 or IPv6)
             // DashMap lookups are lock-free - no async await needed
             let (endpoint_id, device_id) = match extract_dest_ip(packet_ref) {
-                Some(PacketIp::V4(dest_ip)) => match self.ip_to_endpoint.get(&dest_ip).map(|r| *r) {
-                    Some(res) => res,
-                    None => {
-                        self.stats.packets_no_route.fetch_add(1, Ordering::Relaxed);
-                        continue;
+                Some(PacketIp::V4(dest_ip)) => {
+                    match self.ip_to_endpoint.get(&dest_ip).map(|r| *r) {
+                        Some(res) => res,
+                        None => {
+                            self.stats.packets_no_route.fetch_add(1, Ordering::Relaxed);
+                            continue;
+                        }
                     }
-                },
-                Some(PacketIp::V6(dest_ip)) => match self.ip6_to_endpoint.get(&dest_ip).map(|r| *r) {
+                }
+                Some(PacketIp::V6(dest_ip)) => match self.ip6_to_endpoint.get(&dest_ip).map(|r| *r)
+                {
                     Some(res) => res,
                     None => {
                         self.stats.packets_no_route.fetch_add(1, Ordering::Relaxed);
