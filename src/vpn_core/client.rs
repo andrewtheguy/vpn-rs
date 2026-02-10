@@ -254,10 +254,26 @@ impl VpnClient {
             log::info!("  Client IPv6: {}", ip6);
         }
 
+        // Drop any tunneled UDP packets that target this endpoint's own iroh
+        // socket ports. This prevents recursive self-encapsulation loops.
+        let local_iroh_udp_ports = Arc::new(collect_local_iroh_udp_ports(endpoint));
+        if !local_iroh_udp_ports.is_empty() {
+            log::info!(
+                "Filtering tunneled traffic for {} local iroh UDP port(s)",
+                local_iroh_udp_ports.len()
+            );
+        }
+
         // Run the VPN packet loop (tunneled over iroh)
         // Pass the bypass route task so it's aborted when VPN ends
-        self.run_vpn_loop(tun_device, data_send, data_recv, bypass_route_task)
-            .await
+        self.run_vpn_loop(
+            tun_device,
+            data_send,
+            data_recv,
+            bypass_route_task,
+            local_iroh_udp_ports,
+        )
+        .await
     }
 
     /// Perform VPN handshake with the server.
@@ -453,6 +469,7 @@ impl VpnClient {
         data_send: SendStream,
         data_recv: RecvStream,
         bypass_route_task: Option<JoinHandle<()>>,
+        local_iroh_udp_ports: Arc<HashSet<u16>>,
     ) -> VpnResult<()> {
         // Split TUN device
         let (mut tun_reader, mut tun_writer) = tun_device.split()?;
@@ -508,6 +525,14 @@ impl VpnClient {
                     match tun_reader.read(read_slice).await {
                         Ok(n) if n > 0 => {
                             let packet = &read_slice[..n];
+
+                            if packet_has_local_iroh_udp_port(packet, &local_iroh_udp_ports) {
+                                log::debug!(
+                                    "Dropped self-encapsulated iroh UDP packet from TUN ({} bytes)",
+                                    n
+                                );
+                                continue;
+                            }
 
                             // Allocate buffer sized to actual packet (1 byte type + 4 byte length + packet).
                             // Avoids over-allocation for small packets; allocator serves from thread-local caches.
@@ -1126,6 +1151,63 @@ fn calculate_backoff_with_rng(attempt: u32, rng: &mut impl Rng) -> Duration {
     let total_ms = base_delay_ms.saturating_add(jitter_ms).min(BACKOFF_MAX_MS);
 
     Duration::from_millis(total_ms)
+}
+
+/// Collect local UDP ports bound by the iroh endpoint.
+fn collect_local_iroh_udp_ports(endpoint: &Endpoint) -> HashSet<u16> {
+    endpoint.addr().ip_addrs().map(|addr| addr.port()).collect()
+}
+
+/// Return true if packet is UDP and either source/destination port matches a blocked port.
+#[inline]
+fn packet_has_local_iroh_udp_port(packet: &[u8], blocked_ports: &HashSet<u16>) -> bool {
+    if blocked_ports.is_empty() {
+        return false;
+    }
+    let Some((src_port, dst_port)) = extract_udp_ports(packet) else {
+        return false;
+    };
+    blocked_ports.contains(&src_port) || blocked_ports.contains(&dst_port)
+}
+
+/// Extract UDP source/destination ports from an IPv4/IPv6 packet.
+///
+/// For IPv6, only packets with UDP as the first next-header are parsed.
+#[inline]
+fn extract_udp_ports(packet: &[u8]) -> Option<(u16, u16)> {
+    const IPV4_MIN_HEADER_BYTES: usize = 20;
+    const IPV6_MIN_HEADER_BYTES: usize = 40;
+
+    if packet.len() < IPV4_MIN_HEADER_BYTES {
+        return None;
+    }
+
+    match packet[0] >> 4 {
+        4 => {
+            let ihl = usize::from(packet[0] & 0x0f) * 4;
+            if ihl < IPV4_MIN_HEADER_BYTES || packet.len() < ihl + 8 {
+                return None;
+            }
+            if packet[9] != 17 {
+                return None;
+            }
+            let src = u16::from_be_bytes([packet[ihl], packet[ihl + 1]]);
+            let dst = u16::from_be_bytes([packet[ihl + 2], packet[ihl + 3]]);
+            Some((src, dst))
+        }
+        6 => {
+            if packet.len() < IPV6_MIN_HEADER_BYTES + 8 {
+                return None;
+            }
+            if packet[6] != 17 {
+                return None;
+            }
+            let src = u16::from_be_bytes([packet[40], packet[41]]);
+            let dst = u16::from_be_bytes([packet[42], packet[43]]);
+            Some((src, dst))
+        }
+        _ => None,
+    }
 }
 
 #[cfg(test)]
