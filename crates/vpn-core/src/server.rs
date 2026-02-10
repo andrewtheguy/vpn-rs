@@ -1719,12 +1719,10 @@ fn read_ipv6_addr(packet: &[u8], offset: usize) -> Ipv6Addr {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand::RngCore;
 
     /// Helper to create a random EndpointId for testing
     fn random_endpoint_id() -> EndpointId {
-        let mut bytes = [0u8; 32];
-        rand::rngs::OsRng.fill_bytes(&mut bytes);
+        let bytes: [u8; 32] = rand::random();
         let secret = iroh::SecretKey::from_bytes(&bytes);
         secret.public()
     }

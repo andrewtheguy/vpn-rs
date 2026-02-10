@@ -98,7 +98,7 @@ impl VpnClient {
         let lock = VpnLock::acquire()?;
 
         // Generate random device ID (unique per session)
-        let device_id: u64 = rand::thread_rng().gen();
+        let device_id: u64 = rand::rng().random();
         log::info!("Generated device ID: {:016x}", device_id);
 
         Ok(Self {
@@ -1070,13 +1070,13 @@ const BACKOFF_JITTER_MS: u64 = 500;
 /// Adds random jitter (0-500ms) to prevent thundering herd.
 /// The cap is applied after adding jitter to ensure the total never exceeds MAX_MS.
 fn calculate_backoff(attempt: u32) -> Duration {
-    calculate_backoff_with_rng(attempt, &mut rand::thread_rng())
+    calculate_backoff_with_rng(attempt, &mut rand::rng())
 }
 
 /// Calculate exponential backoff delay with a custom RNG.
 ///
 /// This is the testable version that accepts an RNG parameter.
-/// Production code should use `calculate_backoff()` which uses `thread_rng()`.
+/// Production code should use `calculate_backoff()` which uses `rand::rng()`.
 ///
 /// # Arguments
 /// * `attempt` - Current attempt number (1-based)
@@ -1086,8 +1086,8 @@ fn calculate_backoff_with_rng(attempt: u32, rng: &mut impl Rng) -> Duration {
     let multiplier = 2_u64.saturating_pow(attempt.saturating_sub(1));
     let base_delay_ms = BACKOFF_BASE_MS.saturating_mul(multiplier);
 
-    // Add jitter to prevent thundering herd (unbiased via gen_range)
-    let jitter_ms = rng.gen_range(0..BACKOFF_JITTER_MS);
+    // Add jitter to prevent thundering herd (unbiased via random_range)
+    let jitter_ms = rng.random_range(0..BACKOFF_JITTER_MS);
 
     // Cap total delay (base + jitter) to MAX_MS
     let total_ms = base_delay_ms.saturating_add(jitter_ms).min(BACKOFF_MAX_MS);

@@ -9,3 +9,6 @@ members = [
 
 [workspace.package]
 version = "0.0.1"
+
+[workspace.dependencies]
+rand = "0.9"

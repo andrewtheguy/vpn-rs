@@ -436,7 +436,6 @@ fn default_nat64_icmp_timeout() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand::RngCore;
 
     fn minimal_server_config() -> VpnServerConfig {
         VpnServerConfig {
@@ -456,8 +455,7 @@ mod tests {
     }
 
     fn random_server_node_id() -> String {
-        let mut bytes = [0u8; 32];
-        rand::rngs::OsRng.fill_bytes(&mut bytes);
+        let bytes: [u8; 32] = rand::random();
         let secret = iroh::SecretKey::from_bytes(&bytes);
         secret.public().to_string()
     }
