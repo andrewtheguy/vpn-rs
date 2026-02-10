@@ -1,10 +1,13 @@
 #!/usr/bin/env pwsh
 
-# tunnel-rs installer for Windows
-# Downloads latest binary from: https://github.com/andrewtheguy/tunnel-rs/releases
+# vpn-rs installer for Windows
+# Downloads latest binary from: https://github.com/andrewtheguy/vpn-rs/releases
 #
 # Usage: .\install.ps1 [RELEASE_TAG] [-Admin] [-PreRelease]
 # Or set $env:RELEASE_TAG environment variable
+#
+# Note: VPN mode requires Administrator privileges to run (creates TUN devices)
+# The wintun.dll driver must be downloaded separately from https://www.wintun.net/ (official WireGuard project)
 
 param(
     [Parameter(Position = 0)]
@@ -23,7 +26,7 @@ param(
 $ErrorActionPreference = "Stop"
 
 $REPO_OWNER = "andrewtheguy"
-$REPO_NAME = "tunnel-rs"
+$REPO_NAME = "vpn-rs"
 
 # Function to print colored messages
 function Print-Info {
@@ -191,7 +194,7 @@ function Get-BinaryName {
         exit 1
     }
 
-    return "tunnel-rs-windows-amd64.exe"
+    return "vpn-rs-windows-amd64.exe"
 }
 
 # Download binary and verify checksum
@@ -256,6 +259,16 @@ function Download-Only {
     }
 
     Print-Info "Binary saved to: $outputFile"
+    Print-Warn ""
+    Print-Warn "IMPORTANT: Before running, you must manually install the WinTun driver:"
+    Print-Warn "  1. Download wintun.zip from https://www.wintun.net/ (official WireGuard project)"
+    Print-Warn "  2. Extract the zip file"
+    Print-Warn "  3. Copy wintun\bin\amd64\wintun.dll to: $(Get-Location)"
+    Print-Warn "     (or any directory in the system PATH)"
+    Print-Warn "  4. Run as Administrator"
+    Print-Warn ""
+    Print-Warn "If you see 'Failed to create TUN device: LoadLibraryExW failed',"
+    Print-Warn "the wintun.dll is missing or not in a valid DLL search path."
 }
 
 # Download binary to temporary location, test it, and install
@@ -267,10 +280,10 @@ function Install-Binary {
     )
 
     $url = "$BaseUrl/$BinaryName"
-    $tempDir = Join-Path $env:TEMP "tunnel-rs-install-$(Get-Random)"
+    $tempDir = Join-Path $env:TEMP "vpn-rs-install-$(Get-Random)"
     $tempBinary = Join-Path $tempDir $BinaryName
-    $installDir = Join-Path $env:LOCALAPPDATA "Programs\tunnel-rs"
-    $finalPath = Join-Path $installDir "tunnel-rs.exe"
+    $installDir = Join-Path $env:LOCALAPPDATA "Programs\vpn-rs"
+    $finalPath = Join-Path $installDir "vpn-rs.exe"
 
     try {
         # Create temp directory
@@ -309,9 +322,16 @@ function Install-Binary {
 
         Print-Info "Binary installed successfully to $finalPath"
 
-        # Add to PATH if not already there
+        # Add to PATH if not already there (case-insensitive exact match)
         $userPath = [System.Environment]::GetEnvironmentVariable("Path", "User")
-        if ($userPath -notlike "*$installDir*") {
+        $normalizedInstallDir = $installDir.TrimEnd('\', '/')
+        $currentPaths = @()
+        if ($userPath) {
+            $currentPaths = $userPath -split ';' | ForEach-Object { $_.Trim().TrimEnd('\', '/') } | Where-Object { $_ -ne '' }
+        }
+        $isInPath = $currentPaths -contains $normalizedInstallDir
+
+        if (-not $isInPath) {
             Print-Warn "$installDir is not in your PATH"
             Print-Warn "Adding to user PATH..."
 
@@ -328,6 +348,17 @@ function Install-Binary {
         else {
             Print-Info "$installDir is already in your PATH"
         }
+
+        Print-Warn ""
+        Print-Warn "IMPORTANT: Before running, you must manually install the WinTun driver:"
+        Print-Warn "  1. Download wintun.zip from https://www.wintun.net/ (official WireGuard project)"
+        Print-Warn "  2. Extract the zip file"
+        Print-Warn "  3. Copy wintun\bin\amd64\wintun.dll to: $installDir"
+        Print-Warn "     (or any directory in the system PATH)"
+        Print-Warn "  4. Run as Administrator"
+        Print-Warn ""
+        Print-Warn "If you see 'Failed to create TUN device: LoadLibraryExW failed',"
+        Print-Warn "the wintun.dll is missing or not in a valid DLL search path."
     }
     finally {
         # Clean up temp directory
@@ -342,7 +373,7 @@ function Show-Usage {
     Write-Host @"
 Usage: .\install.ps1 [OPTIONS] [RELEASE_TAG]
 
-Download and install tunnel-rs binary
+Download and install vpn-rs binary
 
 Options:
   -DownloadOnly  Download binary to current directory without installing
@@ -367,7 +398,14 @@ Examples:
 
 Supported platforms: Windows (amd64)
 
-Note: Installation as administrator is not recommended. Use -Admin flag to override.
+Note: VPN mode requires Administrator privileges to run (creates TUN devices).
+
+IMPORTANT: You must manually download and install the WinTun driver:
+  1. Download wintun.zip from https://www.wintun.net/ (official WireGuard project)
+  2. Extract and copy wintun\bin\amd64\wintun.dll to the executable directory
+     (or any directory in the system PATH)
+
+If you see 'Failed to create TUN device: LoadLibraryExW failed', wintun.dll is missing or not in a valid DLL search path.
 "@
 }
 
@@ -404,10 +442,10 @@ function Start-Installation {
     )
 
     if ($DownloadOnly) {
-        Print-Info "tunnel-rs downloader"
+        Print-Info "vpn-rs downloader"
     }
     else {
-        Print-Info "tunnel-rs installer"
+        Print-Info "vpn-rs installer"
     }
     Print-Info "Release: $Tag"
     Print-Info "Repository: $REPO_OWNER/$REPO_NAME"
@@ -444,24 +482,23 @@ function Start-Installation {
     else {
         Install-Binary -BaseUrl $baseUrl -BinaryName $binaryName -ExpectedChecksum $expectedChecksum
         Print-Info "Installation completed successfully!"
-        Print-Info "You can now run 'tunnel-rs' from your terminal."
+        Print-Info "You can now run 'vpn-rs' from an Administrator terminal."
     }
 }
 
 # Main execution
 function Main {
-    # Handle help flags - check both parameter and ReleaseTag value
-    if ($args -contains "--help" -or $args -contains "-h" -or $args -contains "-?" -or $args -contains "/?" -or $args -contains "/h" -or
-        $ReleaseTag -eq "--help" -or $ReleaseTag -eq "-h" -or $ReleaseTag -eq "-?" -or $ReleaseTag -eq "/?" -or $ReleaseTag -eq "/h") {
+    # Handle help flags via ReleaseTag parameter
+    if ($ReleaseTag -eq "--help" -or $ReleaseTag -eq "-h" -or $ReleaseTag -eq "-?" -or $ReleaseTag -eq "/?" -or $ReleaseTag -eq "/h") {
         Show-Usage
         exit 0
     }
 
     if ($DownloadOnly) {
-        Print-Info "Starting tunnel-rs download..."
+        Print-Info "Starting vpn-rs download..."
     }
     else {
-        Print-Info "Starting tunnel-rs installation..."
+        Print-Info "Starting vpn-rs installation..."
     }
 
     # Determine release tag

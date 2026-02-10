@@ -1,15 +1,16 @@
 #!/bin/bash
 
-# tunnel-rs installer for Linux and Mac
-# Downloads latest binary from: https://github.com/andrewtheguy/tunnel-rs/releases
+# vpn-rs installer for Linux and Mac
+# Downloads latest binary from: https://github.com/andrewtheguy/vpn-rs/releases
+# Installs to /usr/local/bin (requires root/sudo)
 #
-# Usage: ./install.sh [RELEASE_TAG] [--prerelease]
+# Usage: sudo ./install.sh [RELEASE_TAG] [--prerelease]
 # Or set RELEASE_TAG environment variable
 
 set -e
 
 REPO_OWNER="andrewtheguy"
-REPO_NAME="tunnel-rs"
+REPO_NAME="vpn-rs"
 DOWNLOAD_ONLY=false
 PREFER_PRERELEASE=false
 
@@ -203,7 +204,7 @@ detect_os() {
             ;;
         *)
             print_error "Unsupported operating system: $(uname -s)"
-            print_error "This script only supports Linux and macOS"
+            print_error "vpn-rs only supports Linux and macOS"
             exit 1
             ;;
     esac
@@ -231,13 +232,13 @@ detect_arch() {
 get_binary_name() {
     case "${OS}-${ARCH}" in
         "linux-amd64")
-            BINARY_NAME="tunnel-rs-linux-amd64"
+            BINARY_NAME="vpn-rs-linux-amd64"
             ;;
         "linux-arm64")
-            BINARY_NAME="tunnel-rs-linux-arm64"
+            BINARY_NAME="vpn-rs-linux-arm64"
             ;;
         "macos-arm64")
-            BINARY_NAME="tunnel-rs-macos-arm64"
+            BINARY_NAME="vpn-rs-macos-arm64"
             ;;
         *)
             print_error "Unsupported platform: ${OS}-${ARCH}"
@@ -310,63 +311,12 @@ download_only() {
     print_info "Binary saved to: ${output_file}"
 }
 
-# Check if sourcing a profile would add target_dir to PATH
-check_profile_has_path() {
-    local profile="$1"
-    local target_dir="$2"
-
-    if [ -z "$profile" ] || [ ! -f "$profile" ]; then
-        return 1
-    fi
-
-    # Source the profile in a subshell and check if target_dir is in PATH
-    local new_path
-    new_path=$(HOME="$HOME" SHELL="$SHELL" bash -c "source '$profile' 2>/dev/null; echo \"\$PATH\"" 2>/dev/null)
-
-    if [[ ":$new_path:" == *":$target_dir:"* ]]; then
-        return 0
-    fi
-    return 1
-}
-
-# Find a profile file that has .local/bin configured
-find_profile_with_local_bin() {
-    local target_dir="$1"
-    local shell_name
-    shell_name=$(basename "$SHELL")
-
-    # List of profile files to check (order matters - check login profiles first)
-    local profiles=()
-
-    case "$shell_name" in
-        bash)
-            profiles=("$HOME/.bash_profile" "$HOME/.profile" "$HOME/.bashrc")
-            ;;
-        zsh)
-            profiles=("$HOME/.zprofile" "$HOME/.zshrc")
-            ;;
-        *)
-            profiles=("$HOME/.profile")
-            ;;
-    esac
-
-    # Find first profile that has .local/bin configured
-    for profile in "${profiles[@]}"; do
-        if check_profile_has_path "$profile" "$target_dir"; then
-            echo "$profile"
-            return 0
-        fi
-    done
-
-    return 1
-}
-
-# Download binary to temporary location, test it, and install
+# Download binary to temporary location, test it, and install to /usr/local/bin
 download_and_install() {
     local temp_dir
     temp_dir=$(mktemp -d)
     local temp_binary="${temp_dir}/${BINARY_NAME}"
-    local final_path="$HOME/.local/bin/tunnel-rs"
+    local final_path="/usr/local/bin/vpn-rs"
 
     # Set up trap to clean up temp directory on exit
     trap 'rm -rf "$temp_dir"' EXIT
@@ -387,9 +337,8 @@ download_and_install() {
 
     print_info "Binary test successful: $version_info"
 
-    # Create target directory if it doesn't exist
-    local target_dir="$HOME/.local/bin"
-    mkdir -p "$target_dir"
+    # Ensure /usr/local/bin exists
+    mkdir -p /usr/local/bin
 
     # Move the tested binary to final location
     if ! mv "$temp_binary" "$final_path"; then
@@ -401,37 +350,13 @@ download_and_install() {
     rm -rf "$temp_dir"
 
     print_info "Binary installed successfully to ${final_path}"
-
-    # Check PATH and suggest how to fix if needed
-    if [[ ":$PATH:" != *":$target_dir:"* ]]; then
-        local profile
-        profile=$(find_profile_with_local_bin "$target_dir")
-
-        if [ -n "$profile" ]; then
-            # Profile already has .local/bin configured, just needs reload
-            print_warn "${target_dir} is not in your current PATH, but is configured in your profile."
-            print_warn "To use tunnel-rs now, reload your profile:"
-            echo ""
-            echo "    source $profile"
-            echo ""
-            print_warn "Or start a new terminal session."
-        else
-            # Profile doesn't have .local/bin, need to add it
-            print_warn "${target_dir} is not in your PATH"
-            print_warn "Add the following line to your shell profile (.bashrc, .zshrc, etc.):"
-            echo ""
-            echo "    export PATH=\"\$HOME/.local/bin:\$PATH\""
-            echo ""
-            print_warn "Then reload your profile or start a new terminal session."
-        fi
-    fi
 }
 
 # Display usage information
 show_usage() {
-    echo "Usage: $0 [OPTIONS] [RELEASE_TAG]"
+    echo "Usage: sudo $0 [OPTIONS] [RELEASE_TAG]"
     echo ""
-    echo "Download and install tunnel-rs binary"
+    echo "Download and install vpn-rs binary to /usr/local/bin"
     echo ""
     echo "Options:"
     echo "  --download-only  Download binary to current directory without installing"
@@ -442,21 +367,23 @@ show_usage() {
     echo "  RELEASE_TAG      GitHub release tag to download (default: latest)"
     echo ""
     echo "Examples:"
-    echo "  $0                              # Install latest release"
-    echo "  $0 20251210172710               # Install specific release"
-    echo "  $0 --prerelease                 # Install latest prerelease"
-    echo "  $0 --download-only              # Download latest to current directory"
-    echo "  $0 --download-only 20251210172710  # Download specific release"
+    echo "  sudo $0                              # Install latest release"
+    echo "  sudo $0 20251210172710               # Install specific release"
+    echo "  sudo $0 --prerelease                 # Install latest prerelease"
+    echo "  $0 --download-only                   # Download latest to current directory"
+    echo "  $0 --download-only 20251210172710    # Download specific release"
     echo ""
     echo "Supported platforms: Linux (amd64, arm64), macOS (arm64)"
+    echo ""
+    echo "Note: VPN mode requires root privileges to run (creates TUN devices)."
 }
 
 # Main installation function
 install() {
     if [ "$DOWNLOAD_ONLY" = true ]; then
-        print_info "tunnel-rs downloader"
+        print_info "vpn-rs downloader"
     else
-        print_info "tunnel-rs installer"
+        print_info "vpn-rs installer"
     fi
     print_info "Release: ${RELEASE_TAG}"
     print_info "Repository: ${REPO_OWNER}/${REPO_NAME}"
@@ -490,14 +417,16 @@ install() {
     else
         download_and_install
         print_info "Installation completed successfully!"
-        print_info "You can now run 'tunnel-rs' from your terminal."
+        print_info "You can now run 'sudo vpn-rs' from your terminal."
     fi
 }
 
 # Check if running with proper privileges
 check_privileges() {
-    if [ "$EUID" -eq 0 ]; then
-        print_warn "Running as root. It's recommended to install as a regular user."
+    if [ "$EUID" -ne 0 ]; then
+        print_error "This installer must be run as root (use sudo)"
+        print_error "Example: curl -sSL ... | sudo bash"
+        exit 1
     fi
 }
 
@@ -506,9 +435,9 @@ main() {
     parse_args "$@"
 
     if [ "$DOWNLOAD_ONLY" = true ]; then
-        print_info "Starting tunnel-rs download..."
+        print_info "Starting vpn-rs download..."
     else
-        print_info "Starting tunnel-rs installation..."
+        print_info "Starting vpn-rs installation..."
         check_privileges
     fi
 

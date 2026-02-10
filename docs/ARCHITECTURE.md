@@ -1,811 +1,396 @@
-# tunnel-rs Architecture
+# vpn-rs Architecture
 
-This document provides a comprehensive overview of the tunnel-rs architecture, including detailed diagrams of all four operational modes, component interactions, data flows, and security considerations.
+`vpn-rs` provides full-network tunneling using direct IP-over-QUIC. It creates a TUN device and routes IP traffic directly through encrypted iroh QUIC connections, eliminating double-encryption overhead while preserving TLS 1.3 security.
 
-## Table of Contents
+## VPN Mode
 
-- [System Overview](#system-overview)
-- [Mode Comparison](#mode-comparison)
-- [Mode-Specific Architecture](#mode-specific-architecture)
-- [Configuration System](#configuration-system)
-- [Security Model](#security-model)
-- [Protocol Support](#protocol-support)
-- [Component Details](#component-details)
-- [Performance Considerations](#performance-considerations)
-- [Error Handling](#error-handling)
-- [Mode Capabilities](#mode-capabilities)
-- [Current Limitations](#current-limitations)
-- [References](#references)
+> **Note:** VPN mode requires root/admin privileges. On Windows, you also need `wintun.dll` from https://www.wintun.net/ (official WireGuard project) — download the zip, extract, and copy `wintun/bin/amd64/wintun.dll` to the same directory as the executable (or any directory in the system PATH).
 
----
-
-## System Overview
-
-tunnel-rs is a P2P TCP/UDP port forwarding tool that supports multiple distinct operational modes, each optimized for different use cases and network environments.
-
-Binary layout:
-- `tunnel-rs`: iroh mode (port forwarding)
-- `tunnel-rs-vpn`: VPN mode (iroh)
-- `tunnel-rs-ice`: manual and nostr modes (port forwarding)
-
-> **Design Goal:** The project's primary goal is to provide a convenient way to connect to different networks for development or homelab purposes without the hassle and security risk of opening a port. It is **not** meant for production setups or designed to be performant at scale.
+### Architecture Overview
 
 ```mermaid
 graph TB
-    subgraph "tunnel-rs Modes"
-        A[iroh]
-        A2[vpn]
-        C[manual]
-        D2[nostr]
+    subgraph "Client Side"
+        A[Applications]
+        B[TUN Device<br/>tun0: 10.0.0.2<br/>fd00::2]
+        D[iroh Endpoint]
     end
 
-    subgraph "Use Cases"
-        D[Persistent<br/>Best NAT Traversal]
-        D3[Full Network VPN<br/>Direct QUIC Encryption]
-        F[Manual Signaling<br/>Full ICE]
-        F2[Automated Signaling<br/>Static Keys]
+    subgraph "Transport"
+        E[iroh Connection<br/>NAT Traversal + Relay]
     end
 
-    subgraph "Infrastructure"
-        G[Pkarr/DNS<br/>Relay Servers]
-        I[STUN Only]
-        I2[STUN + Nostr Relays]
+    subgraph "Server Side"
+        F[iroh Endpoint]
+        H[TUN Device<br/>tun0: 10.0.0.1<br/>fd00::1]
+        I[Target Network<br/>LAN / Internet]
     end
 
-    A --> D
-    A2 --> D3
-    C --> F
-    D2 --> F2
+    A -->|IP packets| B
+    B -->|read & frame| D
+    D <-->|iroh QUIC| E
+    E <-->|iroh QUIC| F
+    F -->|write & unframe| H
+    H -->|forward| I
 
-    A --> G
-    A2 --> G
-    C --> I
-    D2 --> I2
-
-    style A fill:#4CAF50
-    style A2 fill:#2196F3
-    style C fill:#FF9800
-    style D2 fill:#9C27B0
+    style B fill:#FFE0B2
+    style H fill:#FFE0B2
+    style E fill:#BBDEFB
 ```
 
-### Binaries & Crates
+**IPv6 Dual-Stack Support:**
 
-The project is split into separate binaries to isolate dependencies:
+VPN mode supports optional IPv6 alongside IPv4. When `network6` is configured on the server, clients receive both an IPv4 address and an IPv6 address. This enables:
+- Native IPv6 connectivity through the VPN tunnel
+- Dual-stack applications (IPv4 and IPv6 simultaneously)
+- Backwards compatibility (IPv4-only configs continue to work)
 
-| Binary | Modes | Key Modules |
-|--------|-------|-------------|
-| `tunnel-rs` | `iroh` | `iroh_mode`, `auth` |
-| `tunnel-rs-vpn` | `vpn` (iroh) | `tunnel_vpn`, `auth` |
-| `tunnel-rs-ice` | `manual`, `nostr` | `custom`, `nostr`, `transport` |
+IPv4 is optional: the server can run IPv6-only with `network6` and no `network`. **IPv6-only mode is experimental.** In that mode, IPv4 reachability is only available via **experimental** NAT64.
 
-Relay-only is a CLI-only flag that forces connections through relay servers instead of attempting direct connections. It is intended for testing or special scenarios and is not supported in config files to avoid accidental activation. See `tunnel-rs --help` for usage.
+**Note:** VPN mode is not intended for stable client-to-client communications. Client IPs are dynamically assigned and may change between sessions.
 
-### Core Components
+### Key Components
 
 ```mermaid
 graph LR
-    subgraph "Core Modules"
-        A[main.rs<br/>CLI & Orchestration]
-        B[config.rs<br/>Configuration]
-        C[tunnel.rs<br/>TCP/UDP Forwarding]
-        D[endpoint.rs<br/>iroh Endpoint]
-        E[secret.rs<br/>Identity Management]
-        E2[auth.rs<br/>Token Authentication]
+    subgraph "vpn-core Crate"
+        A[VpnServer / VpnClient]
+        C[TUN Device<br/>tun crate]
+        D[IP Pool<br/>address management]
+        E[Signaling<br/>handshake & framing]
+        F[VpnLock<br/>single instance]
     end
 
-    subgraph "Manual/Custom Mode"
-        F[transport/ice.rs<br/>ICE with str0m]
-        G[transport/quic.rs<br/>QUIC with quinn]
-        H[signaling/manual.rs<br/>Offer/Answer]
-        I[transport/mux.rs<br/>Stream Multiplexing]
-    end
-
-    subgraph "Nostr Mode"
-        J[signaling/nostr.rs<br/>Nostr Relay Signaling]
-    end
-
-    A --> B
     A --> C
     A --> D
     A --> E
-    A --> E2
     A --> F
-    A --> G
-    A --> H
-    A --> J
 
-    F --> G
-    H --> F
-    J --> H
-    G --> I
-
-    style A fill:#E3F2FD
-    style C fill:#E8F5E9
-    style E2 fill:#FFCCBC
-    style F fill:#FFF3E0
-    style G fill:#FFF3E0
-    style J fill:#E1BEE7
+    style C fill:#FFE0B2
+    style E fill:#BBDEFB
 ```
 
----
-
-## Mode Comparison
-
-> **Tip for Containerized Environments:** Use `iroh` mode for Docker, Kubernetes, and cloud VM deployments. It includes relay fallback which ensures connectivity even when both peers are behind restrictive NATs (common in cloud environments). The `nostr` and `manual` modes use STUN-only NAT traversal which may fail in these environments.
-
-### Feature Matrix
-
-```mermaid
-graph TD
-    subgraph "iroh"
-        A1[Discovery: Automatic]
-        A2[NAT: Relay Fallback]
-        A3[Setup: Minimal - EndpointId required]
-        A4[Infrastructure: Required]
-    end
-
-    subgraph "manual"
-        C1[Discovery: Copy-Paste]
-        C2[NAT: Full ICE]
-        C3[Setup: Manual Exchange]
-        C4[Infrastructure: STUN Only]
-    end
-
-    style A1 fill:#C8E6C9
-    style A2 fill:#C8E6C9
-    style A3 fill:#C8E6C9
-    style A4 fill:#FFCCBC
-
-    style C1 fill:#FFE0B2
-    style C2 fill:#C8E6C9
-    style C3 fill:#FFE0B2
-    style C4 fill:#C8E6C9
-```
-
-### NAT Traversal Capabilities
-
-```mermaid
-graph LR
-    subgraph "NAT Types"
-        A[Full Cone]
-        B[Restricted Cone]
-        C[Port Restricted]
-        D[Symmetric]
-    end
-
-    subgraph "iroh"
-        E1[✓ Direct/Relay]
-        E2[✓ Direct/Relay]
-        E3[✓ Direct/Relay]
-        E4[✓ Relay]
-    end
-
-    subgraph "manual"
-        G1[✓ Direct]
-        G2[✓ Direct]
-        G3[✓ Direct]
-        G4[~ Best-effort<br/>may fail without relay]
-    end
-
-    A --> E1
-    B --> E2
-    C --> E3
-    D --> E4
-
-    A --> G1
-    B --> G2
-    C --> G3
-    D --> G4
-
-    style E1 fill:#C8E6C9
-    style E2 fill:#C8E6C9
-    style E3 fill:#C8E6C9
-    style E4 fill:#C8E6C9
-
-    style G1 fill:#C8E6C9
-    style G2 fill:#C8E6C9
-    style G3 fill:#C8E6C9
-    style G4 fill:#FFF9C4
-```
-
----
-
-## Mode-Specific Architecture
-
-Detailed architecture for each mode lives in separate documents:
-
-- Port Forwarding (iroh, manual, nostr): `docs/ARCHITECTURE-PORT-FORWARDING.md`
-- VPN (TUN + NAT64): `docs/ARCHITECTURE-VPN.md`
-
-## Configuration System
-
-### Configuration File Structure
-
-```mermaid
-graph TB
-    subgraph "Config File"
-        A[role: server/client]
-        B[mode: iroh/manual/nostr]
-        C[source/target: tcp://host:port or udp://host:port]
-    end
-
-    subgraph "Mode Sections"
-        E[iroh]
-        G[manual]
-        H[nostr]
-    end
-
-    subgraph "iroh Options"
-        I[secret_file]
-        I2[auth_tokens - server only]
-        I3[auth_token - client only]
-        J[relay_urls]
-        L[dns_server]
-        M[server_node_id - client only]
-    end
-
-    subgraph "manual Options"
-        N[stun_servers]
-    end
-
-    subgraph "nostr Options"
-        O[nsec/nsec_file]
-        P[peer_npub]
-        Q[relays]
-        R[stun_servers]
-    end
-
-    A --> S[Validation]
-    B --> S
-    S --> E
-    S --> G
-    S --> H
-
-    E --> I
-    E --> I2
-    E --> I3
-    E --> J
-    E --> L
-    E --> M
-
-    G --> N
-    H --> O
-    H --> P
-    H --> Q
-    H --> R
-
-    style S fill:#FFF9C4
-```
-
-### Configuration Loading Flow
-
-```mermaid
-sequenceDiagram
-    participant CLI as CLI Parser
-    participant Main as Main
-    participant Config as Config Module
-    participant File as Config File
-    
-    CLI->>Main: Parse arguments
-    Main->>Main: Check config flags
-    
-    alt --default-config
-        Main->>Config: Load from default path
-        Config->>File: Read ~/.config/tunnel-rs/{role}.toml (tunnel-rs) or ~/.config/tunnel-rs/{role}_ice.toml (tunnel-rs-ice)
-    else -c <path>
-        Main->>Config: Load from path
-        Config->>File: Read specified file
-    else No config flag
-        Main->>Main: Use CLI arguments only
-    end
-    
-    alt Config loaded
-        File-->>Config: TOML content
-        Config->>Config: Parse TOML
-        Config->>Config: Validate role + mode
-        Config-->>Main: Validated config
-        Main->>Main: Merge with CLI args
-    end
-    
-    Main->>Main: Proceed with merged config
-```
-
-Note: For `tunnel-rs-ice`, the mode is inferred from the config file, so `server -c <file>` / `client -c <file>` can be used without a subcommand.
-
-### Config Validation
-
-```mermaid
-graph TB
-    A[Load Config] --> B{Role matches?}
-    B -->|No| C[Error: Role mismatch]
-    B -->|Yes| D{Mode matches?}
-    D -->|No| E[Error: Mode mismatch]
-    D -->|Yes| F{Check sections}
-    
-    F --> G{Extra sections?}
-    G -->|Yes| H[Ignored by parser]
-    G -->|No| I{Required fields?}
-    
-    I -->|Missing| J[Error: Missing field]
-    I -->|Present| K[Validation Success]
-    
-    style C fill:#FFCCBC
-    style E fill:#FFCCBC
-    style H fill:#FFF9C4
-    style J fill:#FFCCBC
-    style K fill:#C8E6C9
-```
-
----
-
-## Security Model
-
-### Encryption Stack
-
-```mermaid
-graph TB
-    subgraph "Application Data"
-        A[TCP/UDP Payload]
-    end
-    
-    subgraph "QUIC Layer"
-        B[QUIC Stream Encryption]
-        C[TLS 1.3]
-        D[Per-Stream Keys]
-    end
-    
-    subgraph "Transport"
-        E[QUIC Packets]
-        F[Authenticated Encryption]
-    end
-    
-    subgraph "Network"
-        G[UDP Datagrams]
-    end
-    
-    A --> B
-    B --> C
-    C --> D
-    D --> E
-    E --> F
-    F --> G
-    
-    style C fill:#C8E6C9
-    style D fill:#C8E6C9
-    style F fill:#C8E6C9
-```
-
-### Identity and Authentication
-
-```mermaid
-graph TB
-    subgraph "iroh Mode"
-        A[Server Secret Key] --> B[Ed25519 Private Key]
-        B --> C[EndpointId - Public Key]
-        C --> D[Client Connects]
-        D --> E[Token Validation]
-        E --> F{Valid Token?}
-        F -->|Yes| G[Authenticated]
-        F -->|No| H[Rejected]
-    end
-
-    subgraph "manual Mode"
-        I[ICE Credentials] --> J[ufrag + pwd]
-        J --> K[STUN Auth]
-        K --> L[QUIC TLS]
-    end
-
-    style B fill:#FFE0B2
-    style C fill:#C8E6C9
-    style G fill:#C8E6C9
-    style H fill:#FFCCBC
-    style L fill:#C8E6C9
-```
-
-### Token Authentication (iroh Mode)
-
-Iroh mode requires authentication using pre-shared tokens. Clients use ephemeral identities but must provide a valid token. **Authentication is mandatory and must complete successfully before any source requests are permitted.** The client must authenticate via a dedicated auth stream with a valid token within a 10-second timeout immediately after QUIC connection establishment.
-
-1. **Server Configuration**: Server specifies `--auth-tokens` with one or more pre-shared tokens
-2. **Client Configuration**: Client specifies `--auth-token` with the token received from the server admin
-3. **Protocol Flow**: Client opens a dedicated auth stream immediately after connection and sends an `AuthRequest`. **No source requests are accepted until authentication succeeds.**
-4. **Validation**: Server validates the token using `is_token_valid()` within a 10-second timeout
-5. **Rejection**: Invalid tokens receive an `AuthResponse::rejected()` and the connection is closed immediately
-
-This early validation prevents unauthorized clients from holding open connections or attempting source requests.
+### Connection Flow
 
 ```mermaid
 sequenceDiagram
     participant C as Client
+    participant CI as Client iroh
+    participant SI as Server iroh
     participant S as Server
-    participant A as Auth Module
 
-    C->>S: Connect (QUIC TLS handshake)
-    S->>C: Accept connection
+    Note over C: User runs vpn client
+    C->>C: Acquire VPN lock
+    C->>C: Generate session device_id
+    C->>CI: Create iroh endpoint
 
-    Note over C,S: Auth Phase (10s timeout)
-    C->>S: Open auth stream
-    C->>S: AuthRequest {version, auth_token}
-    S->>A: is_token_valid(auth_token, auth_tokens)
-    alt Token is valid
-        A-->>S: true
-        S->>C: AuthResponse {accepted: true}
-        Note over S,C: Connection authenticated
-    else Token is invalid
-        A-->>S: false
-        S->>C: AuthResponse {accepted: false, reason}
-        S->>S: Close connection (error code 1)
-        Note over S,C: Connection rejected
-    else Timeout (no auth within 10s)
-        S->>S: Close connection (error code 2)
-        Note over S,C: Connection rejected
+    CI->>SI: Connect via iroh (NAT traversal)
+    SI-->>CI: Connection established
+
+    Note over C,S: VPN Handshake Phase
+    C->>S: VpnHandshake {device_id, auth_token}
+    S->>S: Validate auth token
+    S->>S: Store client (EndpointId, device_id)
+    S->>S: Allocate IP(s) from pool(s)
+    S-->>C: VpnHandshakeResponse {assigned_ip, network, server_ip, ...}
+
+    Note over C,S: TUN Device Setup
+    C->>C: Create TUN device (tun0)
+    C->>C: Assign IP(s) (10.0.0.2, fd00::2)
+    C->>C: Configure routes
+    S->>S: Create TUN device (tun0)
+    S->>S: Assign IP(s) (10.0.0.1, fd00::1)
+
+    Note over C,S: Direct IP Tunnel Active
+    loop Packet Flow
+        C->>C: Application sends packet
+        C->>C: TUN captures packet
+        C->>S: Send over QUIC (encrypted)
+        S->>S: Unframe IP packet
+        S->>S: TUN injects packet
+        S->>S: Forward to destination
     end
-
-    Note over C,S: Source Request Phase (after successful auth)
-    C->>S: Open source stream
-    C->>S: SourceRequest {source}
-    S->>S: Validate source against allowed networks
-    S->>C: SourceResponse::accepted()
-    Note over S,C: Proceed with tunnel data transfer
 ```
 
-### Token Security Notes (iroh Mode)
+**`VpnHandshakeResponse` Fields:**
 
-- Tokens are **bearer credentials**: possession is sufficient for access. Use one token per client to enable revocation.
-- Token strength comes from **randomness, not format**: 16 random characters from a 65‑symbol alphabet (~96 bits of entropy). Treat tokens like high‑entropy secrets.
-- Tokens are sent only **after** the QUIC/TLS 1.3 handshake, so the auth stream is encrypted in transit.
-- The checksum is **for typo detection only**, not cryptographic security.
-- Tokens are validated as ASCII and limited to safe characters to avoid shell/TOML parsing issues.
-- Avoid logging or sharing tokens; the `AuthToken` wrapper redacts values in Debug output, but treat them like passwords.
-- Prefer token files with restricted permissions (e.g., `0600`) and rotate tokens if exposure is suspected.
+The response includes different fields depending on the server's address configuration:
 
-### Threat Model
+| Mode | Fields in Response |
+|------|-------------------|
+| IPv4-only | `assigned_ip`, `network`, `server_ip` |
+| IPv6-only | `assigned_ip6`, `network6`, `server_ip6` |
+| Dual-stack | All six fields: `assigned_ip`, `network`, `server_ip`, `assigned_ip6`, `network6`, `server_ip6` |
+
+When `network6` is configured on the server, clients receive IPv6 addresses alongside IPv4 (dual-stack) or IPv6-only if `network` is omitted.
+
+### Direct IP over QUIC Integration
+
+The VPN mode sends raw IP packets directly over iroh QUIC streams (TLS 1.3). This removes the double encryption overhead of running WireGuard inside QUIC.
+
+**Key Design Decisions:**
+- **Framing**: IP packets are length-prefixed and sent over the QUIC stream.
+- **Security**: Relies on iroh/QUIC's built-in encryption (TLS 1.3).
+- **Efficiency**: Zero-copy forwarding where possible between TUN and QUIC buffers.
+- **Identification**: Clients identify via a random `u64` `device_id` generated at startup, allowing multiple sessions per iroh endpoint.
+- **Reconnects**: The server automatically manages session limits and cleanup, allowing seamless reconnects from the same device ID.
+
+**Device ID Generation:**
+
+The `device_id` is generated using `rand::thread_rng()`, which in rand 0.8 provides a thread-local CSPRNG (ChaCha12) seeded from OS entropy via `OsRng`. This produces cryptographically random 64-bit values suitable for unique session identification.
+
+**Security Considerations:**
+
+The `device_id` is used **purely for session tracking** within an already-authenticated iroh connection—it is NOT used for access control. Security relies on:
+1. iroh's cryptographic `EndpointId` authentication
+2. Auth token validation (if configured)
+
+Clients are keyed by `(EndpointId, device_id)`, so an attacker cannot hijack a session by guessing a `device_id` without also possessing the victim's iroh private key.
+
+**Collision Handling:**
+
+The 64-bit ID space provides a ~2^32 birthday bound for collisions, which is sufficient for session tracking across reasonable client counts (thousands of concurrent sessions). Unpredictability is not a security requirement since `device_id` only differentiates sessions from the same authenticated endpoint. We use `rand::thread_rng()` (a CSPRNG) for defense-in-depth: it avoids predictable collision patterns, reduces correlation/timing attack surface, and makes accidental collisions less likely in practice.
+
+### IP Pool Management
 
 ```mermaid
 graph TB
-    subgraph "Protected Against"
-        A[Eavesdropping<br/>TLS 1.3 encryption]
-        B[MITM<br/>Peer authentication]
-        C[Replay Attacks<br/>QUIC nonces]
-        D[Tampering<br/>Authenticated encryption]
-        E2[Unauthorized Access<br/>Token Authentication - iroh mode]
+    subgraph "IPv4 Pool (Server)"
+        A[Network: 10.0.0.0/24]
+        B[Server IP: 10.0.0.1]
+        C[Available: 10.0.0.2 - 10.0.0.254]
+        D[Allocated Set<br/>tracks in-use IPs]
     end
 
-    subgraph "User Responsibility"
-        E[Signaling Channel Security<br/>Manual modes]
-        F[Secret Key Protection<br/>iroh server]
-        G[EndpointId Verification<br/>Trust on first use]
-        H[Auth Token Security<br/>Treat tokens like passwords]
+    subgraph "IPv6 Pool (Optional)"
+        A6[Network: fd00::/64]
+        B6[Server IP: fd00::1]
+        C6[Available: fd00::2 onwards]
+        D6[Allocated Set<br/>one IPv6 per client]
     end
 
-    style A fill:#C8E6C9
-    style B fill:#C8E6C9
-    style C fill:#C8E6C9
-    style D fill:#C8E6C9
-    style E2 fill:#C8E6C9
+    subgraph "Allocation"
+        E[Client connects]
+        F[Find first available IPv4]
+        F6[Find first available IPv6]
+        G[Mark as allocated]
+        H[Return to client]
+    end
 
-    style E fill:#FFF9C4
-    style F fill:#FFF9C4
-    style G fill:#FFF9C4
-    style H fill:#FFF9C4
+    subgraph "Release"
+        I[Client disconnects]
+        J[Return IPs to pools]
+    end
+
+    E --> F
+    E -.->|if IPv6 enabled| F6
+    F --> C
+    F6 --> C6
+    F --> G
+    F6 --> G
+    G --> D
+    G -.-> D6
+    G --> H
+
+    I --> J
+    J --> D
+    J -.-> D6
+
+    style B fill:#FFE0B2
+    style B6 fill:#FFE0B2
+    style D fill:#BBDEFB
+    style D6 fill:#BBDEFB
 ```
 
-### Secret Key Management (Server Only)
+When `network6` is configured, each client receives both an IPv4 and IPv6 address. The IPv6 pool works identically to the IPv4 pool, with each client getting a single /128 address. Unlike IPv4, a /64 network provides an effectively unlimited address space (~18.4 quintillion (2^64) addresses), so pool exhaustion is not a practical concern for IPv6. If `network` is omitted, the IPv4 pool is not created and the server runs IPv6-only (experimental); NAT64 (also experimental) can be enabled to reach IPv4 destinations.
 
-In iroh mode, only the **server** needs a persistent secret key to maintain a stable EndpointId. Clients use ephemeral identities and authenticate via tokens.
+### NAT64 (Experimental)
+
+NAT64 allows IPv6-only VPN clients to reach IPv4 destinations by translating IPv6 packets
+destined for the well-known NAT64 prefix `64:ff9b::/96` into IPv4 and performing NAPT.
+This is intended for IPv6-only server deployments where `network6` is set and `network`
+is omitted. NAT64 requires an IPv4 source address for translated packets, provided by
+either the VPN IPv4 network (when configured) or an explicit `nat64.source_ip`. When
+`network` is set and `nat64.source_ip` is omitted, the server auto-reserves the highest
+available IPv4 address (excluding the server's own IP address) from the VPN pool for
+NAT64. If the VPN IPv4 pool cannot spare an extra address, server startup fails with a
+config error; set `nat64.source_ip` explicitly in that case.
 
 ```mermaid
 sequenceDiagram
-    participant User as User
-    participant CLI as CLI
-    participant Secret as Secret Module
-    participant FS as File System
+    participant C as Client (IPv6)
+    participant S as Server
+    participant V4 as IPv4 Dest
 
-    alt Generate Server Key
-        User->>CLI: generate-server-key --output server.key
-        CLI->>Secret: Generate Ed25519 key
-        Secret->>Secret: Derive EndpointId
-        Secret->>FS: Write with 0600 permissions
-        FS-->>Secret: Success
-        Secret->>CLI: Display EndpointId
-        CLI->>User: Show EndpointId (share with clients)
-    end
-
-    alt Load Server Secret
-        User->>CLI: server --secret-file server.key
-        CLI->>FS: Read key file
-        FS-->>Secret: Key bytes
-        Secret->>Secret: Parse Ed25519 key
-        Secret->>Secret: Derive EndpointId
-        Secret-->>CLI: Secret + EndpointId
-    end
-
-    alt Show EndpointId
-        User->>CLI: show-server-id --secret-file server.key
-        CLI->>FS: Read key file
-        FS-->>Secret: Key bytes
-        Secret->>Secret: Derive EndpointId
-        Secret->>User: Display EndpointId
-    end
+    C->>S: IPv6 packet to 64:ff9b::/96
+    S->>S: Translate IPv6->IPv4 + NAPT
+    S->>V4: IPv4 packet (src = nat64.source_ip)
+    V4-->>S: IPv4 response
+    S-->>C: IPv6 response (translated)
 ```
 
----
+**Limitations (current):**
+- ICMP error translation is not implemented.
+- IPv6 extension headers are not parsed.
+- Fragmentation handling and PMTU discovery are not implemented.
 
-## Protocol Support
+### Platform-Specific Details
 
-### TCP Tunneling Architecture
+| Platform | TUN Device | Route Configuration | Privileges |
+|----------|------------|---------------------|------------|
+| Linux | `/dev/net/tun` | `ip route add` | CAP_NET_ADMIN or root |
+| macOS | `utunX` | `route add` | root |
+| Windows | `wintun.dll` | `route add` | Administrator |
+
+### Security Model
 
 ```mermaid
 graph TB
-    subgraph "Client Side"
-        A[Listen Socket] --> B[Accept Connection]
-        B --> C[TCP Stream]
-        C --> D[Async Read/Write]
+    subgraph "Authentication"
+        A[Auth Token<br/>vpn-rs token format]
+        B[Validate before IP assignment]
     end
 
-    subgraph "QUIC Tunnel"
-        E[Open Bi-Stream]
-        F[Send Stream]
-        G[Recv Stream]
+    subgraph "Encryption"
+        C[Iroh QUIC<br/>TLS 1.3]
+        E[Forward Secrecy]
     end
 
-    subgraph "Server Side"
-        H[Connect to Target]
-        I[TCP Stream]
-        J[Async Read/Write]
-    end
-    
-    D --> E
-    E --> F
-    E --> G
-    
-    F --> J
-    G --> D
-    J --> H
-    
-    style E fill:#BBDEFB
-    style F fill:#BBDEFB
-    style G fill:#BBDEFB
-```
-
-### UDP Tunneling Architecture
-
-```mermaid
-graph TB
-    subgraph "Client Side"
-        A[UDP Socket] --> B[Receive Packet]
-        B --> C[Track Client Address]
-        C --> D[Encode: u16 len + data]
+    subgraph "Isolation"
+        F[Single Instance Lock<br/>prevents conflicts]
+        G[Session Keys<br/>per-connection]
     end
 
-    subgraph "QUIC Tunnel"
-        E[Single Bidirectional Stream]
-        F[Send Stream]
-        G[Recv Stream]
-    end
-
-    subgraph "Server Side"
-        H[Decode Packet]
-        I[Send to Target]
-        J[Receive Response]
-        K[Encode Response]
-    end
-    
-    subgraph "Return Path"
-        L[Send via QUIC]
-        M[Decode at Client]
-        N[Send to Client]
-    end
-    
-    D --> E
-    E --> F
-    F --> H
-    H --> I
-    I --> J
-    J --> K
-    K --> L
-    L --> G
-    G --> M
-    M --> N
-    N --> C
-    
-    style E fill:#BBDEFB
-    style F fill:#BBDEFB
-    style G fill:#BBDEFB
-    style L fill:#BBDEFB
-```
-
-### UDP Packet Framing
-
-```mermaid
-graph LR
-    subgraph "UDP Packet"
-        A[Payload<br/>variable length]
-    end
-    
-    subgraph "QUIC Stream Frame"
-        B[Length<br/>u16 BE]
-        C[Payload<br/>bytes]
-    end
-    
-    subgraph "Decoding"
-        D[Read 2 bytes]
-        E[Parse length]
-        F[Read N bytes]
-        G[Reconstruct packet]
-    end
-    
     A --> B
-    A --> C
-    
-    B --> D
-    D --> E
-    E --> F
-    C --> F
-    F --> G
-    
-    style B fill:#FFF9C4
-    style C fill:#C8E6C9
-```
+    C --> E
 
----
-
-## Component Details
-
-### IceAgent (str0m)
-
-The `IceAgent` from str0m handles ICE connectivity establishment:
-
-- **Candidate Gathering**: Discovers local and server-reflexive addresses
-- **Connectivity Checks**: Performs STUN binding checks to all candidate pairs
-- **Nomination**: Selects the best working candidate pair
-- **Socket Management**: Provides the UDP socket for QUIC transport
-
-### QUIC Endpoint (quinn)
-
-The `quinn` QUIC implementation provides:
-
-- **TLS 1.3**: Encrypted transport with certificate-based auth
-- **Stream Multiplexing**: Multiple concurrent streams over one connection
-- **Congestion Control**: Built-in congestion control and flow control
-- **0-RTT**: Not currently enabled (future optimization)
-
-### Endpoint (iroh)
-
-The `iroh::Endpoint` provides:
-
-- **Discovery**: Automatic peer discovery via Pkarr/DNS/mDNS
-- **Relay**: Fallback relay servers for NAT traversal
-- **QUIC**: Built-in QUIC transport with hole punching
-- **Identity**: Ed25519-based peer identity and authentication
-
----
-
-## Performance Considerations
-
-### Connection Establishment Times
-
-> **Note:** These are illustrative, environment-dependent ranges (network conditions, NAT type, relay availability, and DNS). Treat as rough guidance, not guarantees.
-
-```mermaid
-graph LR
-    subgraph "iroh"
-        A[Discovery: 1-3s]
-        B[Connection: 0.5-2s]
-        C[Total: 1.5-5s]
-    end
-
-    subgraph "manual"
-        H[ICE Gather: 1-2s]
-        I[Manual: User dependent]
-        J[ICE Checks: 1-3s]
-        K[QUIC: 0.5s]
-        L[Total: 2.5-5.5s + manual]
-    end
-
-    style C fill:#FFF9C4
-    style L fill:#FFF9C4
-```
-
-### Throughput Characteristics
-
-- **TCP Tunneling**: Limited by QUIC stream flow control and congestion control
-- **UDP Tunneling**: Additional framing overhead (2 bytes per packet)
-- **Relay Mode**: Higher latency, potentially lower throughput
-- **Direct Mode**: Near-native performance with encryption overhead
-
----
-
-## Error Handling
-
-### Connection Failures
-
-```mermaid
-graph TB
-    A[Connection Attempt] --> B{Success?}
-    B -->|Yes| C[Established]
-    B -->|No| D{Mode?}
-    
-    D -->|iroh| E{Relay available?}
-    E -->|Yes| F[Fallback to relay]
-    E -->|No| G[Connection failed]
-
-    D -->|manual| I[ICE checks failed]
-    
-    F --> C
-    H --> G
-    I --> G
-    
-    style C fill:#C8E6C9
+    style E fill:#C8E6C9
     style F fill:#FFF9C4
-    style G fill:#FFCCBC
 ```
 
-### Stream Errors
+### Auto-Reconnect and Connection Health
 
-- **TCP**: Connection reset, timeout → close QUIC stream
-- **UDP**: Packet loss → no retry (UDP semantics preserved)
-- **QUIC**: Stream reset → close local TCP connection or stop UDP forwarding
+VPN mode includes automatic reconnection when the tunnel connection fails. This handles scenarios like server restarts or network partitions.
 
----
+**Configuration:**
+- `auto_reconnect = true` (default): Automatically reconnect on connection loss
+- `auto_reconnect = false`: Exit on first disconnection
+- `max_reconnect_attempts`: Limit total attempts (unlimited if not set)
 
-## Mode Capabilities
+**Health Monitoring Layers:**
 
-| Mode | Multi-Session | Dynamic Source | Encryption | Platform |
-|------|---------------|----------------|------------|----------|
-| `iroh` | **Yes** | **Yes** | QUIC/TLS 1.3 | Linux, macOS, Windows |
-| `vpn` (iroh) | **Yes** | N/A (full tunnel) | QUIC (TLS 1.3) | Linux, macOS, Windows |
-| `nostr` | **Yes** | **Yes** | QUIC/TLS 1.3 | Linux, macOS, Windows |
-| `manual` | No | **Yes** | QUIC/TLS 1.3 | Linux, macOS, Windows |
+The VPN client uses two complementary health monitoring mechanisms:
 
-**Multi-Session** = Multiple concurrent connections to the same server
-**Dynamic Source** = Client specifies which service to tunnel (via `--source`)
-**VPN Mode** = Full network tunneling with automatic IP assignment (no per-port config)
+1. **Application-Level Heartbeat** (fast detection, ~30s)
+   - Client sends ping every 10 seconds
+   - Server responds with pong immediately
+   - Client triggers reconnection if no pong received within 30 seconds
+   - Detects: server restart, IP changes, network partitions, NAT timeout, relay issues
 
----
+2. **Connection Monitoring** (instant)
+   - Iroh/QUIC connection errors (timeouts, closures)
+   - TUN read/write errors
 
-## Current Limitations
-
-### Single Session (Manual Signaling Mode)
-
-The `manual` mode currently supports only one tunnel session at a time per server instance. Each signaling exchange establishes exactly one tunnel.
-
+**Interaction Between Layers:**
+- Heartbeat traffic uses the same underlying iroh QUIC connection as the VPN data.
+- If heartbeats fail, it indicates an issue with the QUIC connection itself.
 ```mermaid
 graph TB
-    subgraph "manual Behavior"
-        A[Server starts] --> B[Wait for client offer]
-        B --> C[Validate source request]
-        C --> D[Establish single tunnel]
-        D --> E[Handle streams over this tunnel]
-        E --> F[Additional clients timeout]
+    subgraph "Application Heartbeat (Fast)"
+        H1[Heartbeat Ping<br/>10s interval]
+        H2[Heartbeat Pong<br/>server response]
+        H3[Timeout Check<br/>30s threshold]
     end
 
-    subgraph "Workarounds"
-        G[Run multiple server instances]
-        I[Use iroh mode]
+    subgraph "Failure Detection"
+        D[Heartbeat Timeout<br/>30s no pong]
+        E[QUIC Error<br/>Connection Lost]
+        F[Connection Down<br/>trigger reconnect]
     end
 
-    style F fill:#FFCCBC
+    subgraph "Recovery"
+        G[Exponential Backoff<br/>1s → 60s max]
+        HH[Reconnect Attempt]
+        I[Re-establish Tunnel]
+    end
+
+    H1 --> H2
+    H2 --> H3
+    H3 -->|no pong| D
+    D --> F
+    E --> F
+    F --> G
+    G --> HH
+    HH --> I
+
+    style D fill:#FFE0B2
+    style E fill:#FFCCBC
+    style F fill:#FFF9C4
     style I fill:#C8E6C9
 ```
 
-**Why this limitation exists:**
-- Manual signaling mode performs a single offer/answer exchange
-- The server enters a connection handling loop after establishing the tunnel
-- No mechanism to accept additional signaling while serving existing tunnel
+**Application-Level Heartbeat Protocol:**
 
-**Workarounds:**
-- Use `iroh` mode for multi-client support
-- Run separate server instances for each tunnel
+Heartbeats and IP packets are multiplexed on the same bidirectional QUIC stream (the "data stream" opened after handshake). All messages are prefixed with a 1-byte type discriminator defined in `DataMessageType` in `crates/vpn-core/src/signaling.rs`:
 
-See [Roadmap](ROADMAP.md) for planned multi-session support.
+```
+Data channel message framing:
+
+  IP packet (type 0x00):
+    [0x00] [4 bytes: length BE u32] [N bytes: raw IP packet]
+
+  Heartbeat ping (type 0x01):
+    [0x01]
+
+  Heartbeat pong (type 0x02):
+    [0x02]
+```
+
+**Implementation locations** (search by symbol name; line numbers may shift):
+- Type enum: `DataMessageType` in `signaling.rs`
+- Packet framing: `frame_ip_packet()` in `signaling.rs`
+- Client send (outbound): TUN reader task in `client.rs` - calls `frame_ip_packet()`
+- Client receive (inbound): inbound reader task in `client.rs` - reads type byte, dispatches via `DataMessageType::from_byte()`
+- Client heartbeat sender: heartbeat task in `client.rs` - sends `HeartbeatPing` byte
+- Server receive: inbound reader task in `server.rs` - reads type byte, responds to pings with `HeartbeatPong`
+- Server send: TUN reader and timer tasks in `server.rs` - call `frame_ip_packet()`
+
+**Compatibility note:** This framing was added with the heartbeat feature. Older clients/servers that expect raw length-prefixed IP packets (without the type byte) are incompatible.
+
+This allows fast failure detection (~30 seconds) for common issues like server restarts or network changes.
+
+**Connection Check:**
+
+The application uses the heartbeat to detect broken connections faster than standard TCP/QUIC timeouts.
+
+```mermaid
+sequenceDiagram
+    participant T as Timer Task
+    participant VPN as VPN Loop
+    participant RC as Reconnect Logic
+
+    loop Every 10s
+        T->>VPN: Send Heartbeat Ping
+    end
+
+    Note over VPN: No Pong received (30s)
+    T->>VPN: Timeout Error
+    VPN-->>RC: VpnError::ConnectionLost
+
+    alt auto_reconnect = true
+        RC->>RC: Calculate backoff delay
+        RC->>RC: Wait (1s, 2s, 4s... up to 60s)
+        RC->>VPN: Reconnect
+    else auto_reconnect = false
+        RC->>RC: Exit with error
+    end
+```
+
+**Reconnection Backoff:**
+- Base delay: 1 second
+- Exponential growth: 1s → 2s → 4s → 8s → 16s → 32s → 60s
+- Maximum delay: 60 seconds
+- Jitter: 0-500ms added to prevent thundering herd
+- Counter reset: Resets to 0 after successful tunnel operation
 
 ---
-
-## References
-
-- [iroh Documentation](https://iroh.computer/)
-- [str0m ICE Implementation](https://github.com/algesten/str0m)
-- [quinn QUIC Implementation](https://github.com/quinn-rs/quinn)
-- [RFC 8445 - ICE](https://datatracker.ietf.org/doc/html/rfc8445)
-- [RFC 9000 - QUIC](https://datatracker.ietf.org/doc/html/rfc9000)

@@ -1,7 +1,7 @@
-# tunnel-rs-vpn server configuration example
+# vpn-rs server configuration example
 #
-# Usage: tunnel-rs-vpn server -c vpn_server.toml
-#        tunnel-rs-vpn server --default-config
+# Usage: vpn-rs server -c vpn_server.toml
+#        vpn-rs server --default-config
 #
 # CLI arguments take precedence over config file values.
 
@@ -105,7 +105,7 @@ network = "10.0.0.0/24"
 
 # Path to secret key file for persistent iroh identity (REQUIRED)
 # Generates same EndpointId across restarts
-# Create with: tunnel-rs-vpn generate-server-key -o ./vpn-server.key
+# Create with: vpn-rs generate-server-key -o ./vpn-server.key
 secret_file = "./vpn-server.key"
 
 # ============================================================================
@@ -115,7 +115,7 @@ secret_file = "./vpn-server.key"
 # Clients must provide one of these tokens to connect.
 #
 # Token format: exactly 18 characters (i + 16 body chars + Luhn mod N checksum)
-# Generate with: tunnel-rs-vpn generate-token
+# Generate with: vpn-rs generate-token
 
 # Inline tokens (for testing; prefer auth_tokens_file in production)
 # NOTE: Use either auth_tokens OR auth_tokens_file, not both.
