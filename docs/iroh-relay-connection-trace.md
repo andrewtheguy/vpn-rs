@@ -77,9 +77,9 @@ Sec-WebSocket-Protocol: iroh-relay-v1
 
 **Quick tunnels work** because they automatically detect WebSocket traffic and use HTTP/1.1.
 
-**Named tunnels may fail** because they use HTTP/2 by default, which doesn't support the `Upgrade` header mechanism.
+**Named tunnels may fail** because HTTP/2 is enabled by default, and HTTP/1.1-style `Upgrade` handling can break on this path.
 
-**Recommendation:** For self-hosted iroh-relay, open a port directly instead of using Cloudflare Tunnel. The HTTP/2 issue with named tunnels requires a paid Cloudflare plan to force HTTP/1.1.
+**Recommendation:** For self-hosted iroh-relay, open a port directly instead of using Cloudflare Tunnel. Named tunnels default to HTTP/2, and forcing HTTP/1.1 requires a paid Cloudflare plan.
 
 ### Verification
 
