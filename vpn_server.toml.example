@@ -115,12 +115,12 @@ secret_file = "./vpn-server.key"
 # At least one authentication method is required.
 # Clients must provide one of these tokens to connect.
 #
-# Token format: exactly 18 characters (i + 16 body chars + Luhn mod N checksum)
+# Token format: exactly 47 characters (`v` + 46 Base64URL chars, no padding)
 # Generate with: vpn-rs generate-token
 
 # Inline tokens (for testing; prefer auth_tokens_file in production)
 # NOTE: Use either auth_tokens OR auth_tokens_file, not both.
-auth_tokens = ["iXXXXXXXXXXXXXXXXX"]  # Replace with real token from generate-token
+auth_tokens = ["<YOUR_AUTH_TOKEN>"]  # Replace with real token from generate-token
 
 # Or use a file containing tokens (one per line, # comments allowed)
 # NOTE: Use either auth_tokens OR auth_tokens_file, not both.

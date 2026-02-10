@@ -21,7 +21,7 @@ mode = "iroh"
 [iroh]
 network = "10.0.0.0/24"
 secret_file = "./vpn-server.key"
-auth_tokens = ["iXXXXXXXXXXXXXXXXX"]
+auth_tokens = ["<YOUR_AUTH_TOKEN>"]
 relay_urls = ["https://relay.example.com"]
 ```
 
@@ -54,7 +54,7 @@ mode = "iroh"
 [iroh]
 network = "10.0.0.0/24"
 secret_file = "./vpn-server.key"
-auth_tokens = ["iXXXXXXXXXXXXXXXXX"]
+auth_tokens = ["<YOUR_AUTH_TOKEN>"]
 relay_urls = ["https://relay.example.com"]
 dns_server = "https://dns.example.com/pkarr"
 ```
@@ -140,7 +140,7 @@ mode = "iroh"
 [iroh]
 network = "10.0.0.0/24"
 secret_file = "./vpn-server.key"
-auth_tokens = ["iXXXXXXXXXXXXXXXXX"]
+auth_tokens = ["<YOUR_AUTH_TOKEN>"]
 relay_urls = [
   "https://relay.example.com",
   "https://relay-backup.example.com",

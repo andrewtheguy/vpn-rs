@@ -41,7 +41,7 @@ pub struct VpnServerConfig {
     pub max_clients: usize,
 
     /// Valid authentication tokens (clients must provide one to connect).
-    /// Uses vpn-auth format (i + 16 chars + checksum).
+    /// Uses vpn-auth format (`v` + 46 Base64URL chars, no padding).
     #[serde(default)]
     pub auth_tokens: Option<HashSet<String>>,
 
@@ -171,7 +171,7 @@ pub struct VpnClientConfig {
     /// Server's iroh node ID.
     pub server_node_id: String,
 
-    /// Authentication token (vpn-auth format).
+    /// Authentication token (vpn-auth format: `v` + Base64URL payload).
     pub auth_token: Option<String>,
 
     /// MTU for the TUN device.

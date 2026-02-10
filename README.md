@@ -105,6 +105,11 @@ AUTH_TOKEN=$(vpn-rs generate-token)
 echo "$AUTH_TOKEN"
 ```
 
+Token format:
+- Exactly 47 characters
+- Prefix `v`
+- Followed by 46 Base64URL (no padding) characters
+
 ### 2. Create Server Config
 
 Create `vpn_server.toml` (or copy from `vpn_server.toml.example`):
