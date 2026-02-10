@@ -1,0 +1,16 @@
+[package]
+name = "vpn-common"
+version.workspace = true
+edition = "2021"
+description = "VPN-specific config and validation for vpn-rs"
+
+[lib]
+name = "vpn_common"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+ipnet = "2"
+dirs = "6"

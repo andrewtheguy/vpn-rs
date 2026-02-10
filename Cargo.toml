@@ -1,21 +1,11 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/tunnel-common",
-    "crates/tunnel-iroh",
-    "crates/tunnel-ice",
-    "crates/tunnel-vpn",
-    "crates/tunnel-rs",
-    "crates/tunnel-rs-ice",
-    "crates/tunnel-rs-vpn",
+    "crates/vpn-common",
+    "crates/vpn-iroh",
+    "crates/vpn-core",
+    "crates/vpn-rs",
 ]
-
 
 [workspace.package]
 version = "0.1.78"
-
-# [profile.release]
-# strip = true
-# lto = "fat"
-# codegen-units = 1
-# panic = "abort"

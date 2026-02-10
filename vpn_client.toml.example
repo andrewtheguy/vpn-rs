@@ -1,7 +1,7 @@
-# tunnel-rs-vpn client configuration example
+# vpn-rs client configuration example
 #
-# Usage: tunnel-rs-vpn client -c vpn_client.toml
-#        tunnel-rs-vpn client --default-config
+# Usage: vpn-rs client -c vpn_client.toml
+#        vpn-rs client --default-config
 #
 # CLI arguments take precedence over config file values.
 
@@ -23,14 +23,14 @@ server_node_id = "2xnbkpbc7izsilvewd7c62w7wnwziacmpfwvhcrya5nt76dqkpga"
 # ============================================================================
 # Token provided by the server admin for authentication
 # Token format: exactly 18 characters (i + 16 body chars + Luhn mod N checksum)
-# Generate with: tunnel-rs-vpn generate-token
+# Generate with: vpn-rs generate-token
 
 # NOTE: Use either auth_token OR auth_token_file, not both.
 auth_token = "iXXXXXXXXXXXXXXXXX"  # Replace with real token from generate-token
 
 # Or use a file containing the token (one token, no comments)
 # NOTE: Use either auth_token OR auth_token_file, not both.
-# auth_token_file = "~/.config/tunnel-rs/vpn-token.txt"
+# auth_token_file = "~/.config/vpn-rs/vpn-token.txt"
 
 # ============================================================================
 # Performance Tuning
