@@ -5,12 +5,14 @@
 //! tunnels for each connected client. IP packets are framed and sent
 //! directly over the encrypted iroh QUIC connection.
 
-use crate::buffer::{as_mut_byte_slice, uninitialized_vec};
-use crate::config::VpnServerConfig;
-use crate::device::{TunConfig, TunDevice};
-use crate::error::{VpnError, VpnResult};
-use crate::nat64::{is_nat64_address, Nat64TranslateResult, Nat64Translator, NAT64_PREFIX_CIDR};
-use crate::signaling::{
+use crate::vpn_core::buffer::{as_mut_byte_slice, uninitialized_vec};
+use crate::vpn_core::config::VpnServerConfig;
+use crate::vpn_core::device::{TunConfig, TunDevice};
+use crate::vpn_core::error::{VpnError, VpnResult};
+use crate::vpn_core::nat64::{
+    is_nat64_address, Nat64TranslateResult, Nat64Translator, NAT64_PREFIX_CIDR,
+};
+use crate::vpn_core::signaling::{
     frame_ip_packet, read_message, write_message, DataMessageType, VpnHandshake,
     VpnHandshakeResponse, HEARTBEAT_PONG_BYTE, MAX_HANDSHAKE_SIZE,
 };
@@ -228,10 +230,7 @@ impl IpPool {
         }
         // O(n) scan of in_use: small in practice, avoids extra lookup map.
         if self.in_use.values().any(|assigned| *assigned == ip) {
-            return Err(format!(
-                "{} {} is already assigned to a client",
-                label, ip
-            ));
+            return Err(format!("{} {} is already assigned to a client", label, ip));
         }
         self.released.retain(|released_ip| *released_ip != ip);
         self.reserved.insert(ip);
@@ -462,7 +461,10 @@ impl VpnServer {
 
         // Create IPv4 pool if configured
         let ip_pool = match config.network {
-            Some(network) => Some(Arc::new(RwLock::new(IpPool::new(network, config.server_ip)))),
+            Some(network) => Some(Arc::new(RwLock::new(IpPool::new(
+                network,
+                config.server_ip,
+            )))),
             None => None,
         };
 
@@ -610,9 +612,7 @@ Set 'nat64.source_ip' explicitly or use a larger IPv4 network."
                 TunConfig::new(ip4, mask, ip4).with_mtu(self.config.mtu)
             }
             // IPv6-only
-            (None, None, Some(ip6), Some(pl6)) => {
-                TunConfig::ipv6_only(ip6, pl6, self.config.mtu)?
-            }
+            (None, None, Some(ip6), Some(pl6)) => TunConfig::ipv6_only(ip6, pl6, self.config.mtu)?,
             // Invalid: no networks configured (should be caught by validate())
             _ => {
                 return Err(VpnError::config(
@@ -871,7 +871,10 @@ Set 'nat64.source_ip' explicitly or use a larger IPv4 network."
                         return Err(VpnError::IpAssignment("IPv4 pool exhausted".into()));
                     }
                     // Dual-stack: continue with IPv6 only
-                    log::warn!("IPv4 pool exhausted for client {}, using IPv6 only", remote_id);
+                    log::warn!(
+                        "IPv4 pool exhausted for client {}, using IPv6 only",
+                        remote_id
+                    );
                     None
                 }
             }
@@ -890,7 +893,10 @@ Set 'nat64.source_ip' explicitly or use a larger IPv4 network."
                         return Err(VpnError::IpAssignment("IPv6 pool exhausted".into()));
                     }
                     // Dual-stack: continue with IPv4 only
-                    log::warn!("IPv6 pool exhausted for client {}, using IPv4 only", remote_id);
+                    log::warn!(
+                        "IPv6 pool exhausted for client {}, using IPv4 only",
+                        remote_id
+                    );
                     None
                 }
             }
@@ -1104,9 +1110,8 @@ Set 'nat64.source_ip' explicitly or use a larger IPv4 network."
             if let Some((_, client_state)) = removed {
                 // Remove IPv4 mapping if it points to us
                 if let Some(ip4) = assigned_ip {
-                    ip_to_endpoint.remove_if(&ip4, |_, (ep, dev)| {
-                        *ep == remote_id && *dev == device_id
-                    });
+                    ip_to_endpoint
+                        .remove_if(&ip4, |_, (ep, dev)| *ep == remote_id && *dev == device_id);
                 }
 
                 // Remove IPv6 mapping if it points to us
@@ -1209,7 +1214,10 @@ Set 'nat64.source_ip' explicitly or use a larger IPv4 network."
                         log::trace!("Heartbeat ping from {}", client_id);
                         let pong = Bytes::from_static(HEARTBEAT_PONG_BYTE);
                         if packet_tx.send(pong).await.is_err() {
-                            log::warn!("Failed to send heartbeat pong to {}: channel closed", client_id);
+                            log::warn!(
+                                "Failed to send heartbeat pong to {}: channel closed",
+                                client_id
+                            );
                             break;
                         }
                         continue;
@@ -1228,11 +1236,7 @@ Set 'nat64.source_ip' explicitly or use a larger IPv4 network."
                 match data_recv.read_exact(&mut len_buf).await {
                     Ok(()) => {}
                     Err(e) => {
-                        log::debug!(
-                            "Failed to read IP packet length from {}: {}",
-                            client_id,
-                            e
-                        );
+                        log::debug!("Failed to read IP packet length from {}: {}", client_id, e);
                         break;
                     }
                 }
@@ -1280,7 +1284,8 @@ Set 'nat64.source_ip' explicitly or use a larger IPv4 network."
                             // Silently drop link-local packets (fe80::/10) - these are normal
                             // OS traffic (neighbor discovery, etc.) that shouldn't be forwarded
                             let src_bytes = src_ip.octets();
-                            let is_link_local = src_bytes[0] == 0xfe && (src_bytes[1] & 0xc0) == 0x80;
+                            let is_link_local =
+                                src_bytes[0] == 0xfe && (src_bytes[1] & 0xc0) == 0x80;
                             if is_link_local {
                                 // Link-local IPv6 packets are dropped (can't route across VPN)
                                 false
@@ -1322,9 +1327,8 @@ Set 'nat64.source_ip' explicitly or use a larger IPv4 network."
                     // Check if this is an IPv6 packet destined for NAT64 prefix
                     if packet.len() >= 40 && (packet[0] >> 4) == 6 {
                         // Extract destination IPv6 address
-                        let dest_ip6 = Ipv6Addr::from(
-                            <[u8; 16]>::try_from(&packet[24..40]).unwrap()
-                        );
+                        let dest_ip6 =
+                            Ipv6Addr::from(<[u8; 16]>::try_from(&packet[24..40]).unwrap());
 
                         if is_nat64_address(&dest_ip6) {
                             log::info!("NAT64: translating packet to {}", dest_ip6);
@@ -1334,14 +1338,17 @@ Set 'nat64.source_ip' explicitly or use a larger IPv4 network."
                                     stats.packets_nat64_6to4.fetch_add(1, Ordering::Relaxed);
                                     log::info!(
                                         "NAT64 6to4: translated {} bytes -> {} bytes for client {}",
-                                        packet.len(), ipv4_packet.len(), client_id
+                                        packet.len(),
+                                        ipv4_packet.len(),
+                                        client_id
                                     );
                                     packet_bytes = Cow::Owned(ipv4_packet);
                                 }
                                 Err(e) => {
                                     log::warn!(
                                         "NAT64 translation error for client {}: {}",
-                                        client_id, e
+                                        client_id,
+                                        e
                                     );
                                     stats.packets_nat64_errors.fetch_add(1, Ordering::Relaxed);
                                     continue;
@@ -1367,12 +1374,16 @@ Set 'nat64.source_ip' explicitly or use a larger IPv4 network."
                         if tun_write_tx.send(data).await.is_ok() {
                             stats.packets_from_clients.fetch_add(1, Ordering::Relaxed);
                         } else {
-                            stats.packets_tun_write_failed.fetch_add(1, Ordering::Relaxed);
+                            stats
+                                .packets_tun_write_failed
+                                .fetch_add(1, Ordering::Relaxed);
                             break;
                         }
                     }
                     Err(mpsc::error::TrySendError::Closed(_)) => {
-                        stats.packets_tun_write_failed.fetch_add(1, Ordering::Relaxed);
+                        stats
+                            .packets_tun_write_failed
+                            .fetch_add(1, Ordering::Relaxed);
                         break;
                     }
                 }
@@ -1426,7 +1437,10 @@ Set 'nat64.source_ip' explicitly or use a larger IPv4 network."
     /// Memory note: Each packet requires a small allocation (5 bytes framing + packet length).
     /// We allocate based on actual packet size to avoid over-allocation for small packets.
     /// Most allocations are small and served from thread-local caches, making them fast.
-    async fn run_tun_reader(&self, mut tun_reader: crate::device::TunReader) -> VpnResult<()> {
+    async fn run_tun_reader(
+        &self,
+        mut tun_reader: crate::vpn_core::device::TunReader,
+    ) -> VpnResult<()> {
         log::info!("TUN reader started");
 
         let buffer_size = tun_reader.buffer_size();
@@ -1458,8 +1472,13 @@ Set 'nat64.source_ip' explicitly or use a larger IPv4 network."
                         // This is an IPv4 packet - try NAT64 reverse translation
                         match nat64.translate_4to6(packet) {
                             Ok(Nat64TranslateResult::Translated { client_ip6, packet }) => {
-                                self.stats.packets_nat64_4to6.fetch_add(1, Ordering::Relaxed);
-                                log::info!("NAT64 4to6: translated response for client {}", client_ip6);
+                                self.stats
+                                    .packets_nat64_4to6
+                                    .fetch_add(1, Ordering::Relaxed);
+                                log::info!(
+                                    "NAT64 4to6: translated response for client {}",
+                                    client_ip6
+                                );
                                 (Cow::Owned(packet), Some(client_ip6))
                             }
                             Ok(Nat64TranslateResult::NotNat64Packet) => {
@@ -1474,7 +1493,9 @@ Set 'nat64.source_ip' explicitly or use a larger IPv4 network."
                                 // fallback to IPv4 routing. For IPv6-only clients, the packet
                                 // will be dropped by normal no-route logic since there's no
                                 // IPv4 address to route to.
-                                self.stats.packets_nat64_errors.fetch_add(1, Ordering::Relaxed);
+                                self.stats
+                                    .packets_nat64_errors
+                                    .fetch_add(1, Ordering::Relaxed);
                                 log::debug!("NAT64 4to6 translation error: {}", e);
                                 (Cow::Borrowed(packet), None)
                             }
@@ -1521,7 +1542,9 @@ Set 'nat64.source_ip' explicitly or use a larger IPv4 network."
                         }
                     }
                     None => {
-                        self.stats.packets_unknown_version.fetch_add(1, Ordering::Relaxed);
+                        self.stats
+                            .packets_unknown_version
+                            .fetch_add(1, Ordering::Relaxed);
                         continue;
                     }
                 }
@@ -1561,18 +1584,26 @@ Set 'nat64.source_ip' explicitly or use a larger IPv4 network."
             // Send via channel - try non-blocking first
             match packet_tx.try_send(bytes) {
                 Ok(()) => {
-                    self.stats.packets_to_clients.fetch_add(1, Ordering::Relaxed);
+                    self.stats
+                        .packets_to_clients
+                        .fetch_add(1, Ordering::Relaxed);
                 }
                 Err(mpsc::error::TrySendError::Full(data)) => {
                     // Buffer full - behavior depends on drop_on_full config
                     if self.config.drop_on_full {
                         // Drop packet to avoid blocking other clients (head-of-line blocking)
-                        self.stats.packets_dropped_full.fetch_add(1, Ordering::Relaxed);
+                        self.stats
+                            .packets_dropped_full
+                            .fetch_add(1, Ordering::Relaxed);
                     } else {
                         // Apply backpressure - blocks TUN reader until space available
-                        self.stats.packets_backpressure.fetch_add(1, Ordering::Relaxed);
+                        self.stats
+                            .packets_backpressure
+                            .fetch_add(1, Ordering::Relaxed);
                         if packet_tx.send(data).await.is_ok() {
-                            self.stats.packets_to_clients.fetch_add(1, Ordering::Relaxed);
+                            self.stats
+                                .packets_to_clients
+                                .fetch_add(1, Ordering::Relaxed);
                         }
                         // Channel closed is expected during client disconnect, no counter needed
                     }
@@ -1828,7 +1859,9 @@ mod tests {
         assert!(pool.reserve_ip(Ipv4Addr::new(10, 0, 0, 1), "ip").is_err());
         assert!(pool.reserve_ip(Ipv4Addr::new(10, 0, 0, 0), "ip").is_err());
         assert!(pool.reserve_ip(Ipv4Addr::new(10, 0, 0, 255), "ip").is_err());
-        assert!(pool.reserve_ip(Ipv4Addr::new(192, 168, 1, 1), "ip").is_err());
+        assert!(pool
+            .reserve_ip(Ipv4Addr::new(192, 168, 1, 1), "ip")
+            .is_err());
 
         let reserved = pool.reserve_next_available().unwrap();
         let id1 = random_endpoint_id();
@@ -2156,7 +2189,9 @@ mod tests {
         // Valid IPv4 packet - should not increment unknown_version
         let ipv4_packet = [0x45u8; 20];
         if extract_dest_ip(&ipv4_packet).is_none() {
-            stats.packets_unknown_version.fetch_add(1, Ordering::Relaxed);
+            stats
+                .packets_unknown_version
+                .fetch_add(1, Ordering::Relaxed);
         }
         assert_eq!(stats.packets_unknown_version.load(Ordering::Relaxed), 0);
 
@@ -2164,13 +2199,17 @@ mod tests {
         let mut invalid_packet = [0u8; 40];
         invalid_packet[0] = 0x50; // Version 5
         if extract_dest_ip(&invalid_packet).is_none() {
-            stats.packets_unknown_version.fetch_add(1, Ordering::Relaxed);
+            stats
+                .packets_unknown_version
+                .fetch_add(1, Ordering::Relaxed);
         }
         assert_eq!(stats.packets_unknown_version.load(Ordering::Relaxed), 1);
 
         // Empty packet - should increment unknown_version
         if extract_dest_ip(&[]).is_none() {
-            stats.packets_unknown_version.fetch_add(1, Ordering::Relaxed);
+            stats
+                .packets_unknown_version
+                .fetch_add(1, Ordering::Relaxed);
         }
         assert_eq!(stats.packets_unknown_version.load(Ordering::Relaxed), 2);
     }
@@ -2292,12 +2331,18 @@ mod tests {
         assert_eq!(stats.packets_from_clients.load(Ordering::Relaxed), 1);
 
         // Failed write (channel closed)
-        stats.packets_tun_write_failed.fetch_add(1, Ordering::Relaxed);
+        stats
+            .packets_tun_write_failed
+            .fetch_add(1, Ordering::Relaxed);
         assert_eq!(stats.packets_tun_write_failed.load(Ordering::Relaxed), 1);
 
         // Multiple failures
-        stats.packets_tun_write_failed.fetch_add(1, Ordering::Relaxed);
-        stats.packets_tun_write_failed.fetch_add(1, Ordering::Relaxed);
+        stats
+            .packets_tun_write_failed
+            .fetch_add(1, Ordering::Relaxed);
+        stats
+            .packets_tun_write_failed
+            .fetch_add(1, Ordering::Relaxed);
         assert_eq!(stats.packets_tun_write_failed.load(Ordering::Relaxed), 3);
     }
 

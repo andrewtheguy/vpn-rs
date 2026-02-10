@@ -61,10 +61,7 @@ pub fn extract_ipv4_from_nat64(addr: &std::net::Ipv6Addr) -> Option<std::net::Ip
     }
     let octets = addr.octets();
     Some(std::net::Ipv4Addr::new(
-        octets[12],
-        octets[13],
-        octets[14],
-        octets[15],
+        octets[12], octets[13], octets[14], octets[15],
     ))
 }
 

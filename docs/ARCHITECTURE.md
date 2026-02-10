@@ -331,7 +331,7 @@ graph TB
 
 **Application-Level Heartbeat Protocol:**
 
-Heartbeats and IP packets are multiplexed on the same bidirectional QUIC stream (the "data stream" opened after handshake). All messages are prefixed with a 1-byte type discriminator defined in `DataMessageType` in `crates/vpn-core/src/signaling.rs`:
+Heartbeats and IP packets are multiplexed on the same bidirectional QUIC stream (the "data stream" opened after handshake). All messages are prefixed with a 1-byte type discriminator defined in `DataMessageType` in `src/vpn_core/signaling.rs`:
 
 ```
 Data channel message framing:

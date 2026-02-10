@@ -3,7 +3,7 @@
 //! This module handles creating and managing TUN network interfaces
 //! for VPN traffic.
 
-use crate::error::{VpnError, VpnResult};
+use crate::vpn_core::error::{VpnError, VpnResult};
 use ipnet::{Ipv4Net, Ipv6Net};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -938,18 +938,16 @@ pub async fn add_route6(tun_name: &str, route: &Ipv6Net) -> VpnResult<()> {
 /// may select the wrong source address for packets routed through this route.
 ///
 /// If the route already exists, this is treated as idempotent success.
-pub async fn add_route6_with_src(
-    tun_name: &str,
-    route: &Ipv6Net,
-    src: Ipv6Addr,
-) -> VpnResult<()> {
+pub async fn add_route6_with_src(tun_name: &str, route: &Ipv6Net, src: Ipv6Addr) -> VpnResult<()> {
     #[cfg(target_os = "macos")]
     {
         // macOS doesn't support source address in routes the same way
         // Fall back to standard route addition
         log::debug!(
             "macOS: ignoring source address {} for IPv6 route {} via {}",
-            src, route, tun_name
+            src,
+            route,
+            tun_name
         );
         add_route_generic(tun_name, route).await
     }
@@ -1001,7 +999,9 @@ pub async fn add_route6_with_src(
         // Fall back to standard route addition
         log::debug!(
             "Windows: ignoring source address {} for IPv6 route {} via {}",
-            src, route, tun_name
+            src,
+            route,
+            tun_name
         );
         add_route_generic(tun_name, route).await
     }
@@ -1486,7 +1486,11 @@ async fn add_bypass_route_impl(info: &BypassRouteInfo) -> VpnResult<()> {
         .map_err(|e| VpnError::tun_device_with_source("Failed to add bypass route", e))?;
 
     if output.status.success() {
-        log::info!("Added bypass route for {} via {}", info.peer_ip, info.device);
+        log::info!(
+            "Added bypass route for {} via {}",
+            info.peer_ip,
+            info.device
+        );
         return Ok(());
     }
 
@@ -1561,11 +1565,7 @@ fn remove_bypass_route_sync(
     if peer_ip.is_ipv6() {
         args.push("-6".to_string());
     }
-    args.extend([
-        "route".to_string(),
-        "del".to_string(),
-        host_route.clone(),
-    ]);
+    args.extend(["route".to_string(), "del".to_string(), host_route.clone()]);
 
     if let Some(gw) = gateway {
         args.extend(["via".to_string(), gw.to_string()]);
@@ -1579,7 +1579,11 @@ fn remove_bypass_route_sync(
         }
         Ok(output) => {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            log::warn!("Failed to remove bypass route {}: {}", host_route, stderr.trim());
+            log::warn!(
+                "Failed to remove bypass route {}: {}",
+                host_route,
+                stderr.trim()
+            );
         }
         Err(e) => {
             log::warn!("Failed to execute route delete: {}", e);
@@ -1616,7 +1620,11 @@ fn remove_bypass_route_sync(
         }
         Ok(output) => {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            log::warn!("Failed to remove bypass route for {}: {}", peer_ip, stderr.trim());
+            log::warn!(
+                "Failed to remove bypass route for {}: {}",
+                peer_ip,
+                stderr.trim()
+            );
         }
         Err(e) => {
             log::warn!("Failed to execute route delete: {}", e);

@@ -273,7 +273,11 @@ fn route6_context(route: &str, section: Option<&str>) -> String {
     }
 }
 
-fn validate_vpn_network(network: &str, server_ip: Option<&str>, section: &str) -> Result<ipnet::Ipv4Net> {
+fn validate_vpn_network(
+    network: &str,
+    server_ip: Option<&str>,
+    section: &str,
+) -> Result<ipnet::Ipv4Net> {
     let net: ipnet::Ipv4Net = network.parse().with_context(|| {
         format!(
             "[{}] Invalid network CIDR '{}'. Expected format: 10.0.0.0/24",
@@ -497,26 +501,20 @@ fn load_config<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T> {
 }
 
 fn default_vpn_server_config_path() -> Option<PathBuf> {
-    dirs::home_dir().map(|home| {
-        home.join(".config")
-            .join("vpn-rs")
-            .join("vpn_server.toml")
-    })
+    dirs::home_dir().map(|home| home.join(".config").join("vpn-rs").join("vpn_server.toml"))
 }
 
 fn default_vpn_client_config_path() -> Option<PathBuf> {
-    dirs::home_dir().map(|home| {
-        home.join(".config")
-            .join("vpn-rs")
-            .join("vpn_client.toml")
-    })
+    dirs::home_dir().map(|home| home.join(".config").join("vpn-rs").join("vpn_client.toml"))
 }
 
 pub fn load_vpn_server_config(path: Option<&Path>) -> Result<VpnServerConfig> {
     let config_path = match path {
         Some(p) => expand_tilde(p),
         None => default_vpn_server_config_path().ok_or_else(|| {
-            anyhow::anyhow!("Could not resolve default config path. Use -c to specify a config file.")
+            anyhow::anyhow!(
+                "Could not resolve default config path. Use -c to specify a config file."
+            )
         })?,
     };
     load_config(&config_path)
@@ -526,7 +524,9 @@ pub fn load_vpn_client_config(path: Option<&Path>) -> Result<VpnClientConfig> {
     let config_path = match path {
         Some(p) => expand_tilde(p),
         None => default_vpn_client_config_path().ok_or_else(|| {
-            anyhow::anyhow!("Could not resolve default config path. Use -c to specify a config file.")
+            anyhow::anyhow!(
+                "Could not resolve default config path. Use -c to specify a config file."
+            )
         })?,
     };
     load_config(&config_path)

@@ -3842,75 +3842,37 @@ dependencies = [
 ]
 
 [[package]]
-name = "vpn-common"
+name = "vpn-rs"
 version = "0.0.1"
 dependencies = [
  "anyhow",
- "dirs",
- "ipnet",
- "serde",
- "toml",
-]
-
-[[package]]
-name = "vpn-core"
-version = "0.0.1"
-dependencies = [
- "anyhow",
+ "base64",
  "bytes",
+ "clap",
  "dashmap",
+ "dirs",
+ "env_logger",
  "etherparse",
  "fs2",
  "futures",
  "ipnet",
  "iroh",
+ "iroh-quinn-proto",
  "log",
  "mock_instant",
  "rand",
  "rand_chacha",
- "serde",
- "serde_json",
- "thiserror 1.0.69",
- "tokio",
- "tun",
- "vpn-common",
- "vpn-iroh",
-]
-
-[[package]]
-name = "vpn-iroh"
-version = "0.0.1"
-dependencies = [
- "anyhow",
- "base64",
- "iroh",
- "iroh-quinn-proto",
- "log",
- "rand",
  "rustls",
  "serde",
  "serde_json",
  "tempfile",
+ "thiserror 1.0.69",
  "tokio",
  "tokio-rustls",
+ "toml",
+ "tun",
  "url",
- "vpn-common",
  "webpki-roots",
-]
-
-[[package]]
-name = "vpn-rs"
-version = "0.0.1"
-dependencies = [
- "anyhow",
- "clap",
- "env_logger",
- "ipnet",
- "log",
- "tokio",
- "vpn-common",
- "vpn-core",
- "vpn-iroh",
 ]
 
 [[package]]

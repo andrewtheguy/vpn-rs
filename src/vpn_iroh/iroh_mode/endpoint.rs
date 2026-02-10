@@ -1,5 +1,6 @@
 //! Common endpoint helpers for iroh tunnel connections.
 
+use crate::vpn_common::config::{CongestionController, TransportTuning, DEFAULT_RECEIVE_WINDOW};
 use anyhow::{Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use iroh::{
@@ -12,7 +13,6 @@ use log::{info, warn};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
-use vpn_common::config::{CongestionController, TransportTuning, DEFAULT_RECEIVE_WINDOW};
 use url::Url;
 
 /// ALPN for all iroh modes (client requests source)
@@ -157,7 +157,10 @@ pub fn create_endpoint_builder(
         // Set congestion controller
         let factory = create_congestion_controller_factory(tuning.congestion_controller);
         transport_config = transport_config.congestion_controller_factory(factory);
-        info!("Using {:?} congestion controller", tuning.congestion_controller);
+        info!(
+            "Using {:?} congestion controller",
+            tuning.congestion_controller
+        );
 
         // Set receive window (flow control) for connection + streams
         let receive_window = tuning.receive_window.unwrap_or(DEFAULT_RECEIVE_WINDOW);
@@ -174,7 +177,11 @@ pub fn create_endpoint_builder(
             receive_window / 1024,
             send_window / 1024
         );
-        let recv_source = if tuning.receive_window.is_none() { "default" } else { "config" };
+        let recv_source = if tuning.receive_window.is_none() {
+            "default"
+        } else {
+            "config"
+        };
         let send_source = if tuning.send_window.is_none() {
             if tuning.receive_window.is_none() {
                 "default"
@@ -213,7 +220,9 @@ pub fn create_endpoint_builder(
                 if let Some(secret) = secret_key {
                     info!("Using custom DNS server: {}", dns_url);
                     builder = builder
-                        .address_lookup(PkarrPublisher::builder(pkarr_url.clone()).build(secret.clone()))
+                        .address_lookup(
+                            PkarrPublisher::builder(pkarr_url.clone()).build(secret.clone()),
+                        )
                         .address_lookup(PkarrResolver::builder(pkarr_url));
                 } else {
                     // Custom DNS server, resolve only via HTTP (no secret = can't publish)
@@ -248,9 +257,14 @@ pub async fn create_server_endpoint(
     let using_custom_relay = !matches!(relay_mode, RelayMode::Default);
     print_relay_status(relay_urls, relay_only, using_custom_relay);
 
-    let mut builder =
-        create_endpoint_builder(relay_mode, relay_only, dns_server, secret.as_ref(), transport_tuning)?
-            .alpns(vec![alpn.to_vec()]);
+    let mut builder = create_endpoint_builder(
+        relay_mode,
+        relay_only,
+        dns_server,
+        secret.as_ref(),
+        transport_tuning,
+    )?
+    .alpns(vec![alpn.to_vec()]);
 
     if let Some(secret) = secret {
         builder = builder.secret_key(secret);
@@ -290,7 +304,13 @@ pub async fn create_client_endpoint(
     let using_custom_relay = !matches!(relay_mode, RelayMode::Default);
     print_relay_status(relay_urls, relay_only, using_custom_relay);
 
-    let mut builder = create_endpoint_builder(relay_mode, relay_only, dns_server, secret_key, transport_tuning)?;
+    let mut builder = create_endpoint_builder(
+        relay_mode,
+        relay_only,
+        dns_server,
+        secret_key,
+        transport_tuning,
+    )?;
 
     // Set the secret key for persistent identity (used for authentication)
     if let Some(secret) = secret_key {
@@ -405,7 +425,11 @@ pub fn print_connection_paths(conn: &iroh::endpoint::Connection) {
         return;
     }
     for path in paths.iter() {
-        let selected = if path.is_selected() { " (selected)" } else { "" };
+        let selected = if path.is_selected() {
+            " (selected)"
+        } else {
+            ""
+        };
         let remote = path.remote_addr();
         match remote {
             iroh::TransportAddr::Ip(addr) => {

@@ -5,23 +5,23 @@
 //! IP-over-QUIC tunnel. IP packets are framed and sent directly over the
 //! encrypted iroh QUIC connection for automatic NAT traversal.
 
-use crate::buffer::{as_mut_byte_slice, uninitialized_vec};
-use crate::config::VpnClientConfig;
-use crate::device::{
+use crate::vpn_core::buffer::{as_mut_byte_slice, uninitialized_vec};
+use crate::vpn_core::config::VpnClientConfig;
+use crate::vpn_core::device::{
     add_bypass_route, add_routes, add_routes6_with_src, BypassRouteGuard, Route6Guard, RouteGuard,
     TunConfig, TunDevice,
 };
-use crate::error::{VpnError, VpnResult};
-use crate::lock::VpnLock;
-use crate::signaling::{
+use crate::vpn_core::error::{VpnError, VpnResult};
+use crate::vpn_core::lock::VpnLock;
+use crate::vpn_core::signaling::{
     frame_ip_packet, read_message, write_message, DataMessageType, VpnHandshake,
     VpnHandshakeResponse, HEARTBEAT_PING_BYTE, MAX_HANDSHAKE_SIZE, VPN_ALPN,
 };
 use bytes::{Bytes, BytesMut};
+use futures::StreamExt;
 use ipnet::{Ipv4Net, Ipv6Net};
 use iroh::endpoint::{PathInfoList, RecvStream, SendStream};
 use iroh::{Endpoint, EndpointAddr, EndpointId, RelayUrl, TransportAddr, Watcher};
-use futures::StreamExt;
 use rand::Rng;
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -120,10 +120,7 @@ impl VpnClient {
         // Parse server endpoint ID
         let server_id: EndpointId = self.config.server_node_id.parse().map_err(|e| {
             VpnError::config_with_source(
-                format!(
-                "Invalid server node ID: {}",
-                self.config.server_node_id
-                ),
+                format!("Invalid server node ID: {}", self.config.server_node_id),
                 e,
             )
         })?;
@@ -138,10 +135,7 @@ impl VpnClient {
             let mut addr = EndpointAddr::new(server_id);
             for relay_url_str in relay_urls {
                 let relay_url: RelayUrl = relay_url_str.parse().map_err(|e| {
-                    VpnError::config_with_source(
-                        format!("Invalid relay URL: {}", relay_url_str),
-                        e,
-                    )
+                    VpnError::config_with_source(format!("Invalid relay URL: {}", relay_url_str), e)
                 })?;
                 addr = addr.with_relay_url(relay_url);
             }
@@ -202,9 +196,8 @@ impl VpnClient {
         //
         // This spawns a monitoring task that dynamically updates bypass routes as
         // the connection paths change (e.g., relay -> direct, new paths discovered).
-        let will_add_routes =
-            (server_info.assigned_ip.is_some() && !self.config.routes.is_empty())
-                || (server_info.assigned_ip6.is_some() && !self.config.routes6.is_empty());
+        let will_add_routes = (server_info.assigned_ip.is_some() && !self.config.routes.is_empty())
+            || (server_info.assigned_ip6.is_some() && !self.config.routes6.is_empty());
         let bypass_route_task: Option<JoinHandle<()>> = if will_add_routes {
             self.add_iroh_bypass_routes(endpoint, &connection).await
         } else {
@@ -228,12 +221,8 @@ impl VpnClient {
             if let Some(assigned_ip6) = server_info.assigned_ip6 {
                 if !self.config.routes6.is_empty() {
                     Some(
-                        add_routes6_with_src(
-                            tun_device.name(),
-                            &self.config.routes6,
-                            assigned_ip6,
-                        )
-                        .await?,
+                        add_routes6_with_src(tun_device.name(), &self.config.routes6, assigned_ip6)
+                            .await?,
                     )
                 } else {
                     None
@@ -297,21 +286,18 @@ impl VpnClient {
 
         // Extract IPv4 info (optional, for IPv4-only or dual-stack)
         // All three IPv4 fields must be present together or all absent for consistency
-        let (assigned_ip, network, server_ip) = match (
-            response.assigned_ip,
-            response.network,
-            response.server_ip,
-        ) {
-            (Some(ip), Some(net), Some(gw)) => (Some(ip), Some(net), Some(gw)),
-            (None, None, None) => (None, None, None),
-            _ => {
-                return Err(VpnError::Signaling(
-                    "Server response has incomplete IPv4 configuration: \
+        let (assigned_ip, network, server_ip) =
+            match (response.assigned_ip, response.network, response.server_ip) {
+                (Some(ip), Some(net), Some(gw)) => (Some(ip), Some(net), Some(gw)),
+                (None, None, None) => (None, None, None),
+                _ => {
+                    return Err(VpnError::Signaling(
+                        "Server response has incomplete IPv4 configuration: \
                      assigned_ip, network, and server_ip must all be present or all absent"
-                        .into(),
-                ));
-            }
-        };
+                            .into(),
+                    ));
+                }
+            };
 
         // Extract IPv6 info (optional, for IPv6-only or dual-stack)
         // All three IPv6 fields must be present together or all absent for consistency
@@ -488,177 +474,183 @@ impl VpnClient {
         // Memory note: Each packet requires a small allocation (5 bytes framing + packet length).
         // We allocate based on actual packet size to avoid over-allocation for small packets.
         // Most allocations are small and served from thread-local caches, making them fast.
-        let mut outbound_handle: tokio::task::JoinHandle<Option<String>> = tokio::spawn(async move {
-            let mut read_buf = uninitialized_vec(buffer_size);
-            // SAFETY: Buffer is immediately overwritten by tun_reader.read(), and only
-            // the written portion (&read_slice[..n]) is accessed. Skips zeroing overhead.
-            let read_slice = unsafe { as_mut_byte_slice(&mut read_buf) };
-            loop {
-                match tun_reader.read(read_slice).await {
-                    Ok(n) if n > 0 => {
-                        let packet = &read_slice[..n];
+        let mut outbound_handle: tokio::task::JoinHandle<Option<String>> =
+            tokio::spawn(async move {
+                let mut read_buf = uninitialized_vec(buffer_size);
+                // SAFETY: Buffer is immediately overwritten by tun_reader.read(), and only
+                // the written portion (&read_slice[..n]) is accessed. Skips zeroing overhead.
+                let read_slice = unsafe { as_mut_byte_slice(&mut read_buf) };
+                loop {
+                    match tun_reader.read(read_slice).await {
+                        Ok(n) if n > 0 => {
+                            let packet = &read_slice[..n];
 
-                        // Allocate buffer sized to actual packet (1 byte type + 4 byte length + packet).
-                        // Avoids over-allocation for small packets; allocator serves from thread-local caches.
-                        let frame_size = 1 + 4 + n;
-                        let mut write_buf = BytesMut::with_capacity(frame_size);
+                            // Allocate buffer sized to actual packet (1 byte type + 4 byte length + packet).
+                            // Avoids over-allocation for small packets; allocator serves from thread-local caches.
+                            let frame_size = 1 + 4 + n;
+                            let mut write_buf = BytesMut::with_capacity(frame_size);
 
-                        // Frame IP packet for transmission (writes into write_buf)
-                        if let Err(e) = frame_ip_packet(&mut write_buf, packet) {
-                            log::warn!("Failed to frame packet: {}", e);
-                            continue;
+                            // Frame IP packet for transmission (writes into write_buf)
+                            if let Err(e) = frame_ip_packet(&mut write_buf, packet) {
+                                log::warn!("Failed to frame packet: {}", e);
+                                continue;
+                            }
+
+                            // Freeze into Bytes for send to writer task.
+                            let bytes = write_buf.freeze();
+
+                            // Send via channel to writer task (blocking send to apply backpressure)
+                            if outbound_tx.send(bytes).await.is_err() {
+                                log::warn!("Outbound channel closed");
+                                return None; // Normal exit, channel closed
+                            }
                         }
-
-                        // Freeze into Bytes for send to writer task.
-                        let bytes = write_buf.freeze();
-
-                        // Send via channel to writer task (blocking send to apply backpressure)
-                        if outbound_tx.send(bytes).await.is_err() {
-                            log::warn!("Outbound channel closed");
-                            return None; // Normal exit, channel closed
+                        Ok(_) => {}
+                        Err(e) => {
+                            log::error!("TUN read error: {}", e);
+                            return Some(format!("TUN read error: {}", e));
                         }
-                    }
-                    Ok(_) => {}
-                    Err(e) => {
-                        log::error!("TUN read error: {}", e);
-                        return Some(format!("TUN read error: {}", e));
                     }
                 }
-            }
-        });
+            });
 
         // Spawn inbound task (QUIC stream -> TUN)
         // data_recv is moved into this task (no Arc/Mutex needed - single owner)
         // Returns error reason if task exits due to an error.
         let inbound_start_time = start_time;
-        let mut inbound_handle: tokio::task::JoinHandle<Option<String>> = tokio::spawn(async move {
-            const MAX_TUN_WRITE_FAILURES: u32 = 10;
-            let mut data_recv = data_recv;
-            let mut type_buf = [0u8; 1];
-            let mut len_buf = [0u8; 4];
-            let mut data_buf = uninitialized_vec(MAX_IP_PACKET_SIZE);
-            // SAFETY: Buffer is overwritten by read_exact(&mut data_slice[..len]), and only
-            // the written portion (&data_slice[..len]) is accessed. Skips zeroing overhead.
-            let data_slice = unsafe { as_mut_byte_slice(&mut data_buf) };
-            let mut consecutive_tun_failures = 0u32;
-            loop {
-                // Read message type
-                match data_recv.read_exact(&mut type_buf).await {
-                    Ok(()) => {}
-                    Err(e) => {
-                        log::error!("Failed to read message type: {}", e);
-                        return Some(format!("QUIC read error: {}", e));
+        let mut inbound_handle: tokio::task::JoinHandle<Option<String>> =
+            tokio::spawn(async move {
+                const MAX_TUN_WRITE_FAILURES: u32 = 10;
+                let mut data_recv = data_recv;
+                let mut type_buf = [0u8; 1];
+                let mut len_buf = [0u8; 4];
+                let mut data_buf = uninitialized_vec(MAX_IP_PACKET_SIZE);
+                // SAFETY: Buffer is overwritten by read_exact(&mut data_slice[..len]), and only
+                // the written portion (&data_slice[..len]) is accessed. Skips zeroing overhead.
+                let data_slice = unsafe { as_mut_byte_slice(&mut data_buf) };
+                let mut consecutive_tun_failures = 0u32;
+                loop {
+                    // Read message type
+                    match data_recv.read_exact(&mut type_buf).await {
+                        Ok(()) => {}
+                        Err(e) => {
+                            log::error!("Failed to read message type: {}", e);
+                            return Some(format!("QUIC read error: {}", e));
+                        }
                     }
-                }
 
-                let msg_type = match DataMessageType::from_byte(type_buf[0]) {
-                    Some(t) => t,
-                    None => {
-                        // Unknown message type - cannot determine framing, must disconnect
-                        // to avoid stream desynchronization
-                        log::error!("Unknown message type: 0x{:02x}, disconnecting", type_buf[0]);
-                        return Some(format!("Unknown message type: 0x{:02x}", type_buf[0]));
-                    }
-                };
+                    let msg_type = match DataMessageType::from_byte(type_buf[0]) {
+                        Some(t) => t,
+                        None => {
+                            // Unknown message type - cannot determine framing, must disconnect
+                            // to avoid stream desynchronization
+                            log::error!(
+                                "Unknown message type: 0x{:02x}, disconnecting",
+                                type_buf[0]
+                            );
+                            return Some(format!("Unknown message type: 0x{:02x}", type_buf[0]));
+                        }
+                    };
 
-                match msg_type {
-                    DataMessageType::HeartbeatPong => {
-                        // Update last pong time
-                        let now = inbound_start_time.elapsed().as_millis() as u64;
-                        last_pong_inbound.store(now, Ordering::Relaxed);
-                        log::trace!("Heartbeat pong received");
-                        continue;
+                    match msg_type {
+                        DataMessageType::HeartbeatPong => {
+                            // Update last pong time
+                            let now = inbound_start_time.elapsed().as_millis() as u64;
+                            last_pong_inbound.store(now, Ordering::Relaxed);
+                            log::trace!("Heartbeat pong received");
+                            continue;
+                        }
+                        DataMessageType::HeartbeatPing => {
+                            // Client shouldn't receive pings, ignore
+                            log::trace!("Unexpected heartbeat ping received");
+                            continue;
+                        }
+                        DataMessageType::IpPacket => {
+                            // Continue to read IP packet below
+                        }
                     }
-                    DataMessageType::HeartbeatPing => {
-                        // Client shouldn't receive pings, ignore
-                        log::trace!("Unexpected heartbeat ping received");
-                        continue;
-                    }
-                    DataMessageType::IpPacket => {
-                        // Continue to read IP packet below
-                    }
-                }
 
-                // Read length prefix for IP packet
-                match data_recv.read_exact(&mut len_buf).await {
-                    Ok(()) => {}
-                    Err(e) => {
-                        log::error!("Failed to read IP packet length: {}", e);
-                        return Some(format!("QUIC read error: {}", e));
+                    // Read length prefix for IP packet
+                    match data_recv.read_exact(&mut len_buf).await {
+                        Ok(()) => {}
+                        Err(e) => {
+                            log::error!("Failed to read IP packet length: {}", e);
+                            return Some(format!("QUIC read error: {}", e));
+                        }
                     }
-                }
-                let len = u32::from_be_bytes(len_buf) as usize;
-                if len > MAX_IP_PACKET_SIZE {
-                    log::error!("IP packet too large: {}", len);
-                    return Some(format!("IP packet too large: {}", len));
-                }
-
-                // Read packet data
-                match data_recv.read_exact(&mut data_slice[..len]).await {
-                    Ok(()) => {}
-                    Err(e) => {
-                        log::error!("Failed to read IP packet: {}", e);
-                        return Some(format!("QUIC read error: {}", e));
+                    let len = u32::from_be_bytes(len_buf) as usize;
+                    if len > MAX_IP_PACKET_SIZE {
+                        log::error!("IP packet too large: {}", len);
+                        return Some(format!("IP packet too large: {}", len));
                     }
-                }
 
-                let packet = &data_slice[..len];
-                // Directly write to TUN (packet is already decrypted/raw IP)
-                if let Err(e) = tun_writer.write_all(packet).await {
-                    consecutive_tun_failures += 1;
-                    if consecutive_tun_failures >= MAX_TUN_WRITE_FAILURES {
-                        log::error!(
-                            "Too many consecutive TUN write failures ({}), disconnecting: {}",
+                    // Read packet data
+                    match data_recv.read_exact(&mut data_slice[..len]).await {
+                        Ok(()) => {}
+                        Err(e) => {
+                            log::error!("Failed to read IP packet: {}", e);
+                            return Some(format!("QUIC read error: {}", e));
+                        }
+                    }
+
+                    let packet = &data_slice[..len];
+                    // Directly write to TUN (packet is already decrypted/raw IP)
+                    if let Err(e) = tun_writer.write_all(packet).await {
+                        consecutive_tun_failures += 1;
+                        if consecutive_tun_failures >= MAX_TUN_WRITE_FAILURES {
+                            log::error!(
+                                "Too many consecutive TUN write failures ({}), disconnecting: {}",
+                                consecutive_tun_failures,
+                                e
+                            );
+                            return Some(format!("TUN write failures exceeded: {}", e));
+                        }
+                        log::warn!(
+                            "Failed to write to TUN ({}/{}): {}",
                             consecutive_tun_failures,
+                            MAX_TUN_WRITE_FAILURES,
                             e
                         );
-                        return Some(format!("TUN write failures exceeded: {}", e));
+                    } else {
+                        consecutive_tun_failures = 0;
                     }
-                    log::warn!(
-                        "Failed to write to TUN ({}/{}): {}",
-                        consecutive_tun_failures,
-                        MAX_TUN_WRITE_FAILURES,
-                        e
-                    );
-                } else {
-                    consecutive_tun_failures = 0;
                 }
-            }
-        });
+            });
 
         // Spawn heartbeat task (sends pings via channel, checks for timeout)
         // Returns error reason if task exits due to timeout.
-        let mut heartbeat_handle: tokio::task::JoinHandle<Option<String>> = tokio::spawn(async move {
-            let heartbeat_start = start_time;
-            loop {
-                tokio::time::sleep(HEARTBEAT_INTERVAL).await;
+        let mut heartbeat_handle: tokio::task::JoinHandle<Option<String>> =
+            tokio::spawn(async move {
+                let heartbeat_start = start_time;
+                loop {
+                    tokio::time::sleep(HEARTBEAT_INTERVAL).await;
 
-                // Check if we've received a pong recently
-                let now_ms = heartbeat_start.elapsed().as_millis() as u64;
-                let last_pong_ms = last_pong_heartbeat.load(Ordering::Relaxed);
-                let elapsed_ms = now_ms.saturating_sub(last_pong_ms);
+                    // Check if we've received a pong recently
+                    let now_ms = heartbeat_start.elapsed().as_millis() as u64;
+                    let last_pong_ms = last_pong_heartbeat.load(Ordering::Relaxed);
+                    let elapsed_ms = now_ms.saturating_sub(last_pong_ms);
 
-                if elapsed_ms > HEARTBEAT_TIMEOUT.as_millis() as u64 {
-                    log::error!(
-                        "Heartbeat timeout: no pong received for {:.1}s (threshold: {:.1}s)",
-                        elapsed_ms as f64 / 1000.0,
-                        HEARTBEAT_TIMEOUT.as_secs_f64()
-                    );
-                    return Some(format!(
-                        "Heartbeat timeout: no pong for {:.1}s",
-                        elapsed_ms as f64 / 1000.0
-                    ));
+                    if elapsed_ms > HEARTBEAT_TIMEOUT.as_millis() as u64 {
+                        log::error!(
+                            "Heartbeat timeout: no pong received for {:.1}s (threshold: {:.1}s)",
+                            elapsed_ms as f64 / 1000.0,
+                            HEARTBEAT_TIMEOUT.as_secs_f64()
+                        );
+                        return Some(format!(
+                            "Heartbeat timeout: no pong for {:.1}s",
+                            elapsed_ms as f64 / 1000.0
+                        ));
+                    }
+
+                    // Send ping via channel to writer task (static Bytes, zero allocation)
+                    let ping = Bytes::from_static(HEARTBEAT_PING_BYTE);
+                    if outbound_tx_heartbeat.send(ping).await.is_err() {
+                        log::warn!("Failed to send heartbeat ping: channel closed");
+                        return None; // Normal exit, channel closed
+                    }
+                    log::trace!("Heartbeat ping sent");
                 }
-
-                // Send ping via channel to writer task (static Bytes, zero allocation)
-                let ping = Bytes::from_static(HEARTBEAT_PING_BYTE);
-                if outbound_tx_heartbeat.send(ping).await.is_err() {
-                    log::warn!("Failed to send heartbeat ping: channel closed");
-                    return None; // Normal exit, channel closed
-                }
-                log::trace!("Heartbeat ping sent");
-            }
-        });
+            });
 
         // Wait for any task to complete (or error), then clean up all tasks
         let (first_task, first_result, remaining) = tokio::select! {
@@ -956,7 +948,11 @@ async fn collect_addresses_from_paths(
     }
 
     for path in paths.iter() {
-        let selected = if path.is_selected() { " (selected)" } else { "" };
+        let selected = if path.is_selected() {
+            " (selected)"
+        } else {
+            ""
+        };
         let remote = path.remote_addr();
         match remote {
             TransportAddr::Ip(addr) => {
@@ -996,7 +992,10 @@ async fn collect_addresses_from_paths(
 /// Returns:
 /// - `Ok(addresses)` on successful resolution (may be empty if host has no addresses)
 /// - `Err(())` if DNS resolution failed (caller should preserve existing routes)
-async fn resolve_relay_url(endpoint: &Endpoint, relay_url: &RelayUrl) -> Result<Vec<SocketAddr>, ()> {
+async fn resolve_relay_url(
+    endpoint: &Endpoint,
+    relay_url: &RelayUrl,
+) -> Result<Vec<SocketAddr>, ()> {
     // Extract host from relay URL
     let Some(host) = relay_url.host_str() else {
         log::warn!("Relay URL {} has no host", relay_url);
@@ -1015,8 +1014,7 @@ async fn resolve_relay_url(endpoint: &Endpoint, relay_url: &RelayUrl) -> Result<
     let resolver = endpoint.dns_resolver();
     match resolver.lookup_ipv4_ipv6(host, RESOLVE_RELAY_TIMEOUT).await {
         Ok(addrs) => {
-            let socket_addrs: Vec<SocketAddr> =
-                addrs.map(|ip| SocketAddr::new(ip, port)).collect();
+            let socket_addrs: Vec<SocketAddr> = addrs.map(|ip| SocketAddr::new(ip, port)).collect();
             log::debug!(
                 "Resolved relay {} to {} address(es)",
                 relay_url,

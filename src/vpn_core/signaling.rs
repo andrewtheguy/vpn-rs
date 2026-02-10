@@ -5,7 +5,7 @@
 //! via a random `device_id` (allowing multiple sessions per iroh endpoint),
 //! and the server responds with assigned IP addresses and network configuration.
 
-use crate::error::{VpnError, VpnResult};
+use crate::vpn_core::error::{VpnError, VpnResult};
 use bytes::{BufMut, BytesMut};
 use ipnet::{Ipv4Net, Ipv6Net};
 use serde::{Deserialize, Serialize};
@@ -392,8 +392,7 @@ mod tests {
         let network6: Ipv6Net = "fd00::/64".parse().unwrap();
         let server_ip6: Ipv6Addr = "fd00::1".parse().unwrap();
 
-        let response =
-            VpnHandshakeResponse::accepted_ipv6_only(assigned_ip6, network6, server_ip6);
+        let response = VpnHandshakeResponse::accepted_ipv6_only(assigned_ip6, network6, server_ip6);
 
         let encoded = response.encode().unwrap();
         let decoded = VpnHandshakeResponse::decode(&encoded).unwrap();
