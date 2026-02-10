@@ -1328,11 +1328,27 @@ async fn query_route_for_ip(ip: IpAddr) -> VpnResult<BypassRouteInfo> {
 /// ICE keepalive traffic to be black-holed through the VPN tunnel.
 ///
 /// Returns a guard that removes the bypass route when dropped.
-pub async fn add_bypass_route(peer_addr: SocketAddr) -> VpnResult<BypassRouteGuard> {
+///
+/// If `disallow_device` is provided, route lookups that resolve through that
+/// interface are rejected. This prevents self-capture where iroh underlay
+/// traffic is accidentally routed back into the VPN TUN interface.
+pub async fn add_bypass_route(
+    peer_addr: SocketAddr,
+    disallow_device: Option<&str>,
+) -> VpnResult<BypassRouteGuard> {
     let peer_ip = peer_addr.ip();
 
     // Query current route to this IP before adding any VPN routes
     let route_info = query_route_for_ip(peer_ip).await?;
+
+    if let Some(disallowed) = disallow_device {
+        if route_info.device == disallowed {
+            return Err(VpnError::tun_device(format!(
+                "Refusing bypass route for {}: route lookup resolved via VPN tunnel interface {}",
+                peer_ip, disallowed
+            )));
+        }
+    }
 
     log::info!(
         "Adding bypass route for ICE peer {} via {} (gateway: {:?})",

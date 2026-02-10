@@ -54,6 +54,9 @@ const OUTBOUND_CHANNEL_SIZE: usize = 1024;
 /// Timeout for resolving relay URLs via DNS.
 const RESOLVE_RELAY_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Maximum wait for initial bypass route setup before continuing startup.
+const INITIAL_BYPASS_SETUP_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// VPN client instance.
 pub struct VpnClient {
     /// Client configuration.
@@ -201,7 +204,8 @@ impl VpnClient {
         let will_add_routes = (server_info.assigned_ip.is_some() && !self.config.routes.is_empty())
             || (server_info.assigned_ip6.is_some() && !self.config.routes6.is_empty());
         let bypass_route_task: Option<JoinHandle<()>> = if will_add_routes {
-            self.add_iroh_bypass_routes(endpoint, &connection).await
+            self.add_iroh_bypass_routes(endpoint, &connection, tun_device.name())
+                .await
         } else {
             None
         };
@@ -250,10 +254,26 @@ impl VpnClient {
             log::info!("  Client IPv6: {}", ip6);
         }
 
+        // Drop any tunneled UDP packets that target this endpoint's own iroh
+        // socket ports. This prevents recursive self-encapsulation loops.
+        let local_iroh_udp_ports = Arc::new(collect_local_iroh_udp_ports(endpoint));
+        if !local_iroh_udp_ports.is_empty() {
+            log::info!(
+                "Filtering tunneled traffic for {} local iroh UDP port(s)",
+                local_iroh_udp_ports.len()
+            );
+        }
+
         // Run the VPN packet loop (tunneled over iroh)
         // Pass the bypass route task so it's aborted when VPN ends
-        self.run_vpn_loop(tun_device, data_send, data_recv, bypass_route_task)
-            .await
+        self.run_vpn_loop(
+            tun_device,
+            data_send,
+            data_recv,
+            bypass_route_task,
+            local_iroh_udp_ports,
+        )
+        .await
     }
 
     /// Perform VPN handshake with the server.
@@ -399,25 +419,44 @@ impl VpnClient {
         &self,
         endpoint: &Endpoint,
         connection: &iroh::endpoint::Connection,
+        vpn_tun_name: &str,
     ) -> Option<JoinHandle<()>> {
         // Get the paths watcher
         let paths_watcher = connection.paths();
 
         // Clone endpoint for the spawned task
         let endpoint_clone = endpoint.clone();
+        let vpn_tun_name = vpn_tun_name.to_string();
+        let initial_routes = HashMap::new();
 
         // Create oneshot channel to signal when initial setup is complete
         let (setup_done_tx, setup_done_rx) = tokio::sync::oneshot::channel();
 
         // Spawn a task that manages bypass routes dynamically
         let handle = tokio::spawn(async move {
-            run_bypass_route_manager(endpoint_clone, paths_watcher, Some(setup_done_tx)).await;
+            run_bypass_route_manager(
+                endpoint_clone,
+                paths_watcher,
+                Some(setup_done_tx),
+                vpn_tun_name,
+                initial_routes,
+            )
+            .await;
         });
 
         // Wait for initial bypass route setup to complete before returning.
         // This ensures VPN routes are not added until bypass routes are in place.
-        if setup_done_rx.await.is_err() {
-            log::warn!("Bypass route manager task ended before initial setup completed");
+        match tokio::time::timeout(INITIAL_BYPASS_SETUP_TIMEOUT, setup_done_rx).await {
+            Ok(Ok(())) => {}
+            Ok(Err(_)) => {
+                log::warn!("Bypass route manager task ended before initial setup completed");
+            }
+            Err(_) => {
+                log::warn!(
+                    "Initial bypass setup timed out after {:.1}s, continuing startup",
+                    INITIAL_BYPASS_SETUP_TIMEOUT.as_secs_f64()
+                );
+            }
         }
 
         Some(handle)
@@ -430,6 +469,7 @@ impl VpnClient {
         data_send: SendStream,
         data_recv: RecvStream,
         bypass_route_task: Option<JoinHandle<()>>,
+        local_iroh_udp_ports: Arc<HashSet<u16>>,
     ) -> VpnResult<()> {
         // Split TUN device
         let (mut tun_reader, mut tun_writer) = tun_device.split()?;
@@ -485,6 +525,14 @@ impl VpnClient {
                     match tun_reader.read(read_slice).await {
                         Ok(n) if n > 0 => {
                             let packet = &read_slice[..n];
+
+                            if packet_has_local_iroh_udp_port(packet, &local_iroh_udp_ports) {
+                                log::debug!(
+                                    "Dropped self-encapsulated iroh UDP packet from TUN ({} bytes)",
+                                    n
+                                );
+                                continue;
+                            }
 
                             // Allocate buffer sized to actual packet (1 byte type + 4 byte length + packet).
                             // Avoids over-allocation for small packets; allocator serves from thread-local caches.
@@ -821,54 +869,70 @@ struct BypassRouteManager {
     /// Currently active bypass route guards, keyed by IP address.
     /// Dropping a guard removes the corresponding route.
     active_routes: HashMap<IpAddr, BypassRouteGuard>,
+    /// Name of the VPN TUN interface; bypass routes must never resolve through it.
+    vpn_tun_name: String,
 }
 
 impl BypassRouteManager {
-    fn new() -> Self {
+    fn new(vpn_tun_name: String, active_routes: HashMap<IpAddr, BypassRouteGuard>) -> Self {
         Self {
-            active_routes: HashMap::new(),
+            active_routes,
+            vpn_tun_name,
         }
     }
 
     /// Update bypass routes based on a new set of required IP addresses.
     ///
-    /// - Removes routes for addresses no longer needed (by dropping guards)
-    /// - Adds routes for new addresses
+    /// - Adds routes for new addresses first
+    /// - Removes routes for addresses no longer needed only after successful adds
+    ///
+    /// If any new route cannot be added, no removals are performed so existing
+    /// underlay reachability is preserved.
     async fn update(&mut self, required_ips: HashSet<IpAddr>) {
-        // Remove routes for addresses no longer in the required set
-        let to_remove: Vec<_> = self
+        // Stage additions first so we don't tear down working routes on partial failures.
+        let to_add: Vec<IpAddr> = required_ips
+            .iter()
+            .filter(|ip| !self.active_routes.contains_key(ip))
+            .copied()
+            .collect();
+
+        let mut staged_guards = Vec::with_capacity(to_add.len());
+
+        for ip in to_add {
+            let socket_addr = SocketAddr::new(ip, 443); // bypass routes are per-IP
+            match add_bypass_route(socket_addr, Some(&self.vpn_tun_name)).await {
+                Ok(guard) => {
+                    log::info!("Added bypass route for iroh address {}", ip);
+                    staged_guards.push((ip, guard));
+                }
+                Err(err) => {
+                    log::warn!(
+                        "Failed to add bypass route for {} (keeping existing routes): {}",
+                        ip,
+                        err
+                    );
+                    return;
+                }
+            }
+        }
+
+        // Commit staged additions now that all new routes succeeded.
+        for (ip, guard) in staged_guards {
+            self.active_routes.insert(ip, guard);
+        }
+
+        // Remove routes for addresses no longer in the required set.
+        let to_remove: Vec<IpAddr> = self
             .active_routes
             .keys()
             .filter(|ip| !required_ips.contains(ip))
-            .cloned()
+            .copied()
             .collect();
 
         for ip in to_remove {
             log::info!("Removing stale bypass route for {}", ip);
             self.active_routes.remove(&ip);
             // Guard is dropped here, which removes the route
-        }
-
-        // Add routes for new IP addresses
-        for ip in required_ips {
-            if self.active_routes.contains_key(&ip) {
-                continue;
-            }
-            // Use a dummy port (443) since bypass routes are per-IP
-            let socket_addr = SocketAddr::new(ip, 443);
-            match add_bypass_route(socket_addr).await {
-                Ok(guard) => {
-                    log::info!("Added bypass route for iroh address {}", ip);
-                    self.active_routes.insert(ip, guard);
-                }
-                Err(err) => {
-                    log::warn!(
-                        "Failed to add bypass route for {} (continuing anyway): {}",
-                        ip,
-                        err
-                    );
-                }
-            }
         }
     }
 }
@@ -884,21 +948,41 @@ async fn run_bypass_route_manager(
     endpoint: Endpoint,
     mut paths_watcher: impl Watcher<Value = PathInfoList> + Send + Unpin + 'static,
     initial_setup_done: Option<tokio::sync::oneshot::Sender<()>>,
+    vpn_tun_name: String,
+    initial_routes: HashMap<IpAddr, BypassRouteGuard>,
 ) {
-    let mut manager = BypassRouteManager::new();
+    let mut manager = BypassRouteManager::new(vpn_tun_name, initial_routes);
 
-    // Process initial connection paths (always apply, even if DNS partially fails)
+    // Process initial connection paths.
     let initial_paths = paths_watcher.get();
     let initial_result = collect_addresses_from_paths(&endpoint, &initial_paths).await;
-    manager.update(initial_result.ips).await;
+    if initial_result.preserve_routes {
+        log::warn!("Initial bypass route update skipped - keeping existing routes");
+    } else {
+        manager.update(initial_result.ips).await;
+    }
+
+    // Watch for changes using stream_updates_only (skips initial value we already processed)
+    let mut stream = paths_watcher.stream_updates_only();
+
+    // Ensure initial setup does not report success until we have at least one
+    // active bypass route, unless the watcher ends.
+    while manager.active_routes.is_empty() {
+        let Some(paths) = stream.next().await else {
+            break;
+        };
+        let result = collect_addresses_from_paths(&endpoint, &paths).await;
+        if result.preserve_routes {
+            log::warn!("Initial bypass route update skipped - keeping existing routes");
+            continue;
+        }
+        manager.update(result.ips).await;
+    }
 
     // Signal that initial setup is complete
     if let Some(tx) = initial_setup_done {
         let _ = tx.send(());
     }
-
-    // Watch for changes using stream_updates_only (skips initial value we already processed)
-    let mut stream = paths_watcher.stream_updates_only();
 
     while let Some(paths) = stream.next().await {
         log::debug!("Connection paths changed: {:?}", paths);
@@ -973,10 +1057,13 @@ async fn collect_addresses_from_paths(
                     }
                 }
             }
-            _ => {
-                log::debug!("iroh path{} unknown {:?}", selected, remote);
-            }
+            _ => log::debug!("iroh path{} unknown {:?}", selected, remote),
         }
+    }
+
+    if ips.is_empty() {
+        log::warn!("No usable iroh transport addresses found; preserving existing bypass routes");
+        preserve_routes = true;
     }
 
     CollectAddressesResult {
@@ -1064,6 +1151,63 @@ fn calculate_backoff_with_rng(attempt: u32, rng: &mut impl Rng) -> Duration {
     let total_ms = base_delay_ms.saturating_add(jitter_ms).min(BACKOFF_MAX_MS);
 
     Duration::from_millis(total_ms)
+}
+
+/// Collect local UDP ports bound by the iroh endpoint.
+fn collect_local_iroh_udp_ports(endpoint: &Endpoint) -> HashSet<u16> {
+    endpoint.addr().ip_addrs().map(|addr| addr.port()).collect()
+}
+
+/// Return true if packet is UDP and either source/destination port matches a blocked port.
+#[inline]
+fn packet_has_local_iroh_udp_port(packet: &[u8], blocked_ports: &HashSet<u16>) -> bool {
+    if blocked_ports.is_empty() {
+        return false;
+    }
+    let Some((src_port, dst_port)) = extract_udp_ports(packet) else {
+        return false;
+    };
+    blocked_ports.contains(&src_port) || blocked_ports.contains(&dst_port)
+}
+
+/// Extract UDP source/destination ports from an IPv4/IPv6 packet.
+///
+/// For IPv6, only packets with UDP as the first next-header are parsed.
+#[inline]
+fn extract_udp_ports(packet: &[u8]) -> Option<(u16, u16)> {
+    const IPV4_MIN_HEADER_BYTES: usize = 20;
+    const IPV6_MIN_HEADER_BYTES: usize = 40;
+
+    if packet.len() < IPV4_MIN_HEADER_BYTES {
+        return None;
+    }
+
+    match packet[0] >> 4 {
+        4 => {
+            let ihl = usize::from(packet[0] & 0x0f) * 4;
+            if ihl < IPV4_MIN_HEADER_BYTES || packet.len() < ihl + 8 {
+                return None;
+            }
+            if packet[9] != 17 {
+                return None;
+            }
+            let src = u16::from_be_bytes([packet[ihl], packet[ihl + 1]]);
+            let dst = u16::from_be_bytes([packet[ihl + 2], packet[ihl + 3]]);
+            Some((src, dst))
+        }
+        6 => {
+            if packet.len() < IPV6_MIN_HEADER_BYTES + 8 {
+                return None;
+            }
+            if packet[6] != 17 {
+                return None;
+            }
+            let src = u16::from_be_bytes([packet[40], packet[41]]);
+            let dst = u16::from_be_bytes([packet[42], packet[43]]);
+            Some((src, dst))
+        }
+        _ => None,
+    }
 }
 
 #[cfg(test)]

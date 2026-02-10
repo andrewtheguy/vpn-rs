@@ -518,6 +518,15 @@ impl VpnServer {
         // Setup TUN device
         self.setup_tun().await?;
 
+        // Drop self-encapsulated iroh UDP packets from the VPN tunnel path.
+        let local_iroh_udp_ports = Arc::new(collect_local_iroh_udp_ports(&endpoint));
+        if !local_iroh_udp_ports.is_empty() {
+            log::info!(
+                "Filtering tunneled traffic for {} local iroh UDP port(s)",
+                local_iroh_udp_ports.len()
+            );
+        }
+
         log::info!("VPN Server started:");
         // Log IPv4 info if configured
         if let Some(ref ip_pool) = self.ip_pool {
@@ -588,8 +597,12 @@ impl VpnServer {
         // Spawn TUN reader task (reads from TUN, routes to clients)
         // Store JoinHandle for graceful shutdown.
         let server_tun = server.clone();
+        let local_iroh_udp_ports_for_tun = local_iroh_udp_ports.clone();
         let tun_reader_handle = tokio::spawn(async move {
-            if let Err(e) = server_tun.run_tun_reader(tun_reader).await {
+            if let Err(e) = server_tun
+                .run_tun_reader(tun_reader, local_iroh_udp_ports_for_tun)
+                .await
+            {
                 log::error!("TUN reader error: {}", e);
             }
         });
@@ -600,8 +613,12 @@ impl VpnServer {
                 Some(incoming) => {
                     let server = server.clone();
                     let tun_write_tx = tun_write_tx.clone();
+                    let local_iroh_udp_ports = local_iroh_udp_ports.clone();
                     tokio::spawn(async move {
-                        if let Err(e) = server.handle_connection(incoming, tun_write_tx).await {
+                        if let Err(e) = server
+                            .handle_connection(incoming, tun_write_tx, local_iroh_udp_ports)
+                            .await
+                        {
                             log::error!("Connection error: {}", e);
                         }
                     });
@@ -637,6 +654,7 @@ impl VpnServer {
         &self,
         incoming: iroh::endpoint::Incoming,
         tun_write_tx: mpsc::Sender<Bytes>,
+        local_iroh_udp_ports: Arc<HashSet<u16>>,
     ) -> VpnResult<()> {
         let connection = incoming
             .await
@@ -712,6 +730,7 @@ impl VpnServer {
                 remote_id,
                 connection,
                 tun_write_tx,
+                local_iroh_udp_ports,
                 handshake.device_id,
             )
             .await;
@@ -729,6 +748,7 @@ impl VpnServer {
         remote_id: EndpointId,
         connection: iroh::endpoint::Connection,
         tun_write_tx: mpsc::Sender<Bytes>,
+        local_iroh_udp_ports: Arc<HashSet<u16>>,
         device_id: u64,
     ) -> VpnResult<()> {
         // Allocate IPv4 for client (if server has IPv4 configured)
@@ -954,6 +974,7 @@ impl VpnServer {
             data_recv,
             ctx,
             tun_write_tx,
+            local_iroh_udp_ports,
             writer_error_rx,
             self.stats.clone(),
         )
@@ -1034,6 +1055,7 @@ impl VpnServer {
         mut data_recv: iroh::endpoint::RecvStream,
         ctx: ClientContext,
         tun_write_tx: mpsc::Sender<Bytes>,
+        local_iroh_udp_ports: Arc<HashSet<u16>>,
         writer_error_rx: oneshot::Receiver<String>,
         stats: Arc<VpnServerStats>,
     ) -> VpnResult<()> {
@@ -1121,6 +1143,14 @@ impl VpnServer {
                 }
 
                 let packet = &data_buf[..len];
+
+                if packet_has_local_iroh_udp_port(packet, &local_iroh_udp_ports) {
+                    log::debug!(
+                        "Dropped self-encapsulated iroh UDP packet from client {}",
+                        client_id
+                    );
+                    continue;
+                }
 
                 // Validate source IP to prevent inter-client IP spoofing.
                 // We only reject packets if the source IP belongs to another client,
@@ -1265,6 +1295,7 @@ impl VpnServer {
     async fn run_tun_reader(
         &self,
         mut tun_reader: crate::vpn_core::device::TunReader,
+        local_iroh_udp_ports: Arc<HashSet<u16>>,
     ) -> VpnResult<()> {
         log::info!("TUN reader started");
 
@@ -1288,6 +1319,11 @@ impl VpnServer {
             let packet = &buf_slice[..n];
             self.stats.tun_packets_read.fetch_add(1, Ordering::Relaxed);
             let packet_ref: &[u8] = packet;
+
+            if packet_has_local_iroh_udp_port(packet_ref, &local_iroh_udp_ports) {
+                log::debug!("Dropped self-encapsulated iroh UDP packet from server TUN");
+                continue;
+            }
 
             // Extract destination IP from packet (IPv4 or IPv6)
             // DashMap lookups are lock-free - no async await needed
@@ -1512,6 +1548,60 @@ fn read_ipv6_addr(packet: &[u8], offset: usize) -> Ipv6Addr {
         .try_into()
         .expect("IPv6 address read: bounds already verified");
     Ipv6Addr::from(bytes)
+}
+
+/// Collect local UDP ports bound by the iroh endpoint.
+fn collect_local_iroh_udp_ports(endpoint: &Endpoint) -> HashSet<u16> {
+    endpoint.addr().ip_addrs().map(|addr| addr.port()).collect()
+}
+
+/// Return true if packet is UDP and either source/destination port matches a blocked port.
+#[inline]
+fn packet_has_local_iroh_udp_port(packet: &[u8], blocked_ports: &HashSet<u16>) -> bool {
+    if blocked_ports.is_empty() {
+        return false;
+    }
+    let Some((src_port, dst_port)) = extract_udp_ports(packet) else {
+        return false;
+    };
+    blocked_ports.contains(&src_port) || blocked_ports.contains(&dst_port)
+}
+
+/// Extract UDP source/destination ports from an IPv4/IPv6 packet.
+///
+/// For IPv6, only packets with UDP as the first next-header are parsed.
+#[inline]
+fn extract_udp_ports(packet: &[u8]) -> Option<(u16, u16)> {
+    if packet.len() < IPV4_MIN_HEADER {
+        return None;
+    }
+
+    match packet[0] >> 4 {
+        IP_VERSION_4 => {
+            let ihl = usize::from(packet[0] & 0x0f) * 4;
+            if ihl < IPV4_MIN_HEADER || packet.len() < ihl + 8 {
+                return None;
+            }
+            if packet[9] != 17 {
+                return None;
+            }
+            let src = u16::from_be_bytes([packet[ihl], packet[ihl + 1]]);
+            let dst = u16::from_be_bytes([packet[ihl + 2], packet[ihl + 3]]);
+            Some((src, dst))
+        }
+        IP_VERSION_6 => {
+            if packet.len() < IPV6_MIN_HEADER + 8 {
+                return None;
+            }
+            if packet[6] != 17 {
+                return None;
+            }
+            let src = u16::from_be_bytes([packet[40], packet[41]]);
+            let dst = u16::from_be_bytes([packet[42], packet[43]]);
+            Some((src, dst))
+        }
+        _ => None,
+    }
 }
 
 #[cfg(test)]
