@@ -56,7 +56,7 @@ cargo build --release -p vpn-rs
 
 ### Windows: WinTun Required
 
-Running `vpn-rs.exe` requires `wintun.dll` from <https://www.wintun.net/>:
+Running `vpn-rs.exe` requires `wintun.dll` from <https://www.wintun.net/> (official WireGuard project site):
 
 1. Download and extract the WinTun zip
 2. Copy `wintun/bin/amd64/wintun.dll` to either:
