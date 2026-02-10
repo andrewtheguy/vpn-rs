@@ -3873,7 +3873,7 @@ dependencies = [
 
 [[package]]
 name = "vpn-common"
-version = "0.1.78"
+version = "0.0.1"
 dependencies = [
  "anyhow",
  "dirs",
@@ -3884,7 +3884,7 @@ dependencies = [
 
 [[package]]
 name = "vpn-core"
-version = "0.1.78"
+version = "0.0.1"
 dependencies = [
  "anyhow",
  "bytes",
@@ -3909,7 +3909,7 @@ dependencies = [
 
 [[package]]
 name = "vpn-iroh"
-version = "0.1.78"
+version = "0.0.1"
 dependencies = [
  "anyhow",
  "base64",
@@ -3930,7 +3930,7 @@ dependencies = [
 
 [[package]]
 name = "vpn-rs"
-version = "0.1.78"
+version = "0.0.1"
 dependencies = [
  "anyhow",
  "clap",

@@ -8,7 +8,10 @@
 > **Project Goal:** `vpn-rs` is built for development and homelab use. It is not intended for production at scale.
 
 > [!WARNING]
-> **No Backward Compatibility (Pre-1.0):** Before 1.0, compatibility is not guaranteed across minor versions. Regenerate server keys and refresh configs when upgrading.
+> **No Backward Compatibility in 0.0.x:** While `vpn-rs` remains in the `0.0.x` series, there is no backward compatibility between any versions. Regenerate server keys and refresh configs on every upgrade.
+
+> [!CAUTION]
+> **Pre-release Proof of Concept:** `vpn-rs` is still prerelease software and currently in a proof-of-concept stage. Expect rough edges and breaking changes.
 
 > [!NOTE]
 > Running `vpn-rs` requires root/Administrator privileges to create TUN devices and routes.
