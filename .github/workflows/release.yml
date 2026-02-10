@@ -73,25 +73,9 @@ jobs:
           name: release-macos-arm64
           path: target/release/vpn-rs-macos-arm64
 
-  build-windows:
-    needs: setup
-    if: needs.setup.outputs.is_prerelease == 'false'
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: Swatinem/rust-cache@v2
-      - name: Build
-        run: cargo build --release --target x86_64-pc-windows-msvc -p vpn-rs
-      - name: Rename
-        run: move target\x86_64-pc-windows-msvc\release\vpn-rs.exe target\release\vpn-rs-windows-amd64.exe
-      - uses: actions/upload-artifact@v4
-        with:
-          name: release-windows-amd64
-          path: target/release/vpn-rs-windows-amd64.exe
-
   create-release:
-    needs: [setup, build-linux, build-macos, build-windows]
-    if: always() && needs.setup.result == 'success' && needs.build-linux.result == 'success' && needs.build-macos.result == 'success' && (needs.build-windows.result == 'success' || needs.build-windows.result == 'skipped')
+    needs: [setup, build-linux, build-macos]
+    if: always() && needs.setup.result == 'success' && needs.build-linux.result == 'success' && needs.build-macos.result == 'success'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
