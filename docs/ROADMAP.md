@@ -64,23 +64,6 @@ Improve tunnel continuity when clients switch networks (for example, Wi-Fi to ce
 
 Add built-in metrics for latency, throughput, loss, reconnect counts, and tunnel uptime.
 
-### VPN Performance Optimizations
-
-**Status:** Partial
-
-Implemented:
-
-- Release profile tuning (LTO, strip, codegen tuning)
-- Optional `jemalloc` allocator for non-Windows non-musl targets
-- Uninitialized TUN read-buffer optimization
-- Configurable QUIC transport tuning (`cubic`, `bbr`, `newreno`)
-
-Planned:
-
-| Improvement | Impact | Complexity | Notes |
-|------------|--------|------------|-------|
-| Batch TUN I/O (GSO/GRO) | High | High | Requires different Linux TUN integration path |
-
 ### Multi-Path Support
 
 **Status:** Idea

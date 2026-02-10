@@ -6,13 +6,6 @@
 #[cfg(not(any(unix, target_os = "windows")))]
 compile_error!("vpn-rs only supports Unix-like systems (Linux, macOS, BSD) and Windows");
 
-// Use jemalloc for better multi-threaded allocation performance.
-// Enabled by default, can be disabled with --no-default-features.
-// Excluded on musl (static linking issues) and Windows (not supported).
-#[cfg(all(feature = "jemalloc", not(target_env = "musl"), not(target_os = "windows")))]
-#[global_allocator]
-static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
-
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use ipnet::{Ipv4Net, Ipv6Net};
