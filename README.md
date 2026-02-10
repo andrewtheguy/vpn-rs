@@ -51,7 +51,7 @@ Prebuilt Windows binaries are temporarily not published in GitHub releases.
 Build from source:
 
 ```powershell
-cargo build --release -p vpn-rs
+cargo build --release
 ```
 
 ### Windows: WinTun Required
@@ -86,13 +86,13 @@ curl -sSL https://andrewtheguy.github.io/vpn-rs/install.sh | sudo bash -s -- --p
 ### From Source (Windows required for now)
 
 ```bash
-cargo install --path . -p vpn-rs
+cargo install --path .
 ```
 
 Or build a release binary directly:
 
 ```bash
-cargo build --release -p vpn-rs
+cargo build --release
 ```
 
 ## Quick Start
