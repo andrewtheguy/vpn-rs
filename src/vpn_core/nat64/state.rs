@@ -3,8 +3,8 @@
 //! This module provides a state table for tracking NAT64 connections, including
 //! port allocation for NAPT (Network Address Port Translation).
 
-use crate::config::Nat64Config;
-use crate::error::{VpnError, VpnResult};
+use crate::vpn_core::config::Nat64Config;
+use crate::vpn_core::error::{VpnError, VpnResult};
 use dashmap::DashMap;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::sync::atomic::{AtomicU16, Ordering};
@@ -411,8 +411,8 @@ impl Nat64StateTable {
 
 #[cfg(test)]
 mod tests {
-    use crate::nat64::clock::MockClock;
     use super::*;
+    use crate::vpn_core::nat64::clock::MockClock;
 
     fn test_config() -> Nat64Config {
         Nat64Config {
@@ -538,9 +538,18 @@ mod tests {
         assert_eq!(Nat64Protocol::Udp.protocol_number(), 17);
         assert_eq!(Nat64Protocol::Icmp.protocol_number(), 1);
 
-        assert_eq!(Nat64Protocol::from_ipv4_protocol(6), Some(Nat64Protocol::Tcp));
-        assert_eq!(Nat64Protocol::from_ipv4_protocol(17), Some(Nat64Protocol::Udp));
-        assert_eq!(Nat64Protocol::from_ipv4_protocol(1), Some(Nat64Protocol::Icmp));
+        assert_eq!(
+            Nat64Protocol::from_ipv4_protocol(6),
+            Some(Nat64Protocol::Tcp)
+        );
+        assert_eq!(
+            Nat64Protocol::from_ipv4_protocol(17),
+            Some(Nat64Protocol::Udp)
+        );
+        assert_eq!(
+            Nat64Protocol::from_ipv4_protocol(1),
+            Some(Nat64Protocol::Icmp)
+        );
         assert_eq!(Nat64Protocol::from_ipv4_protocol(99), None);
 
         assert_eq!(
@@ -733,10 +742,7 @@ mod tests {
                         );
                         match result {
                             Ok(port) => ports.push(port),
-                            Err(e) => panic!(
-                                "thread {} mapping {} failed: {:?}",
-                                thread_id, i, e
-                            ),
+                            Err(e) => panic!("thread {} mapping {} failed: {:?}", thread_id, i, e),
                         }
                     }
                     ports

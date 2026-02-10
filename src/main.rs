@@ -6,6 +6,10 @@
 #[cfg(not(any(unix, target_os = "windows")))]
 compile_error!("vpn-rs only supports Unix-like systems (Linux, macOS, BSD) and Windows");
 
+mod vpn_common;
+mod vpn_core;
+mod vpn_iroh;
+
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use ipnet::{Ipv4Net, Ipv6Net};
@@ -13,20 +17,20 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 use std::num::NonZeroU32;
 use std::path::PathBuf;
 
-use vpn_common::config::{
+use crate::vpn_common::config::{
     expand_tilde, load_vpn_client_config, load_vpn_server_config, ResolvedVpnClientConfig,
     ResolvedVpnServerConfig, VpnClientConfig as TomlClientConfig, VpnClientConfigBuilder,
     VpnServerConfig as TomlServerConfig,
 };
-use vpn_iroh::auth;
-use vpn_iroh::iroh_mode::endpoint::{
+use crate::vpn_iroh::auth;
+use crate::vpn_iroh::iroh_mode::endpoint::{
     create_client_endpoint, create_server_endpoint, load_secret,
 };
-use vpn_iroh::secret;
+use crate::vpn_iroh::secret;
 // Runtime config types from vpn-core (different from TOML config types)
-use vpn_core::config::{VpnClientConfig, VpnServerConfig};
-use vpn_core::signaling::VPN_ALPN;
-use vpn_core::{VpnClient, VpnServer};
+use crate::vpn_core::config::{VpnClientConfig, VpnServerConfig};
+use crate::vpn_core::signaling::VPN_ALPN;
+use crate::vpn_core::{VpnClient, VpnServer};
 
 #[derive(Parser)]
 #[command(name = "vpn-rs")]
@@ -200,13 +204,14 @@ async fn main() -> Result<()> {
 
             // Load and validate config file
             let (cfg, _from_file) = resolve_server_config(config, default_config)?;
-            let cfg = cfg.expect("resolve_server_config returns Some when config or default_config is set");
+            let cfg = cfg
+                .expect("resolve_server_config returns Some when config or default_config is set");
             cfg.validate()?;
 
             // Build resolved config from config file
-            let iroh_cfg = cfg.iroh().ok_or_else(|| {
-                anyhow::anyhow!("Missing [iroh] section in config file")
-            })?;
+            let iroh_cfg = cfg
+                .iroh()
+                .ok_or_else(|| anyhow::anyhow!("Missing [iroh] section in config file"))?;
             let resolved = ResolvedVpnServerConfig::from_config(iroh_cfg)?;
 
             run_vpn_server(resolved).await
@@ -341,7 +346,7 @@ async fn run_vpn_server(resolved: ResolvedVpnServerConfig) -> Result<()> {
     };
 
     // Convert NAT64 config from vpn_common to vpn_core types
-    let nat64: Option<vpn_core::config::Nat64Config> = resolved.nat64.map(Into::into);
+    let nat64: Option<crate::vpn_core::config::Nat64Config> = resolved.nat64.map(Into::into);
 
     // Create VPN server config
     let config = VpnServerConfig {
@@ -466,7 +471,11 @@ async fn run_vpn_client(resolved: ResolvedVpnClientConfig) -> Result<()> {
     // Connect with or without auto-reconnect
     if resolved.auto_reconnect {
         client
-            .run_with_reconnect(&endpoint, &resolved.relay_urls, resolved.max_reconnect_attempts)
+            .run_with_reconnect(
+                &endpoint,
+                &resolved.relay_urls,
+                resolved.max_reconnect_attempts,
+            )
             .await
             .map_err(|e| anyhow::anyhow!("VPN connection error: {}", e))
     } else {

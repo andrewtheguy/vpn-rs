@@ -254,17 +254,26 @@ mod tests {
         // 16-bit words: 0x4500 + 0x0073 + 0x0000 + 0x4000 + 0x4011 = 0xC584
         let data = [0x45, 0x00, 0x00, 0x73, 0x00, 0x00, 0x40, 0x00, 0x40, 0x11];
         let sum = ones_complement_sum(&data);
-        assert_eq!(sum, 0xC584, "ones_complement_sum should return 0xC584 for test data");
+        assert_eq!(
+            sum, 0xC584,
+            "ones_complement_sum should return 0xC584 for test data"
+        );
 
         // Test with odd-length data (last byte padded with 0x00)
         // 16-bit words: 0x0102 + 0x0300 = 0x0402
         let odd_data = [0x01, 0x02, 0x03];
         let odd_sum = ones_complement_sum(&odd_data);
-        assert_eq!(odd_sum, 0x0402, "ones_complement_sum should handle odd-length data");
+        assert_eq!(
+            odd_sum, 0x0402,
+            "ones_complement_sum should handle odd-length data"
+        );
 
         // Test empty data
         let empty_sum = ones_complement_sum(&[]);
-        assert_eq!(empty_sum, 0, "ones_complement_sum of empty data should be 0");
+        assert_eq!(
+            empty_sum, 0,
+            "ones_complement_sum of empty data should be 0"
+        );
     }
 
     #[test]
@@ -285,7 +294,8 @@ mod tests {
     fn test_ipv4_header_checksum() {
         // Example IPv4 header (checksum field at bytes 10-11 set to 0)
         let header = [
-            0x45, 0x00, 0x00, 0x73, 0x00, 0x00, 0x40, 0x00, 0x40, 0x11, 0x00, 0x00, // checksum = 0
+            0x45, 0x00, 0x00, 0x73, 0x00, 0x00, 0x40, 0x00, 0x40, 0x11, 0x00,
+            0x00, // checksum = 0
             0xc0, 0xa8, 0x00, 0x01, // src: 192.168.0.1
             0xc0, 0xa8, 0x00, 0xc7, // dst: 192.168.0.199
         ];
@@ -378,23 +388,23 @@ mod tests {
 
         for original in test_checksums {
             // Apply 6to4 translation (IPv6 -> IPv4)
-            let after_6to4 = adjust_checksum_6to4(
-                original, src6, dst6, src4, dst4, protocol, payload_len,
-            );
+            let after_6to4 =
+                adjust_checksum_6to4(original, src6, dst6, src4, dst4, protocol, payload_len);
 
             // Apply 4to6 translation (IPv4 -> IPv6) - reverse direction
             // Note: In the reverse direction, src4 becomes the source, dst4 is where we came from
             // and we're going back to src6/dst6
-            let after_4to6 = adjust_checksum_4to6(
-                after_6to4, src4, dst4, src6, dst6, protocol, payload_len,
-            )
-            .expect("TCP checksum adjustment should always succeed");
+            let after_4to6 =
+                adjust_checksum_4to6(after_6to4, src4, dst4, src6, dst6, protocol, payload_len)
+                    .expect("TCP checksum adjustment should always succeed");
 
             assert!(
                 ones_complement_eq(after_4to6, original),
                 "Round-trip 6to4->4to6 failed for original checksum 0x{:04X}: \
                  6to4 gave 0x{:04X}, 4to6 gave 0x{:04X}",
-                original, after_6to4, after_4to6
+                original,
+                after_6to4,
+                after_4to6
             );
         }
     }
@@ -415,9 +425,8 @@ mod tests {
 
         for original in test_checksums {
             // Apply 4to6 translation (IPv4 -> IPv6)
-            let after_4to6 = adjust_checksum_4to6(
-                original, src4, dst4, src6, dst6, protocol, payload_len,
-            );
+            let after_4to6 =
+                adjust_checksum_4to6(original, src4, dst4, src6, dst6, protocol, payload_len);
 
             if original == 0 {
                 assert!(
@@ -430,15 +439,16 @@ mod tests {
             let after_4to6 = after_4to6.expect("UDP non-zero checksum should adjust");
 
             // Apply 6to4 translation (IPv6 -> IPv4) - reverse direction
-            let after_6to4 = adjust_checksum_6to4(
-                after_4to6, src6, dst6, src4, dst4, protocol, payload_len,
-            );
+            let after_6to4 =
+                adjust_checksum_6to4(after_4to6, src6, dst6, src4, dst4, protocol, payload_len);
 
             assert!(
                 ones_complement_eq(after_6to4, original),
                 "Round-trip 4to6->6to4 failed for original checksum 0x{:04X}: \
                  4to6 gave 0x{:04X}, 6to4 gave 0x{:04X}",
-                original, after_4to6, after_6to4
+                original,
+                after_4to6,
+                after_6to4
             );
         }
     }
@@ -463,13 +473,11 @@ mod tests {
         let original: u16 = 0x9ABC;
 
         for (protocol, payload_len) in test_cases {
-            let after_6to4 = adjust_checksum_6to4(
-                original, src6, dst6, src4, dst4, protocol, payload_len,
-            );
-            let after_4to6 = adjust_checksum_4to6(
-                after_6to4, src4, dst4, src6, dst6, protocol, payload_len,
-            )
-            .expect("checksum adjustment should succeed for non-zero UDP/TCP checksums");
+            let after_6to4 =
+                adjust_checksum_6to4(original, src6, dst6, src4, dst4, protocol, payload_len);
+            let after_4to6 =
+                adjust_checksum_4to6(after_6to4, src4, dst4, src6, dst6, protocol, payload_len)
+                    .expect("checksum adjustment should succeed for non-zero UDP/TCP checksums");
 
             assert_eq!(
                 after_4to6, original,
@@ -514,7 +522,10 @@ mod tests {
         let payload_len: u16 = 100;
 
         let result = adjust_checksum_4to6(0x0000, src4, dst4, src6, dst6, protocol, payload_len);
-        assert!(result.is_none(), "UDP zero checksum must be recomputed for IPv6");
+        assert!(
+            result.is_none(),
+            "UDP zero checksum must be recomputed for IPv6"
+        );
     }
 
     #[test]
@@ -527,9 +538,8 @@ mod tests {
         let payload_len: u16 = 128;
 
         for original in (0u16..=u16::MAX).step_by(257) {
-            let adjusted = adjust_checksum_4to6(
-                original, src4, dst4, src6, dst6, protocol, payload_len,
-            );
+            let adjusted =
+                adjust_checksum_4to6(original, src4, dst4, src6, dst6, protocol, payload_len);
 
             if let Some(checksum) = adjusted {
                 assert_ne!(
@@ -553,15 +563,21 @@ mod tests {
         let payload_len: u16 = 100;
 
         // UDP with zero checksum should return zero (preserves "no checksum" semantics)
-        let result = adjust_checksum_6to4(0x0000, src6, dst6, src4, dst4, udp_protocol, payload_len);
+        let result =
+            adjust_checksum_6to4(0x0000, src6, dst6, src4, dst4, udp_protocol, payload_len);
         assert_eq!(result, 0x0000, "UDP zero checksum should be preserved");
 
         // TCP with zero checksum should NOT return zero (TCP checksum is always required)
-        let result = adjust_checksum_6to4(0x0000, src6, dst6, src4, dst4, tcp_protocol, payload_len);
-        assert_ne!(result, 0x0000, "TCP zero checksum should be adjusted, not preserved");
+        let result =
+            adjust_checksum_6to4(0x0000, src6, dst6, src4, dst4, tcp_protocol, payload_len);
+        assert_ne!(
+            result, 0x0000,
+            "TCP zero checksum should be adjusted, not preserved"
+        );
 
         // UDP with non-zero checksum should be adjusted normally
-        let result = adjust_checksum_6to4(0x1234, src6, dst6, src4, dst4, udp_protocol, payload_len);
+        let result =
+            adjust_checksum_6to4(0x1234, src6, dst6, src4, dst4, udp_protocol, payload_len);
         assert_ne!(result, 0x1234, "UDP non-zero checksum should be adjusted");
     }
 }

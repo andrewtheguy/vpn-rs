@@ -8,8 +8,8 @@ use super::checksum::{
 };
 use super::state::{Nat64Protocol, Nat64StateTable};
 use super::{embed_ipv4_in_nat64, extract_ipv4_from_nat64, is_nat64_address};
-use crate::config::Nat64Config;
-use crate::error::{VpnError, VpnResult};
+use crate::vpn_core::config::Nat64Config;
+use crate::vpn_core::error::{VpnError, VpnResult};
 use std::net::{Ipv4Addr, Ipv6Addr};
 
 /// Result of an IPv4-to-IPv6 NAT64 translation attempt.
@@ -132,10 +132,7 @@ impl Nat64Translator {
 
         // Extract embedded IPv4 destination from NAT64 address
         let dst_ip4 = extract_ipv4_from_nat64(&dst_ip6).ok_or_else(|| {
-            VpnError::Nat64(format!(
-                "Destination {} is not a NAT64 address",
-                dst_ip6
-            ))
+            VpnError::Nat64(format!("Destination {} is not a NAT64 address", dst_ip6))
         })?;
 
         // Get protocol (extension headers are not parsed here).
@@ -184,7 +181,9 @@ impl Nat64Translator {
         // Drop packet if TTL would be 0 (RFC 6146: must not forward with TTL=0)
         // In a full implementation, we would send ICMPv6 Time Exceeded back to source.
         if ttl == 0 {
-            return Err(VpnError::Nat64("Hop limit expired (would be 0 after decrement)".into()));
+            return Err(VpnError::Nat64(
+                "Hop limit expired (would be 0 after decrement)".into(),
+            ));
         }
 
         match protocol {
@@ -268,12 +267,18 @@ impl Nat64Translator {
         // Drop packet if hop limit would be 0 (RFC 6146: must not forward with hop_limit=0)
         // In a full implementation, we would send ICMP Time Exceeded back to source.
         if hop_limit == 0 {
-            return Err(VpnError::Nat64("TTL expired (would be 0 after decrement)".into()));
+            return Err(VpnError::Nat64(
+                "TTL expired (would be 0 after decrement)".into(),
+            ));
         }
 
         match nat64_protocol {
-            Nat64Protocol::Tcp => self.translate_tcp_4to6(src_ip4, payload, payload_length, hop_limit),
-            Nat64Protocol::Udp => self.translate_udp_4to6(src_ip4, payload, payload_length, hop_limit),
+            Nat64Protocol::Tcp => {
+                self.translate_tcp_4to6(src_ip4, payload, payload_length, hop_limit)
+            }
+            Nat64Protocol::Udp => {
+                self.translate_udp_4to6(src_ip4, payload, payload_length, hop_limit)
+            }
             Nat64Protocol::Icmp => self.translate_icmp_4to6(src_ip4, payload, hop_limit),
         }
     }
@@ -296,9 +301,13 @@ impl Nat64Translator {
         let old_checksum = u16::from_be_bytes([tcp_payload[16], tcp_payload[17]]);
 
         // Get or create NAT mapping
-        let translated_port =
-            self.state
-                .get_or_create_mapping(src_ip6, src_port, dst_ip4, dst_port, Nat64Protocol::Tcp)?;
+        let translated_port = self.state.get_or_create_mapping(
+            src_ip6,
+            src_port,
+            dst_ip4,
+            dst_port,
+            Nat64Protocol::Tcp,
+        )?;
 
         // Build IPv4 packet
         self.build_ipv4_packet(
@@ -333,9 +342,13 @@ impl Nat64Translator {
         let old_checksum = u16::from_be_bytes([udp_payload[6], udp_payload[7]]);
 
         // Get or create NAT mapping
-        let translated_port =
-            self.state
-                .get_or_create_mapping(src_ip6, src_port, dst_ip4, dst_port, Nat64Protocol::Udp)?;
+        let translated_port = self.state.get_or_create_mapping(
+            src_ip6,
+            src_port,
+            dst_ip4,
+            dst_port,
+            Nat64Protocol::Udp,
+        )?;
 
         // Build IPv4 packet
         self.build_ipv4_packet(
@@ -454,7 +467,8 @@ impl Nat64Translator {
             );
 
             // Also adjust checksum for source port change (old_src_port -> new_src_port)
-            let new_checksum = update_checksum_16(checksum_after_pseudo, old_src_port, new_src_port);
+            let new_checksum =
+                update_checksum_16(checksum_after_pseudo, old_src_port, new_src_port);
 
             // Update checksum in payload
             new_payload[checksum_offset] = (new_checksum >> 8) as u8;
@@ -529,13 +543,14 @@ impl Nat64Translator {
         let old_checksum = u16::from_be_bytes([tcp_payload[16], tcp_payload[17]]);
 
         // Look up the original client - if no mapping, this isn't a NAT64 response
-        let (client_ip6, client_port) = match self
-            .state
-            .lookup_reverse(dst_port, src_ip4, src_port, Nat64Protocol::Tcp)
-        {
-            Some(result) => result,
-            None => return Ok(Nat64TranslateResult::NotNat64Packet),
-        };
+        let (client_ip6, client_port) =
+            match self
+                .state
+                .lookup_reverse(dst_port, src_ip4, src_port, Nat64Protocol::Tcp)
+            {
+                Some(result) => result,
+                None => return Ok(Nat64TranslateResult::NotNat64Packet),
+            };
 
         // Build IPv6 packet
         let src_ip6 = embed_ipv4_in_nat64(src_ip4);
@@ -556,9 +571,7 @@ impl Nat64Translator {
             6, // TCP
             payload_len,
         )
-        .ok_or_else(|| {
-            VpnError::Nat64("TCP checksum adjustment failed (zero checksum)".into())
-        })?;
+        .ok_or_else(|| VpnError::Nat64("TCP checksum adjustment failed (zero checksum)".into()))?;
 
         // Also adjust checksum for destination port change (dst_port -> client_port)
         let new_checksum = update_checksum_16(checksum_after_pseudo, dst_port, client_port);
@@ -567,10 +580,7 @@ impl Nat64Translator {
         new_payload[17] = new_checksum as u8;
 
         let packet = self.build_ipv6_packet(src_ip6, dst_ip6, 6, &new_payload, hop_limit)?;
-        Ok(Nat64TranslateResult::Translated {
-            client_ip6,
-            packet,
-        })
+        Ok(Nat64TranslateResult::Translated { client_ip6, packet })
     }
 
     /// Translate UDP from IPv4 to IPv6.
@@ -592,13 +602,14 @@ impl Nat64Translator {
         let old_checksum = u16::from_be_bytes([udp_payload[6], udp_payload[7]]);
 
         // Look up the original client - if no mapping, this isn't a NAT64 response
-        let (client_ip6, client_port) = match self
-            .state
-            .lookup_reverse(dst_port, src_ip4, src_port, Nat64Protocol::Udp)
-        {
-            Some(result) => result,
-            None => return Ok(Nat64TranslateResult::NotNat64Packet),
-        };
+        let (client_ip6, client_port) =
+            match self
+                .state
+                .lookup_reverse(dst_port, src_ip4, src_port, Nat64Protocol::Udp)
+            {
+                Some(result) => result,
+                None => return Ok(Nat64TranslateResult::NotNat64Packet),
+            };
 
         // Build IPv6 packet
         let src_ip6 = embed_ipv4_in_nat64(src_ip4);
@@ -638,10 +649,7 @@ impl Nat64Translator {
         new_payload[7] = new_checksum as u8;
 
         let packet = self.build_ipv6_packet(src_ip6, dst_ip6, 17, &new_payload, hop_limit)?;
-        Ok(Nat64TranslateResult::Translated {
-            client_ip6,
-            packet,
-        })
+        Ok(Nat64TranslateResult::Translated { client_ip6, packet })
     }
 
     /// Translate ICMPv4 to ICMPv6.
@@ -674,13 +682,14 @@ impl Nat64Translator {
         let translated_id = u16::from_be_bytes([icmp_payload[4], icmp_payload[5]]);
 
         // Look up the original client - if no mapping, this isn't a NAT64 response
-        let (client_ip6, original_id) = match self
-            .state
-            .lookup_reverse(translated_id, src_ip4, 0, Nat64Protocol::Icmp)
-        {
-            Some(result) => result,
-            None => return Ok(Nat64TranslateResult::NotNat64Packet),
-        };
+        let (client_ip6, original_id) =
+            match self
+                .state
+                .lookup_reverse(translated_id, src_ip4, 0, Nat64Protocol::Icmp)
+            {
+                Some(result) => result,
+                None => return Ok(Nat64TranslateResult::NotNat64Packet),
+            };
 
         let src_ip6 = embed_ipv4_in_nat64(src_ip4);
         let dst_ip6 = client_ip6;
@@ -699,10 +708,7 @@ impl Nat64Translator {
         icmpv6[3] = checksum as u8;
 
         let packet = self.build_ipv6_packet(src_ip6, dst_ip6, 58, &icmpv6, hop_limit)?; // ICMPv6 = 58
-        Ok(Nat64TranslateResult::Translated {
-            client_ip6,
-            packet,
-        })
+        Ok(Nat64TranslateResult::Translated { client_ip6, packet })
     }
 
     /// Build an IPv6 packet.
@@ -817,8 +823,8 @@ pub fn create_nat64_translator(
 
 #[cfg(test)]
 mod tests {
-    use crate::nat64::clock::MockClock;
     use super::*;
+    use crate::vpn_core::nat64::clock::MockClock;
 
     fn test_config() -> Nat64Config {
         Nat64Config {
@@ -836,9 +842,7 @@ mod tests {
         assert!(Nat64Translator::is_nat64_dest(
             &"64:ff9b::8.8.8.8".parse().unwrap()
         ));
-        assert!(!Nat64Translator::is_nat64_dest(
-            &"fd00::1".parse().unwrap()
-        ));
+        assert!(!Nat64Translator::is_nat64_dest(&"fd00::1".parse().unwrap()));
     }
 
     #[test]
@@ -1208,9 +1212,9 @@ mod tests {
         // Build an IPv4 UDP response packet
         let response_payload = b"dns response";
         let ipv4_response = build_test_ipv4_udp_packet(
-            dest_ip4,     // Source is original dest
-            server_ip4,   // Dest is server's NAPT address
-            dst_port,     // Source port is original dest port
+            dest_ip4,        // Source is original dest
+            server_ip4,      // Dest is server's NAPT address
+            dst_port,        // Source port is original dest port
             translated_port, // Dest port is the translated NAPT port
             response_payload,
         );
@@ -1250,7 +1254,8 @@ mod tests {
 
         // Verify UDP ports are restored
         let udp6_start = 40;
-        let udp_src = u16::from_be_bytes([ipv6_response[udp6_start], ipv6_response[udp6_start + 1]]);
+        let udp_src =
+            u16::from_be_bytes([ipv6_response[udp6_start], ipv6_response[udp6_start + 1]]);
         let udp_dst =
             u16::from_be_bytes([ipv6_response[udp6_start + 2], ipv6_response[udp6_start + 3]]);
         assert_eq!(udp_src, dst_port); // Source was original dest port
@@ -1283,13 +1288,8 @@ mod tests {
             u16::from_be_bytes([ipv4_outbound[tcp_start], ipv4_outbound[tcp_start + 1]]);
 
         // Step 2: Simulate SYN-ACK response
-        let ipv4_response = build_test_ipv4_tcp_packet(
-            dest_ip4,
-            server_ip4,
-            dst_port,
-            translated_port,
-            b"",
-        );
+        let ipv4_response =
+            build_test_ipv4_tcp_packet(dest_ip4, server_ip4, dst_port, translated_port, b"");
 
         // Step 3: Translate response back
         let result = translator.translate_4to6(&ipv4_response).unwrap();
@@ -1331,13 +1331,8 @@ mod tests {
             u16::from_be_bytes([ipv4_outbound[icmp_start + 4], ipv4_outbound[icmp_start + 5]]);
 
         // Step 2: Simulate ICMPv4 echo reply
-        let ipv4_response = build_test_ipv4_icmp_echo_reply(
-            dest_ip4,
-            server_ip4,
-            translated_id,
-            sequence,
-            payload,
-        );
+        let ipv4_response =
+            build_test_ipv4_icmp_echo_reply(dest_ip4, server_ip4, translated_id, sequence, payload);
 
         // Step 3: Translate response back
         let result = translator.translate_4to6(&ipv4_response).unwrap();
@@ -1353,13 +1348,17 @@ mod tests {
         assert_eq!(ipv6_response[icmp6_start], ICMPV6_ECHO_REPLY);
 
         // Verify identifier restored
-        let response_id =
-            u16::from_be_bytes([ipv6_response[icmp6_start + 4], ipv6_response[icmp6_start + 5]]);
+        let response_id = u16::from_be_bytes([
+            ipv6_response[icmp6_start + 4],
+            ipv6_response[icmp6_start + 5],
+        ]);
         assert_eq!(response_id, identifier);
 
         // Verify sequence preserved
-        let response_seq =
-            u16::from_be_bytes([ipv6_response[icmp6_start + 6], ipv6_response[icmp6_start + 7]]);
+        let response_seq = u16::from_be_bytes([
+            ipv6_response[icmp6_start + 6],
+            ipv6_response[icmp6_start + 7],
+        ]);
         assert_eq!(response_seq, sequence);
 
         // Verify payload
@@ -1676,7 +1675,8 @@ mod tests {
         let dest_port = 53u16;
 
         // Create a UDP mapping
-        let packet = build_test_ipv6_udp_packet(client_ip6, dest_ip6, client_port, dest_port, b"q1");
+        let packet =
+            build_test_ipv6_udp_packet(client_ip6, dest_ip6, client_port, dest_port, b"q1");
         let ipv4_packet = translator.translate_6to4(&packet).unwrap();
         let translated_port = u16::from_be_bytes([ipv4_packet[20], ipv4_packet[21]]);
         assert_eq!(translator.active_mappings(), 1);
@@ -1703,7 +1703,10 @@ mod tests {
 
         // Cleanup should NOT remove the mapping because it was refreshed
         let removed = translator.cleanup();
-        assert_eq!(removed, 0, "Mapping should not expire due to activity refresh");
+        assert_eq!(
+            removed, 0,
+            "Mapping should not expire due to activity refresh"
+        );
         assert_eq!(translator.active_mappings(), 1);
 
         // Advance past the timeout from last activity (11 more seconds = 61s from refresh)
@@ -1836,16 +1839,15 @@ mod tests {
 
         // Build IPv6 UDP packet with zero checksum
         let ipv6_packet = build_test_ipv6_udp_packet_zero_checksum(
-            client_ip6,
-            dest_ip6,
-            src_port,
-            dst_port,
-            payload,
+            client_ip6, dest_ip6, src_port, dst_port, payload,
         );
 
         // Verify the IPv6 packet has zero checksum
         let ipv6_udp_checksum = u16::from_be_bytes([ipv6_packet[46], ipv6_packet[47]]);
-        assert_eq!(ipv6_udp_checksum, 0, "Input packet should have zero checksum");
+        assert_eq!(
+            ipv6_udp_checksum, 0,
+            "Input packet should have zero checksum"
+        );
 
         // Translate to IPv4
         let ipv4_packet = translator.translate_6to4(&ipv6_packet).unwrap();

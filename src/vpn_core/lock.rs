@@ -10,7 +10,7 @@
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 compile_error!("VPN lock is only supported on Linux, macOS, and Windows");
 
-use crate::error::{VpnError, VpnResult};
+use crate::vpn_core::error::{VpnError, VpnResult};
 use fs2::FileExt;
 use std::fs::{File, OpenOptions};
 use std::io::{Seek, SeekFrom, Write};
@@ -51,9 +51,7 @@ impl VpnLock {
 
         // Try to acquire exclusive lock (non-blocking)
         file.try_lock_exclusive().map_err(|_| {
-            VpnError::config(
-                "Another VPN client is already running. Only one instance allowed.",
-            )
+            VpnError::config("Another VPN client is already running. Only one instance allowed.")
         })?;
 
         // Now that we hold the lock, truncate and write our PID

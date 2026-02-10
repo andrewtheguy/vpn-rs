@@ -128,8 +128,8 @@ impl Nat64Config {
     }
 }
 
-impl From<vpn_common::config::Nat64Config> for Nat64Config {
-    fn from(cfg: vpn_common::config::Nat64Config) -> Self {
+impl From<crate::vpn_common::config::Nat64Config> for Nat64Config {
+    fn from(cfg: crate::vpn_common::config::Nat64Config) -> Self {
         Self {
             enabled: cfg.enabled,
             source_ip: cfg.source_ip,
@@ -568,7 +568,9 @@ mod tests {
         config.server_ip = Some("10.0.0.1".parse().unwrap());
         let result = config.validate();
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("'server_ip' requires 'network'"));
+        assert!(result
+            .unwrap_err()
+            .contains("'server_ip' requires 'network'"));
     }
 
     #[test]
@@ -691,9 +693,7 @@ mod tests {
         config.routes.push("0.0.0.0/0".parse().unwrap());
         let result = config.validate();
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .contains("'server_node_id' is required"));
+        assert!(result.unwrap_err().contains("'server_node_id' is required"));
     }
 
     #[test]
