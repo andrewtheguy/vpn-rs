@@ -201,7 +201,8 @@ impl VpnClient {
         let will_add_routes = (server_info.assigned_ip.is_some() && !self.config.routes.is_empty())
             || (server_info.assigned_ip6.is_some() && !self.config.routes6.is_empty());
         let bypass_route_task: Option<JoinHandle<()>> = if will_add_routes {
-            self.add_iroh_bypass_routes(endpoint, &connection).await
+            self.add_iroh_bypass_routes(endpoint, &connection, tun_device.name())
+                .await
         } else {
             None
         };
@@ -399,19 +400,27 @@ impl VpnClient {
         &self,
         endpoint: &Endpoint,
         connection: &iroh::endpoint::Connection,
+        vpn_tun_name: &str,
     ) -> Option<JoinHandle<()>> {
         // Get the paths watcher
         let paths_watcher = connection.paths();
 
         // Clone endpoint for the spawned task
         let endpoint_clone = endpoint.clone();
+        let vpn_tun_name = vpn_tun_name.to_string();
 
         // Create oneshot channel to signal when initial setup is complete
         let (setup_done_tx, setup_done_rx) = tokio::sync::oneshot::channel();
 
         // Spawn a task that manages bypass routes dynamically
         let handle = tokio::spawn(async move {
-            run_bypass_route_manager(endpoint_clone, paths_watcher, Some(setup_done_tx)).await;
+            run_bypass_route_manager(
+                endpoint_clone,
+                paths_watcher,
+                Some(setup_done_tx),
+                vpn_tun_name,
+            )
+            .await;
         });
 
         // Wait for initial bypass route setup to complete before returning.
@@ -821,54 +830,70 @@ struct BypassRouteManager {
     /// Currently active bypass route guards, keyed by IP address.
     /// Dropping a guard removes the corresponding route.
     active_routes: HashMap<IpAddr, BypassRouteGuard>,
+    /// Name of the VPN TUN interface; bypass routes must never resolve through it.
+    vpn_tun_name: String,
 }
 
 impl BypassRouteManager {
-    fn new() -> Self {
+    fn new(vpn_tun_name: String) -> Self {
         Self {
             active_routes: HashMap::new(),
+            vpn_tun_name,
         }
     }
 
     /// Update bypass routes based on a new set of required IP addresses.
     ///
-    /// - Removes routes for addresses no longer needed (by dropping guards)
-    /// - Adds routes for new addresses
+    /// - Adds routes for new addresses first
+    /// - Removes routes for addresses no longer needed only after successful adds
+    ///
+    /// If any new route cannot be added, no removals are performed so existing
+    /// underlay reachability is preserved.
     async fn update(&mut self, required_ips: HashSet<IpAddr>) {
-        // Remove routes for addresses no longer in the required set
-        let to_remove: Vec<_> = self
+        // Stage additions first so we don't tear down working routes on partial failures.
+        let to_add: Vec<IpAddr> = required_ips
+            .iter()
+            .filter(|ip| !self.active_routes.contains_key(ip))
+            .copied()
+            .collect();
+
+        let mut staged_guards = Vec::with_capacity(to_add.len());
+
+        for ip in to_add {
+            let socket_addr = SocketAddr::new(ip, 443); // bypass routes are per-IP
+            match add_bypass_route(socket_addr, Some(&self.vpn_tun_name)).await {
+                Ok(guard) => {
+                    log::info!("Added bypass route for iroh address {}", ip);
+                    staged_guards.push((ip, guard));
+                }
+                Err(err) => {
+                    log::warn!(
+                        "Failed to add bypass route for {} (keeping existing routes): {}",
+                        ip,
+                        err
+                    );
+                    return;
+                }
+            }
+        }
+
+        // Commit staged additions now that all new routes succeeded.
+        for (ip, guard) in staged_guards {
+            self.active_routes.insert(ip, guard);
+        }
+
+        // Remove routes for addresses no longer in the required set.
+        let to_remove: Vec<IpAddr> = self
             .active_routes
             .keys()
             .filter(|ip| !required_ips.contains(ip))
-            .cloned()
+            .copied()
             .collect();
 
         for ip in to_remove {
             log::info!("Removing stale bypass route for {}", ip);
             self.active_routes.remove(&ip);
             // Guard is dropped here, which removes the route
-        }
-
-        // Add routes for new IP addresses
-        for ip in required_ips {
-            if self.active_routes.contains_key(&ip) {
-                continue;
-            }
-            // Use a dummy port (443) since bypass routes are per-IP
-            let socket_addr = SocketAddr::new(ip, 443);
-            match add_bypass_route(socket_addr).await {
-                Ok(guard) => {
-                    log::info!("Added bypass route for iroh address {}", ip);
-                    self.active_routes.insert(ip, guard);
-                }
-                Err(err) => {
-                    log::warn!(
-                        "Failed to add bypass route for {} (continuing anyway): {}",
-                        ip,
-                        err
-                    );
-                }
-            }
         }
     }
 }
@@ -884,8 +909,9 @@ async fn run_bypass_route_manager(
     endpoint: Endpoint,
     mut paths_watcher: impl Watcher<Value = PathInfoList> + Send + Unpin + 'static,
     initial_setup_done: Option<tokio::sync::oneshot::Sender<()>>,
+    vpn_tun_name: String,
 ) {
-    let mut manager = BypassRouteManager::new();
+    let mut manager = BypassRouteManager::new(vpn_tun_name);
 
     // Process initial connection paths (always apply, even if DNS partially fails)
     let initial_paths = paths_watcher.get();
@@ -973,10 +999,13 @@ async fn collect_addresses_from_paths(
                     }
                 }
             }
-            _ => {
-                log::debug!("iroh path{} unknown {:?}", selected, remote);
-            }
+            _ => log::debug!("iroh path{} unknown {:?}", selected, remote),
         }
+    }
+
+    if ips.is_empty() {
+        log::warn!("No usable iroh transport addresses found; preserving existing bypass routes");
+        preserve_routes = true;
     }
 
     CollectAddressesResult {
