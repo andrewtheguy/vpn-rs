@@ -36,9 +36,5 @@ pub mod server;
 pub mod signaling;
 
 // Re-exports for convenience
-pub use client::{VpnClient, VpnClientBuilder};
-pub use config::VpnConfig;
-pub use error::{VpnError, VpnResult};
-pub use lock::VpnLock;
-pub use server::{VpnServer, VpnServerStats, VpnServerStatsSnapshot};
-pub use signaling::{VpnHandshake, VpnHandshakeResponse};
+pub use client::VpnClient;
+pub use server::VpnServer;

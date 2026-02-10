@@ -89,26 +89,6 @@ impl VpnLock {
         }
     }
 
-    /// Check if a VPN client is already running (without acquiring lock).
-    pub fn is_locked() -> bool {
-        let path = Self::lock_path();
-        if !path.exists() {
-            return false;
-        }
-
-        // Try to acquire lock non-blocking to check (use write mode to match acquire())
-        let file = match OpenOptions::new().write(true).open(&path) {
-            Ok(f) => f,
-            Err(_) => return false,
-        };
-
-        // If we can't get the lock, someone else has it
-        if file.try_lock_exclusive().is_err() {
-            return true;
-        }
-        // We got the lock - it will be released when file is dropped
-        false
-    }
 }
 
 impl Drop for VpnLock {
@@ -130,7 +110,9 @@ mod tests {
     fn test_lock_acquire_release() {
         // Acquire lock
         let lock = VpnLock::acquire().expect("Should acquire lock");
-        assert!(VpnLock::is_locked());
+
+        // A second lock attempt should fail while first lock is held.
+        assert!(VpnLock::acquire().is_err());
 
         // Drop releases lock
         drop(lock);

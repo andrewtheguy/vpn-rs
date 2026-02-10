@@ -223,19 +223,6 @@ impl VpnClientConfig {
     }
 }
 
-/// Combined VPN configuration (for config file).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "role")]
-pub enum VpnConfig {
-    /// Server configuration.
-    #[serde(rename = "server")]
-    Server(VpnServerConfig),
-
-    /// Client configuration.
-    #[serde(rename = "client")]
-    Client(VpnClientConfig),
-}
-
 // Default value functions for serde
 fn default_mtu() -> u16 {
     DEFAULT_MTU

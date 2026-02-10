@@ -94,6 +94,8 @@ impl VpnClient {
     /// The device_id allows the server to distinguish multiple sessions from
     /// the same iroh endpoint.
     pub fn new(config: VpnClientConfig) -> VpnResult<Self> {
+        config.validate().map_err(VpnError::config)?;
+
         // Acquire single-instance lock
         let lock = VpnLock::acquire()?;
 
@@ -1026,40 +1028,6 @@ async fn resolve_relay_url(
             log::warn!("Failed to resolve relay URL {}: {}", relay_url, e);
             Err(()) // Signal DNS failure
         }
-    }
-}
-
-/// Builder for VpnClient.
-pub struct VpnClientBuilder {
-    config: VpnClientConfig,
-}
-
-impl VpnClientBuilder {
-    /// Create a new builder.
-    pub fn new(server_node_id: impl Into<String>) -> Self {
-        Self {
-            config: VpnClientConfig {
-                server_node_id: server_node_id.into(),
-                ..Default::default()
-            },
-        }
-    }
-
-    /// Set the authentication token.
-    pub fn auth_token(mut self, token: impl Into<String>) -> Self {
-        self.config.auth_token = Some(token.into());
-        self
-    }
-
-    /// Set the MTU.
-    pub fn mtu(mut self, mtu: u16) -> Self {
-        self.config.mtu = mtu;
-        self
-    }
-
-    /// Build the client.
-    pub fn build(self) -> VpnResult<VpnClient> {
-        VpnClient::new(self.config)
     }
 }
 

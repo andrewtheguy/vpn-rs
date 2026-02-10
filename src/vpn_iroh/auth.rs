@@ -289,15 +289,6 @@ pub fn load_auth_token_from_file(path: &Path) -> Result<String> {
     anyhow::bail!("No valid token found in file: {}", path.display())
 }
 
-/// Check if a token is in the valid tokens set.
-///
-/// Returns true if the token is valid, false otherwise.
-/// An empty valid_tokens set means no tokens are authorized.
-#[inline]
-pub fn is_token_valid(token: &str, valid_tokens: &HashSet<String>) -> bool {
-    valid_tokens.contains(token)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -516,32 +507,6 @@ mod tests {
 
         let result = load_auth_token_from_file(file.path());
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_is_token_valid_empty_set_rejects_all() {
-        let token = generate_token();
-        let valid_tokens = HashSet::new();
-        assert!(!is_token_valid(&token, &valid_tokens));
-    }
-
-    #[test]
-    fn test_is_token_valid_in_set() {
-        let token = generate_token();
-        let mut valid_tokens = HashSet::new();
-        valid_tokens.insert(token.clone());
-
-        assert!(is_token_valid(&token, &valid_tokens));
-    }
-
-    #[test]
-    fn test_is_token_valid_not_in_set() {
-        let token_a = generate_token();
-        let token_b = generate_token();
-        let mut valid_tokens = HashSet::new();
-        valid_tokens.insert(token_a.clone());
-
-        assert!(!is_token_valid(&token_b, &valid_tokens));
     }
 
     #[test]

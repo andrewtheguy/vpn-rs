@@ -29,7 +29,7 @@ const MAX_IP_PACKET_SIZE: usize = 65536;
 /// Performance statistics for the VPN server.
 ///
 /// These atomic counters replace per-packet trace logging to eliminate
-/// logging overhead in hot paths. Access via `VpnServer::stats()`.
+/// logging overhead in hot paths.
 #[derive(Debug, Default)]
 pub struct VpnServerStats {
     /// Total packets read from TUN device.
@@ -57,35 +57,6 @@ impl VpnServerStats {
     pub fn new() -> Self {
         Self::default()
     }
-
-    /// Get a snapshot of current statistics.
-    pub fn snapshot(&self) -> VpnServerStatsSnapshot {
-        VpnServerStatsSnapshot {
-            tun_packets_read: self.tun_packets_read.load(Ordering::Relaxed),
-            packets_to_clients: self.packets_to_clients.load(Ordering::Relaxed),
-            packets_no_route: self.packets_no_route.load(Ordering::Relaxed),
-            packets_unknown_version: self.packets_unknown_version.load(Ordering::Relaxed),
-            packets_dropped_full: self.packets_dropped_full.load(Ordering::Relaxed),
-            packets_backpressure: self.packets_backpressure.load(Ordering::Relaxed),
-            packets_from_clients: self.packets_from_clients.load(Ordering::Relaxed),
-            packets_tun_write_failed: self.packets_tun_write_failed.load(Ordering::Relaxed),
-            packets_spoofed: self.packets_spoofed.load(Ordering::Relaxed),
-        }
-    }
-}
-
-/// Point-in-time snapshot of server statistics.
-#[derive(Debug, Clone)]
-pub struct VpnServerStatsSnapshot {
-    pub tun_packets_read: u64,
-    pub packets_to_clients: u64,
-    pub packets_no_route: u64,
-    pub packets_unknown_version: u64,
-    pub packets_dropped_full: u64,
-    pub packets_backpressure: u64,
-    pub packets_from_clients: u64,
-    pub packets_tun_write_failed: u64,
-    pub packets_spoofed: u64,
 }
 
 // Channel buffer sizes are now configurable via VpnServerConfig:
@@ -481,31 +452,6 @@ impl VpnServer {
             next_session_id: AtomicU64::new(1),
             stats: Arc::new(VpnServerStats::new()),
         })
-    }
-
-    /// Get the server's VPN IP address.
-    /// Returns None if IPv6-only mode (no IPv4 network configured).
-    pub async fn server_ip(&self) -> Option<Ipv4Addr> {
-        match &self.ip_pool {
-            Some(pool) => Some(pool.read().await.server_ip()),
-            None => None,
-        }
-    }
-
-    /// Get the VPN network.
-    /// Returns None if IPv6-only mode (no IPv4 network configured).
-    pub async fn network(&self) -> Option<Ipv4Net> {
-        match &self.ip_pool {
-            Some(pool) => Some(pool.read().await.network()),
-            None => None,
-        }
-    }
-
-    /// Get a reference to the server statistics.
-    ///
-    /// Use `stats.snapshot()` to get a point-in-time copy of all counters.
-    pub fn stats(&self) -> &Arc<VpnServerStats> {
-        &self.stats
     }
 
     /// Create and configure the TUN device.
@@ -1920,7 +1866,7 @@ mod tests {
     }
 
     #[test]
-    fn test_stats_snapshot() {
+    fn test_stats_counters_increment() {
         let stats = VpnServerStats::new();
 
         // Increment some counters
@@ -1930,17 +1876,15 @@ mod tests {
         stats.packets_spoofed.fetch_add(3, Ordering::Relaxed);
         stats.packets_backpressure.fetch_add(2, Ordering::Relaxed);
 
-        // Take a snapshot and verify values
-        let snapshot = stats.snapshot();
-        assert_eq!(snapshot.tun_packets_read, 100);
-        assert_eq!(snapshot.packets_to_clients, 90);
-        assert_eq!(snapshot.packets_no_route, 5);
-        assert_eq!(snapshot.packets_spoofed, 3);
-        assert_eq!(snapshot.packets_backpressure, 2);
-        assert_eq!(snapshot.packets_unknown_version, 0);
-        assert_eq!(snapshot.packets_dropped_full, 0);
-        assert_eq!(snapshot.packets_from_clients, 0);
-        assert_eq!(snapshot.packets_tun_write_failed, 0);
+        assert_eq!(stats.tun_packets_read.load(Ordering::Relaxed), 100);
+        assert_eq!(stats.packets_to_clients.load(Ordering::Relaxed), 90);
+        assert_eq!(stats.packets_no_route.load(Ordering::Relaxed), 5);
+        assert_eq!(stats.packets_spoofed.load(Ordering::Relaxed), 3);
+        assert_eq!(stats.packets_backpressure.load(Ordering::Relaxed), 2);
+        assert_eq!(stats.packets_unknown_version.load(Ordering::Relaxed), 0);
+        assert_eq!(stats.packets_dropped_full.load(Ordering::Relaxed), 0);
+        assert_eq!(stats.packets_from_clients.load(Ordering::Relaxed), 0);
+        assert_eq!(stats.packets_tun_write_failed.load(Ordering::Relaxed), 0);
     }
 
     #[test]

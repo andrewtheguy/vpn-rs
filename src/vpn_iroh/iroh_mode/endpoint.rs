@@ -6,17 +6,15 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use iroh::{
     address_lookup::{DnsAddressLookup, MdnsAddressLookup, PkarrPublisher, PkarrResolver},
     endpoint::{Builder as EndpointBuilder, ControllerFactory, QuicTransportConfig},
-    Endpoint, EndpointAddr, EndpointId, RelayMap, RelayMode, RelayUrl, SecretKey, Watcher,
+    Endpoint, EndpointId, RelayMap, RelayMode, RelayUrl, SecretKey,
 };
 use iroh_quinn_proto::congestion::{BbrConfig, CubicConfig, NewRenoConfig};
-use log::{info, warn};
+use log::info;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 use url::Url;
 
-/// ALPN for all iroh modes (client requests source)
-pub const MULTI_ALPN: &[u8] = b"multi-forward/1";
 pub const RELAY_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// QUIC keep-alive interval for tunnel connections.
@@ -97,18 +95,6 @@ pub fn parse_relay_mode(relay_urls: &[String]) -> Result<RelayMode> {
         let relay_map = RelayMap::from_iter(parsed_urls);
         Ok(RelayMode::Custom(relay_map))
     }
-}
-
-/// Validate that relay-only mode is used correctly.
-pub fn validate_relay_only(relay_only: bool, relay_urls: &[String]) -> Result<()> {
-    if relay_only && relay_urls.is_empty() {
-        anyhow::bail!(
-            "--relay-only requires at least one --relay-url to be specified.\n\
-            The default public relay is rate-limited and cannot be used for relay-only mode."
-        );
-    }
-
-    Ok(())
 }
 
 /// Print relay configuration status messages.
@@ -336,111 +322,4 @@ pub async fn create_client_endpoint(
     }
 
     Ok(endpoint)
-}
-
-/// Connect to a server endpoint with relay failover support.
-pub async fn connect_to_server(
-    endpoint: &Endpoint,
-    server_id: EndpointId,
-    relay_urls: &[String],
-    relay_only: bool,
-    alpn: &[u8],
-) -> Result<iroh::endpoint::Connection> {
-    info!("Connecting to server {}...", server_id);
-
-    if relay_only {
-        // Try each relay URL until one works
-        let mut last_error = None;
-        for relay_url_str in relay_urls {
-            let relay_url: RelayUrl = relay_url_str.parse().context("Invalid relay URL")?;
-            let endpoint_addr = EndpointAddr::new(server_id).with_relay_url(relay_url.clone());
-            info!(
-                "Trying relay: {} (timeout: {}s)",
-                relay_url,
-                RELAY_CONNECT_TIMEOUT.as_secs()
-            );
-
-            match tokio::time::timeout(RELAY_CONNECT_TIMEOUT, endpoint.connect(endpoint_addr, alpn))
-                .await
-            {
-                Ok(Ok(conn)) => {
-                    info!("Connected via relay: {}", relay_url);
-                    return Ok(conn);
-                }
-                Ok(Err(e)) => {
-                    warn!("Failed to connect via {}: {}", relay_url, e);
-                    last_error = Some(e.to_string());
-                }
-                Err(_) => {
-                    warn!("Connection to {} timed out", relay_url);
-                    last_error = Some(format!("Connection to {} timed out", relay_url));
-                }
-            }
-        }
-        anyhow::bail!(
-            "Failed to connect via any relay: {}",
-            last_error.unwrap_or_else(|| "No relay URLs provided".to_string())
-        )
-    } else {
-        // Include relay URLs in EndpointAddr if available, allowing iroh to use
-        // the relay for initial connection when DNS discovery is disabled.
-        // Iroh will still attempt hole punching for direct P2P connections.
-        let endpoint_addr = if !relay_urls.is_empty() {
-            let mut addr = EndpointAddr::new(server_id);
-            for relay_url_str in relay_urls {
-                let relay_url: RelayUrl = relay_url_str.parse().context("Invalid relay URL")?;
-                addr = addr.with_relay_url(relay_url);
-            }
-            info!(
-                "Connecting with {} relay hint(s) (timeout: {}s)...",
-                relay_urls.len(),
-                RELAY_CONNECT_TIMEOUT.as_secs()
-            );
-            addr
-        } else {
-            info!(
-                "Connecting (timeout: {}s)...",
-                RELAY_CONNECT_TIMEOUT.as_secs()
-            );
-            EndpointAddr::new(server_id)
-        };
-        match tokio::time::timeout(RELAY_CONNECT_TIMEOUT, endpoint.connect(endpoint_addr, alpn))
-            .await
-        {
-            Ok(Ok(conn)) => Ok(conn),
-            Ok(Err(e)) => Err(e).context("Failed to connect to server"),
-            Err(_) => anyhow::bail!(
-                "Connection timed out after {}s",
-                RELAY_CONNECT_TIMEOUT.as_secs()
-            ),
-        }
-    }
-}
-
-/// Print connection type information.
-pub fn print_connection_paths(conn: &iroh::endpoint::Connection) {
-    let paths = conn.paths().get();
-    if paths.is_empty() {
-        info!("Connection paths: none");
-        return;
-    }
-    for path in paths.iter() {
-        let selected = if path.is_selected() {
-            " (selected)"
-        } else {
-            ""
-        };
-        let remote = path.remote_addr();
-        match remote {
-            iroh::TransportAddr::Ip(addr) => {
-                info!("Connection path: direct {}{}", addr, selected);
-            }
-            iroh::TransportAddr::Relay(relay_url) => {
-                info!("Connection path: relay {}{}", relay_url, selected);
-            }
-            _ => {
-                info!("Connection path: other {:?}{}", remote, selected);
-            }
-        }
-    }
 }

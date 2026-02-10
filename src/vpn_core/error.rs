@@ -45,14 +45,6 @@ pub enum VpnError {
     #[error("TUN device error: {0}")]
     TunDevice(#[source] ErrorContext),
 
-    /// Tunnel/protocol error.
-    #[error("Tunnel error: {0}")]
-    Tunnel(#[source] ErrorContext),
-
-    /// Key generation or parsing error.
-    #[error("Key error: {0}")]
-    Key(#[source] ErrorContext),
-
     /// Network I/O error.
     #[error("Network error: {0}")]
     Network(#[from] std::io::Error),
@@ -72,10 +64,6 @@ pub enum VpnError {
     /// IP address assignment error.
     #[error("IP assignment error: {0}")]
     IpAssignment(String),
-
-    /// Peer not found.
-    #[error("Peer not found: {0}")]
-    PeerNotFound(String),
 
     /// Connection lost during VPN session (recoverable via reconnect).
     #[error("Connection lost: {0}")]
@@ -99,32 +87,6 @@ impl VpnError {
         E: StdError + Send + Sync + 'static,
     {
         Self::TunDevice(ErrorContext::with_source(message, source))
-    }
-
-    /// Create a tunnel/protocol error with context only.
-    pub fn tunnel(message: impl Into<String>) -> Self {
-        Self::Tunnel(ErrorContext::new(message))
-    }
-
-    /// Create a tunnel/protocol error with preserved source.
-    pub fn tunnel_with_source<E>(message: impl Into<String>, source: E) -> Self
-    where
-        E: StdError + Send + Sync + 'static,
-    {
-        Self::Tunnel(ErrorContext::with_source(message, source))
-    }
-
-    /// Create a key error with context only.
-    pub fn key(message: impl Into<String>) -> Self {
-        Self::Key(ErrorContext::new(message))
-    }
-
-    /// Create a key error with preserved source.
-    pub fn key_with_source<E>(message: impl Into<String>, source: E) -> Self
-    where
-        E: StdError + Send + Sync + 'static,
-    {
-        Self::Key(ErrorContext::with_source(message, source))
     }
 
     /// Create a configuration error with context only.
@@ -151,10 +113,7 @@ impl VpnError {
     /// - `AuthenticationFailed` - invalid token, server rejected credentials
     /// - `Config` - invalid configuration (won't change without user action)
     /// - `TunDevice` - permission denied, device creation failed
-    /// - `Tunnel` - protocol errors
-    /// - `Key` - invalid key format
     /// - `IpAssignment` - IP pool exhausted (unlikely to recover quickly)
-    /// - `PeerNotFound` - unknown peer
     /// - `MaxReconnectAttemptsExceeded` - retry limit hit
     pub fn is_recoverable(&self) -> bool {
         matches!(

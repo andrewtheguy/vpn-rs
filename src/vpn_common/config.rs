@@ -45,9 +45,6 @@ pub enum CongestionController {
 /// Default QUIC receive window size (8 MB).
 pub const DEFAULT_RECEIVE_WINDOW: u32 = 8 * 1024 * 1024;
 
-/// Default QUIC send window size (8 MB).
-pub const DEFAULT_SEND_WINDOW: u32 = 8 * 1024 * 1024;
-
 /// Transport tuning for QUIC connections.
 #[derive(Deserialize, Default, Clone, Debug, PartialEq)]
 pub struct TransportTuning {
