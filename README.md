@@ -47,11 +47,8 @@ curl -sSL https://andrewtheguy.github.io/vpn-rs/install.sh | sudo bash
 
 ### Windows
 
-Prebuilt Windows binaries are temporarily not published in GitHub releases.
-Build from source:
-
 ```powershell
-cargo build --release
+irm https://andrewtheguy.github.io/vpn-rs/install.ps1 | iex
 ```
 
 ### Windows: WinTun Required
@@ -67,12 +64,16 @@ Running `vpn-rs.exe` requires `wintun.dll` from <https://www.wintun.net/> (offic
 If you see `Failed to create TUN device: LoadLibraryExW failed`, the DLL is missing or not in a valid search path.
 
 <details>
-<summary>Advanced installation options (Linux/macOS prebuilt)</summary>
+<summary>Advanced installation options</summary>
 
 Install a specific release tag:
 
 ```bash
 curl -sSL https://andrewtheguy.github.io/vpn-rs/install.sh | sudo bash -s <RELEASE_TAG>
+```
+
+```powershell
+& ([scriptblock]::Create((irm https://andrewtheguy.github.io/vpn-rs/install.ps1))) <RELEASE_TAG>
 ```
 
 Install latest prerelease:
@@ -81,9 +82,13 @@ Install latest prerelease:
 curl -sSL https://andrewtheguy.github.io/vpn-rs/install.sh | sudo bash -s -- --prerelease
 ```
 
+```powershell
+& ([scriptblock]::Create((irm https://andrewtheguy.github.io/vpn-rs/install.ps1))) -PreRelease
+```
+
 </details>
 
-### From Source (Windows required for now)
+### From Source
 
 ```bash
 cargo install --path .
