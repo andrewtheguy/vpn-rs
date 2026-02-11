@@ -1,6 +1,6 @@
 [package]
 name = "vpn-rs"
-version = "0.0.7-beta2"
+version = "0.0.7-beta3"
 edition = "2021"
 description = "IP-over-QUIC VPN tunnel via iroh P2P"
 readme = "README.md"
