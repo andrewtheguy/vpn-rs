@@ -57,6 +57,10 @@ network = "10.0.0.0/24"
 # Performance Tuning
 # ============================================================================
 
+# Linux GSO offload is automatic in protocol v2 (no config toggle).
+# On startup, server logs local TUN GSO status.
+# Per-client, server logs: `server_local`, `client_reported`, and `active` GSO status.
+
 # MTU for VPN packets (576-1500, default: 1420)
 # Lower values may help with fragmentation issues
 # mtu = 1420

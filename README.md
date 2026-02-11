@@ -9,6 +9,7 @@
 
 > [!WARNING]
 > **No Backward Compatibility in 0.0.x:** While `vpn-rs` remains in the `0.0.x` series, there is no backward compatibility between any versions. Regenerate server keys and refresh configs on every upgrade.
+> The current wire protocol is v2 (`ALPN: vpn-rs/2`), and v1 peers are rejected.
 
 > [!CAUTION]
 > **Pre-release Proof of Concept:** `vpn-rs` is still prerelease software and currently in a proof-of-concept stage. Expect rough edges and breaking changes.
@@ -25,6 +26,15 @@
 - Optional dual-stack VPN (IPv4 + IPv6)
 - Optional split tunneling (`--route` / `--route6`)
 - Auto-reconnect with heartbeat-based health checks
+- Automatic Linux TUN GSO offload with software segmentation fallback when a peer does not support GSO (e.g., mixed-OS peers)
+
+## Protocol and Linux GSO
+
+- Wire protocol v2 is required on both peers. Mixed v1/v2 pairs will not connect.
+- On Linux, TUN offload is attempted automatically at startup (`vnet_hdr` + TCP GSO flags).
+- No GSO config toggle is exposed in config files.
+- If Linux offload setup fails, VPN traffic continues in non-GSO mode and logs a warning.
+- Connection setup logs include local, remote, and negotiated GSO status.
 
 ## When To Use It
 

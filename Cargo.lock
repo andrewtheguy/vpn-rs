@@ -3843,7 +3843,7 @@ dependencies = [
 
 [[package]]
 name = "vpn-rs"
-version = "0.0.6"
+version = "0.0.7"
 dependencies = [
  "anyhow",
  "base64",
@@ -3858,6 +3858,7 @@ dependencies = [
  "ipnet",
  "iroh",
  "iroh-quinn-proto",
+ "libc",
  "log",
  "mock_instant",
  "rand",

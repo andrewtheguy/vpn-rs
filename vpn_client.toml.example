@@ -36,6 +36,9 @@ auth_token = "<YOUR_AUTH_TOKEN>"  # Replace with real token from generate-token
 # Performance Tuning
 # ============================================================================
 
+# Linux GSO offload is automatic in protocol v2 (no config toggle).
+# Client connection logs report local, server, and negotiated GSO status.
+
 # MTU for VPN packets (576-1500, default: 1420)
 # Lower values may help with fragmentation issues
 mtu = 1420

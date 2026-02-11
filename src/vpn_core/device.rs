@@ -4,11 +4,16 @@
 //! for VPN traffic.
 
 use crate::vpn_core::error::{VpnError, VpnResult};
+use crate::vpn_core::offload::{compose_tun_frame, VIRTIO_NET_HDR_LEN};
+use bytes::BytesMut;
 use ipnet::{Ipv4Net, Ipv6Net};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 use tun::{AbstractDevice, AsyncDevice, Configuration, DeviceReader, DeviceWriter};
+
+#[cfg(target_os = "linux")]
+use std::os::fd::AsRawFd;
 
 /// TUN device configuration.
 #[derive(Debug, Clone)]
@@ -27,6 +32,8 @@ pub struct TunConfig {
     pub prefix_len6: Option<u8>,
     /// MTU for the device (default: 1440, accounts for QUIC/TLS overhead).
     pub mtu: u16,
+    /// Attempt Linux TUN GSO/offload ioctls when creating the device.
+    pub enable_gso: bool,
 }
 
 /// Validate IPv6 prefix length (must be 0-128).
@@ -51,12 +58,19 @@ impl TunConfig {
             address6: None,
             prefix_len6: None,
             mtu: 1440,
+            enable_gso: true,
         }
     }
 
     /// Set the MTU.
     pub fn with_mtu(mut self, mtu: u16) -> Self {
         self.mtu = mtu;
+        self
+    }
+
+    /// Enable or disable Linux GSO/offload setup for this device.
+    pub fn with_gso(mut self, enable_gso: bool) -> Self {
+        self.enable_gso = enable_gso;
         self
     }
 
@@ -113,7 +127,36 @@ impl TunConfig {
             address6: Some(address6),
             prefix_len6: Some(prefix_len6),
             mtu,
+            enable_gso: true,
         })
+    }
+}
+
+/// Linux TUN offload status for the current device.
+#[derive(Debug, Clone, Default)]
+pub struct TunOffloadStatus {
+    /// True when Linux TUN offload ioctls were enabled successfully.
+    pub enabled: bool,
+    /// Reason when offload could not be enabled.
+    pub reason: Option<String>,
+}
+
+impl TunOffloadStatus {
+    /// Construct an enabled status.
+    #[cfg(target_os = "linux")]
+    pub fn enabled() -> Self {
+        Self {
+            enabled: true,
+            reason: None,
+        }
+    }
+
+    /// Construct a disabled status with a reason.
+    pub fn disabled(reason: impl Into<String>) -> Self {
+        Self {
+            enabled: false,
+            reason: Some(reason.into()),
+        }
     }
 }
 
@@ -125,6 +168,10 @@ pub struct TunDevice {
     name: String,
     /// Configured MTU.
     mtu: u16,
+    /// Whether this TUN device uses vnet headers in read/write frames.
+    vnet_hdr_enabled: bool,
+    /// Linux GSO/offload status for this device.
+    offload_status: TunOffloadStatus,
 }
 
 impl TunDevice {
@@ -150,6 +197,7 @@ impl TunDevice {
         #[cfg(target_os = "linux")]
         tun_config.platform_config(|platform_config| {
             platform_config.ensure_root_privileges(true);
+            platform_config.vnet_hdr(true);
         });
 
         // Create the async device
@@ -159,6 +207,24 @@ impl TunDevice {
         let name = device
             .tun_name()
             .map_err(|e| VpnError::tun_device_with_source("Failed to get TUN name", e))?;
+
+        #[cfg(target_os = "linux")]
+        let offload_status = configure_linux_tun_offload(&device, config.enable_gso);
+        #[cfg(not(target_os = "linux"))]
+        let offload_status =
+            TunOffloadStatus::disabled("TUN offload not supported on this platform");
+
+        #[cfg(target_os = "linux")]
+        if offload_status.enabled {
+            log::info!("Linux TUN GSO enabled on device {}", name);
+        } else {
+            let reason = offload_status.reason.as_deref().unwrap_or("unknown reason");
+            if config.enable_gso {
+                log::warn!("Linux TUN GSO disabled on device {}: {}", name, reason);
+            } else {
+                log::info!("Linux TUN GSO disabled on device {}: {}", name, reason);
+            }
+        }
 
         log::info!("Created TUN device: {} with IP {}", name, config.address);
 
@@ -172,6 +238,8 @@ impl TunDevice {
             device,
             name,
             mtu: config.mtu,
+            vnet_hdr_enabled: cfg!(target_os = "linux"),
+            offload_status,
         })
     }
 
@@ -180,9 +248,18 @@ impl TunDevice {
         &self.name
     }
 
+    /// Get local GSO/offload status for this TUN device.
+    pub fn offload_status(&self) -> &TunOffloadStatus {
+        &self.offload_status
+    }
+
     /// Get the buffer size for reading packets (MTU + packet info header).
     pub fn buffer_size(&self) -> usize {
-        self.mtu as usize + tun::PACKET_INFORMATION_LENGTH
+        if self.vnet_hdr_enabled {
+            65535 + VIRTIO_NET_HDR_LEN
+        } else {
+            self.mtu as usize + tun::PACKET_INFORMATION_LENGTH
+        }
     }
 
     /// Split the device into read and write halves.
@@ -200,22 +277,85 @@ impl TunDevice {
             TunReader {
                 reader,
                 buffer_size,
+                vnet_hdr_enabled: self.vnet_hdr_enabled,
+                offload_status: self.offload_status.clone(),
             },
-            TunWriter { writer },
+            TunWriter {
+                writer,
+                vnet_hdr_enabled: self.vnet_hdr_enabled,
+                offload_status: self.offload_status,
+                scratch: BytesMut::with_capacity(buffer_size),
+            },
         ))
     }
+}
+
+#[cfg(target_os = "linux")]
+fn configure_linux_tun_offload(device: &AsyncDevice, enable_gso: bool) -> TunOffloadStatus {
+    let fd = device.as_raw_fd();
+
+    let mut vnet_hdr_size: libc::c_int =
+        i32::try_from(VIRTIO_NET_HDR_LEN).expect("virtio header size must fit in c_int");
+    let vnet_hdr_result = unsafe {
+        libc::ioctl(
+            fd,
+            libc::TUNSETVNETHDRSZ as _,
+            &mut vnet_hdr_size as *mut libc::c_int,
+        )
+    };
+    if vnet_hdr_result < 0 {
+        return TunOffloadStatus::disabled(format!(
+            "TUNSETVNETHDRSZ failed: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+
+    if !enable_gso {
+        return TunOffloadStatus::disabled("disabled by peer capability");
+    }
+
+    let offload_flags: libc::c_uint = libc::TUN_F_CSUM | libc::TUN_F_TSO4 | libc::TUN_F_TSO6;
+    let offload_result = unsafe {
+        // TUNSETOFFLOAD takes the bitmask value directly as ioctl arg.
+        // Passing a pointer here sends the pointer address as flags.
+        libc::ioctl(
+            fd,
+            libc::TUNSETOFFLOAD as _,
+            libc::c_ulong::from(offload_flags),
+        )
+    };
+    if offload_result < 0 {
+        return TunOffloadStatus::disabled(format!(
+            "TUNSETOFFLOAD(TSO4/TSO6) failed: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+
+    TunOffloadStatus::enabled()
 }
 
 /// Read half of a split TUN device.
 pub struct TunReader {
     reader: DeviceReader,
     buffer_size: usize,
+    vnet_hdr_enabled: bool,
+    offload_status: TunOffloadStatus,
 }
 
 impl TunReader {
     /// Get the recommended buffer size.
     pub fn buffer_size(&self) -> usize {
         self.buffer_size
+    }
+
+    /// Return true if raw TUN reads include the 10-byte Linux vnet header.
+    pub fn vnet_hdr_enabled(&self) -> bool {
+        self.vnet_hdr_enabled
+    }
+
+    /// Get local offload status associated with this TUN reader.
+    pub fn offload_status(&self) -> &TunOffloadStatus {
+        &self.offload_status
     }
 
     /// Read a packet from the TUN device.
@@ -227,12 +367,34 @@ impl TunReader {
 /// Write half of a split TUN device.
 pub struct TunWriter {
     writer: DeviceWriter,
+    vnet_hdr_enabled: bool,
+    offload_status: TunOffloadStatus,
+    scratch: BytesMut,
 }
 
 impl TunWriter {
+    /// Get local offload status associated with this TUN writer.
+    pub fn offload_status(&self) -> &TunOffloadStatus {
+        &self.offload_status
+    }
+
+    /// Write an IP packet to the TUN device, optionally including offload metadata.
+    pub async fn write_packet(
+        &mut self,
+        offload: Option<&crate::vpn_core::offload::VirtioNetHdr>,
+        ip_packet: &[u8],
+    ) -> VpnResult<()> {
+        compose_tun_frame(&mut self.scratch, self.vnet_hdr_enabled, offload, ip_packet)
+            .map_err(VpnError::tun_device)?;
+        self.writer
+            .write_all(&self.scratch)
+            .await
+            .map_err(VpnError::Network)
+    }
+
     /// Write all bytes to the TUN device.
     pub async fn write_all(&mut self, buf: &[u8]) -> VpnResult<()> {
-        self.writer.write_all(buf).await.map_err(VpnError::Network)
+        self.write_packet(None, buf).await
     }
 }
 

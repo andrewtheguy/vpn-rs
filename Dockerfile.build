@@ -1,0 +1,23 @@
+# Build stage - buildx handles platform selection automatically
+FROM rust:1.93 AS builder
+
+ARG TARGETPLATFORM
+
+WORKDIR /build
+
+# Copy manifests first for better layer caching.
+COPY Cargo.toml Cargo.lock ./
+
+# Copy source tree.
+COPY src ./src
+
+# Build for the current buildx target platform.
+RUN --mount=type=cache,target=/usr/local/cargo/registry,id=cargo-registry-${TARGETPLATFORM} \
+    --mount=type=cache,target=/usr/local/cargo/git,id=cargo-git-${TARGETPLATFORM} \
+    --mount=type=cache,target=/build/target,id=cargo-target-${TARGETPLATFORM} \
+    cargo build --release --bin vpn-rs && \
+    cp target/release/vpn-rs /vpn-rs
+
+# Export stage used by build-linux.sh local output.
+FROM scratch AS export
+COPY --from=builder /vpn-rs /vpn-rs
