@@ -388,6 +388,10 @@ pub fn frame_ip_packet_v2(
         ));
     }
 
+    const _: () = assert!(
+        VIRTIO_NET_HDR_LEN <= u8::MAX as usize,
+        "VIRTIO_NET_HDR_LEN must fit in u8"
+    );
     let offload_len: u8 = if offload.is_some() {
         VIRTIO_NET_HDR_LEN as u8
     } else {
@@ -459,6 +463,33 @@ pub fn parse_ip_packet_v2(frame_payload: &[u8]) -> VpnResult<(Option<VirtioNetHd
             "IP frame payload too short: {} bytes",
             frame_payload.len()
         )));
+    }
+
+    let ip_version = frame_payload[offload_end] >> 4;
+    let ip_payload_len = frame_payload.len() - offload_end;
+    match ip_version {
+        4 => {
+            if ip_payload_len < 20 {
+                return Err(VpnError::Signaling(format!(
+                    "IPv4 packet too short: {} bytes (minimum 20)",
+                    ip_payload_len
+                )));
+            }
+        }
+        6 => {
+            if ip_payload_len < 40 {
+                return Err(VpnError::Signaling(format!(
+                    "IPv6 packet too short: {} bytes (minimum 40)",
+                    ip_payload_len
+                )));
+            }
+        }
+        _ => {
+            return Err(VpnError::Signaling(format!(
+                "Unsupported IP version: {}",
+                ip_version
+            )));
+        }
     }
 
     let offload = if offload_len == 0 {
@@ -680,19 +711,23 @@ mod tests {
 
     #[test]
     fn test_parse_ip_packet_message_v2_roundtrip_without_offload() {
-        let payload = b"plain packet payload";
+        // Minimal valid IPv4 header (20 bytes, version=4, IHL=5)
+        let mut payload = [0u8; 20];
+        payload[0] = 0x45; // version 4, IHL 5
         let mut buf = BytesMut::new();
-        frame_ip_packet_v2(&mut buf, None, payload).expect("frame packet");
+        frame_ip_packet_v2(&mut buf, None, &payload).expect("frame packet");
 
         let (offload, parsed_payload) =
             parse_ip_packet_message_v2(&buf).expect("parse full message");
         assert!(offload.is_none());
-        assert_eq!(parsed_payload, payload);
+        assert_eq!(parsed_payload, &payload[..]);
     }
 
     #[test]
     fn test_frame_and_parse_ip_packet_v2_with_offload() {
-        let payload = b"offloaded packet";
+        // Minimal valid IPv4 header (20 bytes, version=4, IHL=5) + 4 bytes payload
+        let mut payload = [0u8; 24];
+        payload[0] = 0x45; // version 4, IHL 5
         let offload = VirtioNetHdr {
             flags: 1,
             gso_type: 1,
@@ -704,7 +739,7 @@ mod tests {
         };
 
         let mut buf = BytesMut::new();
-        frame_ip_packet_v2(&mut buf, Some(&offload), payload).expect("frame packet");
+        frame_ip_packet_v2(&mut buf, Some(&offload), &payload).expect("frame packet");
 
         let frame_len = u32::from_be_bytes([buf[1], buf[2], buf[3], buf[4]]) as usize;
         let frame_payload = &buf[5..5 + frame_len];
@@ -712,7 +747,7 @@ mod tests {
         let (parsed_offload, parsed_payload) =
             parse_ip_packet_v2(frame_payload).expect("parse v2 frame payload");
         assert_eq!(parsed_offload, Some(offload));
-        assert_eq!(parsed_payload, payload);
+        assert_eq!(parsed_payload, &payload[..]);
     }
 
     #[test]

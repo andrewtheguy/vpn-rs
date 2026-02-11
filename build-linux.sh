@@ -94,13 +94,22 @@ echo "Build complete!"
 echo "==============="
 echo ""
 echo "Binaries:"
-ls -lh "$BUILD_DIR"/vpn-rs-linux-* 2>/dev/null || echo "  (none found)"
+shopt -s nullglob
+binaries=("$BUILD_DIR"/vpn-rs-linux-*)
+shopt -u nullglob
+if [ ${#binaries[@]} -gt 0 ]; then
+    ls -lh "${binaries[@]}"
+else
+    echo "  (none found)"
+fi
 echo ""
 
 echo "Verifying binaries..."
 echo "---------------------"
 if command -v file >/dev/null 2>&1; then
-    file "$BUILD_DIR"/vpn-rs-linux-* 2>/dev/null || true
+    if [ ${#binaries[@]} -gt 0 ]; then
+        file "${binaries[@]}"
+    fi
 else
     echo "Note: 'file' command not available, skipping binary verification"
 fi

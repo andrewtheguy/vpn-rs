@@ -284,7 +284,7 @@ impl TunDevice {
                 writer,
                 vnet_hdr_enabled: self.vnet_hdr_enabled,
                 offload_status: self.offload_status,
-                scratch: BytesMut::new(),
+                scratch: BytesMut::with_capacity(buffer_size),
             },
         ))
     }

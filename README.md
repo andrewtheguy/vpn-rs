@@ -26,7 +26,7 @@
 - Optional dual-stack VPN (IPv4 + IPv6)
 - Optional split tunneling (`--route` / `--route6`)
 - Auto-reconnect with heartbeat-based health checks
-- Automatic Linux TUN GSO offload with TCP software fallback for mixed-OS peers
+- Automatic Linux TUN GSO offload with software segmentation fallback when a peer does not support GSO (e.g., mixed-OS peers)
 
 ## Protocol and Linux GSO
 
