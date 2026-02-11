@@ -250,7 +250,8 @@ impl VpnClient {
 
         log::info!("VPN data stream opened");
 
-        let local_gso_enabled = tun_device.offload_status().enabled;
+        let offload_status = tun_device.offload_status();
+        let local_gso_enabled = offload_status.enabled;
         let negotiated_gso = local_gso_enabled && server_info.server_gso_enabled;
         // Data-channel GSO metadata is supported even when local TUN offload is not,
         // because inbound metadata can be fallback-segmented in software.
@@ -263,11 +264,7 @@ impl VpnClient {
             advertised_gso
         );
         if !local_gso_enabled {
-            let reason = tun_device
-                .offload_status()
-                .reason
-                .as_deref()
-                .unwrap_or("unknown reason");
+            let reason = offload_status.reason.as_deref().unwrap_or("unknown reason");
             if server_info.server_gso_enabled {
                 log::warn!("Local TUN GSO disabled: {}", reason);
             } else {
@@ -276,7 +273,7 @@ impl VpnClient {
         }
 
         // Capabilities must be the first data-stream message in protocol v2.
-        let mut capabilities_buf = BytesMut::with_capacity(2);
+        let mut capabilities_buf = BytesMut::with_capacity(3);
         frame_capabilities_message(
             &mut capabilities_buf,
             CapabilitiesMessage {
@@ -717,6 +714,18 @@ impl VpnClient {
                         DataMessageType::Capabilities => {
                             // Capabilities are exchanged once at stream setup and should not
                             // appear later in steady-state traffic.
+                            // Drain the length-prefixed payload to keep the stream aligned.
+                            let mut cap_len = [0u8; 1];
+                            if data_recv.read_exact(&mut cap_len).await.is_err() {
+                                return Some("Failed to read capabilities length".into());
+                            }
+                            let n = cap_len[0] as usize;
+                            if n > 0 {
+                                let mut discard = vec![0u8; n];
+                                if data_recv.read_exact(&mut discard).await.is_err() {
+                                    return Some("Failed to read capabilities payload".into());
+                                }
+                            }
                             log::trace!("Unexpected capabilities message received");
                             continue;
                         }

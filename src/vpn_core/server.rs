@@ -12,7 +12,8 @@ use crate::vpn_core::error::{VpnError, VpnResult};
 use crate::vpn_core::offload::{segment_tcp_gso_packet, split_tun_frame, VirtioNetHdr};
 use crate::vpn_core::signaling::{
     frame_ip_packet_v2, parse_ip_packet_v2, read_message, write_message, CapabilitiesMessage,
-    DataMessageType, VpnHandshake, VpnHandshakeResponse, HEARTBEAT_PONG_BYTE, MAX_HANDSHAKE_SIZE,
+    DataMessageType, VpnHandshake, VpnHandshakeResponse, HEARTBEAT_PONG_BYTE,
+    MAX_CAPABILITIES_PAYLOAD, MAX_HANDSHAKE_SIZE,
 };
 use bytes::{Bytes, BytesMut};
 use dashmap::DashMap;
@@ -933,15 +934,30 @@ impl VpnServer {
             .await
             .map_err(|e| VpnError::Signaling(format!("Failed to read capabilities type: {}", e)))?;
         let _first_type = Self::parse_first_client_message_type(first_type[0])?;
-        let mut caps_payload = [0u8; 1];
+        let mut caps_len_buf = [0u8; 1];
+        data_recv
+            .read_exact(&mut caps_len_buf)
+            .await
+            .map_err(|e| {
+                VpnError::Signaling(format!("Failed to read capabilities length: {}", e))
+            })?;
+        let caps_len = caps_len_buf[0] as usize;
+        if caps_len > MAX_CAPABILITIES_PAYLOAD {
+            return Err(VpnError::Signaling(format!(
+                "Capabilities payload too large: {}",
+                caps_len
+            )));
+        }
+        let mut caps_payload = vec![0u8; caps_len];
         data_recv.read_exact(&mut caps_payload).await.map_err(|e| {
             VpnError::Signaling(format!("Failed to read capabilities payload: {}", e))
         })?;
-        let caps = CapabilitiesMessage::decode_payload(caps_payload[0]);
+        let caps = CapabilitiesMessage::decode_payload(&caps_payload);
         log::debug!(
-            "Client {} capabilities payload: 0x{:02x}",
+            "Client {} capabilities payload ({} bytes): {:02x?}",
             remote_id,
-            caps_payload[0]
+            caps_len,
+            caps_payload
         );
         let connection_gso_active = self.tun_offload_status.enabled && caps.gso_enabled;
         log::info!(
@@ -1237,7 +1253,7 @@ impl VpnServer {
             let mut type_buf = [0u8; 1];
             let mut len_buf = [0u8; 4];
             let mut data_buf = vec![0u8; MAX_IP_PACKET_SIZE];
-            loop {
+            'read_loop: loop {
                 // Read message type
                 match data_recv.read_exact(&mut type_buf).await {
                     Ok(()) => {}
@@ -1284,6 +1300,18 @@ impl VpnServer {
                     DataMessageType::Capabilities => {
                         // Capabilities are only valid as the first message and are
                         // consumed in handle_connection_inner before this loop starts.
+                        // Drain the length-prefixed payload to keep the stream aligned.
+                        let mut cap_len = [0u8; 1];
+                        if data_recv.read_exact(&mut cap_len).await.is_err() {
+                            break;
+                        }
+                        let n = cap_len[0] as usize;
+                        if n > 0 {
+                            let mut discard = vec![0u8; n];
+                            if data_recv.read_exact(&mut discard).await.is_err() {
+                                break;
+                            }
+                        }
                         log::warn!(
                             "Unexpected capabilities message from {} after stream setup",
                             client_id
@@ -1406,7 +1434,7 @@ impl VpnServer {
                                         offload: None,
                                     };
                                     if !Self::enqueue_tun_write(&tun_write_tx, req, &stats).await {
-                                        return;
+                                        break 'read_loop;
                                     }
                                 }
                             }

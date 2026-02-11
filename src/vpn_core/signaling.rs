@@ -247,10 +247,14 @@ impl CapabilitiesMessage {
         payload
     }
 
-    /// Parse capability flags from the compact byte payload.
-    pub fn decode_payload(payload: u8) -> Self {
+    /// Parse capability flags from a variable-length payload.
+    ///
+    /// Unknown trailing bytes are silently ignored for forward compatibility.
+    /// An empty payload yields the default (all capabilities off).
+    pub fn decode_payload(payload: &[u8]) -> Self {
+        let flags = payload.first().copied().unwrap_or(0);
         Self {
-            gso_enabled: (payload & CAPABILITIES_GSO_BIT) != 0,
+            gso_enabled: (flags & CAPABILITIES_GSO_BIT) != 0,
         }
     }
 }
@@ -291,12 +295,15 @@ pub async fn read_message<R: tokio::io::AsyncReadExt + Unpin>(
 /// Maximum handshake message size (16 KB).
 pub const MAX_HANDSHAKE_SIZE: usize = 16 * 1024;
 
+/// Maximum capabilities payload size (prevents unbounded allocation).
+pub const MAX_CAPABILITIES_PAYLOAD: usize = 255;
+
 /// Message types for the VPN data channel.
 ///
 /// The data channel uses a simple framing protocol:
 /// - First byte: message type
 /// - For IP packets: 4-byte big-endian frame length + frame payload
-/// - For capabilities: one-byte payload (flags)
+/// - For capabilities: 1-byte payload length + variable payload
 /// - For heartbeat: no additional payload
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -360,12 +367,16 @@ impl From<DataMessageType> for u8 {
 }
 
 /// Frame a capabilities message for transmission on the data channel.
+///
+/// Wire format: `[type: 0x03] [payload_len: 1 byte] [payload: payload_len bytes]`
 #[inline]
 pub fn frame_capabilities_message(buf: &mut BytesMut, caps: CapabilitiesMessage) {
+    let payload = caps.encode_payload();
     buf.clear();
-    buf.reserve(2);
+    buf.reserve(3);
     buf.put_u8(DataMessageType::Capabilities.as_byte());
-    buf.put_u8(caps.encode_payload());
+    buf.put_u8(1); // payload length
+    buf.put_u8(payload);
 }
 
 /// Frame an IP packet for transmission on the data channel.
@@ -687,11 +698,25 @@ mod tests {
         let mut buf = BytesMut::new();
         frame_capabilities_message(&mut buf, CapabilitiesMessage { gso_enabled: true });
 
-        assert_eq!(buf.len(), 2);
+        assert_eq!(buf.len(), 3);
         assert_eq!(buf[0], DataMessageType::Capabilities.as_byte());
-        assert_eq!(buf[1], CAPABILITIES_GSO_BIT);
+        assert_eq!(buf[1], 1); // payload length
+        assert_eq!(buf[2], CAPABILITIES_GSO_BIT);
 
-        let caps = CapabilitiesMessage::decode_payload(buf[1]);
+        let payload_len = buf[1] as usize;
+        let caps = CapabilitiesMessage::decode_payload(&buf[2..2 + payload_len]);
+        assert!(caps.gso_enabled);
+    }
+
+    #[test]
+    fn test_decode_capabilities_empty_payload() {
+        let caps = CapabilitiesMessage::decode_payload(&[]);
+        assert!(!caps.gso_enabled);
+    }
+
+    #[test]
+    fn test_decode_capabilities_extra_bytes_ignored() {
+        let caps = CapabilitiesMessage::decode_payload(&[CAPABILITIES_GSO_BIT, 0xff, 0xab]);
         assert!(caps.gso_enabled);
     }
 
