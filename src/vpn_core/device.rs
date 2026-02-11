@@ -7,8 +7,10 @@ use crate::vpn_core::error::{VpnError, VpnResult};
 use crate::vpn_core::offload::{compose_tun_frame, VIRTIO_NET_HDR_LEN};
 use bytes::BytesMut;
 use ipnet::{Ipv4Net, Ipv6Net};
+use std::future::poll_fn;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use std::task::Poll;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt, ReadBuf};
 use tokio::process::Command;
 use tun::{AbstractDevice, AsyncDevice, Configuration, DeviceReader, DeviceWriter};
 
@@ -361,6 +363,21 @@ impl TunReader {
     /// Read a packet from the TUN device.
     pub async fn read(&mut self, buf: &mut [u8]) -> VpnResult<usize> {
         self.reader.read(buf).await.map_err(VpnError::Network)
+    }
+
+    /// Non-blocking TUN read: returns `Ok(Some(n))` if data was available,
+    /// `Ok(None)` if it would block. Used for userspace packet batching.
+    pub async fn try_read(&mut self, buf: &mut [u8]) -> VpnResult<Option<usize>> {
+        let reader = &mut self.reader;
+        poll_fn(|cx| {
+            let mut read_buf = ReadBuf::new(buf);
+            match std::pin::Pin::new(&mut *reader).poll_read(cx, &mut read_buf) {
+                Poll::Ready(Ok(())) => Poll::Ready(Ok(Some(read_buf.filled().len()))),
+                Poll::Ready(Err(e)) => Poll::Ready(Err(VpnError::Network(e))),
+                Poll::Pending => Poll::Ready(Ok(None)),
+            }
+        })
+        .await
     }
 }
 

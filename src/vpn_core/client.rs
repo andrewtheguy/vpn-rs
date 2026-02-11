@@ -564,94 +564,113 @@ impl VpnClient {
         // Most allocations are small and served from thread-local caches, making them fast.
         let mut outbound_handle: tokio::task::JoinHandle<Option<String>> =
             tokio::spawn(async move {
+                const MAX_BATCH: usize = 32;
                 let mut read_buf = uninitialized_vec(buffer_size);
                 // SAFETY: Buffer is immediately overwritten by tun_reader.read(), and only
                 // the written portion (&read_slice[..n]) is accessed. Skips zeroing overhead.
                 let read_slice = unsafe { as_mut_byte_slice(&mut read_buf) };
                 loop {
-                    match tun_reader.read(read_slice).await {
-                        Ok(n) if n > 0 => {
-                            let raw_packet = &read_slice[..n];
-                            let (offload, packet) =
-                                match split_tun_frame(raw_packet, tun_reader.vnet_hdr_enabled()) {
-                                    Ok(parts) => parts,
-                                    Err(e) => {
-                                        log::warn!("Failed to parse TUN frame: {}", e);
-                                        continue;
-                                    }
-                                };
+                    // Blocking first read
+                    let first_n = match tun_reader.read(read_slice).await {
+                        Ok(n) if n > 0 => n,
+                        Ok(_) => continue,
+                        Err(e) => {
+                            log::error!("TUN read error: {}", e);
+                            return Some(format!("TUN read error: {}", e));
+                        }
+                    };
 
-                            if packet_has_local_iroh_udp_port(packet, &local_iroh_udp_ports) {
-                                log::debug!(
-                                    "Dropped self-encapsulated iroh UDP packet from TUN ({} bytes)",
-                                    n
-                                );
-                                continue;
-                            }
+                    let mut current_n = first_n;
+                    let mut batch_count = 0usize;
+                    loop {
+                        batch_count += 1;
+                        let raw_packet = &read_slice[..current_n];
+                        let (offload, packet) =
+                            match split_tun_frame(raw_packet, tun_reader.vnet_hdr_enabled()) {
+                                Ok(parts) => parts,
+                                Err(e) => {
+                                    log::warn!("Failed to parse TUN frame: {}", e);
+                                    break;
+                                }
+                            };
 
-                            if let Some(meta) = offload {
-                                if !negotiated_gso {
-                                    match segment_tcp_gso_packet(&meta, packet) {
-                                        Ok(segments) => {
-                                            for seg in segments {
-                                                let frame_size = 1 + 4 + 1 + seg.len();
-                                                let mut write_buf =
-                                                    BytesMut::with_capacity(frame_size);
-                                                if let Err(e) =
-                                                    frame_ip_packet_v2(&mut write_buf, None, &seg)
-                                                {
-                                                    log::warn!(
-                                                        "Failed to frame segmented packet: {}",
-                                                        e
-                                                    );
-                                                    continue;
-                                                }
-                                                if outbound_tx
-                                                    .send(write_buf.freeze())
-                                                    .await
-                                                    .is_err()
-                                                {
-                                                    log::warn!("Outbound channel closed");
-                                                    return None;
-                                                }
+                        if packet_has_local_iroh_udp_port(packet, &local_iroh_udp_ports) {
+                            log::debug!(
+                                "Dropped self-encapsulated iroh UDP packet from TUN ({} bytes)",
+                                current_n
+                            );
+                        } else if let Some(meta) = offload {
+                            if !negotiated_gso {
+                                match segment_tcp_gso_packet(&meta, packet) {
+                                    Ok(segments) => {
+                                        for seg in segments {
+                                            let frame_size = 1 + 4 + 1 + seg.len();
+                                            let mut write_buf =
+                                                BytesMut::with_capacity(frame_size);
+                                            if let Err(e) =
+                                                frame_ip_packet_v2(&mut write_buf, None, &seg)
+                                            {
+                                                log::warn!(
+                                                    "Failed to frame segmented packet: {}",
+                                                    e
+                                                );
+                                                continue;
+                                            }
+                                            if outbound_tx
+                                                .send(write_buf.freeze())
+                                                .await
+                                                .is_err()
+                                            {
+                                                log::warn!("Outbound channel closed");
+                                                return None;
                                             }
                                         }
-                                        Err(e) => {
-                                            log::warn!(
-                                                "Failed to fallback-segment TCP GSO packet: {}",
-                                                e
-                                            );
-                                        }
                                     }
-                                    continue;
+                                    Err(e) => {
+                                        log::warn!(
+                                            "Failed to fallback-segment TCP GSO packet: {}",
+                                            e
+                                        );
+                                    }
+                                }
+                            } else {
+                                // GSO negotiated, send with offload metadata
+                                let frame_size = 1
+                                    + 4
+                                    + 1
+                                    + crate::vpn_core::offload::VIRTIO_NET_HDR_LEN
+                                    + packet.len();
+                                let mut write_buf = BytesMut::with_capacity(frame_size);
+                                if let Err(e) =
+                                    frame_ip_packet_v2(&mut write_buf, Some(&meta), packet)
+                                {
+                                    log::warn!("Failed to frame packet: {}", e);
+                                } else if outbound_tx.send(write_buf.freeze()).await.is_err() {
+                                    log::warn!("Outbound channel closed");
+                                    return None;
                                 }
                             }
-
-                            // Allocate buffer sized to actual frame
-                            let frame_size = 1
-                                + 4
-                                + 1
-                                + offload
-                                    .map(|_| crate::vpn_core::offload::VIRTIO_NET_HDR_LEN)
-                                    .unwrap_or(0)
-                                + packet.len();
+                        } else {
+                            // No offload metadata
+                            let frame_size = 1 + 4 + 1 + packet.len();
                             let mut write_buf = BytesMut::with_capacity(frame_size);
                             if let Err(e) =
-                                frame_ip_packet_v2(&mut write_buf, offload.as_ref(), packet)
+                                frame_ip_packet_v2(&mut write_buf, None, packet)
                             {
                                 log::warn!("Failed to frame packet: {}", e);
-                                continue;
-                            }
-
-                            if outbound_tx.send(write_buf.freeze()).await.is_err() {
+                            } else if outbound_tx.send(write_buf.freeze()).await.is_err() {
                                 log::warn!("Outbound channel closed");
                                 return None;
                             }
                         }
-                        Ok(_) => {}
-                        Err(e) => {
-                            log::error!("TUN read error: {}", e);
-                            return Some(format!("TUN read error: {}", e));
+
+                        // Try to drain more packets non-blockingly
+                        if batch_count >= MAX_BATCH {
+                            break;
+                        }
+                        match tun_reader.try_read(read_slice).await {
+                            Ok(Some(n)) if n > 0 => current_n = n,
+                            _ => break,
                         }
                     }
                 }

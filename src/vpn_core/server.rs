@@ -1521,6 +1521,7 @@ impl VpnServer {
     ) -> VpnResult<()> {
         log::info!("TUN reader started");
 
+        const MAX_BATCH: usize = 32;
         let buffer_size = tun_reader.buffer_size();
         let mut buf = uninitialized_vec(buffer_size);
         // SAFETY: Buffer is immediately overwritten by tun_reader.read(), and only
@@ -1528,8 +1529,8 @@ impl VpnServer {
         let buf_slice = unsafe { as_mut_byte_slice(&mut buf) };
 
         loop {
-            // Read packet from TUN device
-            let n = match tun_reader.read(buf_slice).await {
+            // Blocking first read
+            let first_n = match tun_reader.read(buf_slice).await {
                 Ok(n) if n > 0 => n,
                 Ok(_) => continue,
                 Err(e) => {
@@ -1538,136 +1539,148 @@ impl VpnServer {
                 }
             };
 
-            let raw_frame = &buf_slice[..n];
-            self.stats.tun_packets_read.fetch_add(1, Ordering::Relaxed);
+            let mut current_n = first_n;
+            let mut batch_count = 0usize;
+            loop {
+                batch_count += 1;
+                let raw_frame = &buf_slice[..current_n];
+                self.stats.tun_packets_read.fetch_add(1, Ordering::Relaxed);
 
-            let (offload, packet_ref) =
-                match split_tun_frame(raw_frame, tun_reader.vnet_hdr_enabled()) {
-                    Ok(parts) => parts,
-                    Err(e) => {
-                        log::warn!("Failed to parse TUN frame from server device: {}", e);
-                        continue;
-                    }
-                };
-
-            if packet_has_local_iroh_udp_port(packet_ref, &local_iroh_udp_ports) {
-                log::debug!("Dropped self-encapsulated iroh UDP packet from server TUN");
-                continue;
-            }
-
-            // Extract destination IP from packet (IPv4 or IPv6)
-            // DashMap lookups are lock-free - no async await needed
-            let (endpoint_id, device_id) = match extract_dest_ip(packet_ref) {
-                Some(PacketIp::V4(dest_ip)) => {
-                    match self.ip_to_endpoint.get(&dest_ip).map(|r| *r) {
-                        Some(res) => res,
-                        None => {
-                            self.stats.packets_no_route.fetch_add(1, Ordering::Relaxed);
-                            continue;
+                let (offload, packet_ref) =
+                    match split_tun_frame(raw_frame, tun_reader.vnet_hdr_enabled()) {
+                        Ok(parts) => parts,
+                        Err(e) => {
+                            log::warn!("Failed to parse TUN frame from server device: {}", e);
+                            break;
                         }
-                    }
-                }
-                Some(PacketIp::V6(dest_ip)) => match self.ip6_to_endpoint.get(&dest_ip).map(|r| *r)
-                {
-                    Some(res) => res,
-                    None => {
-                        self.stats.packets_no_route.fetch_add(1, Ordering::Relaxed);
-                        continue;
-                    }
-                },
-                None => {
-                    self.stats
-                        .packets_unknown_version
-                        .fetch_add(1, Ordering::Relaxed);
-                    continue;
-                }
-            };
+                    };
 
-            let client_key = (endpoint_id, device_id);
+                if packet_has_local_iroh_udp_port(packet_ref, &local_iroh_udp_ports) {
+                    log::debug!("Dropped self-encapsulated iroh UDP packet from server TUN");
+                } else if let Some(dest) = extract_dest_ip(packet_ref) {
+                    let lookup_result = match dest {
+                        PacketIp::V4(dest_ip) => {
+                            self.ip_to_endpoint.get(&dest_ip).map(|r| *r)
+                        }
+                        PacketIp::V6(dest_ip) => {
+                            self.ip6_to_endpoint.get(&dest_ip).map(|r| *r)
+                        }
+                    };
 
-            // Get client's packet channel sender (DashMap lookup is lock-free)
-            let (packet_tx, client_gso_enabled, connection_gso_active) =
-                match self.clients.get(&client_key) {
-                    Some(c) => (
-                        c.packet_tx.clone(),
-                        c.client_gso_enabled,
-                        c.connection_gso_active,
-                    ),
-                    None => {
-                        self.stats.packets_no_route.fetch_add(1, Ordering::Relaxed);
-                        continue;
-                    }
-                };
+                    if let Some((endpoint_id, device_id)) = lookup_result {
+                        let client_key = (endpoint_id, device_id);
 
-            if let Some(meta) = offload {
-                if !connection_gso_active {
-                    log::trace!(
-                        "Falling back to software segmentation for {} dev {} (client_gso_enabled={})",
-                        endpoint_id,
-                        device_id,
-                        client_gso_enabled
-                    );
-                    match segment_tcp_gso_packet(&meta, packet_ref) {
-                        Ok(segments) => {
-                            for segment in segments {
-                                let mut write_buf =
-                                    BytesMut::with_capacity(1 + 4 + 1 + segment.len());
-                                if let Err(e) = frame_ip_packet_v2(&mut write_buf, None, &segment) {
+                        if let Some(c) = self.clients.get(&client_key) {
+                            let packet_tx = c.packet_tx.clone();
+                            let client_gso_enabled = c.client_gso_enabled;
+                            let connection_gso_active = c.connection_gso_active;
+                            drop(c);
+
+                            if let Some(meta) = offload {
+                                if !connection_gso_active {
+                                    log::trace!(
+                                        "Falling back to software segmentation for {} dev {} (client_gso_enabled={})",
+                                        endpoint_id,
+                                        device_id,
+                                        client_gso_enabled
+                                    );
+                                    match segment_tcp_gso_packet(&meta, packet_ref) {
+                                        Ok(segments) => {
+                                            for segment in segments {
+                                                let mut write_buf =
+                                                    BytesMut::with_capacity(1 + 4 + 1 + segment.len());
+                                                if let Err(e) = frame_ip_packet_v2(&mut write_buf, None, &segment) {
+                                                    log::warn!(
+                                                        "Failed to frame segmented packet for {} dev {}: {}",
+                                                        endpoint_id,
+                                                        device_id,
+                                                        e
+                                                    );
+                                                    continue;
+                                                }
+                                                Self::enqueue_client_frame(
+                                                    &packet_tx,
+                                                    write_buf.freeze(),
+                                                    &self.stats,
+                                                    self.config.drop_on_full,
+                                                )
+                                                .await;
+                                            }
+                                        }
+                                        Err(e) => {
+                                            log::warn!(
+                                                "Dropping packet with unsupported offload metadata for {} dev {}: {}",
+                                                endpoint_id,
+                                                device_id,
+                                                e
+                                            );
+                                        }
+                                    }
+                                } else {
+                                    let frame_size = 1
+                                        + 4
+                                        + 1
+                                        + crate::vpn_core::offload::VIRTIO_NET_HDR_LEN
+                                        + packet_ref.len();
+                                    let mut write_buf = BytesMut::with_capacity(frame_size);
+                                    if let Err(e) = frame_ip_packet_v2(&mut write_buf, Some(&meta), packet_ref) {
+                                        log::warn!(
+                                            "Failed to frame packet for {} dev {}: {}",
+                                            endpoint_id,
+                                            device_id,
+                                            e
+                                        );
+                                    } else {
+                                        Self::enqueue_client_frame(
+                                            &packet_tx,
+                                            write_buf.freeze(),
+                                            &self.stats,
+                                            self.config.drop_on_full,
+                                        )
+                                        .await;
+                                    }
+                                }
+                            } else {
+                                let frame_size = 1 + 4 + 1 + packet_ref.len();
+                                let mut write_buf = BytesMut::with_capacity(frame_size);
+                                if let Err(e) = frame_ip_packet_v2(&mut write_buf, offload.as_ref(), packet_ref) {
                                     log::warn!(
-                                        "Failed to frame segmented packet for {} dev {}: {}",
+                                        "Failed to frame packet for {} dev {}: {}",
                                         endpoint_id,
                                         device_id,
                                         e
                                     );
-                                    continue;
+                                } else {
+                                    Self::enqueue_client_frame(
+                                        &packet_tx,
+                                        write_buf.freeze(),
+                                        &self.stats,
+                                        self.config.drop_on_full,
+                                    )
+                                    .await;
                                 }
-                                Self::enqueue_client_frame(
-                                    &packet_tx,
-                                    write_buf.freeze(),
-                                    &self.stats,
-                                    self.config.drop_on_full,
-                                )
-                                .await;
                             }
+                        } else {
+                            self.stats.packets_no_route.fetch_add(1, Ordering::Relaxed);
                         }
-                        Err(e) => {
-                            log::warn!(
-                                "Dropping packet with unsupported offload metadata for {} dev {}: {}",
-                                endpoint_id,
-                                device_id,
-                                e
-                            );
-                        }
+                    } else {
+                        self.stats.packets_no_route.fetch_add(1, Ordering::Relaxed);
                     }
-                    continue;
+                } else {
+                    self.stats
+                        .packets_unknown_version
+                        .fetch_add(1, Ordering::Relaxed);
+                }
+
+                // Try to drain more packets non-blockingly
+                if batch_count >= MAX_BATCH {
+                    break;
+                }
+                match tun_reader.try_read(buf_slice).await {
+                    Ok(Some(n)) if n > 0 => current_n = n,
+                    _ => break,
                 }
             }
-
-            let frame_size = 1
-                + 4
-                + 1
-                + offload
-                    .map(|_| crate::vpn_core::offload::VIRTIO_NET_HDR_LEN)
-                    .unwrap_or(0)
-                + packet_ref.len();
-            let mut write_buf = BytesMut::with_capacity(frame_size);
-            if let Err(e) = frame_ip_packet_v2(&mut write_buf, offload.as_ref(), packet_ref) {
-                log::warn!(
-                    "Failed to frame packet for {} dev {}: {}",
-                    endpoint_id,
-                    device_id,
-                    e
-                );
-                continue;
-            }
-
-            Self::enqueue_client_frame(
-                &packet_tx,
-                write_buf.freeze(),
-                &self.stats,
-                self.config.drop_on_full,
-            )
-            .await;
         }
 
         Ok(())

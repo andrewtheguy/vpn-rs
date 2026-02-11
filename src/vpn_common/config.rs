@@ -158,9 +158,9 @@ pub fn validate_transport_tuning(tuning: &TransportTuning, section: &str) -> Res
 }
 
 fn validate_mtu(mtu: u16, section: &str) -> Result<()> {
-    if !(576..=1500).contains(&mtu) {
+    if !(576..=65535).contains(&mtu) {
         anyhow::bail!(
-            "[{}] MTU {} is out of range. Valid range: 576-1500",
+            "[{}] MTU {} is out of range. Valid range: 576-65535",
             section,
             mtu
         );

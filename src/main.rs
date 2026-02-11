@@ -70,8 +70,8 @@ enum Command {
         #[arg(short = 'n', long)]
         server_node_id: Option<String>,
 
-        /// MTU for VPN packets (default: 1440, valid range: 576-1500)
-        #[arg(long, value_parser = clap::value_parser!(u16).range(576..=1500))]
+        /// MTU for VPN packets (default: 1440, valid range: 576-65535)
+        #[arg(long, value_parser = clap::value_parser!(u16).range(576..=65535))]
         mtu: Option<u16>,
 
         /// Custom relay server URL(s) for failover
