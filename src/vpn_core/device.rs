@@ -573,7 +573,7 @@ async fn add_route_generic<R: Route>(tun_name: &str, route: &R) -> VpnResult<()>
     {
         let _ = (tun_name, route);
         Err(VpnError::tun_device(
-            "Route management not supported on this platform".into(),
+            "Route management not supported on this platform",
         ))
     }
 }
@@ -907,7 +907,7 @@ fn configure_tun_ipv6(tun_name: &str, addr: Ipv6Addr, prefix_len: u8) -> VpnResu
 #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 fn configure_tun_ipv6(_tun_name: &str, _addr: Ipv6Addr, _prefix_len: u8) -> VpnResult<()> {
     Err(VpnError::tun_device(
-        "IPv6 configuration not supported on this platform".into(),
+        "IPv6 configuration not supported on this platform",
     ))
 }
 
@@ -990,7 +990,7 @@ pub async fn add_route6_with_src(tun_name: &str, route: &Ipv6Net, src: Ipv6Addr)
     {
         let _ = (tun_name, route, src);
         Err(VpnError::tun_device(
-            "Route management not supported on this platform".into(),
+            "Route management not supported on this platform",
         ))
     }
 }
@@ -1308,7 +1308,7 @@ fn parse_macos_route_get(output: &str, peer_ip: IpAddr) -> VpnResult<BypassRoute
 async fn query_route_for_ip(ip: IpAddr) -> VpnResult<BypassRouteInfo> {
     // Windows route querying is more complex; for now return an error
     Err(VpnError::tun_device(
-        "Bypass route detection not yet implemented on Windows".into(),
+        "Bypass route detection not yet implemented on Windows",
     ))
 }
 
@@ -1316,7 +1316,7 @@ async fn query_route_for_ip(ip: IpAddr) -> VpnResult<BypassRouteInfo> {
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 async fn query_route_for_ip(ip: IpAddr) -> VpnResult<BypassRouteInfo> {
     Err(VpnError::tun_device(
-        "Bypass route detection not supported on this platform".into(),
+        "Bypass route detection not supported on this platform",
     ))
 }
 
@@ -1478,7 +1478,7 @@ async fn add_bypass_route_impl(info: &BypassRouteInfo) -> VpnResult<()> {
 #[cfg(target_os = "windows")]
 async fn add_bypass_route_impl(_info: &BypassRouteInfo) -> VpnResult<()> {
     Err(VpnError::tun_device(
-        "Bypass route not yet implemented on Windows".into(),
+        "Bypass route not yet implemented on Windows",
     ))
 }
 
@@ -1486,7 +1486,7 @@ async fn add_bypass_route_impl(_info: &BypassRouteInfo) -> VpnResult<()> {
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 async fn add_bypass_route_impl(_info: &BypassRouteInfo) -> VpnResult<()> {
     Err(VpnError::tun_device(
-        "Bypass route not supported on this platform".into(),
+        "Bypass route not supported on this platform",
     ))
 }
 
