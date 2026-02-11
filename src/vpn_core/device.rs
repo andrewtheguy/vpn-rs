@@ -374,6 +374,8 @@ impl Route for Ipv4Net {
 
     #[cfg(target_os = "windows")]
     fn windows_add_args(&self, tun_name: &str) -> Vec<String> {
+        // For TUN interfaces, we don't specify a nexthop - the route goes directly
+        // through the interface. On Windows, nexthop=0.0.0.0 can cause errors.
         vec![
             "interface".into(),
             "ipv4".into(),
@@ -381,7 +383,6 @@ impl Route for Ipv4Net {
             "route".into(),
             format!("prefix={}", self),
             format!("interface={}", tun_name),
-            "nexthop=0.0.0.0".into(),
             "store=active".into(),
         ]
     }
@@ -395,7 +396,6 @@ impl Route for Ipv4Net {
             "route".into(),
             format!("prefix={}", self),
             format!("interface={}", tun_name),
-            "nexthop=0.0.0.0".into(),
         ]
     }
 }
@@ -451,6 +451,8 @@ impl Route for Ipv6Net {
 
     #[cfg(target_os = "windows")]
     fn windows_add_args(&self, tun_name: &str) -> Vec<String> {
+        // For TUN interfaces, we don't specify a nexthop - the route goes directly
+        // through the interface. On Windows, nexthop=:: can cause errors.
         vec![
             "interface".into(),
             "ipv6".into(),
@@ -458,7 +460,6 @@ impl Route for Ipv6Net {
             "route".into(),
             format!("prefix={}", self),
             format!("interface={}", tun_name),
-            "nexthop=::".into(),
             "store=active".into(),
         ]
     }
@@ -472,7 +473,6 @@ impl Route for Ipv6Net {
             "route".into(),
             format!("prefix={}", self),
             format!("interface={}", tun_name),
-            "nexthop=::".into(),
         ]
     }
 }
@@ -496,14 +496,24 @@ fn handle_route_add_output<R: Route>(
         return Ok(());
     }
 
+    // On Windows, netsh outputs error messages to stdout, not stderr.
+    // Check both stdout and stderr for error messages.
     let stderr = String::from_utf8_lossy(&output.stderr);
-    let stderr_trimmed = stderr.trim();
-    if is_already_exists_error(&stderr) {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let combined = if stderr.trim().is_empty() {
+        stdout.trim().to_string()
+    } else if stdout.trim().is_empty() {
+        stderr.trim().to_string()
+    } else {
+        format!("{} {}", stderr.trim(), stdout.trim())
+    };
+
+    if is_already_exists_error(&stderr) || is_already_exists_error(&stdout) {
         log::warn!(
             "{} {} already exists (treating as success): {}",
             R::LABEL,
             route,
-            stderr_trimmed
+            combined
         );
         Ok(())
     } else {
@@ -511,7 +521,7 @@ fn handle_route_add_output<R: Route>(
             "Failed to add {} {}: {}",
             R::LABEL,
             route,
-            stderr_trimmed
+            combined
         )))
     }
 }
@@ -521,8 +531,15 @@ fn handle_route_remove_output<R: Route>(output: std::process::Output, route: &R,
     if output.status.success() {
         log::info!("Removed {} {} via {}", R::LABEL, route, tun_name);
     } else {
+        // On Windows, netsh outputs error messages to stdout, not stderr.
         let stderr = String::from_utf8_lossy(&output.stderr);
-        log::warn!("Failed to remove {} {}: {}", R::LABEL, route, stderr.trim());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let error_msg = if stderr.trim().is_empty() {
+            stdout.trim().to_string()
+        } else {
+            stderr.trim().to_string()
+        };
+        log::warn!("Failed to remove {} {}: {}", R::LABEL, route, error_msg);
     }
 }
 
@@ -682,8 +699,15 @@ fn remove_route_sync_generic<R: Route>(tun_name: &str, route: &R) {
                 log::info!("Removed {} {} via {}", R::LABEL, route, tun_name);
             }
             Ok(output) => {
+                // Windows netsh outputs error messages to stdout, not stderr
                 let stderr = String::from_utf8_lossy(&output.stderr);
-                log::warn!("Failed to remove {} {}: {}", R::LABEL, route, stderr);
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let error_msg = if stderr.trim().is_empty() {
+                    stdout.trim().to_string()
+                } else {
+                    stderr.trim().to_string()
+                };
+                log::warn!("Failed to remove {} {}: {}", R::LABEL, route, error_msg);
             }
             Err(e) => {
                 log::warn!("Failed to execute netsh route delete command: {}", e);
@@ -1086,6 +1110,7 @@ impl Drop for Route6Guard {
 
 /// Information about a bypass route for an ICE peer.
 #[derive(Debug)]
+#[allow(dead_code)] // peer_ip is used on Linux/macOS but not on Windows
 struct BypassRouteInfo {
     /// The peer address to bypass.
     peer_ip: IpAddr,
@@ -1141,6 +1166,7 @@ async fn query_route_for_ip(ip: IpAddr) -> VpnResult<BypassRouteInfo> {
 ///
 /// This validation prevents command injection when the gateway string
 /// is passed to route commands.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn is_valid_gateway_str(s: &str) -> bool {
     if s.is_empty() {
         return false;
@@ -1305,7 +1331,7 @@ fn parse_macos_route_get(output: &str, peer_ip: IpAddr) -> VpnResult<BypassRoute
 
 /// Query the current route for a given IP address (Windows stub).
 #[cfg(target_os = "windows")]
-async fn query_route_for_ip(ip: IpAddr) -> VpnResult<BypassRouteInfo> {
+async fn query_route_for_ip(_ip: IpAddr) -> VpnResult<BypassRouteInfo> {
     // Windows route querying is more complex; for now return an error
     Err(VpnError::tun_device(
         "Bypass route detection not yet implemented on Windows",
@@ -1314,7 +1340,7 @@ async fn query_route_for_ip(ip: IpAddr) -> VpnResult<BypassRouteInfo> {
 
 /// Query the current route for a given IP address (unsupported platforms).
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
-async fn query_route_for_ip(ip: IpAddr) -> VpnResult<BypassRouteInfo> {
+async fn query_route_for_ip(_ip: IpAddr) -> VpnResult<BypassRouteInfo> {
     Err(VpnError::tun_device(
         "Bypass route detection not supported on this platform",
     ))
@@ -1625,9 +1651,11 @@ fn remove_bypass_route_sync(
 
 #[cfg(test)]
 mod tests {
+    #[allow(unused_imports)]
     use super::*;
 
     #[test]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn test_valid_ipv4_gateway() {
         assert!(is_valid_gateway_str("192.168.1.1"));
         assert!(is_valid_gateway_str("10.0.0.1"));
@@ -1636,6 +1664,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn test_valid_ipv6_gateway() {
         assert!(is_valid_gateway_str("fe80::1"));
         assert!(is_valid_gateway_str("2001:db8::1"));
@@ -1645,6 +1674,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn test_valid_ipv6_with_scope() {
         assert!(is_valid_gateway_str("fe80::1%en0"));
         assert!(is_valid_gateway_str("fe80::1%eth0"));
@@ -1654,11 +1684,13 @@ mod tests {
     }
 
     #[test]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn test_invalid_gateway_empty() {
         assert!(!is_valid_gateway_str(""));
     }
 
     #[test]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn test_invalid_gateway_command_injection() {
         // Shell metacharacters
         assert!(!is_valid_gateway_str("192.168.1.1; rm -rf /"));
@@ -1674,6 +1706,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn test_invalid_gateway_bad_scope() {
         // Scope with invalid characters
         assert!(!is_valid_gateway_str("fe80::1%"));
@@ -1684,6 +1717,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn test_invalid_gateway_spaces() {
         assert!(!is_valid_gateway_str("192.168.1.1 "));
         assert!(!is_valid_gateway_str(" 192.168.1.1"));
