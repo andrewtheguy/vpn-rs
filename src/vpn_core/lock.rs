@@ -71,7 +71,7 @@ impl VpnLock {
         // Windows: use system temp directory (handles %TEMP%/%TMP% with proper fallbacks)
         #[cfg(target_os = "windows")]
         {
-            return std::env::temp_dir().join(LOCK_FILE_NAME);
+            std::env::temp_dir().join(LOCK_FILE_NAME)
         }
 
         // Unix: use XDG runtime dir on Linux, TMPDIR on macOS, or /tmp as fallback

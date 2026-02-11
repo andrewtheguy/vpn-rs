@@ -1110,6 +1110,7 @@ impl Drop for Route6Guard {
 
 /// Information about a bypass route for an ICE peer.
 #[derive(Debug)]
+#[allow(dead_code)] // peer_ip is used on Linux/macOS but not on Windows
 struct BypassRouteInfo {
     /// The peer address to bypass.
     peer_ip: IpAddr,
@@ -1165,6 +1166,7 @@ async fn query_route_for_ip(ip: IpAddr) -> VpnResult<BypassRouteInfo> {
 ///
 /// This validation prevents command injection when the gateway string
 /// is passed to route commands.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn is_valid_gateway_str(s: &str) -> bool {
     if s.is_empty() {
         return false;
@@ -1329,7 +1331,7 @@ fn parse_macos_route_get(output: &str, peer_ip: IpAddr) -> VpnResult<BypassRoute
 
 /// Query the current route for a given IP address (Windows stub).
 #[cfg(target_os = "windows")]
-async fn query_route_for_ip(ip: IpAddr) -> VpnResult<BypassRouteInfo> {
+async fn query_route_for_ip(_ip: IpAddr) -> VpnResult<BypassRouteInfo> {
     // Windows route querying is more complex; for now return an error
     Err(VpnError::tun_device(
         "Bypass route detection not yet implemented on Windows",
@@ -1338,7 +1340,7 @@ async fn query_route_for_ip(ip: IpAddr) -> VpnResult<BypassRouteInfo> {
 
 /// Query the current route for a given IP address (unsupported platforms).
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
-async fn query_route_for_ip(ip: IpAddr) -> VpnResult<BypassRouteInfo> {
+async fn query_route_for_ip(_ip: IpAddr) -> VpnResult<BypassRouteInfo> {
     Err(VpnError::tun_device(
         "Bypass route detection not supported on this platform",
     ))
@@ -1649,9 +1651,11 @@ fn remove_bypass_route_sync(
 
 #[cfg(test)]
 mod tests {
+    #[allow(unused_imports)]
     use super::*;
 
     #[test]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn test_valid_ipv4_gateway() {
         assert!(is_valid_gateway_str("192.168.1.1"));
         assert!(is_valid_gateway_str("10.0.0.1"));
@@ -1660,6 +1664,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn test_valid_ipv6_gateway() {
         assert!(is_valid_gateway_str("fe80::1"));
         assert!(is_valid_gateway_str("2001:db8::1"));
@@ -1669,6 +1674,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn test_valid_ipv6_with_scope() {
         assert!(is_valid_gateway_str("fe80::1%en0"));
         assert!(is_valid_gateway_str("fe80::1%eth0"));
@@ -1678,11 +1684,13 @@ mod tests {
     }
 
     #[test]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn test_invalid_gateway_empty() {
         assert!(!is_valid_gateway_str(""));
     }
 
     #[test]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn test_invalid_gateway_command_injection() {
         // Shell metacharacters
         assert!(!is_valid_gateway_str("192.168.1.1; rm -rf /"));
@@ -1698,6 +1706,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn test_invalid_gateway_bad_scope() {
         // Scope with invalid characters
         assert!(!is_valid_gateway_str("fe80::1%"));
@@ -1708,6 +1717,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn test_invalid_gateway_spaces() {
         assert!(!is_valid_gateway_str("192.168.1.1 "));
         assert!(!is_valid_gateway_str(" 192.168.1.1"));
