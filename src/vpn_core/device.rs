@@ -299,12 +299,14 @@ fn configure_linux_tun_offload(device: &AsyncDevice) -> TunOffloadStatus {
         ));
     }
 
-    let mut offload_flags: libc::c_uint = libc::TUN_F_CSUM | libc::TUN_F_TSO4 | libc::TUN_F_TSO6;
+    let offload_flags: libc::c_uint = libc::TUN_F_CSUM | libc::TUN_F_TSO4 | libc::TUN_F_TSO6;
     let offload_result = unsafe {
+        // TUNSETOFFLOAD takes the bitmask value directly as ioctl arg.
+        // Passing a pointer here sends the pointer address as flags.
         libc::ioctl(
             fd,
             libc::TUNSETOFFLOAD as _,
-            &mut offload_flags as *mut libc::c_uint,
+            libc::c_ulong::from(offload_flags),
         )
     };
     if offload_result < 0 {
