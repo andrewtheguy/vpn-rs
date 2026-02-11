@@ -32,6 +32,8 @@ pub struct TunConfig {
     pub prefix_len6: Option<u8>,
     /// MTU for the device (default: 1440, accounts for QUIC/TLS overhead).
     pub mtu: u16,
+    /// Attempt Linux TUN GSO/offload ioctls when creating the device.
+    pub enable_gso: bool,
 }
 
 /// Validate IPv6 prefix length (must be 0-128).
@@ -56,12 +58,19 @@ impl TunConfig {
             address6: None,
             prefix_len6: None,
             mtu: 1440,
+            enable_gso: true,
         }
     }
 
     /// Set the MTU.
     pub fn with_mtu(mut self, mtu: u16) -> Self {
         self.mtu = mtu;
+        self
+    }
+
+    /// Enable or disable Linux GSO/offload setup for this device.
+    pub fn with_gso(mut self, enable_gso: bool) -> Self {
+        self.enable_gso = enable_gso;
         self
     }
 
@@ -118,6 +127,7 @@ impl TunConfig {
             address6: Some(address6),
             prefix_len6: Some(prefix_len6),
             mtu,
+            enable_gso: true,
         })
     }
 }
@@ -199,7 +209,7 @@ impl TunDevice {
             .map_err(|e| VpnError::tun_device_with_source("Failed to get TUN name", e))?;
 
         #[cfg(target_os = "linux")]
-        let offload_status = configure_linux_tun_offload(&device);
+        let offload_status = configure_linux_tun_offload(&device, config.enable_gso);
         #[cfg(not(target_os = "linux"))]
         let offload_status =
             TunOffloadStatus::disabled("TUN offload not supported on this platform");
@@ -208,11 +218,12 @@ impl TunDevice {
         if offload_status.enabled {
             log::info!("Linux TUN GSO enabled on device {}", name);
         } else {
-            log::warn!(
-                "Linux TUN GSO disabled on device {}: {}",
-                name,
-                offload_status.reason.as_deref().unwrap_or("unknown reason")
-            );
+            let reason = offload_status.reason.as_deref().unwrap_or("unknown reason");
+            if config.enable_gso {
+                log::warn!("Linux TUN GSO disabled on device {}: {}", name, reason);
+            } else {
+                log::info!("Linux TUN GSO disabled on device {}: {}", name, reason);
+            }
         }
 
         log::info!("Created TUN device: {} with IP {}", name, config.address);
@@ -280,7 +291,7 @@ impl TunDevice {
 }
 
 #[cfg(target_os = "linux")]
-fn configure_linux_tun_offload(device: &AsyncDevice) -> TunOffloadStatus {
+fn configure_linux_tun_offload(device: &AsyncDevice, enable_gso: bool) -> TunOffloadStatus {
     let fd = device.as_raw_fd();
 
     let mut vnet_hdr_size: libc::c_int =
@@ -297,6 +308,10 @@ fn configure_linux_tun_offload(device: &AsyncDevice) -> TunOffloadStatus {
             "TUNSETVNETHDRSZ failed: {}",
             std::io::Error::last_os_error()
         ));
+    }
+
+    if !enable_gso {
+        return TunOffloadStatus::disabled("disabled by peer capability");
     }
 
     let offload_flags: libc::c_uint = libc::TUN_F_CSUM | libc::TUN_F_TSO4 | libc::TUN_F_TSO6;

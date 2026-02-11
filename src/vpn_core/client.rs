@@ -252,21 +252,27 @@ impl VpnClient {
 
         let local_gso_enabled = tun_device.offload_status().enabled;
         let negotiated_gso = local_gso_enabled && server_info.server_gso_enabled;
+        // Data-channel GSO metadata is supported even when local TUN offload is not,
+        // because inbound metadata can be fallback-segmented in software.
+        let advertised_gso = true;
         log::info!(
-            "GSO status (client): local={}, server={}, negotiated={}",
+            "GSO status (client): local={}, server={}, negotiated={}, advertised={}",
             local_gso_enabled,
             server_info.server_gso_enabled,
-            negotiated_gso
+            negotiated_gso,
+            advertised_gso
         );
         if !local_gso_enabled {
-            log::warn!(
-                "Local TUN GSO disabled: {}",
-                tun_device
-                    .offload_status()
-                    .reason
-                    .as_deref()
-                    .unwrap_or("unknown reason")
-            );
+            let reason = tun_device
+                .offload_status()
+                .reason
+                .as_deref()
+                .unwrap_or("unknown reason");
+            if server_info.server_gso_enabled {
+                log::warn!("Local TUN GSO disabled: {}", reason);
+            } else {
+                log::info!("Local TUN GSO disabled: {}", reason);
+            }
         }
 
         // Capabilities must be the first data-stream message in protocol v2.
@@ -274,7 +280,7 @@ impl VpnClient {
         frame_capabilities_message(
             &mut capabilities_buf,
             CapabilitiesMessage {
-                gso_enabled: local_gso_enabled,
+                gso_enabled: advertised_gso,
             },
         );
         data_send
@@ -404,7 +410,7 @@ impl VpnClient {
         // Build TUN config based on what the server provided.
         // Match includes all fields explicitly to be defensive against future validation changes
         // in perform_handshake and avoid implicit assumptions about grouped fields.
-        let tun_config = match (
+        let mut tun_config = match (
             server_info.assigned_ip,
             server_info.network,
             server_info.server_ip,
@@ -433,6 +439,7 @@ impl VpnClient {
                 ))
             }
         };
+        tun_config = tun_config.with_gso(server_info.server_gso_enabled);
 
         TunDevice::create(tun_config)
     }

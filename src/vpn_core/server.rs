@@ -938,6 +938,11 @@ impl VpnServer {
             VpnError::Signaling(format!("Failed to read capabilities payload: {}", e))
         })?;
         let caps = CapabilitiesMessage::decode_payload(caps_payload[0]);
+        log::debug!(
+            "Client {} capabilities payload: 0x{:02x}",
+            remote_id,
+            caps_payload[0]
+        );
         let connection_gso_active = self.tun_offload_status.enabled && caps.gso_enabled;
         log::info!(
             "Client {} GSO status: server_local={}, client_reported={}, active={}",
