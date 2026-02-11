@@ -35,23 +35,14 @@ pub struct VirtioNetHdr {
 impl VirtioNetHdr {
     /// Parse a 10-byte virtio header.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, String> {
-        if bytes.len() != VIRTIO_NET_HDR_LEN {
-            return Err(format!(
+        let arr: [u8; VIRTIO_NET_HDR_LEN] = bytes.try_into().map_err(|_| {
+            format!(
                 "virtio_net_hdr must be {} bytes, got {}",
                 VIRTIO_NET_HDR_LEN,
                 bytes.len()
-            ));
-        }
-
-        Ok(Self {
-            flags: bytes[0],
-            gso_type: bytes[1],
-            hdr_len: u16::from_le_bytes([bytes[2], bytes[3]]),
-            gso_size: u16::from_le_bytes([bytes[4], bytes[5]]),
-            csum_start: u16::from_le_bytes([bytes[6], bytes[7]]),
-            csum_offset: u16::from_le_bytes([bytes[8], bytes[9]]),
-            num_buffers: 0,
-        })
+            )
+        })?;
+        Ok(Self::from(arr))
     }
 
     /// Serialize a virtio header to its 10-byte wire form.
@@ -272,7 +263,13 @@ pub fn segment_tcp_gso_packet(
         segment.extend_from_slice(chunk);
 
         // Sequence number increments by payload bytes emitted in previous segments.
-        let seq = base_seq.wrapping_add(chunk_offset as u32);
+        let chunk_offset_u32 = u32::try_from(chunk_offset).map_err(|_| {
+            format!(
+                "TCP GSO payload offset {} exceeds u32 range for sequence number",
+                chunk_offset
+            )
+        })?;
+        let seq = base_seq.wrapping_add(chunk_offset_u32);
         segment[tcp_offset + 4..tcp_offset + 8].copy_from_slice(&seq.to_be_bytes());
 
         // FIN/PSH belong only on the last segment.
