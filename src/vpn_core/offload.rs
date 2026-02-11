@@ -124,6 +124,13 @@ pub fn split_tun_frame(
     }
 
     if offload.gso_type == VIRTIO_NET_HDR_GSO_NONE {
+        // Keep checksum-offload metadata (e.g. NEEDS_CSUM) so the peer can
+        // preserve/finalize transport checksums correctly on write.
+        let has_checksum_metadata =
+            offload.flags != 0 || offload.csum_start != 0 || offload.csum_offset != 0;
+        if has_checksum_metadata {
+            return Ok((Some(offload), ip_packet));
+        }
         return Ok((None, ip_packet));
     }
 
@@ -509,6 +516,25 @@ mod tests {
         let (offload, payload) = split_tun_frame(&frame, true).expect("split frame");
         assert!(offload.is_none());
         assert_eq!(payload, &[0x45, 0, 0, 20]);
+    }
+
+    #[test]
+    fn test_split_tun_frame_preserves_checksum_only_metadata() {
+        let offload = VirtioNetHdr {
+            flags: 1,
+            gso_type: VIRTIO_NET_HDR_GSO_NONE,
+            hdr_len: 40,
+            gso_size: 0,
+            csum_start: 20,
+            csum_offset: 16,
+            num_buffers: 0,
+        };
+        let mut frame = offload.to_bytes().to_vec();
+        frame.extend_from_slice(&[0x45, 0, 0, 20, 0, 0, 0, 0]);
+
+        let (parsed_offload, payload) = split_tun_frame(&frame, true).expect("split frame");
+        assert_eq!(parsed_offload, Some(offload));
+        assert_eq!(payload, &[0x45, 0, 0, 20, 0, 0, 0, 0]);
     }
 
     #[test]
