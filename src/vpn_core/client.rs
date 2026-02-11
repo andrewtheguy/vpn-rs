@@ -13,9 +13,11 @@ use crate::vpn_core::device::{
 };
 use crate::vpn_core::error::{VpnError, VpnResult};
 use crate::vpn_core::lock::VpnLock;
+use crate::vpn_core::offload::{segment_tcp_gso_packet, split_tun_frame};
 use crate::vpn_core::signaling::{
-    frame_ip_packet, read_message, write_message, DataMessageType, VpnHandshake,
-    VpnHandshakeResponse, HEARTBEAT_PING_BYTE, MAX_HANDSHAKE_SIZE, VPN_ALPN,
+    frame_capabilities_message, frame_ip_packet_v2, parse_ip_packet_v2, read_message,
+    write_message, CapabilitiesMessage, DataMessageType, VpnHandshake, VpnHandshakeResponse,
+    HEARTBEAT_PING_BYTE, MAX_HANDSHAKE_SIZE, VPN_ALPN,
 };
 use bytes::{Bytes, BytesMut};
 use futures::StreamExt;
@@ -32,8 +34,8 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
-/// Maximum IP packet size (MTU + overhead).
-const MAX_IP_PACKET_SIZE: usize = 65536;
+/// Maximum data-channel IP frame size (IP packet + optional offload metadata).
+const MAX_IP_PACKET_SIZE: usize = 65536 + 64;
 
 /// Heartbeat ping interval (how often client sends ping).
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
@@ -87,6 +89,8 @@ pub struct ServerInfo {
     pub network6: Option<Ipv6Net>,
     /// Server's IPv6 VPN address (gateway). None for IPv4-only mode.
     pub server_ip6: Option<Ipv6Addr>,
+    /// Whether server-side Linux TUN GSO is enabled.
+    pub server_gso_enabled: bool,
 }
 
 impl VpnClient {
@@ -190,6 +194,7 @@ impl VpnClient {
         } else {
             log::info!("  Mode: IPv4-only");
         }
+        log::info!("  Server GSO enabled: {}", server_info.server_gso_enabled);
 
         // Create TUN device
         let tun_device = self.create_tun_device(&server_info)?;
@@ -238,12 +243,44 @@ impl VpnClient {
             };
 
         // Open data stream for IP packets
-        let (data_send, data_recv) = connection
+        let (mut data_send, data_recv) = connection
             .open_bi()
             .await
             .map_err(|e| VpnError::Signaling(format!("Failed to open data stream: {}", e)))?;
 
         log::info!("VPN data stream opened");
+
+        let local_gso_enabled = tun_device.offload_status().enabled;
+        let negotiated_gso = local_gso_enabled && server_info.server_gso_enabled;
+        log::info!(
+            "GSO status (client): local={}, server={}, negotiated={}",
+            local_gso_enabled,
+            server_info.server_gso_enabled,
+            negotiated_gso
+        );
+        if !local_gso_enabled {
+            log::warn!(
+                "Local TUN GSO disabled: {}",
+                tun_device
+                    .offload_status()
+                    .reason
+                    .as_deref()
+                    .unwrap_or("unknown reason")
+            );
+        }
+
+        // Capabilities must be the first data-stream message in protocol v2.
+        let mut capabilities_buf = BytesMut::with_capacity(2);
+        frame_capabilities_message(
+            &mut capabilities_buf,
+            CapabilitiesMessage {
+                gso_enabled: local_gso_enabled,
+            },
+        );
+        data_send
+            .write_all(&capabilities_buf)
+            .await
+            .map_err(|e| VpnError::Signaling(format!("Failed to send capabilities: {}", e)))?;
 
         log::info!("VPN tunnel established!");
         log::info!("  TUN device: {}", tun_device.name());
@@ -270,6 +307,7 @@ impl VpnClient {
             tun_device,
             data_send,
             data_recv,
+            server_info.server_gso_enabled,
             bypass_route_task,
             local_iroh_udp_ports,
         )
@@ -357,6 +395,7 @@ impl VpnClient {
             assigned_ip6,
             network6,
             server_ip6,
+            server_gso_enabled: response.server_gso_enabled,
         })
     }
 
@@ -468,11 +507,15 @@ impl VpnClient {
         tun_device: TunDevice,
         data_send: SendStream,
         data_recv: RecvStream,
+        server_gso_enabled: bool,
         bypass_route_task: Option<JoinHandle<()>>,
         local_iroh_udp_ports: Arc<HashSet<u16>>,
     ) -> VpnResult<()> {
         // Split TUN device
         let (mut tun_reader, mut tun_writer) = tun_device.split()?;
+        let local_gso_enabled = tun_reader.offload_status().enabled;
+        debug_assert_eq!(local_gso_enabled, tun_writer.offload_status().enabled);
+        let negotiated_gso = local_gso_enabled && server_gso_enabled;
         let buffer_size = tun_reader.buffer_size();
 
         // Create channel for outbound data to decouple packet production from stream writes.
@@ -524,7 +567,15 @@ impl VpnClient {
                 loop {
                     match tun_reader.read(read_slice).await {
                         Ok(n) if n > 0 => {
-                            let packet = &read_slice[..n];
+                            let raw_packet = &read_slice[..n];
+                            let (offload, packet) =
+                                match split_tun_frame(raw_packet, tun_reader.vnet_hdr_enabled()) {
+                                    Ok(parts) => parts,
+                                    Err(e) => {
+                                        log::warn!("Failed to parse TUN frame: {}", e);
+                                        continue;
+                                    }
+                                };
 
                             if packet_has_local_iroh_udp_port(packet, &local_iroh_udp_ports) {
                                 log::debug!(
@@ -534,24 +585,63 @@ impl VpnClient {
                                 continue;
                             }
 
-                            // Allocate buffer sized to actual packet (1 byte type + 4 byte length + packet).
-                            // Avoids over-allocation for small packets; allocator serves from thread-local caches.
-                            let frame_size = 1 + 4 + n;
-                            let mut write_buf = BytesMut::with_capacity(frame_size);
+                            if let Some(meta) = offload {
+                                if !negotiated_gso {
+                                    match segment_tcp_gso_packet(&meta, packet) {
+                                        Ok(segments) => {
+                                            for seg in segments {
+                                                let frame_size = 1 + 4 + 1 + seg.len();
+                                                let mut write_buf =
+                                                    BytesMut::with_capacity(frame_size);
+                                                if let Err(e) =
+                                                    frame_ip_packet_v2(&mut write_buf, None, &seg)
+                                                {
+                                                    log::warn!(
+                                                        "Failed to frame segmented packet: {}",
+                                                        e
+                                                    );
+                                                    continue;
+                                                }
+                                                if outbound_tx
+                                                    .send(write_buf.freeze())
+                                                    .await
+                                                    .is_err()
+                                                {
+                                                    log::warn!("Outbound channel closed");
+                                                    return None;
+                                                }
+                                            }
+                                        }
+                                        Err(e) => {
+                                            log::warn!(
+                                                "Failed to fallback-segment TCP GSO packet: {}",
+                                                e
+                                            );
+                                        }
+                                    }
+                                    continue;
+                                }
+                            }
 
-                            // Frame IP packet for transmission (writes into write_buf)
-                            if let Err(e) = frame_ip_packet(&mut write_buf, packet) {
+                            // Allocate buffer sized to actual frame
+                            let frame_size = 1
+                                + 4
+                                + 1
+                                + offload
+                                    .map(|_| crate::vpn_core::offload::VIRTIO_NET_HDR_LEN)
+                                    .unwrap_or(0)
+                                + packet.len();
+                            let mut write_buf = BytesMut::with_capacity(frame_size);
+                            if let Err(e) =
+                                frame_ip_packet_v2(&mut write_buf, offload.as_ref(), packet)
+                            {
                                 log::warn!("Failed to frame packet: {}", e);
                                 continue;
                             }
 
-                            // Freeze into Bytes for send to writer task.
-                            let bytes = write_buf.freeze();
-
-                            // Send via channel to writer task (blocking send to apply backpressure)
-                            if outbound_tx.send(bytes).await.is_err() {
+                            if outbound_tx.send(write_buf.freeze()).await.is_err() {
                                 log::warn!("Outbound channel closed");
-                                return None; // Normal exit, channel closed
+                                return None;
                             }
                         }
                         Ok(_) => {}
@@ -617,34 +707,75 @@ impl VpnClient {
                         DataMessageType::IpPacket => {
                             // Continue to read IP packet below
                         }
+                        DataMessageType::Capabilities => {
+                            // Capabilities are exchanged once at stream setup and should not
+                            // appear later in steady-state traffic.
+                            log::trace!("Unexpected capabilities message received");
+                            continue;
+                        }
                     }
 
-                    // Read length prefix for IP packet
+                    // Read frame length for IP packet
                     match data_recv.read_exact(&mut len_buf).await {
                         Ok(()) => {}
                         Err(e) => {
-                            log::error!("Failed to read IP packet length: {}", e);
+                            log::error!("Failed to read IP frame length: {}", e);
                             return Some(format!("QUIC read error: {}", e));
                         }
                     }
                     let len = u32::from_be_bytes(len_buf) as usize;
                     if len > MAX_IP_PACKET_SIZE {
-                        log::error!("IP packet too large: {}", len);
-                        return Some(format!("IP packet too large: {}", len));
+                        log::error!("IP frame too large: {}", len);
+                        return Some(format!("IP frame too large: {}", len));
                     }
 
-                    // Read packet data
+                    // Read frame payload
                     match data_recv.read_exact(&mut data_slice[..len]).await {
                         Ok(()) => {}
                         Err(e) => {
-                            log::error!("Failed to read IP packet: {}", e);
+                            log::error!("Failed to read IP frame: {}", e);
                             return Some(format!("QUIC read error: {}", e));
                         }
                     }
 
-                    let packet = &data_slice[..len];
-                    // Directly write to TUN (packet is already decrypted/raw IP)
-                    if let Err(e) = tun_writer.write_all(packet).await {
+                    let frame = &data_slice[..len];
+                    let (offload, packet) = match parse_ip_packet_v2(frame) {
+                        Ok(parts) => parts,
+                        Err(e) => {
+                            log::warn!("Invalid IP frame from peer: {}", e);
+                            continue;
+                        }
+                    };
+
+                    let write_result = if let Some(meta) = offload {
+                        if !local_gso_enabled {
+                            match segment_tcp_gso_packet(&meta, packet) {
+                                Ok(segments) => {
+                                    let mut result = Ok(());
+                                    for seg in segments {
+                                        if let Err(e) = tun_writer.write_all(&seg).await {
+                                            result = Err(e);
+                                            break;
+                                        }
+                                    }
+                                    result
+                                }
+                                Err(e) => {
+                                    log::warn!(
+                                        "Dropping packet with unsupported offload metadata: {}",
+                                        e
+                                    );
+                                    continue;
+                                }
+                            }
+                        } else {
+                            tun_writer.write_packet(Some(&meta), packet).await
+                        }
+                    } else {
+                        tun_writer.write_all(packet).await
+                    };
+
+                    if let Err(e) = write_result {
                         consecutive_tun_failures += 1;
                         if consecutive_tun_failures >= MAX_TUN_WRITE_FAILURES {
                             log::error!(

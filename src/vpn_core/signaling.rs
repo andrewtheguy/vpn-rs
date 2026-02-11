@@ -3,19 +3,24 @@
 //! This module defines the handshake messages exchanged between VPN
 //! client and server to establish IP-over-QUIC tunnels. Clients identify
 //! via a random `device_id` (allowing multiple sessions per iroh endpoint),
-//! and the server responds with assigned IP addresses and network configuration.
+//! and the server responds with assigned IP addresses, route metadata, and
+//! connection capabilities.
 
 use crate::vpn_core::error::{VpnError, VpnResult};
+use crate::vpn_core::offload::{VirtioNetHdr, VIRTIO_NET_HDR_LEN};
 use bytes::{BufMut, BytesMut};
 use ipnet::{Ipv4Net, Ipv6Net};
 use serde::{Deserialize, Serialize};
 use std::net::{Ipv4Addr, Ipv6Addr};
 
 /// VPN protocol version.
-pub const VPN_PROTOCOL_VERSION: u16 = 1;
+pub const VPN_PROTOCOL_VERSION: u16 = 2;
 
 /// ALPN identifier for VPN mode.
-pub const VPN_ALPN: &[u8] = b"vpn-rs/1";
+pub const VPN_ALPN: &[u8] = b"vpn-rs/2";
+
+/// Bit flag indicating support for GSO metadata on data-stream packets.
+const CAPABILITIES_GSO_BIT: u8 = 1 << 0;
 
 /// VPN handshake request from client to server.
 ///
@@ -55,8 +60,17 @@ impl VpnHandshake {
 
     /// Decode from bytes.
     pub fn decode(data: &[u8]) -> VpnResult<Self> {
-        serde_json::from_slice(data)
-            .map_err(|e| VpnError::Signaling(format!("Failed to decode handshake: {}", e)))
+        let handshake: Self = serde_json::from_slice(data)
+            .map_err(|e| VpnError::Signaling(format!("Failed to decode handshake: {}", e)))?;
+
+        if handshake.version != VPN_PROTOCOL_VERSION {
+            return Err(VpnError::Signaling(format!(
+                "Unsupported handshake protocol version: {} (expected {})",
+                handshake.version, VPN_PROTOCOL_VERSION
+            )));
+        }
+
+        Ok(handshake)
     }
 }
 
@@ -67,6 +81,8 @@ pub struct VpnHandshakeResponse {
     pub version: u16,
     /// Whether the handshake was accepted.
     pub accepted: bool,
+    /// Server-local TUN GSO/offload status.
+    pub server_gso_enabled: bool,
     /// Assigned VPN IP address for the client (IPv4).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assigned_ip: Option<Ipv4Addr>,
@@ -99,10 +115,16 @@ impl VpnHandshakeResponse {
     }
 
     /// Create an accepted response (IPv4 only).
-    pub fn accepted(assigned_ip: Ipv4Addr, network: Ipv4Net, server_ip: Ipv4Addr) -> Self {
+    pub fn accepted(
+        assigned_ip: Ipv4Addr,
+        network: Ipv4Net,
+        server_ip: Ipv4Addr,
+        server_gso_enabled: bool,
+    ) -> Self {
         Self {
             version: VPN_PROTOCOL_VERSION,
             accepted: true,
+            server_gso_enabled,
             assigned_ip: Some(assigned_ip),
             network: Some(network),
             server_ip: Some(server_ip),
@@ -121,10 +143,12 @@ impl VpnHandshakeResponse {
         assigned_ip6: Ipv6Addr,
         network6: Ipv6Net,
         server_ip6: Ipv6Addr,
+        server_gso_enabled: bool,
     ) -> Self {
         Self {
             version: VPN_PROTOCOL_VERSION,
             accepted: true,
+            server_gso_enabled,
             assigned_ip: Some(assigned_ip),
             network: Some(network),
             server_ip: Some(server_ip),
@@ -142,10 +166,12 @@ impl VpnHandshakeResponse {
         assigned_ip6: Ipv6Addr,
         network6: Ipv6Net,
         server_ip6: Ipv6Addr,
+        server_gso_enabled: bool,
     ) -> Self {
         Self {
             version: VPN_PROTOCOL_VERSION,
             accepted: true,
+            server_gso_enabled,
             assigned_ip: None,
             network: None,
             server_ip: None,
@@ -157,10 +183,11 @@ impl VpnHandshakeResponse {
     }
 
     /// Create a rejected response.
-    pub fn rejected(reason: impl Into<String>) -> Self {
+    pub fn rejected(reason: impl Into<String>, server_gso_enabled: bool) -> Self {
         Self {
             version: VPN_PROTOCOL_VERSION,
             accepted: false,
+            server_gso_enabled,
             assigned_ip: None,
             network: None,
             server_ip: None,
@@ -186,12 +213,45 @@ impl VpnHandshakeResponse {
     pub fn decode(data: &[u8]) -> VpnResult<Self> {
         let response: Self = serde_json::from_slice(data)
             .map_err(|e| VpnError::Signaling(format!("Failed to decode response: {}", e)))?;
+
+        if response.version != VPN_PROTOCOL_VERSION {
+            return Err(VpnError::Signaling(format!(
+                "Unsupported handshake response protocol version: {} (expected {})",
+                response.version, VPN_PROTOCOL_VERSION
+            )));
+        }
+
         if !response.is_valid() {
             return Err(VpnError::Signaling(
                 "Invalid handshake response: accepted response must include assigned_ip or assigned_ip6".into(),
             ));
         }
         Ok(response)
+    }
+}
+
+/// Data-channel capabilities exchanged after handshake and before IP packet flow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct CapabilitiesMessage {
+    /// Whether this endpoint can send/receive GSO metadata on data packets.
+    pub gso_enabled: bool,
+}
+
+impl CapabilitiesMessage {
+    /// Convert capability flags to the compact byte payload.
+    pub fn encode_payload(self) -> u8 {
+        let mut payload = 0u8;
+        if self.gso_enabled {
+            payload |= CAPABILITIES_GSO_BIT;
+        }
+        payload
+    }
+
+    /// Parse capability flags from the compact byte payload.
+    pub fn decode_payload(payload: u8) -> Self {
+        Self {
+            gso_enabled: (payload & CAPABILITIES_GSO_BIT) != 0,
+        }
     }
 }
 
@@ -235,17 +295,20 @@ pub const MAX_HANDSHAKE_SIZE: usize = 16 * 1024;
 ///
 /// The data channel uses a simple framing protocol:
 /// - First byte: message type
-/// - For IP packets: 4-byte big-endian length + packet data
+/// - For IP packets: 4-byte big-endian frame length + frame payload
+/// - For capabilities: one-byte payload (flags)
 /// - For heartbeat: no additional payload
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum DataMessageType {
-    /// IP packet (followed by length-prefixed data).
+    /// IP packet v2 frame.
     IpPacket = 0x00,
     /// Heartbeat ping (client -> server).
     HeartbeatPing = 0x01,
     /// Heartbeat pong (server -> client).
     HeartbeatPong = 0x02,
+    /// Capability negotiation message.
+    Capabilities = 0x03,
 }
 
 impl DataMessageType {
@@ -255,6 +318,7 @@ impl DataMessageType {
             0x00 => Some(Self::IpPacket),
             0x01 => Some(Self::HeartbeatPing),
             0x02 => Some(Self::HeartbeatPong),
+            0x03 => Some(Self::Capabilities),
             _ => None,
         }
     }
@@ -295,28 +359,118 @@ impl From<DataMessageType> for u8 {
     }
 }
 
+/// Frame a capabilities message for transmission on the data channel.
+#[inline]
+pub fn frame_capabilities_message(buf: &mut BytesMut, caps: CapabilitiesMessage) {
+    buf.clear();
+    buf.reserve(2);
+    buf.put_u8(DataMessageType::Capabilities.as_byte());
+    buf.put_u8(caps.encode_payload());
+}
+
 /// Frame an IP packet for transmission on the data channel.
 ///
-/// Builds a buffer with the format: `[type: 0x00] [length: 4 bytes BE] [data: N bytes]`
+/// v2 layout:
+/// `[type: 0x00] [frame_len: 4 bytes BE] [offload_len: 1 byte] [offload: N bytes] [ip_packet]`
 ///
-/// This is the standard framing for IP packets on the multiplexed data stream.
-/// The buffer is cleared and filled with the framed packet, then can be passed to `write_all()`.
-///
-/// # Arguments
-/// * `buf` - Reusable buffer to write into (cleared and resized as needed)
-/// * `data` - The IP packet payload to frame
-///
-/// Returns an error if the packet exceeds `u32::MAX` bytes (matching `write_message` behavior).
+/// `offload_len` is either:
+/// - `0` (no offload metadata)
+/// - `10` (`virtio_net_hdr` metadata)
 #[inline]
-pub fn frame_ip_packet(buf: &mut BytesMut, data: &[u8]) -> VpnResult<()> {
-    let len = u32::try_from(data.len())
-        .map_err(|_| VpnError::Signaling(format!("Packet too large: {} bytes", data.len())))?;
+pub fn frame_ip_packet_v2(
+    buf: &mut BytesMut,
+    offload: Option<&VirtioNetHdr>,
+    ip_packet: &[u8],
+) -> VpnResult<()> {
+    if ip_packet.is_empty() {
+        return Err(VpnError::Signaling(
+            "Cannot frame empty IP packet".to_string(),
+        ));
+    }
+
+    let offload_len: u8 = if offload.is_some() {
+        VIRTIO_NET_HDR_LEN as u8
+    } else {
+        0
+    };
+    let frame_len = 1 + usize::from(offload_len) + ip_packet.len();
+    let frame_len_u32 = u32::try_from(frame_len)
+        .map_err(|_| VpnError::Signaling(format!("Packet frame too large: {}", frame_len)))?;
+
     buf.clear();
-    buf.reserve(1 + 4 + data.len());
+    buf.reserve(1 + 4 + frame_len);
     buf.put_u8(DataMessageType::IpPacket.as_byte());
-    buf.put_slice(&len.to_be_bytes());
-    buf.put_slice(data);
+    buf.put_slice(&frame_len_u32.to_be_bytes());
+    buf.put_u8(offload_len);
+    if let Some(hdr) = offload {
+        buf.put_slice(&hdr.to_bytes());
+    }
+    buf.put_slice(ip_packet);
     Ok(())
+}
+
+/// Parse a full v2 IP packet message including type and frame length fields.
+#[inline]
+#[cfg(test)]
+pub fn parse_ip_packet_message_v2(message: &[u8]) -> VpnResult<(Option<VirtioNetHdr>, &[u8])> {
+    if message.len() < 5 {
+        return Err(VpnError::Signaling(format!(
+            "IP message too short: {} bytes",
+            message.len()
+        )));
+    }
+    if message[0] != DataMessageType::IpPacket.as_byte() {
+        return Err(VpnError::Signaling(format!(
+            "Unexpected message type 0x{:02x} for IP packet",
+            message[0]
+        )));
+    }
+
+    let frame_len = u32::from_be_bytes([message[1], message[2], message[3], message[4]]) as usize;
+    if message.len() != 5 + frame_len {
+        return Err(VpnError::Signaling(format!(
+            "Malformed IP frame length: header={}, actual={}",
+            frame_len,
+            message.len().saturating_sub(5)
+        )));
+    }
+
+    parse_ip_packet_v2(&message[5..])
+}
+
+/// Parse a v2 IP packet frame payload (without leading type and frame_len fields).
+#[inline]
+pub fn parse_ip_packet_v2(frame_payload: &[u8]) -> VpnResult<(Option<VirtioNetHdr>, &[u8])> {
+    if frame_payload.is_empty() {
+        return Err(VpnError::Signaling("Empty IP frame payload".to_string()));
+    }
+
+    let offload_len = usize::from(frame_payload[0]);
+    if offload_len != 0 && offload_len != VIRTIO_NET_HDR_LEN {
+        return Err(VpnError::Signaling(format!(
+            "Invalid offload metadata length {} (expected 0 or {})",
+            offload_len, VIRTIO_NET_HDR_LEN
+        )));
+    }
+
+    let offload_end = 1 + offload_len;
+    if frame_payload.len() <= offload_end {
+        return Err(VpnError::Signaling(format!(
+            "IP frame payload too short: {} bytes",
+            frame_payload.len()
+        )));
+    }
+
+    let offload = if offload_len == 0 {
+        None
+    } else {
+        Some(
+            VirtioNetHdr::from_bytes(&frame_payload[1..offload_end])
+                .map_err(|e| VpnError::Signaling(format!("Invalid offload metadata: {}", e)))?,
+        )
+    };
+
+    Ok((offload, &frame_payload[offload_end..]))
 }
 
 #[cfg(test)]
@@ -326,34 +480,54 @@ mod tests {
     #[test]
     fn test_handshake_roundtrip() {
         let handshake = VpnHandshake::new(12345).with_auth_token("test-token");
-        let encoded = handshake.encode().unwrap();
-        let decoded = VpnHandshake::decode(&encoded).unwrap();
+        let encoded = handshake.encode().expect("encode handshake");
+        let decoded = VpnHandshake::decode(&encoded).expect("decode handshake");
         assert_eq!(decoded.version, VPN_PROTOCOL_VERSION);
         assert_eq!(decoded.device_id, 12345);
         assert_eq!(decoded.auth_token, Some("test-token".to_string()));
     }
 
     #[test]
+    fn test_handshake_rejects_unsupported_version() {
+        let raw = serde_json::to_vec(&VpnHandshake {
+            version: 1,
+            device_id: 7,
+            auth_token: None,
+        })
+        .expect("serialize handshake");
+
+        let err = VpnHandshake::decode(&raw).expect_err("v1 handshake should be rejected");
+        assert!(err
+            .to_string()
+            .contains("Unsupported handshake protocol version"));
+    }
+
+    #[test]
     fn test_response_accepted_roundtrip() {
         let response = VpnHandshakeResponse::accepted(
-            "10.0.0.2".parse().unwrap(),
-            "10.0.0.0/24".parse().unwrap(),
-            "10.0.0.1".parse().unwrap(),
+            "10.0.0.2".parse().expect("parse IPv4"),
+            "10.0.0.0/24".parse().expect("parse network"),
+            "10.0.0.1".parse().expect("parse server ip"),
+            true,
         );
-        let encoded = response.encode().unwrap();
-        let decoded = VpnHandshakeResponse::decode(&encoded).unwrap();
+        let encoded = response.encode().expect("encode response");
+        let decoded = VpnHandshakeResponse::decode(&encoded).expect("decode response");
         assert!(decoded.accepted);
-        assert_eq!(decoded.assigned_ip, Some("10.0.0.2".parse().unwrap()));
+        assert!(decoded.server_gso_enabled);
+        assert_eq!(
+            decoded.assigned_ip,
+            Some("10.0.0.2".parse().expect("parse IPv4"))
+        );
     }
 
     #[test]
     fn test_response_accepted_dual_stack_roundtrip() {
-        let assigned_ip: Ipv4Addr = "10.0.0.2".parse().unwrap();
-        let network: Ipv4Net = "10.0.0.0/24".parse().unwrap();
-        let server_ip: Ipv4Addr = "10.0.0.1".parse().unwrap();
-        let assigned_ip6: Ipv6Addr = "fd00::2".parse().unwrap();
-        let network6: Ipv6Net = "fd00::/64".parse().unwrap();
-        let server_ip6: Ipv6Addr = "fd00::1".parse().unwrap();
+        let assigned_ip: Ipv4Addr = "10.0.0.2".parse().expect("parse IPv4");
+        let network: Ipv4Net = "10.0.0.0/24".parse().expect("parse network");
+        let server_ip: Ipv4Addr = "10.0.0.1".parse().expect("parse server ip");
+        let assigned_ip6: Ipv6Addr = "fd00::2".parse().expect("parse IPv6");
+        let network6: Ipv6Net = "fd00::/64".parse().expect("parse network6");
+        let server_ip6: Ipv6Addr = "fd00::1".parse().expect("parse server ip6");
 
         let response = VpnHandshakeResponse::accepted_dual_stack(
             assigned_ip,
@@ -362,12 +536,14 @@ mod tests {
             assigned_ip6,
             network6,
             server_ip6,
+            false,
         );
 
-        let encoded = response.encode().unwrap();
-        let decoded = VpnHandshakeResponse::decode(&encoded).unwrap();
+        let encoded = response.encode().expect("encode response");
+        let decoded = VpnHandshakeResponse::decode(&encoded).expect("decode response");
 
         assert!(decoded.accepted);
+        assert!(!decoded.server_gso_enabled);
         assert_eq!(decoded.assigned_ip, Some(assigned_ip));
         assert_eq!(decoded.network, Some(network));
         assert_eq!(decoded.server_ip, Some(server_ip));
@@ -379,30 +555,31 @@ mod tests {
 
     #[test]
     fn test_response_rejected_roundtrip() {
-        let response = VpnHandshakeResponse::rejected("Server full");
-        let encoded = response.encode().unwrap();
-        let decoded = VpnHandshakeResponse::decode(&encoded).unwrap();
+        let response = VpnHandshakeResponse::rejected("Server full", false);
+        let encoded = response.encode().expect("encode response");
+        let decoded = VpnHandshakeResponse::decode(&encoded).expect("decode response");
         assert!(!decoded.accepted);
+        assert!(!decoded.server_gso_enabled);
         assert_eq!(decoded.reject_reason, Some("Server full".to_string()));
     }
 
     #[test]
     fn test_response_accepted_ipv6_only_roundtrip() {
-        let assigned_ip6: Ipv6Addr = "fd00::2".parse().unwrap();
-        let network6: Ipv6Net = "fd00::/64".parse().unwrap();
-        let server_ip6: Ipv6Addr = "fd00::1".parse().unwrap();
+        let assigned_ip6: Ipv6Addr = "fd00::2".parse().expect("parse IPv6");
+        let network6: Ipv6Net = "fd00::/64".parse().expect("parse network6");
+        let server_ip6: Ipv6Addr = "fd00::1".parse().expect("parse server ip6");
 
-        let response = VpnHandshakeResponse::accepted_ipv6_only(assigned_ip6, network6, server_ip6);
+        let response =
+            VpnHandshakeResponse::accepted_ipv6_only(assigned_ip6, network6, server_ip6, true);
 
-        let encoded = response.encode().unwrap();
-        let decoded = VpnHandshakeResponse::decode(&encoded).unwrap();
+        let encoded = response.encode().expect("encode response");
+        let decoded = VpnHandshakeResponse::decode(&encoded).expect("decode response");
 
         assert!(decoded.accepted);
-        // IPv4 fields should be None
+        assert!(decoded.server_gso_enabled);
         assert_eq!(decoded.assigned_ip, None);
         assert_eq!(decoded.network, None);
         assert_eq!(decoded.server_ip, None);
-        // IPv6 fields should be present
         assert_eq!(decoded.assigned_ip6, Some(assigned_ip6));
         assert_eq!(decoded.network6, Some(network6));
         assert_eq!(decoded.server_ip6, Some(server_ip6));
@@ -414,6 +591,7 @@ mod tests {
         let response = VpnHandshakeResponse {
             version: VPN_PROTOCOL_VERSION,
             accepted: true,
+            server_gso_enabled: false,
             assigned_ip: None,
             network: None,
             server_ip: None,
@@ -426,26 +604,24 @@ mod tests {
         assert!(!response.is_valid());
         assert!(response.encode().is_err());
 
-        let raw = serde_json::to_vec(&response).unwrap();
+        let raw = serde_json::to_vec(&response).expect("serialize response");
         let decoded = VpnHandshakeResponse::decode(&raw);
         assert!(decoded.is_err());
     }
 
     #[test]
     fn test_data_message_type_roundtrip() {
-        // Test all valid message types: byte -> DataMessageType -> byte
         for (byte, expected_type) in [
             (0x00, DataMessageType::IpPacket),
             (0x01, DataMessageType::HeartbeatPing),
             (0x02, DataMessageType::HeartbeatPong),
+            (0x03, DataMessageType::Capabilities),
         ] {
-            // from_byte roundtrip
-            let msg_type = DataMessageType::from_byte(byte).unwrap();
+            let msg_type = DataMessageType::from_byte(byte).expect("valid message type");
             assert_eq!(msg_type, expected_type);
             assert_eq!(msg_type.as_byte(), byte);
 
-            // TryFrom/From trait roundtrip
-            let msg_type: DataMessageType = byte.try_into().unwrap();
+            let msg_type: DataMessageType = byte.try_into().expect("try_from should work");
             assert_eq!(msg_type, expected_type);
             let back: u8 = msg_type.into();
             assert_eq!(back, byte);
@@ -454,8 +630,7 @@ mod tests {
 
     #[test]
     fn test_data_message_type_invalid_bytes() {
-        // Test that invalid bytes return None from from_byte
-        for invalid in [0x03, 0x04, 0x10, 0x80, 0xFF] {
+        for invalid in [0x04, 0x10, 0x80, 0xff] {
             assert!(
                 DataMessageType::from_byte(invalid).is_none(),
                 "from_byte(0x{:02x}) should return None",
@@ -466,34 +641,107 @@ mod tests {
 
     #[test]
     fn test_data_message_type_try_from_invalid() {
-        // Test that TryFrom returns InvalidMessageType error for invalid bytes
-        for invalid in [0x03, 0x04, 0x10, 0x80, 0xFF] {
+        for invalid in [0x04, 0x10, 0x80, 0xff] {
             let result: Result<DataMessageType, _> = invalid.try_into();
             assert!(result.is_err(), "TryFrom(0x{:02x}) should fail", invalid);
 
-            let err = result.unwrap_err();
+            let err = result.expect_err("invalid type");
             assert_eq!(err, InvalidMessageType(invalid));
             assert!(err.to_string().contains(&format!("0x{:02x}", invalid)));
         }
     }
 
     #[test]
-    fn test_frame_ip_packet() {
+    fn test_frame_capabilities_message() {
+        let mut buf = BytesMut::new();
+        frame_capabilities_message(&mut buf, CapabilitiesMessage { gso_enabled: true });
+
+        assert_eq!(buf.len(), 2);
+        assert_eq!(buf[0], DataMessageType::Capabilities.as_byte());
+        assert_eq!(buf[1], CAPABILITIES_GSO_BIT);
+
+        let caps = CapabilitiesMessage::decode_payload(buf[1]);
+        assert!(caps.gso_enabled);
+    }
+
+    #[test]
+    fn test_frame_ip_packet_v2_without_offload() {
         let payload = b"hello ip packet";
         let mut buf = BytesMut::new();
-        frame_ip_packet(&mut buf, payload).unwrap();
+        frame_ip_packet_v2(&mut buf, None, payload).expect("frame packet");
 
-        // Total length: 1 (type) + 4 (length) + payload
-        assert_eq!(buf.len(), 1 + 4 + payload.len());
-
-        // First byte is message type
         assert_eq!(buf[0], DataMessageType::IpPacket.as_byte());
 
-        // Next 4 bytes are big-endian length
-        let len_bytes = (payload.len() as u32).to_be_bytes();
-        assert_eq!(&buf[1..5], &len_bytes);
+        let frame_len = u32::from_be_bytes([buf[1], buf[2], buf[3], buf[4]]) as usize;
+        assert_eq!(frame_len, 1 + payload.len());
+        assert_eq!(buf[5], 0);
+        assert_eq!(&buf[6..], payload);
+    }
 
-        // Trailing bytes are the payload
-        assert_eq!(&buf[5..], payload);
+    #[test]
+    fn test_parse_ip_packet_message_v2_roundtrip_without_offload() {
+        let payload = b"plain packet payload";
+        let mut buf = BytesMut::new();
+        frame_ip_packet_v2(&mut buf, None, payload).expect("frame packet");
+
+        let (offload, parsed_payload) =
+            parse_ip_packet_message_v2(&buf).expect("parse full message");
+        assert!(offload.is_none());
+        assert_eq!(parsed_payload, payload);
+    }
+
+    #[test]
+    fn test_frame_and_parse_ip_packet_v2_with_offload() {
+        let payload = b"offloaded packet";
+        let offload = VirtioNetHdr {
+            flags: 1,
+            gso_type: 1,
+            hdr_len: 40,
+            gso_size: 1200,
+            csum_start: 20,
+            csum_offset: 16,
+            num_buffers: 0,
+        };
+
+        let mut buf = BytesMut::new();
+        frame_ip_packet_v2(&mut buf, Some(&offload), payload).expect("frame packet");
+
+        let frame_len = u32::from_be_bytes([buf[1], buf[2], buf[3], buf[4]]) as usize;
+        let frame_payload = &buf[5..5 + frame_len];
+
+        let (parsed_offload, parsed_payload) =
+            parse_ip_packet_v2(frame_payload).expect("parse v2 frame payload");
+        assert_eq!(parsed_offload, Some(offload));
+        assert_eq!(parsed_payload, payload);
+    }
+
+    #[test]
+    fn test_parse_ip_packet_message_v2_rejects_malformed_frame_len() {
+        let payload = b"malformed length payload";
+        let mut buf = BytesMut::new();
+        frame_ip_packet_v2(&mut buf, None, payload).expect("frame packet");
+
+        // Corrupt the declared frame length to be larger than actual payload.
+        let bad_len = (payload.len() as u32) + 9;
+        buf[1..5].copy_from_slice(&bad_len.to_be_bytes());
+
+        let err =
+            parse_ip_packet_message_v2(&buf).expect_err("mismatched frame length should fail");
+        assert!(err.to_string().contains("Malformed IP frame length"));
+    }
+
+    #[test]
+    fn test_parse_ip_packet_v2_rejects_invalid_offload_len() {
+        let payload = [7u8, 1, 2, 3, 4, 5];
+        let err = parse_ip_packet_v2(&payload).expect_err("invalid offload length must fail");
+        assert!(err.to_string().contains("Invalid offload metadata length"));
+    }
+
+    #[test]
+    fn test_parse_ip_packet_v2_rejects_empty_ip_payload() {
+        let mut payload = vec![VIRTIO_NET_HDR_LEN as u8];
+        payload.extend_from_slice(&[0u8; VIRTIO_NET_HDR_LEN]);
+        let err = parse_ip_packet_v2(&payload).expect_err("empty payload must fail");
+        assert!(err.to_string().contains("IP frame payload too short"));
     }
 }

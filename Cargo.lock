@@ -3858,6 +3858,7 @@ dependencies = [
  "ipnet",
  "iroh",
  "iroh-quinn-proto",
+ "libc",
  "log",
  "mock_instant",
  "rand",

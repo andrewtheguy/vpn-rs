@@ -20,6 +20,7 @@ ipnet = { version = "2", features = ["serde"] }
 iroh = { version = "0.96.1", features = ["address-lookup-mdns"] }
 iroh-quinn-proto = "0.15.0"
 log = "0.4"
+libc = "0.2"
 rand = "0.9"
 rustls = { version = "0.23", features = ["aws-lc-rs"] }
 serde = { version = "1", features = ["derive"] }
