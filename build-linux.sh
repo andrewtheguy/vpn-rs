@@ -64,9 +64,12 @@ echo ""
 echo "Organizing binaries..."
 echo "----------------------"
 
+found_any=false
+
 if [ -f "$BUILD_DIR/linux_amd64/vpn-rs" ]; then
     mv "$BUILD_DIR/linux_amd64/vpn-rs" "$BUILD_DIR/vpn-rs-linux-amd64"
     echo "✓ vpn-rs AMD64 saved to: $BUILD_DIR/vpn-rs-linux-amd64"
+    found_any=true
 fi
 if [ -d "$BUILD_DIR/linux_amd64" ]; then
     rm -rf "$BUILD_DIR/linux_amd64"
@@ -75,9 +78,15 @@ fi
 if [ -f "$BUILD_DIR/linux_arm64/vpn-rs" ]; then
     mv "$BUILD_DIR/linux_arm64/vpn-rs" "$BUILD_DIR/vpn-rs-linux-arm64"
     echo "✓ vpn-rs ARM64 saved to: $BUILD_DIR/vpn-rs-linux-arm64"
+    found_any=true
 fi
 if [ -d "$BUILD_DIR/linux_arm64" ]; then
     rm -rf "$BUILD_DIR/linux_arm64"
+fi
+
+if [ "$found_any" = false ]; then
+    echo "Error: No binaries found in $BUILD_DIR (expected vpn-rs-linux-amd64 or vpn-rs-linux-arm64)" >&2
+    exit 1
 fi
 
 echo ""

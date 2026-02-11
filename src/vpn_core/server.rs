@@ -1126,7 +1126,7 @@ impl VpnServer {
         result
     }
 
-    /// Enqueue a packet for the dedicated TUN writer task.
+    /// Parse and validate the first client message type, returning a `DataMessageType` on success.
     fn parse_first_client_message_type(raw_type: u8) -> VpnResult<DataMessageType> {
         let msg_type = DataMessageType::from_byte(raw_type).ok_or_else(|| {
             VpnError::Signaling(format!(
@@ -1143,7 +1143,9 @@ impl VpnServer {
         Ok(msg_type)
     }
 
-    /// Enqueue a packet for the dedicated TUN writer task.
+    /// Enqueue a TUN write request to be processed by the dedicated TUN writer task.
+    ///
+    /// Returns `true` if the request was successfully enqueued, `false` if the channel is closed.
     async fn enqueue_tun_write(
         tun_write_tx: &mpsc::Sender<TunWriteRequest>,
         req: TunWriteRequest,
