@@ -22,8 +22,8 @@ use crate::vpn_core::signaling::{
 use bytes::{Bytes, BytesMut};
 use futures::StreamExt;
 use ipnet::{Ipv4Net, Ipv6Net};
-use iroh::endpoint::{PathInfoList, RecvStream, SendStream};
-use iroh::{Endpoint, EndpointAddr, EndpointId, RelayUrl, TransportAddr, Watcher};
+use iroh::endpoint::{PathList, RecvStream, SendStream};
+use iroh::{Endpoint, EndpointAddr, EndpointId, RelayUrl, TransportAddr};
 use rand::Rng;
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -464,11 +464,11 @@ impl VpnClient {
         connection: &iroh::endpoint::Connection,
         vpn_tun_name: &str,
     ) -> Option<JoinHandle<()>> {
-        // Get the paths watcher
-        let paths_watcher = connection.paths();
-
-        // Clone endpoint for the spawned task
+        // Clone endpoint and connection for the spawned task. The paths
+        // stream borrows the connection, so the task owns a clone and creates
+        // the stream inside.
         let endpoint_clone = endpoint.clone();
+        let connection_clone = connection.clone();
         let vpn_tun_name = vpn_tun_name.to_string();
         let initial_routes = HashMap::new();
 
@@ -479,7 +479,7 @@ impl VpnClient {
         let handle = tokio::spawn(async move {
             run_bypass_route_manager(
                 endpoint_clone,
-                paths_watcher,
+                connection_clone,
                 Some(setup_done_tx),
                 vpn_tun_name,
                 initial_routes,
@@ -1086,34 +1086,27 @@ impl BypassRouteManager {
 
 /// Run the bypass route manager task.
 ///
-/// Monitors path changes via the watcher stream and dynamically
+/// Monitors path changes via the connection's paths stream and dynamically
 /// updates bypass routes as the connection evolves.
 ///
 /// Returns after initial setup is complete, continuing to monitor in background.
 /// The returned oneshot receiver signals when initial setup is done.
 async fn run_bypass_route_manager(
     endpoint: Endpoint,
-    mut paths_watcher: impl Watcher<Value = PathInfoList> + Send + Unpin + 'static,
+    connection: iroh::endpoint::Connection,
     initial_setup_done: Option<tokio::sync::oneshot::Sender<()>>,
     vpn_tun_name: String,
     initial_routes: HashMap<IpAddr, BypassRouteGuard>,
 ) {
     let mut manager = BypassRouteManager::new(vpn_tun_name, initial_routes);
 
-    // Process initial connection paths.
-    let initial_paths = paths_watcher.get();
-    let initial_result = collect_addresses_from_paths(&endpoint, &initial_paths).await;
-    if initial_result.preserve_routes {
-        log::warn!("Initial bypass route update skipped - keeping existing routes");
-    } else {
-        manager.update(initial_result.ips).await;
-    }
-
-    // Watch for changes using stream_updates_only (skips initial value we already processed)
-    let mut stream = paths_watcher.stream_updates_only();
+    // The stream yields the current snapshot on the first poll, then a fresh
+    // snapshot whenever the open or selected paths change; it ends when the
+    // connection closes.
+    let mut stream = connection.paths_stream();
 
     // Ensure initial setup does not report success until we have at least one
-    // active bypass route, unless the watcher ends.
+    // active bypass route, unless the stream ends.
     while manager.active_routes.is_empty() {
         let Some(paths) = stream.next().await else {
             break;
@@ -1146,7 +1139,7 @@ async fn run_bypass_route_manager(
         manager.update(result.ips).await;
     }
 
-    log::debug!("Bypass route manager task ending (watcher disconnected)");
+    log::debug!("Bypass route manager task ending (connection closed)");
     // When this function returns, manager is dropped, which drops all guards
     // and removes all bypass routes
 }
@@ -1165,7 +1158,7 @@ struct CollectAddressesResult {
 /// and a flag indicating whether DNS resolution failed.
 async fn collect_addresses_from_paths(
     endpoint: &Endpoint,
-    paths: &PathInfoList,
+    paths: &PathList<'_>,
 ) -> CollectAddressesResult {
     let mut ips = HashSet::new();
     let mut preserve_routes = false;
@@ -1246,7 +1239,13 @@ async fn resolve_relay_url(
     }
 
     // Try to resolve the hostname with a reasonable timeout
-    let resolver = endpoint.dns_resolver();
+    let resolver = match endpoint.dns_resolver() {
+        Ok(resolver) => resolver,
+        Err(e) => {
+            log::warn!("DNS resolver unavailable for relay URL {}: {}", relay_url, e);
+            return Err(()); // Signal DNS failure
+        }
+    };
     match resolver.lookup_ipv4_ipv6(host, RESOLVE_RELAY_TIMEOUT).await {
         Ok(addrs) => {
             let socket_addrs: Vec<SocketAddr> = addrs.map(|ip| SocketAddr::new(ip, port)).collect();
