@@ -1,3 +1,3 @@
 no backward compatibility at all since it is still 0.0.x.
-run cargo clippy and cargo test -q after making changes.
+run cargo clippy and cargo test after making changes.
 no cargo fmt

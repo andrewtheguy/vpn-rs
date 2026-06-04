@@ -178,8 +178,9 @@ pub struct VpnClientConfig {
     #[serde(default = "default_mtu")]
     pub mtu: u16,
 
-    /// IPv4 routes to send through the VPN (CIDRs).
-    /// At least one route is required (e.g., 0.0.0.0/0 for full tunnel).
+    /// IPv4 routes to send through the VPN (CIDRs), e.g., 0.0.0.0/0 for full tunnel.
+    /// Optional: with no routes configured, only the assigned VPN addresses are reachable.
+    #[serde(default)]
     pub routes: Vec<Ipv4Net>,
 
     /// IPv6 routes to send through the VPN (CIDRs). Optional for dual-stack.
@@ -203,20 +204,13 @@ impl VpnClientConfig {
     /// Validate the VPN client configuration.
     ///
     /// Returns an error if:
-    /// - `server_node_id` is empty
-    /// - Both `routes` and `routes6` are empty (at least one route required)
+    /// - `server_node_id` is empty or not a valid iroh node ID
     pub fn validate(&self) -> Result<(), String> {
         if self.server_node_id.is_empty() {
             return Err("'server_node_id' is required and cannot be empty".to_string());
         }
         if self.server_node_id.parse::<EndpointId>().is_err() {
             return Err("'server_node_id' is not a valid iroh node ID".to_string());
-        }
-
-        if self.routes.is_empty() && self.routes6.is_empty() {
-            return Err(
-                "At least one route is required: 'routes' (IPv4) or 'routes6' (IPv6)".to_string(),
-            );
         }
 
         Ok(())
@@ -363,13 +357,11 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_client_requires_routes() {
+    fn test_validate_client_no_routes_ok() {
         let config = VpnClientConfig {
             server_node_id: random_server_node_id(),
             ..Default::default()
         };
-        let result = config.validate();
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("At least one route"));
+        assert!(config.validate().is_ok());
     }
 }
