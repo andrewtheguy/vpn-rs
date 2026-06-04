@@ -55,12 +55,22 @@ jobs:
             echo "Deleting stale draft release ${{ steps.tag.outputs.release_tag }}"
             gh release delete "${{ steps.tag.outputs.release_tag }}" --yes
           fi
+          args=()
+          if [ "${{ steps.tag.outputs.is_prerelease }}" = "true" ]; then
+            args+=(--prerelease)
+          else
+            # Generate notes against the previous *stable* release, not the latest prerelease.
+            prev_stable=$(gh release list --exclude-pre-releases --exclude-drafts --limit 1 --json tagName --jq '.[0].tagName // empty')
+            if [ -n "$prev_stable" ]; then
+              args+=(--notes-start-tag "$prev_stable")
+            fi
+          fi
           gh release create "${{ steps.tag.outputs.release_tag }}" \
             --draft \
             --target "${{ github.sha }}" \
             --title "Release ${{ steps.tag.outputs.release_tag }}" \
             --generate-notes \
-            ${{ steps.tag.outputs.is_prerelease == 'true' && '--prerelease' || '' }}
+            "${args[@]}"
 
   build-linux:
     needs: setup
