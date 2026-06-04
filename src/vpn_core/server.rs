@@ -20,6 +20,7 @@ use crate::vpn_core::signaling::{
 };
 use bytes::{Bytes, BytesMut};
 use dashmap::DashMap;
+use futures::FutureExt;
 use ipnet::{Ipv4Net, Ipv6Net};
 use iroh::{Endpoint, EndpointId};
 use std::collections::{HashMap, HashSet};
@@ -41,9 +42,11 @@ const WRITE_BATCH_SIZE: usize = 256;
 /// allocator is only hit once per chunk instead of once per packet.
 const FRAME_ARENA_CHUNK: usize = 64 * 1024;
 
-/// Maximum time a software-GRO group may wait for additional segments before
-/// being flushed to its client.
-const GRO_FLUSH_WINDOW: Duration = Duration::from_micros(500);
+/// Safety cap on how long a software-GRO group may wait for additional
+/// segments. Groups normally flush as soon as the TUN read would block
+/// (drain-then-flush); this window only bounds holding time while packets
+/// keep arriving back-to-back.
+const GRO_FLUSH_WINDOW: Duration = Duration::from_micros(100);
 
 /// Performance statistics for the VPN server.
 ///
@@ -1643,20 +1646,28 @@ impl VpnServer {
 
         loop {
             let mut packet_buf = ReadBuf::uninit(&mut read_storage);
-            let gro_deadline = gro_states
-                .values()
-                .filter_map(|state| state.table.next_deadline(GRO_FLUSH_WINDOW))
-                .min()
-                .map(tokio::time::Instant::from_std);
-            let read_result = tokio::select! {
-                biased;
-                _ = tokio::time::sleep_until(
-                    gro_deadline.unwrap_or_else(tokio::time::Instant::now)
-                ), if gro_deadline.is_some() => {
-                    self.flush_gro_states(&mut gro_states, &mut arena, true).await;
-                    continue;
+            let gro_pending =
+                software_gro && gro_states.values().any(|state| !state.table.is_empty());
+            let read_result = if gro_pending {
+                // Safety cap: even while packets keep arriving back-to-back,
+                // never hold a partial group beyond the flush window.
+                self.flush_gro_states(&mut gro_states, &mut arena, true).await;
+                // Drain-then-flush (wireguard-go model): keep coalescing only
+                // while another packet is instantly available; flush pending
+                // groups as soon as the TUN read would block, so GRO adds no
+                // latency to flows that are not arriving back-to-back. A
+                // single Pending poll consumes no data, so dropping the
+                // probed future is safe.
+                match tun_reader.read_buf(&mut packet_buf).now_or_never() {
+                    Some(read_result) => read_result,
+                    None => {
+                        self.flush_gro_states(&mut gro_states, &mut arena, false)
+                            .await;
+                        continue;
+                    }
                 }
-                read_result = tun_reader.read_buf(&mut packet_buf) => read_result,
+            } else {
+                tun_reader.read_buf(&mut packet_buf).await
             };
 
             // Read packet from TUN device

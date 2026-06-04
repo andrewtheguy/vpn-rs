@@ -23,7 +23,7 @@ use crate::vpn_core::signaling::{
     HEARTBEAT_PING_BYTE, MAX_CAPABILITIES_PAYLOAD, MAX_HANDSHAKE_SIZE, VPN_ALPN,
 };
 use bytes::{Bytes, BytesMut};
-use futures::StreamExt;
+use futures::{FutureExt, StreamExt};
 use ipnet::{Ipv4Net, Ipv6Net};
 use iroh::endpoint::{PathList, RecvStream, SendStream};
 use iroh::{Endpoint, EndpointAddr, EndpointId, RelayUrl, TransportAddr};
@@ -57,9 +57,9 @@ const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(30);
 /// ensure the sender receives timely backpressure signals when the network is
 /// congested, preventing excessive memory usage and latency buildup.
 ///
-/// Memory impact (typical): ~1024 * ~1500 bytes (standard MTU) = ~1.5 MB.
-/// Latency impact: At 100 Mbps, a full 1024-packet buffer adds ~120ms latency.
-const OUTBOUND_CHANNEL_SIZE: usize = 1024;
+/// Memory impact (typical): ~256 * ~1500 bytes (standard MTU) = ~384 KB.
+/// Latency impact: At 100 Mbps, a full 256-packet buffer adds ~30ms latency.
+const OUTBOUND_CHANNEL_SIZE: usize = 256;
 
 /// Maximum number of framed packets drained from the outbound channel per
 /// batched QUIC write.
@@ -70,9 +70,11 @@ const WRITE_BATCH_SIZE: usize = 256;
 /// allocator is only hit once per chunk instead of once per packet.
 const FRAME_ARENA_CHUNK: usize = 64 * 1024;
 
-/// Maximum time a software-GRO group may wait for additional segments before
-/// being flushed to the QUIC stream.
-const GRO_FLUSH_WINDOW: Duration = Duration::from_micros(500);
+/// Safety cap on how long a software-GRO group may wait for additional
+/// segments. Groups normally flush as soon as the TUN read would block
+/// (drain-then-flush); this window only bounds holding time while packets
+/// keep arriving back-to-back.
+const GRO_FLUSH_WINDOW: Duration = Duration::from_micros(100);
 
 /// Timeout for resolving relay URLs via DNS.
 const RESOLVE_RELAY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -608,21 +610,33 @@ impl VpnClient {
                 let mut gro_table = TcpGroTable::new();
                 loop {
                     let mut packet_buf = ReadBuf::uninit(&mut read_storage);
-                    let gro_deadline = gro_table
-                        .next_deadline(GRO_FLUSH_WINDOW)
-                        .map(tokio::time::Instant::from_std);
-                    let read_result = tokio::select! {
-                        biased;
-                        _ = tokio::time::sleep_until(
-                            gro_deadline.unwrap_or_else(tokio::time::Instant::now)
-                        ), if gro_deadline.is_some() => {
-                            let outputs = gro_table.flush_expired(Instant::now(), GRO_FLUSH_WINDOW);
-                            if !send_gro_outputs(outputs, &mut arena, &outbound_tx).await {
-                                return None;
-                            }
-                            continue;
+                    let read_result = if software_gro && !gro_table.is_empty() {
+                        // Safety cap: even while packets keep arriving
+                        // back-to-back, never hold a partial group beyond the
+                        // flush window.
+                        let expired = gro_table.flush_expired(Instant::now(), GRO_FLUSH_WINDOW);
+                        if !send_gro_outputs(expired, &mut arena, &outbound_tx).await {
+                            return None;
                         }
-                        read_result = tun_reader.read_buf(&mut packet_buf) => read_result,
+                        // Drain-then-flush (wireguard-go model): keep
+                        // coalescing only while another packet is instantly
+                        // available; flush pending groups as soon as the TUN
+                        // read would block, so GRO adds no latency to flows
+                        // that are not arriving back-to-back. A single
+                        // Pending poll consumes no data, so dropping the
+                        // probed future is safe.
+                        match tun_reader.read_buf(&mut packet_buf).now_or_never() {
+                            Some(read_result) => read_result,
+                            None => {
+                                let outputs = gro_table.flush_all();
+                                if !send_gro_outputs(outputs, &mut arena, &outbound_tx).await {
+                                    return None;
+                                }
+                                continue;
+                            }
+                        }
+                    } else {
+                        tun_reader.read_buf(&mut packet_buf).await
                     };
                     match read_result {
                         Ok(()) if !packet_buf.filled().is_empty() => {
