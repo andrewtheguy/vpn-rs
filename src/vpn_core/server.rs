@@ -10,6 +10,7 @@ use crate::vpn_core::config::VpnServerConfig;
 use crate::vpn_core::device::{TunConfig, TunDevice, TunOffloadStatus};
 use crate::vpn_core::error::{VpnError, VpnResult};
 use crate::vpn_core::offload::{segment_tcp_gso_packet, split_tun_frame, VirtioNetHdr};
+use crate::vpn_core::paths::watch_connection_paths;
 use crate::vpn_core::signaling::{
     frame_ip_packet_v2, parse_ip_packet_v2, read_message, write_message, CapabilitiesMessage,
     DataMessageType, VpnHandshake, VpnHandshakeResponse, HEARTBEAT_PONG_BYTE,
@@ -760,6 +761,10 @@ impl VpnServer {
                 "Server has no auth tokens configured".into(),
             ));
         }
+
+        // Monitor and report connection path changes (e.g., relay -> direct)
+        let _path_watcher =
+            watch_connection_paths(&connection, &format!("Client {} connection", remote_id));
 
         // Atomically increment connection count and check max_clients
         // fetch_add returns the previous value, so if it was >= max_clients, we're over

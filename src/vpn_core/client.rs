@@ -14,6 +14,7 @@ use crate::vpn_core::device::{
 use crate::vpn_core::error::{VpnError, VpnResult};
 use crate::vpn_core::lock::VpnLock;
 use crate::vpn_core::offload::{segment_tcp_gso_packet, split_tun_frame};
+use crate::vpn_core::paths::watch_connection_paths;
 use crate::vpn_core::signaling::{
     frame_capabilities_message, frame_ip_packet_v2, parse_ip_packet_v2, read_message,
     write_message, CapabilitiesMessage, DataMessageType, VpnHandshake, VpnHandshakeResponse,
@@ -161,6 +162,9 @@ impl VpnClient {
             .map_err(|e| VpnError::Signaling(format!("Failed to connect to server: {}", e)))?;
 
         log::info!("Connected to server, performing handshake...");
+
+        // Monitor and report connection path changes (e.g., relay -> direct)
+        let _path_watcher = watch_connection_paths(&connection, "Connection");
 
         // Perform handshake on first stream
         let server_info = self.perform_handshake(&connection).await?;

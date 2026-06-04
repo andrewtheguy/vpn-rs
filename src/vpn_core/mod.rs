@@ -33,6 +33,7 @@ pub mod device;
 pub mod error;
 pub mod lock;
 pub mod offload;
+pub mod paths;
 pub mod server;
 pub mod signaling;
 
