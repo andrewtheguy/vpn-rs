@@ -1,15 +1,20 @@
-//! Linux TUN offload metadata helpers and software fallback segmentation.
+//! Linux TUN offload metadata helpers and software fallback materialization.
 //!
 //! This module handles:
 //! - Parsing and serializing `virtio_net_hdr` metadata (10-byte variant).
 //! - Splitting/assembling TUN frames when `IFF_VNET_HDR` is enabled.
-//! - Fallback software segmentation for TCP GSO frames when peer/local offload
+//! - Materializing offload metadata into plain packets when peer/local offload
 //!   support is unavailable.
 
 use bytes::{BufMut, BytesMut};
 
 /// Size of the Linux virtio header used by TUN when `IFF_VNET_HDR` is enabled.
 pub const VIRTIO_NET_HDR_LEN: usize = 10;
+
+/// Offload flag: checksum field needs software/device completion.
+pub const VIRTIO_NET_HDR_F_NEEDS_CSUM: u8 = 1;
+/// Offload flag: packet checksum has already been validated.
+pub const VIRTIO_NET_HDR_F_DATA_VALID: u8 = 2;
 
 /// GSO type: no segmentation offload.
 pub const VIRTIO_NET_HDR_GSO_NONE: u8 = 0;
@@ -68,6 +73,11 @@ impl VirtioNetHdr {
     /// Return the normalized GSO type value without ECN bit.
     pub fn normalized_gso_type(self) -> u8 {
         self.gso_type & !VIRTIO_NET_HDR_GSO_ECN
+    }
+
+    /// Return true if the packet checksum must be completed before writing as plain IP.
+    pub fn needs_checksum(self) -> bool {
+        (self.flags & VIRTIO_NET_HDR_F_NEEDS_CSUM) != 0
     }
 }
 
@@ -300,6 +310,89 @@ pub fn segment_tcp_gso_packet(
     Ok(out)
 }
 
+/// Convert offload metadata into one or more plain IP packets.
+///
+/// TCP GSO packets are segmented. Checksum-only packets have their partial
+/// checksum completed and are returned as a single plain IP packet.
+pub fn materialize_offload_packet(
+    offload: &VirtioNetHdr,
+    ip_packet: &[u8],
+) -> Result<Vec<Vec<u8>>, String> {
+    if offload.is_tcp_gso() {
+        return segment_tcp_gso_packet(offload, ip_packet);
+    }
+
+    if offload.gso_type != VIRTIO_NET_HDR_GSO_NONE {
+        return Err(format!(
+            "unsupported GSO type from offload metadata: 0x{:02x}",
+            offload.gso_type
+        ));
+    }
+
+    Ok(vec![complete_checksum_offload_packet(offload, ip_packet)?])
+}
+
+/// Complete checksum-only virtio metadata and return a plain IP packet.
+pub fn complete_checksum_offload_packet(
+    offload: &VirtioNetHdr,
+    ip_packet: &[u8],
+) -> Result<Vec<u8>, String> {
+    if offload.gso_type != VIRTIO_NET_HDR_GSO_NONE {
+        return Err(format!(
+            "checksum completion requires GSO_NONE, got 0x{:02x}",
+            offload.gso_type
+        ));
+    }
+
+    if ip_packet.is_empty() {
+        return Err("empty IP packet".to_string());
+    }
+
+    if !offload.needs_checksum() {
+        return Ok(ip_packet.to_vec());
+    }
+
+    let unsupported_flags = offload.flags
+        & !(VIRTIO_NET_HDR_F_NEEDS_CSUM | VIRTIO_NET_HDR_F_DATA_VALID);
+    if unsupported_flags != 0 {
+        return Err(format!(
+            "unsupported checksum offload flags: 0x{:02x}",
+            unsupported_flags
+        ));
+    }
+
+    let csum_start = usize::from(offload.csum_start);
+    if csum_start >= ip_packet.len() {
+        return Err(format!(
+            "invalid csum_start {} for packet length {}",
+            csum_start,
+            ip_packet.len()
+        ));
+    }
+
+    let checksum_index = csum_start
+        .checked_add(usize::from(offload.csum_offset))
+        .ok_or_else(|| {
+            format!(
+                "checksum index overflow (csum_start {}, csum_offset {})",
+                offload.csum_start, offload.csum_offset
+            )
+        })?;
+    if checksum_index + 2 > ip_packet.len() {
+        return Err(format!(
+            "invalid csum_offset {} (checksum index {} beyond packet length {})",
+            offload.csum_offset,
+            checksum_index,
+            ip_packet.len()
+        ));
+    }
+
+    let mut out = ip_packet.to_vec();
+    let checksum = finalize_checksum(add_bytes(0, &out[csum_start..]));
+    out[checksum_index..checksum_index + 2].copy_from_slice(&checksum.to_be_bytes());
+    Ok(out)
+}
+
 fn update_ipv4_lengths_and_checksum(packet: &mut [u8], packet_len: usize) -> Result<(), String> {
     if packet.len() < 20 {
         return Err("IPv4 packet too short".to_string());
@@ -488,10 +581,37 @@ mod tests {
         }
     }
 
+    fn fold_ones_complement(mut sum: u32) -> u16 {
+        while (sum >> 16) != 0 {
+            sum = (sum & 0xffff) + (sum >> 16);
+        }
+        sum as u16
+    }
+
+    fn make_ipv4_tcp_partial_checksum(packet: &[u8]) -> Vec<u8> {
+        let tcp_offset = 20;
+        let checksum_index = tcp_offset + 16;
+        let tcp_len = packet.len() - tcp_offset;
+        let mut partial = packet.to_vec();
+        partial[checksum_index] = 0;
+        partial[checksum_index + 1] = 0;
+
+        let mut sum = 0u32;
+        sum = add_bytes(sum, &partial[12..20]);
+        sum = sum.wrapping_add(u32::from(6u16));
+        sum = sum.wrapping_add(u32::from(
+            u16::try_from(tcp_len).expect("test TCP length fits in u16"),
+        ));
+        let pseudo_header_sum = fold_ones_complement(sum);
+        partial[checksum_index..checksum_index + 2]
+            .copy_from_slice(&pseudo_header_sum.to_be_bytes());
+        partial
+    }
+
     #[test]
     fn test_virtio_header_roundtrip() {
         let hdr = VirtioNetHdr {
-            flags: 1,
+            flags: VIRTIO_NET_HDR_F_NEEDS_CSUM,
             gso_type: VIRTIO_NET_HDR_GSO_TCPV4,
             hdr_len: 40,
             gso_size: 1200,
@@ -518,7 +638,7 @@ mod tests {
     #[test]
     fn test_split_tun_frame_preserves_checksum_only_metadata() {
         let offload = VirtioNetHdr {
-            flags: 1,
+            flags: VIRTIO_NET_HDR_F_NEEDS_CSUM,
             gso_type: VIRTIO_NET_HDR_GSO_NONE,
             hdr_len: 40,
             gso_size: 0,
@@ -542,6 +662,45 @@ mod tests {
         assert_eq!(out.len(), VIRTIO_NET_HDR_LEN + 4);
         assert!(out[..VIRTIO_NET_HDR_LEN].iter().all(|b| *b == 0));
         assert_eq!(&out[VIRTIO_NET_HDR_LEN..], &[0x45, 1, 2, 3]);
+    }
+
+    #[test]
+    fn test_materialize_checksum_only_offload_completes_ipv4_tcp_checksum() {
+        let packet = build_ipv4_tcp_packet(256);
+        let partial = make_ipv4_tcp_partial_checksum(&packet);
+        let offload = VirtioNetHdr {
+            flags: VIRTIO_NET_HDR_F_NEEDS_CSUM,
+            gso_type: VIRTIO_NET_HDR_GSO_NONE,
+            hdr_len: 0,
+            gso_size: 0,
+            csum_start: 20,
+            csum_offset: 16,
+            num_buffers: 0,
+        };
+
+        let packets =
+            materialize_offload_packet(&offload, &partial).expect("materialize checksum metadata");
+        assert_eq!(packets.len(), 1);
+        assert_eq!(packets[0], packet);
+        assert_tcp_checksum_valid(&packets[0]);
+    }
+
+    #[test]
+    fn test_materialize_data_valid_offload_strips_metadata() {
+        let packet = build_ipv4_tcp_packet(32);
+        let offload = VirtioNetHdr {
+            flags: VIRTIO_NET_HDR_F_DATA_VALID,
+            gso_type: VIRTIO_NET_HDR_GSO_NONE,
+            hdr_len: 0,
+            gso_size: 0,
+            csum_start: 20,
+            csum_offset: 16,
+            num_buffers: 0,
+        };
+
+        let packets =
+            materialize_offload_packet(&offload, &packet).expect("strip validated metadata");
+        assert_eq!(packets, vec![packet]);
     }
 
     #[test]

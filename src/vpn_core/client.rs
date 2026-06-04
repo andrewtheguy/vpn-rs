@@ -13,7 +13,8 @@ use crate::vpn_core::device::{
 };
 use crate::vpn_core::error::{VpnError, VpnResult};
 use crate::vpn_core::lock::VpnLock;
-use crate::vpn_core::offload::{segment_tcp_gso_packet, split_tun_frame};
+use crate::vpn_core::offload::{materialize_offload_packet, split_tun_frame};
+use crate::vpn_core::paths::watch_connection_paths;
 use crate::vpn_core::signaling::{
     frame_capabilities_message, frame_ip_packet_v2, parse_ip_packet_v2, read_message,
     write_message, CapabilitiesMessage, DataMessageType, VpnHandshake, VpnHandshakeResponse,
@@ -22,8 +23,8 @@ use crate::vpn_core::signaling::{
 use bytes::{Bytes, BytesMut};
 use futures::StreamExt;
 use ipnet::{Ipv4Net, Ipv6Net};
-use iroh::endpoint::{PathInfoList, RecvStream, SendStream};
-use iroh::{Endpoint, EndpointAddr, EndpointId, RelayUrl, TransportAddr, Watcher};
+use iroh::endpoint::{PathList, RecvStream, SendStream};
+use iroh::{Endpoint, EndpointAddr, EndpointId, RelayUrl, TransportAddr};
 use rand::Rng;
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -162,6 +163,9 @@ impl VpnClient {
 
         log::info!("Connected to server, performing handshake...");
 
+        // Monitor and report connection path changes (e.g., relay -> direct)
+        let _path_watcher = watch_connection_paths(&connection, "Connection");
+
         // Perform handshake on first stream
         let server_info = self.perform_handshake(&connection).await?;
 
@@ -254,7 +258,7 @@ impl VpnClient {
         let local_gso_enabled = offload_status.enabled;
         let negotiated_gso = local_gso_enabled && server_info.server_gso_enabled;
         // Data-channel GSO metadata is supported even when local TUN offload is not,
-        // because inbound metadata can be fallback-segmented in software.
+        // because inbound metadata can be materialized in software.
         let advertised_gso = true;
         log::info!(
             "GSO status (client): local={}, server={}, negotiated={}, advertised={}",
@@ -464,11 +468,11 @@ impl VpnClient {
         connection: &iroh::endpoint::Connection,
         vpn_tun_name: &str,
     ) -> Option<JoinHandle<()>> {
-        // Get the paths watcher
-        let paths_watcher = connection.paths();
-
-        // Clone endpoint for the spawned task
+        // Clone endpoint and connection for the spawned task. The paths
+        // stream borrows the connection, so the task owns a clone and creates
+        // the stream inside.
         let endpoint_clone = endpoint.clone();
+        let connection_clone = connection.clone();
         let vpn_tun_name = vpn_tun_name.to_string();
         let initial_routes = HashMap::new();
 
@@ -479,7 +483,7 @@ impl VpnClient {
         let handle = tokio::spawn(async move {
             run_bypass_route_manager(
                 endpoint_clone,
-                paths_watcher,
+                connection_clone,
                 Some(setup_done_tx),
                 vpn_tun_name,
                 initial_routes,
@@ -591,17 +595,20 @@ impl VpnClient {
 
                             if let Some(meta) = offload {
                                 if !negotiated_gso {
-                                    match segment_tcp_gso_packet(&meta, packet) {
-                                        Ok(segments) => {
-                                            for seg in segments {
-                                                let frame_size = 1 + 4 + 1 + seg.len();
+                                    match materialize_offload_packet(&meta, packet) {
+                                        Ok(packets) => {
+                                            for packet in packets {
+                                                let frame_size = 1 + 4 + 1 + packet.len();
                                                 let mut write_buf =
                                                     BytesMut::with_capacity(frame_size);
-                                                if let Err(e) =
-                                                    frame_ip_packet_v2(&mut write_buf, None, &seg)
+                                                if let Err(e) = frame_ip_packet_v2(
+                                                    &mut write_buf,
+                                                    None,
+                                                    &packet,
+                                                )
                                                 {
                                                     log::warn!(
-                                                        "Failed to frame segmented packet: {}",
+                                                        "Failed to frame materialized packet: {}",
                                                         e
                                                     );
                                                     continue;
@@ -618,7 +625,7 @@ impl VpnClient {
                                         }
                                         Err(e) => {
                                             log::warn!(
-                                                "Failed to fallback-segment TCP GSO packet: {}",
+                                                "Failed to materialize offload packet: {}",
                                                 e
                                             );
                                         }
@@ -765,11 +772,11 @@ impl VpnClient {
 
                     let write_result = if let Some(meta) = offload {
                         if !local_gso_enabled {
-                            match segment_tcp_gso_packet(&meta, packet) {
-                                Ok(segments) => {
+                            match materialize_offload_packet(&meta, packet) {
+                                Ok(packets) => {
                                     let mut result = Ok(());
-                                    for seg in segments {
-                                        if let Err(e) = tun_writer.write_all(&seg).await {
+                                    for packet in packets {
+                                        if let Err(e) = tun_writer.write_all(&packet).await {
                                             result = Err(e);
                                             break;
                                         }
@@ -1086,34 +1093,27 @@ impl BypassRouteManager {
 
 /// Run the bypass route manager task.
 ///
-/// Monitors path changes via the watcher stream and dynamically
+/// Monitors path changes via the connection's paths stream and dynamically
 /// updates bypass routes as the connection evolves.
 ///
 /// Returns after initial setup is complete, continuing to monitor in background.
 /// The returned oneshot receiver signals when initial setup is done.
 async fn run_bypass_route_manager(
     endpoint: Endpoint,
-    mut paths_watcher: impl Watcher<Value = PathInfoList> + Send + Unpin + 'static,
+    connection: iroh::endpoint::Connection,
     initial_setup_done: Option<tokio::sync::oneshot::Sender<()>>,
     vpn_tun_name: String,
     initial_routes: HashMap<IpAddr, BypassRouteGuard>,
 ) {
     let mut manager = BypassRouteManager::new(vpn_tun_name, initial_routes);
 
-    // Process initial connection paths.
-    let initial_paths = paths_watcher.get();
-    let initial_result = collect_addresses_from_paths(&endpoint, &initial_paths).await;
-    if initial_result.preserve_routes {
-        log::warn!("Initial bypass route update skipped - keeping existing routes");
-    } else {
-        manager.update(initial_result.ips).await;
-    }
-
-    // Watch for changes using stream_updates_only (skips initial value we already processed)
-    let mut stream = paths_watcher.stream_updates_only();
+    // The stream yields the current snapshot on the first poll, then a fresh
+    // snapshot whenever the open or selected paths change; it ends when the
+    // connection closes.
+    let mut stream = connection.paths_stream();
 
     // Ensure initial setup does not report success until we have at least one
-    // active bypass route, unless the watcher ends.
+    // active bypass route, unless the stream ends.
     while manager.active_routes.is_empty() {
         let Some(paths) = stream.next().await else {
             break;
@@ -1146,7 +1146,7 @@ async fn run_bypass_route_manager(
         manager.update(result.ips).await;
     }
 
-    log::debug!("Bypass route manager task ending (watcher disconnected)");
+    log::debug!("Bypass route manager task ending (connection closed)");
     // When this function returns, manager is dropped, which drops all guards
     // and removes all bypass routes
 }
@@ -1165,7 +1165,7 @@ struct CollectAddressesResult {
 /// and a flag indicating whether DNS resolution failed.
 async fn collect_addresses_from_paths(
     endpoint: &Endpoint,
-    paths: &PathInfoList,
+    paths: &PathList<'_>,
 ) -> CollectAddressesResult {
     let mut ips = HashSet::new();
     let mut preserve_routes = false;
@@ -1246,7 +1246,13 @@ async fn resolve_relay_url(
     }
 
     // Try to resolve the hostname with a reasonable timeout
-    let resolver = endpoint.dns_resolver();
+    let resolver = match endpoint.dns_resolver() {
+        Ok(resolver) => resolver,
+        Err(e) => {
+            log::warn!("DNS resolver unavailable for relay URL {}: {}", relay_url, e);
+            return Err(()); // Signal DNS failure
+        }
+    };
     match resolver.lookup_ipv4_ipv6(host, RESOLVE_RELAY_TIMEOUT).await {
         Ok(addrs) => {
             let socket_addrs: Vec<SocketAddr> = addrs.map(|ip| SocketAddr::new(ip, port)).collect();

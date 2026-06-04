@@ -4,11 +4,12 @@ use crate::vpn_common::config::{CongestionController, TransportTuning, DEFAULT_R
 use anyhow::{Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use iroh::{
-    address_lookup::{DnsAddressLookup, MdnsAddressLookup, PkarrPublisher, PkarrResolver},
-    endpoint::{Builder as EndpointBuilder, ControllerFactory, QuicTransportConfig},
+    address_lookup::{DnsAddressLookup, PkarrPublisher, PkarrResolver},
+    endpoint::{presets, Builder as EndpointBuilder, ControllerFactory, QuicTransportConfig},
     Endpoint, EndpointId, RelayMap, RelayMode, RelayUrl, SecretKey,
 };
-use iroh_quinn_proto::congestion::{BbrConfig, CubicConfig, NewRenoConfig};
+use iroh_mdns_address_lookup::MdnsAddressLookup;
+use noq_proto::congestion::{Bbr3Config, CubicConfig, NewRenoConfig};
 use log::info;
 use std::path::Path;
 use std::sync::Arc;
@@ -50,7 +51,12 @@ fn create_congestion_controller_factory(
 ) -> Arc<dyn ControllerFactory + Send + Sync> {
     match controller {
         CongestionController::Cubic => Arc::new(CubicConfig::default()),
-        CongestionController::Bbr => Arc::new(BbrConfig::default()),
+        CongestionController::Bbr => {
+            // noq-proto 1.0 removed the original BBR implementation; Bbr3 is
+            // its replacement but is marked experimental upstream.
+            info!("BBR congestion control is backed by the experimental Bbr3 implementation");
+            Arc::new(Bbr3Config::default())
+        }
         CongestionController::NewReno => Arc::new(NewRenoConfig::default()),
     }
 }
@@ -187,7 +193,13 @@ pub fn create_endpoint_builder(
     }
 
     let transport_config = transport_config.build();
-    let mut builder = Endpoint::empty_builder(relay_mode).transport_config(transport_config);
+    // iroh 1.0 requires the crypto provider to be set explicitly on the
+    // builder when starting from the `Empty` preset — the `tls-ring` feature
+    // only makes the ring backend available, it does not wire it in.
+    let mut builder = Endpoint::builder(presets::Empty)
+        .relay_mode(relay_mode)
+        .transport_config(transport_config)
+        .crypto_provider(Arc::new(rustls::crypto::ring::default_provider()));
 
     if relay_only {
         builder = builder.clear_ip_transports();
@@ -203,12 +215,10 @@ pub fn create_endpoint_builder(
             Some(dns_url) => {
                 // Custom DNS server with publishing and resolving via HTTP (pkarr)
                 let pkarr_url: Url = dns_url.parse().context("Invalid DNS server URL")?;
-                if let Some(secret) = secret_key {
+                if secret_key.is_some() {
                     info!("Using custom DNS server: {}", dns_url);
                     builder = builder
-                        .address_lookup(
-                            PkarrPublisher::builder(pkarr_url.clone()).build(secret.clone()),
-                        )
+                        .address_lookup(PkarrPublisher::builder(pkarr_url.clone()))
                         .address_lookup(PkarrResolver::builder(pkarr_url));
                 } else {
                     // Custom DNS server, resolve only via HTTP (no secret = can't publish)
