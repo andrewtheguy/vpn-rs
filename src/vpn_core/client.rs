@@ -16,7 +16,7 @@ use crate::vpn_core::lock::VpnLock;
 use crate::vpn_core::offload::{
     materialize_offload_packet, split_tun_frame, CoalescedOutput, TcpGroTable,
 };
-use crate::vpn_core::paths::watch_connection_paths;
+use crate::vpn_core::paths::{format_connection_paths, watch_connection_paths};
 use crate::vpn_core::signaling::{
     append_ip_packet_v2, frame_capabilities_message, parse_ip_packet_v2, read_message,
     write_message, CapabilitiesMessage, DataMessageType, VpnHandshake, VpnHandshakeResponse,
@@ -29,6 +29,10 @@ use iroh::endpoint::{PathList, RecvStream, SendStream};
 use iroh::{Endpoint, EndpointAddr, EndpointId, RelayUrl, TransportAddr};
 use rand::Rng;
 use std::collections::{HashMap, HashSet};
+#[cfg(not(unix))]
+use std::io::IsTerminal;
+#[cfg(unix)]
+use std::io::{self, IsTerminal};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::num::NonZeroU32;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -75,6 +79,9 @@ const RESOLVE_RELAY_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Maximum wait for initial bypass route setup before continuing startup.
 const INITIAL_BYPASS_SETUP_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Poll interval for the client-side interactive path status key.
+const PATH_KEY_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 /// VPN client instance.
 pub struct VpnClient {
@@ -181,6 +188,7 @@ impl VpnClient {
 
         // Monitor and report connection path changes (e.g., relay -> direct)
         let _path_watcher = watch_connection_paths(&connection, "Connection");
+        let _path_keypress = spawn_connection_path_keypress_logger(&connection);
 
         // Perform handshake on first stream
         let server_info = self.perform_handshake(&connection).await?;
@@ -1072,6 +1080,194 @@ impl VpnClient {
                 }
             }
         }
+    }
+}
+
+/// Spawn a client-side task that logs the current selected connection path when
+/// the user presses `c`.
+#[cfg(unix)]
+fn spawn_connection_path_keypress_logger(
+    connection: &iroh::endpoint::Connection,
+) -> Option<ClientInputGuard> {
+    if !std::io::stdin().is_terminal() {
+        return None;
+    }
+
+    let connection = connection.clone();
+    Some(ClientInputGuard(tokio::spawn(async move {
+        let _terminal_guard = match NonCanonicalStdinGuard::enable() {
+            Ok(guard) => guard,
+            Err(e) => {
+                log::debug!("Connection path keypress support disabled: {}", e);
+                return;
+            }
+        };
+        log::info!("Press 'c' to show the current connection path");
+
+        let mut buf = [0u8; 32];
+        loop {
+            match read_stdin_nonblocking(&mut buf) {
+                Ok(0) => {
+                    tokio::time::sleep(PATH_KEY_POLL_INTERVAL).await;
+                }
+                Ok(n) => {
+                    for byte in &buf[..n] {
+                        if matches!(*byte, b'c' | b'C') {
+                            let paths = connection.paths();
+                            log::info!("Connection: {}", format_connection_paths(&paths));
+                        }
+                    }
+                }
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    tokio::time::sleep(PATH_KEY_POLL_INTERVAL).await;
+                }
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                Err(e) => {
+                    log::debug!("Connection path keypress reader stopped: {}", e);
+                    break;
+                }
+            }
+        }
+    })))
+}
+
+/// Non-Unix fallback: line-buffered consoles still let users query with
+/// `c` followed by Enter.
+#[cfg(not(unix))]
+fn spawn_connection_path_keypress_logger(
+    connection: &iroh::endpoint::Connection,
+) -> Option<ClientInputGuard> {
+    if !std::io::stdin().is_terminal() {
+        return None;
+    }
+
+    use tokio::io::{AsyncBufReadExt, BufReader};
+
+    let connection = connection.clone();
+    Some(ClientInputGuard(tokio::spawn(async move {
+        log::info!("Type 'c' and press Enter to show the current connection path");
+        let stdin = BufReader::new(tokio::io::stdin());
+        let mut lines = stdin.lines();
+        loop {
+            match lines.next_line().await {
+                Ok(Some(line)) if line.trim().eq_ignore_ascii_case("c") => {
+                    let paths = connection.paths();
+                    log::info!("Connection: {}", format_connection_paths(&paths));
+                }
+                Ok(Some(_)) => {}
+                Ok(None) => break,
+                Err(e) => {
+                    log::debug!("Connection path keypress reader stopped: {}", e);
+                    break;
+                }
+            }
+        }
+    })))
+}
+
+/// RAII guard that aborts the client input task on drop.
+struct ClientInputGuard(JoinHandle<()>);
+
+impl Drop for ClientInputGuard {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+#[cfg(unix)]
+struct NonCanonicalStdinGuard {
+    fd: libc::c_int,
+    original_termios: libc::termios,
+    original_flags: libc::c_int,
+}
+
+#[cfg(unix)]
+impl NonCanonicalStdinGuard {
+    fn enable() -> io::Result<Self> {
+        let fd = libc::STDIN_FILENO;
+        let original_termios = get_terminal_attr(fd)?;
+        let original_flags = get_fd_flags(fd)?;
+
+        let mut termios = original_termios;
+        termios.c_lflag &= !(libc::ICANON | libc::ECHO);
+        termios.c_cc[libc::VMIN] = 0;
+        termios.c_cc[libc::VTIME] = 0;
+        set_terminal_attr(fd, &termios)?;
+
+        if let Err(e) = set_fd_flags(fd, original_flags | libc::O_NONBLOCK) {
+            let _ = set_terminal_attr(fd, &original_termios);
+            return Err(e);
+        }
+
+        Ok(Self {
+            fd,
+            original_termios,
+            original_flags,
+        })
+    }
+}
+
+#[cfg(unix)]
+impl Drop for NonCanonicalStdinGuard {
+    fn drop(&mut self) {
+        let _ = set_terminal_attr(self.fd, &self.original_termios);
+        let _ = set_fd_flags(self.fd, self.original_flags);
+    }
+}
+
+#[cfg(unix)]
+fn get_terminal_attr(fd: libc::c_int) -> io::Result<libc::termios> {
+    let mut termios = std::mem::MaybeUninit::<libc::termios>::uninit();
+    // SAFETY: `tcgetattr` initializes `termios` on success.
+    let result = unsafe { libc::tcgetattr(fd, termios.as_mut_ptr()) };
+    if result == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: `tcgetattr` returned success, so the termios value is initialized.
+    Ok(unsafe { termios.assume_init() })
+}
+
+#[cfg(unix)]
+fn set_terminal_attr(fd: libc::c_int, termios: &libc::termios) -> io::Result<()> {
+    // SAFETY: `termios` points to a valid termios value for `tcsetattr`.
+    let result = unsafe { libc::tcsetattr(fd, libc::TCSANOW, termios) };
+    if result == -1 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+fn get_fd_flags(fd: libc::c_int) -> io::Result<libc::c_int> {
+    // SAFETY: `fcntl` with `F_GETFL` does not dereference any pointer.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags == -1 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(flags)
+    }
+}
+
+#[cfg(unix)]
+fn set_fd_flags(fd: libc::c_int, flags: libc::c_int) -> io::Result<()> {
+    // SAFETY: `fcntl` with `F_SETFL` does not dereference any pointer.
+    let result = unsafe { libc::fcntl(fd, libc::F_SETFL, flags) };
+    if result == -1 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+fn read_stdin_nonblocking(buf: &mut [u8]) -> io::Result<usize> {
+    // SAFETY: `buf` is valid for writes of `buf.len()` bytes.
+    let result = unsafe { libc::read(libc::STDIN_FILENO, buf.as_mut_ptr().cast(), buf.len()) };
+    if result == -1 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(result as usize)
     }
 }
 

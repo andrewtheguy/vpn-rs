@@ -9,7 +9,7 @@ use iroh::TransportAddr;
 use tokio::task::JoinHandle;
 
 /// Format connection path info for display, showing selected paths with RTT.
-fn format_paths(paths: &PathList<'_>) -> String {
+pub fn format_connection_paths(paths: &PathList<'_>) -> String {
     if paths.is_empty() {
         return "establishing...".to_string();
     }
@@ -69,7 +69,7 @@ pub fn watch_connection_paths(connection: &Connection, label: &str) -> PathWatch
         while let Some(paths) = stream.next().await {
             let key = paths_key(&paths);
             if last_key.as_ref() != Some(&key) {
-                log::info!("{}: {}", label, format_paths(&paths));
+                log::info!("{}: {}", label, format_connection_paths(&paths));
                 last_key = Some(key);
             }
         }
