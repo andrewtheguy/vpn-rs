@@ -14,7 +14,7 @@ use crate::vpn_core::device::{
 use crate::vpn_core::error::{VpnError, VpnResult};
 use crate::vpn_core::lock::VpnLock;
 use crate::vpn_core::offload::{
-    materialize_offload_packet, split_tun_frame, CoalescedOutput, TcpGroTable,
+    materialize_offload_packet, split_tun_frame, CoalescedOutput, TcpGroTable, GRO_FLUSH_WINDOW,
 };
 use crate::vpn_core::paths::{format_connection_paths, watch_connection_paths};
 use crate::vpn_core::signaling::{
@@ -23,7 +23,7 @@ use crate::vpn_core::signaling::{
     HEARTBEAT_PING_BYTE, MAX_CAPABILITIES_PAYLOAD, MAX_HANDSHAKE_SIZE, VPN_ALPN,
 };
 use bytes::{Bytes, BytesMut};
-use futures::{FutureExt, StreamExt};
+use futures::StreamExt;
 use ipnet::{Ipv4Net, Ipv6Net};
 use iroh::endpoint::{PathList, RecvStream, SendStream};
 use iroh::{Endpoint, EndpointAddr, EndpointId, RelayUrl, TransportAddr};
@@ -69,12 +69,6 @@ const WRITE_BATCH_SIZE: usize = 256;
 /// long-lived `BytesMut` and split off as refcounted `Bytes`, so the
 /// allocator is only hit once per chunk instead of once per packet.
 const FRAME_ARENA_CHUNK: usize = 64 * 1024;
-
-/// Safety cap on how long a software-GRO group may wait for additional
-/// segments. Groups normally flush as soon as the TUN read would block
-/// (drain-then-flush); this window only bounds holding time while packets
-/// keep arriving back-to-back.
-const GRO_FLUSH_WINDOW: Duration = Duration::from_micros(100);
 
 /// Timeout for resolving relay URLs via DNS.
 const RESOLVE_RELAY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -604,36 +598,35 @@ impl VpnClient {
                 let software_gro = !tun_reader.vnet_hdr_enabled();
                 if software_gro {
                     log::info!(
-                        "Software GRO enabled for outbound TCP (local TUN has no offload support)"
+                        "Software GRO enabled for outbound TCP (local TUN has no offload support; flush_window_us={})",
+                        GRO_FLUSH_WINDOW.as_micros()
                     );
                 }
                 let mut gro_table = TcpGroTable::new();
                 loop {
                     let mut packet_buf = ReadBuf::uninit(&mut read_storage);
                     let read_result = if software_gro && !gro_table.is_empty() {
-                        // Safety cap: even while packets keep arriving
-                        // back-to-back, never hold a partial group beyond the
-                        // flush window.
+                        // Flush groups whose bounded wait has elapsed before
+                        // arming the next deadline.
                         let expired = gro_table.flush_expired(Instant::now(), GRO_FLUSH_WINDOW);
                         if !send_gro_outputs(expired, &mut arena, &outbound_tx).await {
                             return None;
                         }
-                        // Drain-then-flush (wireguard-go model): keep
-                        // coalescing only while another packet is instantly
-                        // available; flush pending groups as soon as the TUN
-                        // read would block, so GRO adds no latency to flows
-                        // that are not arriving back-to-back. A single
-                        // Pending poll consumes no data, so dropping the
-                        // probed future is safe.
-                        match tun_reader.read_buf(&mut packet_buf).now_or_never() {
-                            Some(read_result) => read_result,
-                            None => {
-                                let outputs = gro_table.flush_all();
-                                if !send_gro_outputs(outputs, &mut arena, &outbound_tx).await {
-                                    return None;
+
+                        if let Some(deadline) = gro_table.next_deadline(GRO_FLUSH_WINDOW) {
+                            match tun_reader.read_buf_until(&mut packet_buf, deadline).await {
+                                Some(read_result) => read_result,
+                                None => {
+                                    let expired =
+                                        gro_table.flush_expired(Instant::now(), GRO_FLUSH_WINDOW);
+                                    if !send_gro_outputs(expired, &mut arena, &outbound_tx).await {
+                                        return None;
+                                    }
+                                    continue;
                                 }
-                                continue;
                             }
+                        } else {
+                            tun_reader.read_buf(&mut packet_buf).await
                         }
                     } else {
                         tun_reader.read_buf(&mut packet_buf).await
@@ -1595,6 +1588,20 @@ async fn send_gro_outputs(
     arena: &mut BytesMut,
     outbound_tx: &mpsc::Sender<Bytes>,
 ) -> bool {
+    let coalesced_frames = outputs.iter().filter(|output| output.is_coalesced()).count();
+    if coalesced_frames > 0 {
+        let coalesced_segments: u64 = outputs
+            .iter()
+            .filter(|output| output.is_coalesced())
+            .map(CoalescedOutput::source_segment_count)
+            .sum();
+        log::trace!(
+            "Software GRO emitted {} outbound coalesced frame(s) carrying {} TCP segment(s)",
+            coalesced_frames,
+            coalesced_segments
+        );
+    }
+
     for output in &outputs {
         let (offload, packet) = match output {
             CoalescedOutput::Coalesced(hdr, packet) => (Some(hdr), packet.as_slice()),

@@ -10,6 +10,9 @@ use bytes::{BufMut, BytesMut};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
+/// Bounded wait for adjacent TCP segments in software GRO before flushing.
+pub(crate) const GRO_FLUSH_WINDOW: Duration = Duration::from_micros(500);
+
 /// Size of the Linux virtio header used by TUN when `IFF_VNET_HDR` is enabled.
 pub const VIRTIO_NET_HDR_LEN: usize = 10;
 
@@ -472,6 +475,25 @@ pub enum CoalescedOutput {
     Coalesced(VirtioNetHdr, Vec<u8>),
 }
 
+impl CoalescedOutput {
+    /// Number of original IP packets carried by this output.
+    pub fn source_segment_count(&self) -> u64 {
+        match self {
+            Self::Single(_) => 1,
+            Self::Coalesced(hdr, packet) => {
+                let payload_len = packet.len().saturating_sub(usize::from(hdr.hdr_len));
+                let gso_size = usize::from(hdr.gso_size).max(1);
+                payload_len.div_ceil(gso_size).max(1) as u64
+            }
+        }
+    }
+
+    /// Return true if this output carries software-coalesced TCP data.
+    pub fn is_coalesced(&self) -> bool {
+        matches!(self, Self::Coalesced(_, _))
+    }
+}
+
 /// In-progress coalesced group for one TCP flow.
 struct GroGroup {
     /// `[IP header][TCP header][concatenated payloads]`, headers from the
@@ -898,15 +920,15 @@ impl TcpGroTable {
 
     /// Drain groups that have been pending for at least `window` (oldest first).
     pub fn flush_expired(&mut self, now: Instant, window: Duration) -> Vec<CoalescedOutput> {
-        let mut expired: Vec<(TcpFlowKey, u64)> = self
+        let mut expired: Vec<(TcpFlowKey, Instant, u64)> = self
             .groups
             .iter()
             .filter(|(_, g)| now.saturating_duration_since(g.created_at) >= window)
-            .map(|(k, g)| (*k, g.order))
+            .map(|(k, g)| (*k, g.created_at, g.order))
             .collect();
-        expired.sort_by_key(|(_, order)| *order);
+        expired.sort_by_key(|(_, created_at, order)| (*created_at, *order));
         let mut out = Vec::with_capacity(expired.len());
-        for (key, _) in expired {
+        for (key, _, _) in expired {
             if let Some(group) = self.groups.remove(&key) {
                 Self::emit(group, &mut out);
             }
@@ -1236,6 +1258,21 @@ mod tests {
         packet
     }
 
+    fn set_gro_segment_source_port_v4(packet: &mut [u8], source_port: u16) {
+        packet[20..22].copy_from_slice(&source_port.to_be_bytes());
+        packet[36..38].copy_from_slice(&0u16.to_be_bytes());
+        let checksum = tcp_checksum_ipv4(packet, 20).expect("valid IPv4 TCP checksum");
+        packet[36..38].copy_from_slice(&checksum.to_be_bytes());
+    }
+
+    fn gro_output_source_port_v4(output: &CoalescedOutput) -> u16 {
+        let packet = match output {
+            CoalescedOutput::Single(packet) => packet,
+            CoalescedOutput::Coalesced(_, packet) => packet,
+        };
+        u16::from_be_bytes([packet[20], packet[21]])
+    }
+
     /// Build one TCP/IPv6 segment of a fixed test flow for GRO tests.
     fn build_gro_segment_v6(seq: u32, payload: &[u8], psh: bool, fin: bool) -> Vec<u8> {
         let mut tcp = etherparse::TcpHeader::new(12345, 443, seq, 65_535);
@@ -1554,7 +1591,7 @@ mod tests {
 
     #[test]
     fn test_gro_flush_expired_respects_window() {
-        let window = Duration::from_micros(500);
+        let window = GRO_FLUSH_WINDOW;
         let now = Instant::now();
         let segment = build_gro_segment_v4(10_000, &[0xaa; 1200], false, false);
 
@@ -1565,10 +1602,40 @@ mod tests {
         assert!(table
             .flush_expired(now + Duration::from_micros(400), window)
             .is_empty());
-        let flushed = table.flush_expired(now + Duration::from_micros(600), window);
+        let flushed = table.flush_expired(now + window, window);
         assert_eq!(flushed.len(), 1);
         assert!(table.is_empty());
         assert_eq!(table.next_deadline(window), None);
+    }
+
+    #[test]
+    fn test_gro_flush_expired_multiple_groups_by_deadline_order() {
+        let window = GRO_FLUSH_WINDOW;
+        let now = Instant::now();
+        let mut table = TcpGroTable::new();
+
+        let mut middle_deadline = build_gro_segment_v4(10_000, &[0x11; 100], false, false);
+        set_gro_segment_source_port_v4(&mut middle_deadline, 40_000);
+        let mut earliest_deadline = build_gro_segment_v4(20_000, &[0x22; 100], false, false);
+        set_gro_segment_source_port_v4(&mut earliest_deadline, 40_001);
+        let mut latest_deadline = build_gro_segment_v4(30_000, &[0x33; 100], false, false);
+        set_gro_segment_source_port_v4(&mut latest_deadline, 40_002);
+
+        assert!(table
+            .push(&middle_deadline, now + Duration::from_micros(100))
+            .is_empty());
+        assert!(table.push(&earliest_deadline, now).is_empty());
+        assert!(table
+            .push(&latest_deadline, now + Duration::from_micros(200))
+            .is_empty());
+        assert_eq!(table.next_deadline(window), Some(now + window));
+
+        let flushed = table.flush_expired(now + Duration::from_micros(700), window);
+        assert_eq!(flushed.len(), 3);
+        assert_eq!(gro_output_source_port_v4(&flushed[0]), 40_001);
+        assert_eq!(gro_output_source_port_v4(&flushed[1]), 40_000);
+        assert_eq!(gro_output_source_port_v4(&flushed[2]), 40_002);
+        assert!(table.is_empty());
     }
 
     #[test]
