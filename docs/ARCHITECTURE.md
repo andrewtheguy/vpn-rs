@@ -129,9 +129,9 @@ When `network6` is configured on the server, clients receive IPv6 addresses alon
 The VPN mode sends raw IP packets directly over iroh QUIC streams (TLS 1.3). This removes the double encryption overhead of running WireGuard inside QUIC.
 
 **Key Design Decisions:**
-- **Framing**: IP packets are length-prefixed and sent over the QUIC stream.
+- **Framing**: IP packets are length-prefixed and sent over the QUIC stream, optionally tagged with segmentation-offload metadata (see "Segmentation Offload" below).
 - **Security**: Relies on iroh/QUIC's built-in encryption (TLS 1.3).
-- **Efficiency**: Zero-copy forwarding where possible between TUN and QUIC buffers.
+- **Efficiency**: Zero-copy forwarding where possible between TUN and QUIC buffers; TCP segments travel as coalesced super-packets when offload is available on either side.
 - **Identification**: Clients identify via a random `u64` `device_id` generated at startup, allowing multiple sessions per iroh endpoint.
 - **Reconnects**: The server automatically manages session limits and cleanup, allowing seamless reconnects from the same device ID.
 
@@ -150,6 +150,41 @@ Clients are keyed by `(EndpointId, device_id)`, so an attacker cannot hijack a s
 **Collision Handling:**
 
 The 64-bit ID space provides a ~2^32 birthday bound for collisions, which is sufficient for session tracking across reasonable client counts (thousands of concurrent sessions). Unpredictability is not a security requirement since `device_id` only differentiates sessions from the same authenticated endpoint. We use `rand::thread_rng()` (a CSPRNG) for defense-in-depth: it avoids predictable collision patterns, reduces correlation/timing attack surface, and makes accidental collisions less likely in practice.
+
+### Segmentation Offload (GSO/GRO)
+
+Per-packet cost dominates tunnel throughput: every ~MTU-sized TCP segment otherwise pays its own framing, channel send and QUIC write. `vpn-rs` moves whole TCP "super-packets" (up to 64 KB) through the tunnel whenever possible and segments them as late as possible — ideally in the receiving kernel.
+
+**Offload metadata:** IP frames may carry a 10-byte `virtio_net_hdr` (the Linux TUN `IFF_VNET_HDR` format, parsed/serialized in `src/vpn_core/offload.rs`) describing TCP GSO state: segment size (MSS), header length and partial-checksum position. The v2 IP frame embeds it via the `offload_len` byte.
+
+**Capability negotiation:**
+- The client always advertises GSO support in its `Capabilities` message (it can software-segment anything it receives).
+- The server reports its TUN offload capability as `server_gso_enabled` in the handshake response, and sets `connection_gso_active = server TUN offload enabled && client advertised GSO` per client.
+
+**Data paths** (each side picks per packet, based on what its local TUN supports):
+
+| Path | Local TUN has offload | Behavior |
+|------|----------------------|----------|
+| Egress, kernel GRO | yes (Linux) | Kernel hands coalesced super-frames + `virtio_net_hdr` to the TUN reader; forwarded with metadata when the peer accepts GSO, otherwise software-segmented (`materialize_offload_packet`) before framing |
+| Egress, software GRO | no (macOS/Windows, or Linux without vnet headers) | `TcpGroTable` (in `offload.rs`) coalesces consecutive in-order same-flow TCP segments into a super-frame with a synthetic `virtio_net_hdr`, flushed within `GRO_FLUSH_WINDOW` (500µs) |
+| Ingress, kernel TSO | yes (Linux) | Offload-tagged frames are written to the TUN with their metadata; the kernel segments and completes checksums |
+| Ingress, software segmentation | no | `materialize_offload_packet` splits the super-frame into plain per-MSS packets with recomputed checksums before the TUN write |
+
+**Software GRO details** (`TcpGroTable`, mirrors wireguard-go's `tun/tcp_offload_linux.go` semantics):
+- Coalesces only clean in-order TCP: same flow key, contiguous sequence numbers, uniform MSS, byte-identical headers (TCP timestamps may advance; the latest is carried). SYN/RST/URG/CWR, pure ACKs, fragments and non-TCP packets pass through immediately — flushing any pending same-flow group first so in-flow ordering is preserved.
+- FIN/PSH are only valid on a group's final segment and finalize it.
+- Bounded: ≤16 in-flight flows, ≤64 segments and ≤65535 bytes per group.
+- The coalesced TCP checksum field holds the folded (not complemented) pseudo-header sum per the Linux `CHECKSUM_PARTIAL` convention, so the receiving kernel/NIC completes it per segment under TSO.
+- On the server's TUN→client direction, GRO state is additionally keyed per destination client and evicted when the client disconnects.
+
+The outbound loops on both sides are a `tokio::select!` between the TUN read and the GRO flush deadline; on a GSO-capable Linux TUN the software-GRO path is bypassed entirely (the kernel already coalesces).
+
+### Throughput Design
+
+- **Dedicated writer tasks** own each QUIC `SendStream` and the server TUN writer; producers communicate over mpsc channels (no per-packet mutex).
+- **Batched writes**: writers drain up to `WRITE_BATCH_SIZE` (256) framed packets per `recv_many` and submit them with one `write_all_chunks` call.
+- **Framing arena**: frames are appended to a long-lived 64 KB `BytesMut` (`append_ip_packet_v2`) and split off as refcounted `Bytes` views, so the allocator is hit once per arena chunk instead of once per packet.
+- **Zero-copy sends**: `Bytes` flow from framing through the channel to the QUIC write without copying.
 
 ### IP Pool Management
 
@@ -305,31 +340,39 @@ graph TB
 
 **Application-Level Heartbeat Protocol:**
 
-Heartbeats and IP packets are multiplexed on the same bidirectional QUIC stream (the "data stream" opened after handshake). All messages are prefixed with a 1-byte type discriminator defined in `DataMessageType` in `src/vpn_core/signaling.rs`:
+Heartbeats, capability negotiation and IP packets are multiplexed on the same bidirectional QUIC stream (the "data stream" opened after handshake). All messages are prefixed with a 1-byte type discriminator defined in `DataMessageType` in `src/vpn_core/signaling.rs`:
 
 ```
-Data channel message framing:
+Data channel message framing (v2):
 
   IP packet (type 0x00):
-    [0x00] [4 bytes: length BE u32] [N bytes: raw IP packet]
+    [0x00] [4 bytes: frame_len BE u32] [1 byte: offload_len (0 or 10)]
+           [offload_len bytes: virtio_net_hdr] [N bytes: raw IP packet]
+    frame_len covers everything after itself (offload_len byte + metadata + packet).
 
   Heartbeat ping (type 0x01):
     [0x01]
 
   Heartbeat pong (type 0x02):
     [0x02]
+
+  Capabilities (type 0x03):
+    [0x03] [1 byte: payload length] [payload: capability flags]
+    Bit 0 = GSO support (sender can receive offload-tagged IP frames).
+    Unknown trailing payload bytes are ignored for forward compatibility.
 ```
 
 **Implementation locations** (search by symbol name; line numbers may shift):
 - Type enum: `DataMessageType` in `signaling.rs`
-- Packet framing: `frame_ip_packet()` in `signaling.rs`
-- Client send (outbound): TUN reader task in `client.rs` - calls `frame_ip_packet()`
+- Packet framing: `append_ip_packet_v2()` / `parse_ip_packet_v2()` in `signaling.rs`
+- Capability framing: `frame_capabilities_message()` / `CapabilitiesMessage` in `signaling.rs`
+- Client send (outbound): TUN reader task in `client.rs` - frames via `append_ip_packet_v2()`
 - Client receive (inbound): inbound reader task in `client.rs` - reads type byte, dispatches via `DataMessageType::from_byte()`
 - Client heartbeat sender: heartbeat task in `client.rs` - sends `HeartbeatPing` byte
 - Server receive: inbound reader task in `server.rs` - reads type byte, responds to pings with `HeartbeatPong`
-- Server send: TUN reader and timer tasks in `server.rs` - call `frame_ip_packet()`
+- Server send: TUN reader task in `server.rs` - frames via `append_ip_packet_v2()`
 
-**Compatibility note:** This framing was added with the heartbeat feature. Older clients/servers that expect raw length-prefixed IP packets (without the type byte) are incompatible.
+**Compatibility note:** Peers must speak the same framing version; there is no backward compatibility at 0.0.x.
 
 This allows fast failure detection (~30 seconds) for common issues like server restarts or network changes.
 
