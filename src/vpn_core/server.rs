@@ -9,10 +9,12 @@ use crate::vpn_core::buffer::{as_mut_byte_slice, uninitialized_vec};
 use crate::vpn_core::config::VpnServerConfig;
 use crate::vpn_core::device::{TunConfig, TunDevice, TunOffloadStatus};
 use crate::vpn_core::error::{VpnError, VpnResult};
-use crate::vpn_core::offload::{materialize_offload_packet, split_tun_frame, VirtioNetHdr};
+use crate::vpn_core::offload::{
+    materialize_offload_packet, split_tun_frame, CoalescedOutput, TcpGroTable, VirtioNetHdr,
+};
 use crate::vpn_core::paths::watch_connection_paths;
 use crate::vpn_core::signaling::{
-    frame_ip_packet_v2, parse_ip_packet_v2, read_message, write_message, CapabilitiesMessage,
+    append_ip_packet_v2, parse_ip_packet_v2, read_message, write_message, CapabilitiesMessage,
     DataMessageType, VpnHandshake, VpnHandshakeResponse, HEARTBEAT_PONG_BYTE,
     MAX_CAPABILITIES_PAYLOAD, MAX_HANDSHAKE_SIZE,
 };
@@ -24,10 +26,23 @@ use std::collections::{HashMap, HashSet};
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot, RwLock};
 
 /// Maximum data-channel IP frame size (IP packet + optional offload metadata).
 const MAX_IP_PACKET_SIZE: usize = 65536 + 64;
+
+/// Maximum number of framed packets drained from a channel per batched write.
+const WRITE_BATCH_SIZE: usize = 256;
+
+/// Reserve granularity for the framing arena. Frames are appended to a
+/// long-lived `BytesMut` and split off as refcounted `Bytes`, so the
+/// allocator is only hit once per chunk instead of once per packet.
+const FRAME_ARENA_CHUNK: usize = 64 * 1024;
+
+/// Maximum time a software-GRO group may wait for additional segments before
+/// being flushed to its client.
+const GRO_FLUSH_WINDOW: Duration = Duration::from_micros(500);
 
 /// Performance statistics for the VPN server.
 ///
@@ -611,9 +626,9 @@ impl VpnServer {
         let tun_writer_stats = self.stats.clone();
         let tun_writer_handle = tokio::spawn(async move {
             log::info!("TUN writer task started");
-            let mut batch = Vec::with_capacity(64);
+            let mut batch = Vec::with_capacity(WRITE_BATCH_SIZE);
             loop {
-                let count = tun_write_rx.recv_many(&mut batch, 64).await;
+                let count = tun_write_rx.recv_many(&mut batch, WRITE_BATCH_SIZE).await;
                 if count == 0 {
                     break;
                 }
@@ -994,9 +1009,9 @@ impl VpnServer {
             .expect("at least one IP must be assigned");
         let mut data_send = data_send;
         let writer_handle = tokio::spawn(async move {
-            let mut batch = Vec::with_capacity(64);
+            let mut batch = Vec::with_capacity(WRITE_BATCH_SIZE);
             let error = loop {
-                let count = packet_rx.recv_many(&mut batch, 64).await;
+                let count = packet_rx.recv_many(&mut batch, WRITE_BATCH_SIZE).await;
                 if count == 0 {
                     // Channel closed (normal shutdown) - signal end of stream to peer
                     if let Err(e) = data_send.finish() {
@@ -1198,23 +1213,37 @@ impl VpnServer {
     }
 
     /// Enqueue a framed data-stream packet for a client writer task.
+    /// Enqueue a framed packet on a client's channel.
+    ///
+    /// `packet_count` is the number of original IP packets the frame carries
+    /// (>1 for software-GRO coalesced frames) so per-packet stats stay
+    /// comparable regardless of coalescing.
     async fn enqueue_client_frame(
         packet_tx: &mpsc::Sender<Bytes>,
         frame: Bytes,
         stats: &Arc<VpnServerStats>,
         drop_on_full: bool,
+        packet_count: u64,
     ) {
         match packet_tx.try_send(frame) {
             Ok(()) => {
-                stats.packets_to_clients.fetch_add(1, Ordering::Relaxed);
+                stats
+                    .packets_to_clients
+                    .fetch_add(packet_count, Ordering::Relaxed);
             }
             Err(mpsc::error::TrySendError::Full(frame)) => {
                 if drop_on_full {
-                    stats.packets_dropped_full.fetch_add(1, Ordering::Relaxed);
+                    stats
+                        .packets_dropped_full
+                        .fetch_add(packet_count, Ordering::Relaxed);
                 } else {
-                    stats.packets_backpressure.fetch_add(1, Ordering::Relaxed);
+                    stats
+                        .packets_backpressure
+                        .fetch_add(packet_count, Ordering::Relaxed);
                     if packet_tx.send(frame).await.is_ok() {
-                        stats.packets_to_clients.fetch_add(1, Ordering::Relaxed);
+                        stats
+                            .packets_to_clients
+                            .fetch_add(packet_count, Ordering::Relaxed);
                     }
                 }
             }
@@ -1222,6 +1251,74 @@ impl VpnServer {
                 // Channel closed during disconnect.
             }
         }
+    }
+
+    /// Frame software-GRO outputs with the framing arena and enqueue them on
+    /// a client's packet channel.
+    async fn send_gro_outputs_to_client(
+        &self,
+        outputs: &[CoalescedOutput],
+        arena: &mut BytesMut,
+        packet_tx: &mpsc::Sender<Bytes>,
+    ) {
+        for output in outputs {
+            let (offload, packet, packet_count) = match output {
+                CoalescedOutput::Coalesced(hdr, packet) => {
+                    // Number of original segments the coalesced frame carries.
+                    let payload_len = packet.len().saturating_sub(usize::from(hdr.hdr_len));
+                    let gso_size = usize::from(hdr.gso_size).max(1);
+                    let count = payload_len.div_ceil(gso_size).max(1) as u64;
+                    (Some(hdr), packet.as_slice(), count)
+                }
+                CoalescedOutput::Single(packet) => (None, packet.as_slice(), 1),
+            };
+            let frame_size = 1
+                + 4
+                + 1
+                + offload
+                    .map(|_| crate::vpn_core::offload::VIRTIO_NET_HDR_LEN)
+                    .unwrap_or(0)
+                + packet.len();
+            if arena.capacity() - arena.len() < frame_size {
+                arena.reserve(FRAME_ARENA_CHUNK.max(frame_size));
+            }
+            let written = match append_ip_packet_v2(arena, offload, packet) {
+                Ok(written) => written,
+                Err(e) => {
+                    log::warn!("Failed to frame coalesced packet: {}", e);
+                    continue;
+                }
+            };
+            Self::enqueue_client_frame(
+                packet_tx,
+                arena.split_to(written).freeze(),
+                &self.stats,
+                self.config.drop_on_full,
+                packet_count,
+            )
+            .await;
+        }
+    }
+
+    /// Flush per-client software-GRO tables (expired groups only, or all)
+    /// and evict state for disconnected clients.
+    async fn flush_gro_states(
+        &self,
+        gro_states: &mut HashMap<(EndpointId, u64), ClientGroState>,
+        arena: &mut BytesMut,
+        expired_only: bool,
+    ) {
+        for state in gro_states.values_mut() {
+            let outputs = if expired_only {
+                state.table.flush_expired(Instant::now(), GRO_FLUSH_WINDOW)
+            } else {
+                state.table.flush_all()
+            };
+            self.send_gro_outputs_to_client(&outputs, arena, &state.packet_tx)
+                .await;
+        }
+        // Evict GRO state for disconnected clients to avoid unbounded growth.
+        gro_states.retain(|_, state| !state.packet_tx.is_closed());
     }
 
     /// Handle client data stream.
@@ -1531,14 +1628,48 @@ impl VpnServer {
         // SAFETY: Buffer is immediately overwritten by tun_reader.read(), and only
         // the written portion (&buf_slice[..n]) is accessed. Skips zeroing overhead.
         let buf_slice = unsafe { as_mut_byte_slice(&mut buf) };
+        // Long-lived framing arena: frames are appended and split off as
+        // refcounted Bytes views, amortizing allocations across packets.
+        let mut arena = BytesMut::with_capacity(FRAME_ARENA_CHUNK);
+        // Software GRO: when the server TUN has no offload support (macOS/
+        // Windows, or Linux without vnet headers) the kernel performs no GRO,
+        // so coalesce consecutive same-flow TCP segments per destination
+        // client before framing. On a GSO-enabled Linux TUN this path is
+        // entirely bypassed: the kernel already hands us coalesced frames.
+        let software_gro = !tun_reader.vnet_hdr_enabled();
+        if software_gro {
+            log::info!(
+                "Software GRO enabled for TUN->client TCP (server TUN has no offload support)"
+            );
+        }
+        let mut gro_states: HashMap<(EndpointId, u64), ClientGroState> = HashMap::new();
 
         loop {
+            let gro_deadline = gro_states
+                .values()
+                .filter_map(|state| state.table.next_deadline(GRO_FLUSH_WINDOW))
+                .min()
+                .map(tokio::time::Instant::from_std);
+            let read_result = tokio::select! {
+                biased;
+                _ = tokio::time::sleep_until(
+                    gro_deadline.unwrap_or_else(tokio::time::Instant::now)
+                ), if gro_deadline.is_some() => {
+                    self.flush_gro_states(&mut gro_states, &mut arena, true).await;
+                    continue;
+                }
+                read_result = tun_reader.read(buf_slice) => read_result,
+            };
+
             // Read packet from TUN device
-            let n = match tun_reader.read(buf_slice).await {
+            let n = match read_result {
                 Ok(n) if n > 0 => n,
                 Ok(_) => continue,
                 Err(e) => {
                     log::error!("TUN read error: {}", e);
+                    // Flush pending coalesced groups before shutting down.
+                    self.flush_gro_states(&mut gro_states, &mut arena, false)
+                        .await;
                     break;
                 }
             };
@@ -1604,6 +1735,29 @@ impl VpnServer {
                     }
                 };
 
+            if software_gro && client_gso_enabled {
+                // Non-GSO TUN frames never carry offload metadata; push the
+                // plain IP packet through the client's GRO table. The client
+                // accepts offload-tagged frames regardless of its own TUN
+                // (it software-segments when needed).
+                let state =
+                    gro_states
+                        .entry(client_key)
+                        .or_insert_with(|| ClientGroState {
+                            table: TcpGroTable::new(),
+                            packet_tx: packet_tx.clone(),
+                        });
+                // Keep the freshest sender in case the client reconnected.
+                state.packet_tx = packet_tx;
+                let outputs = state.table.push(packet_ref, Instant::now());
+                if !outputs.is_empty() {
+                    let packet_tx = state.packet_tx.clone();
+                    self.send_gro_outputs_to_client(&outputs, &mut arena, &packet_tx)
+                        .await;
+                }
+                continue;
+            }
+
             if let Some(meta) = offload {
                 if !connection_gso_active {
                     log::trace!(
@@ -1615,24 +1769,29 @@ impl VpnServer {
                     match materialize_offload_packet(&meta, packet_ref) {
                         Ok(packets) => {
                             for packet in packets {
-                                let mut write_buf =
-                                    BytesMut::with_capacity(1 + 4 + 1 + packet.len());
-                                if let Err(e) =
-                                    frame_ip_packet_v2(&mut write_buf, None, &packet)
-                                {
-                                    log::warn!(
+                                let frame_size = 1 + 4 + 1 + packet.len();
+                                if arena.capacity() - arena.len() < frame_size {
+                                    arena.reserve(FRAME_ARENA_CHUNK.max(frame_size));
+                                }
+                                let written =
+                                    match append_ip_packet_v2(&mut arena, None, &packet) {
+                                        Ok(written) => written,
+                                        Err(e) => {
+                                            log::warn!(
                                         "Failed to frame materialized packet for {} dev {}: {}",
                                         endpoint_id,
                                         device_id,
                                         e
                                     );
-                                    continue;
-                                }
+                                            continue;
+                                        }
+                                    };
                                 Self::enqueue_client_frame(
                                     &packet_tx,
-                                    write_buf.freeze(),
+                                    arena.split_to(written).freeze(),
                                     &self.stats,
                                     self.config.drop_on_full,
+                                    1,
                                 )
                                 .await;
                             }
@@ -1657,28 +1816,40 @@ impl VpnServer {
                     .map(|_| crate::vpn_core::offload::VIRTIO_NET_HDR_LEN)
                     .unwrap_or(0)
                 + packet_ref.len();
-            let mut write_buf = BytesMut::with_capacity(frame_size);
-            if let Err(e) = frame_ip_packet_v2(&mut write_buf, offload.as_ref(), packet_ref) {
-                log::warn!(
-                    "Failed to frame packet for {} dev {}: {}",
-                    endpoint_id,
-                    device_id,
-                    e
-                );
-                continue;
+            if arena.capacity() - arena.len() < frame_size {
+                arena.reserve(FRAME_ARENA_CHUNK.max(frame_size));
             }
+            let written = match append_ip_packet_v2(&mut arena, offload.as_ref(), packet_ref) {
+                Ok(written) => written,
+                Err(e) => {
+                    log::warn!(
+                        "Failed to frame packet for {} dev {}: {}",
+                        endpoint_id,
+                        device_id,
+                        e
+                    );
+                    continue;
+                }
+            };
 
             Self::enqueue_client_frame(
                 &packet_tx,
-                write_buf.freeze(),
+                arena.split_to(written).freeze(),
                 &self.stats,
                 self.config.drop_on_full,
+                1,
             )
             .await;
         }
 
         Ok(())
     }
+}
+
+/// Per-client software-GRO accumulation state for the server TUN reader.
+struct ClientGroState {
+    table: TcpGroTable,
+    packet_tx: mpsc::Sender<Bytes>,
 }
 
 /// IP address extracted from a packet (source or destination).

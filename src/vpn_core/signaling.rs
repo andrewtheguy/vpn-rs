@@ -379,7 +379,8 @@ pub fn frame_capabilities_message(buf: &mut BytesMut, caps: CapabilitiesMessage)
     buf.put_u8(payload);
 }
 
-/// Frame an IP packet for transmission on the data channel.
+/// Append a framed IP packet to `buf` without clearing it, returning the
+/// number of bytes written.
 ///
 /// v2 layout:
 /// `[type: 0x00] [frame_len: 4 bytes BE] [offload_len: 1 byte] [offload: N bytes] [ip_packet]`
@@ -387,12 +388,16 @@ pub fn frame_capabilities_message(buf: &mut BytesMut, caps: CapabilitiesMessage)
 /// `offload_len` is either:
 /// - `0` (no offload metadata)
 /// - `10` (`virtio_net_hdr` metadata)
+///
+/// This enables arena-style framing: callers keep one long-lived `BytesMut`,
+/// append a frame, then `split_to(written).freeze()` to hand out a `Bytes`
+/// view that shares the arena's allocation.
 #[inline]
-pub fn frame_ip_packet_v2(
+pub fn append_ip_packet_v2(
     buf: &mut BytesMut,
     offload: Option<&VirtioNetHdr>,
     ip_packet: &[u8],
-) -> VpnResult<()> {
+) -> VpnResult<usize> {
     if ip_packet.is_empty() {
         return Err(VpnError::Signaling(
             "Cannot frame empty IP packet".to_string(),
@@ -412,7 +417,6 @@ pub fn frame_ip_packet_v2(
     let frame_len_u32 = u32::try_from(frame_len)
         .map_err(|_| VpnError::Signaling(format!("Packet frame too large: {}", frame_len)))?;
 
-    buf.clear();
     buf.reserve(1 + 4 + frame_len);
     buf.put_u8(DataMessageType::IpPacket.as_byte());
     buf.put_slice(&frame_len_u32.to_be_bytes());
@@ -421,7 +425,7 @@ pub fn frame_ip_packet_v2(
         buf.put_slice(&hdr.to_bytes());
     }
     buf.put_slice(ip_packet);
-    Ok(())
+    Ok(1 + 4 + frame_len)
 }
 
 /// Parse a full v2 IP packet message including type and frame length fields.
@@ -721,10 +725,10 @@ mod tests {
     }
 
     #[test]
-    fn test_frame_ip_packet_v2_without_offload() {
+    fn test_append_ip_packet_v2_without_offload() {
         let payload = b"hello ip packet";
         let mut buf = BytesMut::new();
-        frame_ip_packet_v2(&mut buf, None, payload).expect("frame packet");
+        append_ip_packet_v2(&mut buf, None, payload).expect("frame packet");
 
         assert_eq!(buf[0], DataMessageType::IpPacket.as_byte());
 
@@ -740,7 +744,7 @@ mod tests {
         let mut payload = [0u8; 20];
         payload[0] = 0x45; // version 4, IHL 5
         let mut buf = BytesMut::new();
-        frame_ip_packet_v2(&mut buf, None, &payload).expect("frame packet");
+        append_ip_packet_v2(&mut buf, None, &payload).expect("frame packet");
 
         let (offload, parsed_payload) =
             parse_ip_packet_message_v2(&buf).expect("parse full message");
@@ -749,7 +753,7 @@ mod tests {
     }
 
     #[test]
-    fn test_frame_and_parse_ip_packet_v2_with_offload() {
+    fn test_append_and_parse_ip_packet_v2_with_offload() {
         // Minimal valid IPv4 header (20 bytes, version=4, IHL=5) + 4 bytes payload
         let mut payload = [0u8; 24];
         payload[0] = 0x45; // version 4, IHL 5
@@ -764,7 +768,7 @@ mod tests {
         };
 
         let mut buf = BytesMut::new();
-        frame_ip_packet_v2(&mut buf, Some(&offload), &payload).expect("frame packet");
+        append_ip_packet_v2(&mut buf, Some(&offload), &payload).expect("frame packet");
 
         let frame_len = u32::from_be_bytes([buf[1], buf[2], buf[3], buf[4]]) as usize;
         let frame_payload = &buf[5..5 + frame_len];
@@ -776,10 +780,51 @@ mod tests {
     }
 
     #[test]
+    fn test_append_ip_packet_v2_arena_roundtrip() {
+        // Two frames appended to one arena, split off as independent Bytes views.
+        let mut packet_a = [0u8; 20];
+        packet_a[0] = 0x45; // version 4, IHL 5
+        let mut packet_b = [0u8; 40];
+        packet_b[0] = 0x60; // version 6
+        let offload = VirtioNetHdr {
+            flags: 1,
+            gso_type: 4,
+            hdr_len: 60,
+            gso_size: 1400,
+            csum_start: 40,
+            csum_offset: 16,
+            num_buffers: 0,
+        };
+
+        let mut arena = BytesMut::with_capacity(256);
+
+        let written_a = append_ip_packet_v2(&mut arena, None, &packet_a).expect("append packet a");
+        assert_eq!(written_a, 1 + 4 + 1 + packet_a.len());
+        assert_eq!(arena.len(), written_a);
+        let frame_a = arena.split_to(written_a).freeze();
+
+        let written_b =
+            append_ip_packet_v2(&mut arena, Some(&offload), &packet_b).expect("append packet b");
+        assert_eq!(written_b, 1 + 4 + 1 + VIRTIO_NET_HDR_LEN + packet_b.len());
+        let frame_b = arena.split_to(written_b).freeze();
+        assert!(arena.is_empty());
+
+        let (offload_a, payload_a) =
+            parse_ip_packet_message_v2(&frame_a).expect("parse frame a");
+        assert!(offload_a.is_none());
+        assert_eq!(payload_a, &packet_a[..]);
+
+        let (offload_b, payload_b) =
+            parse_ip_packet_message_v2(&frame_b).expect("parse frame b");
+        assert_eq!(offload_b, Some(offload));
+        assert_eq!(payload_b, &packet_b[..]);
+    }
+
+    #[test]
     fn test_parse_ip_packet_message_v2_rejects_malformed_frame_len() {
         let payload = b"malformed length payload";
         let mut buf = BytesMut::new();
-        frame_ip_packet_v2(&mut buf, None, payload).expect("frame packet");
+        append_ip_packet_v2(&mut buf, None, payload).expect("frame packet");
 
         // Corrupt the declared frame length to be larger than actual payload.
         let bad_len = (payload.len() as u32) + 9;
