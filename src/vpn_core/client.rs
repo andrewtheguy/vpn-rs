@@ -5,7 +5,7 @@
 //! IP-over-QUIC tunnel. IP packets are framed and sent directly over the
 //! encrypted iroh QUIC connection for automatic NAT traversal.
 
-use crate::vpn_core::buffer::{as_mut_byte_slice, uninitialized_vec};
+use crate::vpn_core::buffer::{read_exact_uninit, uninitialized_vec};
 use crate::vpn_core::config::VpnClientConfig;
 use crate::vpn_core::device::{
     add_bypass_route, add_routes, add_routes6_with_src, BypassRouteGuard, Route6Guard, RouteGuard,
@@ -16,24 +16,29 @@ use crate::vpn_core::lock::VpnLock;
 use crate::vpn_core::offload::{
     materialize_offload_packet, split_tun_frame, CoalescedOutput, TcpGroTable,
 };
-use crate::vpn_core::paths::watch_connection_paths;
+use crate::vpn_core::paths::{format_connection_paths, watch_connection_paths};
 use crate::vpn_core::signaling::{
     append_ip_packet_v2, frame_capabilities_message, parse_ip_packet_v2, read_message,
     write_message, CapabilitiesMessage, DataMessageType, VpnHandshake, VpnHandshakeResponse,
-    HEARTBEAT_PING_BYTE, MAX_HANDSHAKE_SIZE, VPN_ALPN,
+    HEARTBEAT_PING_BYTE, MAX_CAPABILITIES_PAYLOAD, MAX_HANDSHAKE_SIZE, VPN_ALPN,
 };
 use bytes::{Bytes, BytesMut};
-use futures::StreamExt;
+use futures::{FutureExt, StreamExt};
 use ipnet::{Ipv4Net, Ipv6Net};
 use iroh::endpoint::{PathList, RecvStream, SendStream};
 use iroh::{Endpoint, EndpointAddr, EndpointId, RelayUrl, TransportAddr};
 use rand::Rng;
 use std::collections::{HashMap, HashSet};
+#[cfg(not(unix))]
+use std::io::IsTerminal;
+#[cfg(unix)]
+use std::io::{self, IsTerminal};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::num::NonZeroU32;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio::io::ReadBuf;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
@@ -52,9 +57,9 @@ const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(30);
 /// ensure the sender receives timely backpressure signals when the network is
 /// congested, preventing excessive memory usage and latency buildup.
 ///
-/// Memory impact (typical): ~1024 * ~1500 bytes (standard MTU) = ~1.5 MB.
-/// Latency impact: At 100 Mbps, a full 1024-packet buffer adds ~120ms latency.
-const OUTBOUND_CHANNEL_SIZE: usize = 1024;
+/// Memory impact (typical): ~256 * ~1500 bytes (standard MTU) = ~384 KB.
+/// Latency impact: At 100 Mbps, a full 256-packet buffer adds ~30ms latency.
+const OUTBOUND_CHANNEL_SIZE: usize = 256;
 
 /// Maximum number of framed packets drained from the outbound channel per
 /// batched QUIC write.
@@ -65,15 +70,20 @@ const WRITE_BATCH_SIZE: usize = 256;
 /// allocator is only hit once per chunk instead of once per packet.
 const FRAME_ARENA_CHUNK: usize = 64 * 1024;
 
-/// Maximum time a software-GRO group may wait for additional segments before
-/// being flushed to the QUIC stream.
-const GRO_FLUSH_WINDOW: Duration = Duration::from_micros(500);
+/// Safety cap on how long a software-GRO group may wait for additional
+/// segments. Groups normally flush as soon as the TUN read would block
+/// (drain-then-flush); this window only bounds holding time while packets
+/// keep arriving back-to-back.
+const GRO_FLUSH_WINDOW: Duration = Duration::from_micros(100);
 
 /// Timeout for resolving relay URLs via DNS.
 const RESOLVE_RELAY_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Maximum wait for initial bypass route setup before continuing startup.
 const INITIAL_BYPASS_SETUP_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Poll interval for the client-side interactive path status key.
+const PATH_KEY_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 /// VPN client instance.
 pub struct VpnClient {
@@ -180,6 +190,7 @@ impl VpnClient {
 
         // Monitor and report connection path changes (e.g., relay -> direct)
         let _path_watcher = watch_connection_paths(&connection, "Connection");
+        let _path_keypress = spawn_connection_path_keypress_logger(&connection);
 
         // Perform handshake on first stream
         let server_info = self.perform_handshake(&connection).await?;
@@ -583,10 +594,7 @@ impl VpnClient {
         // Most allocations are small and served from thread-local caches, making them fast.
         let mut outbound_handle: tokio::task::JoinHandle<Option<String>> =
             tokio::spawn(async move {
-                let mut read_buf = uninitialized_vec(buffer_size);
-                // SAFETY: Buffer is immediately overwritten by tun_reader.read(), and only
-                // the written portion (&read_slice[..n]) is accessed. Skips zeroing overhead.
-                let read_slice = unsafe { as_mut_byte_slice(&mut read_buf) };
+                let mut read_storage = uninitialized_vec(buffer_size);
                 // Long-lived framing arena: frames are appended and split off as
                 // refcounted Bytes views, amortizing allocations across packets.
                 let mut arena = BytesMut::with_capacity(FRAME_ARENA_CHUNK);
@@ -601,25 +609,38 @@ impl VpnClient {
                 }
                 let mut gro_table = TcpGroTable::new();
                 loop {
-                    let gro_deadline = gro_table
-                        .next_deadline(GRO_FLUSH_WINDOW)
-                        .map(tokio::time::Instant::from_std);
-                    let read_result = tokio::select! {
-                        biased;
-                        _ = tokio::time::sleep_until(
-                            gro_deadline.unwrap_or_else(tokio::time::Instant::now)
-                        ), if gro_deadline.is_some() => {
-                            let outputs = gro_table.flush_expired(Instant::now(), GRO_FLUSH_WINDOW);
-                            if !send_gro_outputs(outputs, &mut arena, &outbound_tx).await {
-                                return None;
-                            }
-                            continue;
+                    let mut packet_buf = ReadBuf::uninit(&mut read_storage);
+                    let read_result = if software_gro && !gro_table.is_empty() {
+                        // Safety cap: even while packets keep arriving
+                        // back-to-back, never hold a partial group beyond the
+                        // flush window.
+                        let expired = gro_table.flush_expired(Instant::now(), GRO_FLUSH_WINDOW);
+                        if !send_gro_outputs(expired, &mut arena, &outbound_tx).await {
+                            return None;
                         }
-                        read_result = tun_reader.read(read_slice) => read_result,
+                        // Drain-then-flush (wireguard-go model): keep
+                        // coalescing only while another packet is instantly
+                        // available; flush pending groups as soon as the TUN
+                        // read would block, so GRO adds no latency to flows
+                        // that are not arriving back-to-back. A single
+                        // Pending poll consumes no data, so dropping the
+                        // probed future is safe.
+                        match tun_reader.read_buf(&mut packet_buf).now_or_never() {
+                            Some(read_result) => read_result,
+                            None => {
+                                let outputs = gro_table.flush_all();
+                                if !send_gro_outputs(outputs, &mut arena, &outbound_tx).await {
+                                    return None;
+                                }
+                                continue;
+                            }
+                        }
+                    } else {
+                        tun_reader.read_buf(&mut packet_buf).await
                     };
                     match read_result {
-                        Ok(n) if n > 0 => {
-                            let raw_packet = &read_slice[..n];
+                        Ok(()) if !packet_buf.filled().is_empty() => {
+                            let raw_packet = packet_buf.filled();
                             let (offload, packet) =
                                 match split_tun_frame(raw_packet, tun_reader.vnet_hdr_enabled()) {
                                     Ok(parts) => parts,
@@ -632,7 +653,7 @@ impl VpnClient {
                             if packet_has_local_iroh_udp_port(packet, &local_iroh_udp_ports) {
                                 log::debug!(
                                     "Dropped self-encapsulated iroh UDP packet from TUN ({} bytes)",
-                                    n
+                                    raw_packet.len()
                                 );
                                 continue;
                             }
@@ -720,7 +741,7 @@ impl VpnClient {
                                 return None;
                             }
                         }
-                        Ok(_) => {}
+                        Ok(()) => {}
                         Err(e) => {
                             log::error!("TUN read error: {}", e);
                             // Flush pending coalesced groups before shutting down.
@@ -743,9 +764,7 @@ impl VpnClient {
                 let mut type_buf = [0u8; 1];
                 let mut len_buf = [0u8; 4];
                 let mut data_buf = uninitialized_vec(MAX_IP_PACKET_SIZE);
-                // SAFETY: Buffer is overwritten by read_exact(&mut data_slice[..len]), and only
-                // the written portion (&data_slice[..len]) is accessed. Skips zeroing overhead.
-                let data_slice = unsafe { as_mut_byte_slice(&mut data_buf) };
+                let mut cap_discard = [0u8; MAX_CAPABILITIES_PAYLOAD];
                 let mut consecutive_tun_failures = 0u32;
                 loop {
                     // Read message type
@@ -795,11 +814,10 @@ impl VpnClient {
                                 return Some("Failed to read capabilities length".into());
                             }
                             let n = cap_len[0] as usize;
-                            if n > 0 {
-                                let mut discard = vec![0u8; n];
-                                if data_recv.read_exact(&mut discard).await.is_err() {
-                                    return Some("Failed to read capabilities payload".into());
-                                }
+                            if n > 0
+                                && data_recv.read_exact(&mut cap_discard[..n]).await.is_err()
+                            {
+                                return Some("Failed to read capabilities payload".into());
                             }
                             log::trace!("Unexpected capabilities message received");
                             continue;
@@ -821,7 +839,8 @@ impl VpnClient {
                     }
 
                     // Read frame payload
-                    match data_recv.read_exact(&mut data_slice[..len]).await {
+                    let mut frame_buf = ReadBuf::uninit(&mut data_buf[..len]);
+                    match read_exact_uninit(&mut data_recv, &mut frame_buf).await {
                         Ok(()) => {}
                         Err(e) => {
                             log::error!("Failed to read IP frame: {}", e);
@@ -829,7 +848,7 @@ impl VpnClient {
                         }
                     }
 
-                    let frame = &data_slice[..len];
+                    let frame = frame_buf.filled();
                     let (offload, packet) = match parse_ip_packet_v2(frame) {
                         Ok(parts) => parts,
                         Err(e) => {
@@ -1075,6 +1094,194 @@ impl VpnClient {
                 }
             }
         }
+    }
+}
+
+/// Spawn a client-side task that logs the current selected connection path when
+/// the user presses `c`.
+#[cfg(unix)]
+fn spawn_connection_path_keypress_logger(
+    connection: &iroh::endpoint::Connection,
+) -> Option<ClientInputGuard> {
+    if !std::io::stdin().is_terminal() {
+        return None;
+    }
+
+    let connection = connection.clone();
+    Some(ClientInputGuard(tokio::spawn(async move {
+        let _terminal_guard = match NonCanonicalStdinGuard::enable() {
+            Ok(guard) => guard,
+            Err(e) => {
+                log::debug!("Connection path keypress support disabled: {}", e);
+                return;
+            }
+        };
+        log::info!("Press 'c' to show the current connection path");
+
+        let mut buf = [0u8; 32];
+        loop {
+            match read_stdin_nonblocking(&mut buf) {
+                Ok(0) => {
+                    tokio::time::sleep(PATH_KEY_POLL_INTERVAL).await;
+                }
+                Ok(n) => {
+                    for byte in &buf[..n] {
+                        if matches!(*byte, b'c' | b'C') {
+                            let paths = connection.paths();
+                            log::info!("Connection: {}", format_connection_paths(&paths));
+                        }
+                    }
+                }
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    tokio::time::sleep(PATH_KEY_POLL_INTERVAL).await;
+                }
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                Err(e) => {
+                    log::debug!("Connection path keypress reader stopped: {}", e);
+                    break;
+                }
+            }
+        }
+    })))
+}
+
+/// Non-Unix fallback: line-buffered consoles still let users query with
+/// `c` followed by Enter.
+#[cfg(not(unix))]
+fn spawn_connection_path_keypress_logger(
+    connection: &iroh::endpoint::Connection,
+) -> Option<ClientInputGuard> {
+    if !std::io::stdin().is_terminal() {
+        return None;
+    }
+
+    use tokio::io::{AsyncBufReadExt, BufReader};
+
+    let connection = connection.clone();
+    Some(ClientInputGuard(tokio::spawn(async move {
+        log::info!("Type 'c' and press Enter to show the current connection path");
+        let stdin = BufReader::new(tokio::io::stdin());
+        let mut lines = stdin.lines();
+        loop {
+            match lines.next_line().await {
+                Ok(Some(line)) if line.trim().eq_ignore_ascii_case("c") => {
+                    let paths = connection.paths();
+                    log::info!("Connection: {}", format_connection_paths(&paths));
+                }
+                Ok(Some(_)) => {}
+                Ok(None) => break,
+                Err(e) => {
+                    log::debug!("Connection path keypress reader stopped: {}", e);
+                    break;
+                }
+            }
+        }
+    })))
+}
+
+/// RAII guard that aborts the client input task on drop.
+struct ClientInputGuard(JoinHandle<()>);
+
+impl Drop for ClientInputGuard {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+#[cfg(unix)]
+struct NonCanonicalStdinGuard {
+    fd: libc::c_int,
+    original_termios: libc::termios,
+    original_flags: libc::c_int,
+}
+
+#[cfg(unix)]
+impl NonCanonicalStdinGuard {
+    fn enable() -> io::Result<Self> {
+        let fd = libc::STDIN_FILENO;
+        let original_termios = get_terminal_attr(fd)?;
+        let original_flags = get_fd_flags(fd)?;
+
+        let mut termios = original_termios;
+        termios.c_lflag &= !(libc::ICANON | libc::ECHO);
+        termios.c_cc[libc::VMIN] = 0;
+        termios.c_cc[libc::VTIME] = 0;
+        set_terminal_attr(fd, &termios)?;
+
+        if let Err(e) = set_fd_flags(fd, original_flags | libc::O_NONBLOCK) {
+            let _ = set_terminal_attr(fd, &original_termios);
+            return Err(e);
+        }
+
+        Ok(Self {
+            fd,
+            original_termios,
+            original_flags,
+        })
+    }
+}
+
+#[cfg(unix)]
+impl Drop for NonCanonicalStdinGuard {
+    fn drop(&mut self) {
+        let _ = set_terminal_attr(self.fd, &self.original_termios);
+        let _ = set_fd_flags(self.fd, self.original_flags);
+    }
+}
+
+#[cfg(unix)]
+fn get_terminal_attr(fd: libc::c_int) -> io::Result<libc::termios> {
+    let mut termios = std::mem::MaybeUninit::<libc::termios>::uninit();
+    // SAFETY: `tcgetattr` initializes `termios` on success.
+    let result = unsafe { libc::tcgetattr(fd, termios.as_mut_ptr()) };
+    if result == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: `tcgetattr` returned success, so the termios value is initialized.
+    Ok(unsafe { termios.assume_init() })
+}
+
+#[cfg(unix)]
+fn set_terminal_attr(fd: libc::c_int, termios: &libc::termios) -> io::Result<()> {
+    // SAFETY: `termios` points to a valid termios value for `tcsetattr`.
+    let result = unsafe { libc::tcsetattr(fd, libc::TCSANOW, termios) };
+    if result == -1 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+fn get_fd_flags(fd: libc::c_int) -> io::Result<libc::c_int> {
+    // SAFETY: `fcntl` with `F_GETFL` does not dereference any pointer.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags == -1 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(flags)
+    }
+}
+
+#[cfg(unix)]
+fn set_fd_flags(fd: libc::c_int, flags: libc::c_int) -> io::Result<()> {
+    // SAFETY: `fcntl` with `F_SETFL` does not dereference any pointer.
+    let result = unsafe { libc::fcntl(fd, libc::F_SETFL, flags) };
+    if result == -1 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+fn read_stdin_nonblocking(buf: &mut [u8]) -> io::Result<usize> {
+    // SAFETY: `buf` is valid for writes of `buf.len()` bytes.
+    let result = unsafe { libc::read(libc::STDIN_FILENO, buf.as_mut_ptr().cast(), buf.len()) };
+    if result == -1 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(result as usize)
     }
 }
 

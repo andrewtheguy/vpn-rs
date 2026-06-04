@@ -7,8 +7,10 @@ use crate::vpn_core::error::{VpnError, VpnResult};
 use crate::vpn_core::offload::{compose_tun_frame, VIRTIO_NET_HDR_LEN};
 use bytes::BytesMut;
 use ipnet::{Ipv4Net, Ipv6Net};
+use std::future::poll_fn;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use std::pin::Pin;
+use tokio::io::{AsyncRead, AsyncWriteExt, ReadBuf};
 use tokio::process::Command;
 use tun::{AbstractDevice, AsyncDevice, Configuration, DeviceReader, DeviceWriter};
 
@@ -358,9 +360,15 @@ impl TunReader {
         &self.offload_status
     }
 
-    /// Read a packet from the TUN device.
-    pub async fn read(&mut self, buf: &mut [u8]) -> VpnResult<usize> {
-        self.reader.read(buf).await.map_err(VpnError::Network)
+    /// Read a packet into a possibly-uninitialized buffer.
+    ///
+    /// The caller can inspect `buf.filled()` after this returns. This avoids
+    /// zeroing large packet buffers while keeping initialized-byte tracking in
+    /// Tokio's safe `ReadBuf` abstraction.
+    pub async fn read_buf(&mut self, buf: &mut ReadBuf<'_>) -> VpnResult<()> {
+        poll_fn(|cx| Pin::new(&mut self.reader).poll_read(cx, buf))
+            .await
+            .map_err(VpnError::Network)
     }
 }
 

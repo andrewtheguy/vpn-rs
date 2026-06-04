@@ -5,7 +5,7 @@
 //! tunnels for each connected client. IP packets are framed and sent
 //! directly over the encrypted iroh QUIC connection.
 
-use crate::vpn_core::buffer::{as_mut_byte_slice, uninitialized_vec};
+use crate::vpn_core::buffer::{read_exact_uninit, uninitialized_vec};
 use crate::vpn_core::config::VpnServerConfig;
 use crate::vpn_core::device::{TunConfig, TunDevice, TunOffloadStatus};
 use crate::vpn_core::error::{VpnError, VpnResult};
@@ -20,6 +20,7 @@ use crate::vpn_core::signaling::{
 };
 use bytes::{Bytes, BytesMut};
 use dashmap::DashMap;
+use futures::FutureExt;
 use ipnet::{Ipv4Net, Ipv6Net};
 use iroh::{Endpoint, EndpointId};
 use std::collections::{HashMap, HashSet};
@@ -27,6 +28,7 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio::io::ReadBuf;
 use tokio::sync::{mpsc, oneshot, RwLock};
 
 /// Maximum data-channel IP frame size (IP packet + optional offload metadata).
@@ -40,9 +42,11 @@ const WRITE_BATCH_SIZE: usize = 256;
 /// allocator is only hit once per chunk instead of once per packet.
 const FRAME_ARENA_CHUNK: usize = 64 * 1024;
 
-/// Maximum time a software-GRO group may wait for additional segments before
-/// being flushed to its client.
-const GRO_FLUSH_WINDOW: Duration = Duration::from_micros(500);
+/// Safety cap on how long a software-GRO group may wait for additional
+/// segments. Groups normally flush as soon as the TUN read would block
+/// (drain-then-flush); this window only bounds holding time while packets
+/// keep arriving back-to-back.
+const GRO_FLUSH_WINDOW: Duration = Duration::from_micros(100);
 
 /// Performance statistics for the VPN server.
 ///
@@ -1354,7 +1358,8 @@ impl VpnServer {
         let mut inbound_handle = tokio::spawn(async move {
             let mut type_buf = [0u8; 1];
             let mut len_buf = [0u8; 4];
-            let mut data_buf = vec![0u8; MAX_IP_PACKET_SIZE];
+            let mut data_buf = uninitialized_vec(MAX_IP_PACKET_SIZE);
+            let mut cap_discard = [0u8; MAX_CAPABILITIES_PAYLOAD];
             'read_loop: loop {
                 // Read message type
                 match data_recv.read_exact(&mut type_buf).await {
@@ -1408,11 +1413,8 @@ impl VpnServer {
                             break;
                         }
                         let n = cap_len[0] as usize;
-                        if n > 0 {
-                            let mut discard = vec![0u8; n];
-                            if data_recv.read_exact(&mut discard).await.is_err() {
-                                break;
-                            }
+                        if n > 0 && data_recv.read_exact(&mut cap_discard[..n]).await.is_err() {
+                            break;
                         }
                         log::warn!(
                             "Unexpected capabilities message from {} after stream setup",
@@ -1437,7 +1439,8 @@ impl VpnServer {
                 }
 
                 // Read frame data
-                match data_recv.read_exact(&mut data_buf[..len]).await {
+                let mut frame_buf = ReadBuf::uninit(&mut data_buf[..len]);
+                match read_exact_uninit(&mut data_recv, &mut frame_buf).await {
                     Ok(()) => {}
                     Err(e) => {
                         log::debug!("Failed to read IP frame from {}: {}", client_id, e);
@@ -1445,7 +1448,7 @@ impl VpnServer {
                     }
                 }
 
-                let frame = &data_buf[..len];
+                let frame = frame_buf.filled();
                 let (offload, packet) = match parse_ip_packet_v2(frame) {
                     Ok(parts) => parts,
                     Err(e) => {
@@ -1624,10 +1627,7 @@ impl VpnServer {
         log::info!("TUN reader started");
 
         let buffer_size = tun_reader.buffer_size();
-        let mut buf = uninitialized_vec(buffer_size);
-        // SAFETY: Buffer is immediately overwritten by tun_reader.read(), and only
-        // the written portion (&buf_slice[..n]) is accessed. Skips zeroing overhead.
-        let buf_slice = unsafe { as_mut_byte_slice(&mut buf) };
+        let mut read_storage = uninitialized_vec(buffer_size);
         // Long-lived framing arena: frames are appended and split off as
         // refcounted Bytes views, amortizing allocations across packets.
         let mut arena = BytesMut::with_capacity(FRAME_ARENA_CHUNK);
@@ -1645,26 +1645,35 @@ impl VpnServer {
         let mut gro_states: HashMap<(EndpointId, u64), ClientGroState> = HashMap::new();
 
         loop {
-            let gro_deadline = gro_states
-                .values()
-                .filter_map(|state| state.table.next_deadline(GRO_FLUSH_WINDOW))
-                .min()
-                .map(tokio::time::Instant::from_std);
-            let read_result = tokio::select! {
-                biased;
-                _ = tokio::time::sleep_until(
-                    gro_deadline.unwrap_or_else(tokio::time::Instant::now)
-                ), if gro_deadline.is_some() => {
-                    self.flush_gro_states(&mut gro_states, &mut arena, true).await;
-                    continue;
+            let mut packet_buf = ReadBuf::uninit(&mut read_storage);
+            let gro_pending =
+                software_gro && gro_states.values().any(|state| !state.table.is_empty());
+            let read_result = if gro_pending {
+                // Safety cap: even while packets keep arriving back-to-back,
+                // never hold a partial group beyond the flush window.
+                self.flush_gro_states(&mut gro_states, &mut arena, true).await;
+                // Drain-then-flush (wireguard-go model): keep coalescing only
+                // while another packet is instantly available; flush pending
+                // groups as soon as the TUN read would block, so GRO adds no
+                // latency to flows that are not arriving back-to-back. A
+                // single Pending poll consumes no data, so dropping the
+                // probed future is safe.
+                match tun_reader.read_buf(&mut packet_buf).now_or_never() {
+                    Some(read_result) => read_result,
+                    None => {
+                        self.flush_gro_states(&mut gro_states, &mut arena, false)
+                            .await;
+                        continue;
+                    }
                 }
-                read_result = tun_reader.read(buf_slice) => read_result,
+            } else {
+                tun_reader.read_buf(&mut packet_buf).await
             };
 
             // Read packet from TUN device
-            let n = match read_result {
-                Ok(n) if n > 0 => n,
-                Ok(_) => continue,
+            match read_result {
+                Ok(()) if !packet_buf.filled().is_empty() => {}
+                Ok(()) => continue,
                 Err(e) => {
                     log::error!("TUN read error: {}", e);
                     // Flush pending coalesced groups before shutting down.
@@ -1672,9 +1681,9 @@ impl VpnServer {
                         .await;
                     break;
                 }
-            };
+            }
 
-            let raw_frame = &buf_slice[..n];
+            let raw_frame = packet_buf.filled();
             self.stats.tun_packets_read.fetch_add(1, Ordering::Relaxed);
 
             let (offload, packet_ref) =

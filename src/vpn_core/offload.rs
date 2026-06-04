@@ -826,12 +826,12 @@ impl TcpGroTable {
     }
 
     /// True if no groups are pending.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn is_empty(&self) -> bool {
         self.groups.is_empty()
     }
 
     /// Deadline by which the oldest pending group must be flushed, if any.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn next_deadline(&self, window: Duration) -> Option<Instant> {
         self.groups
             .values()

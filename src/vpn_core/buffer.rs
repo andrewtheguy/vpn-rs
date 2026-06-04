@@ -1,9 +1,14 @@
 //! Buffer utilities for high-performance packet I/O.
 //!
-//! This module provides buffer allocation helpers using `MaybeUninit` to skip
-//! zeroing overhead for buffers that will be immediately overwritten.
+//! This module provides buffer allocation helpers using `MaybeUninit` and
+//! `ReadBuf` to skip zeroing overhead for buffers that will be immediately
+//! overwritten.
 
+use std::future::poll_fn;
+use std::io;
 use std::mem::MaybeUninit;
+use std::pin::Pin;
+use tokio::io::{AsyncRead, ReadBuf};
 
 /// Allocate an uninitialized byte buffer of the specified capacity.
 ///
@@ -15,9 +20,9 @@ use std::mem::MaybeUninit;
 ///
 /// ```ignore
 /// let mut buf = uninitialized_vec(1500);
-/// let slice = unsafe { as_mut_byte_slice(&mut buf) };
-/// let n = tun_reader.read(slice).await?;
-/// let packet = &slice[..n];  // Only access written portion
+/// let mut read_buf = tokio::io::ReadBuf::uninit(&mut buf);
+/// tun_reader.read_buf(&mut read_buf).await?;
+/// let packet = read_buf.filled();
 /// ```
 ///
 /// # Performance
@@ -34,24 +39,27 @@ pub fn uninitialized_vec(capacity: usize) -> Vec<MaybeUninit<u8>> {
     buf
 }
 
-/// Convert a MaybeUninit buffer to a mutable byte slice for I/O operations.
+/// Read until the unfilled portion of `buf` is full.
 ///
-/// # Safety
-///
-/// The caller MUST ensure that:
-/// 1. Only the portion written to is subsequently read (e.g., `&slice[..n]` after read returns `n`)
-/// 2. The unwritten portion is never read
-///
-/// Converting `&mut [MaybeUninit<u8>]` to `&mut [u8]` is sound here because
-/// `MaybeUninit<u8>` and `u8` have identical layout, and because the caller
-/// upholds the guarantees above: bytes are initialized before they are read.
-/// Reading any unwritten/uninitialized bytes is undefined behavior.
+/// Tokio's `ReadBuf` safely tracks which bytes were initialized by the reader,
+/// letting callers avoid zeroing large packet buffers without converting
+/// uninitialized memory to `&mut [u8]`.
 #[inline]
-pub unsafe fn as_mut_byte_slice(buf: &mut [MaybeUninit<u8>]) -> &mut [u8] {
-    // SAFETY: MaybeUninit<u8> has the same memory layout as u8.
-    // The caller ensures only written bytes are read.
-    // Note: MaybeUninit::slice_as_mut_ptr is unstable, so we use as_mut_ptr().cast().
-    std::slice::from_raw_parts_mut(buf.as_mut_ptr().cast::<u8>(), buf.len())
+pub async fn read_exact_uninit<R>(reader: &mut R, buf: &mut ReadBuf<'_>) -> io::Result<()>
+where
+    R: AsyncRead + Unpin,
+{
+    while buf.remaining() > 0 {
+        let filled_before = buf.filled().len();
+        poll_fn(|cx| Pin::new(&mut *reader).poll_read(cx, buf)).await?;
+        if buf.filled().len() == filled_before {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "early eof",
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -75,12 +83,9 @@ mod tests {
     #[test]
     fn test_uninitialized_vec_write_then_read() {
         let mut buf = uninitialized_vec(100);
-        // Convert to byte slice for writing
-        let slice = unsafe { as_mut_byte_slice(&mut buf) };
-        // Simulate a read operation that writes data
+        let mut read_buf = ReadBuf::uninit(&mut buf);
         let data = b"hello world";
-        slice[..data.len()].copy_from_slice(data);
-        // Only access the written portion
-        assert_eq!(&slice[..data.len()], data);
+        read_buf.put_slice(data);
+        assert_eq!(read_buf.filled(), data);
     }
 }
