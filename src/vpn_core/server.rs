@@ -9,7 +9,7 @@ use crate::vpn_core::buffer::{as_mut_byte_slice, uninitialized_vec};
 use crate::vpn_core::config::VpnServerConfig;
 use crate::vpn_core::device::{TunConfig, TunDevice, TunOffloadStatus};
 use crate::vpn_core::error::{VpnError, VpnResult};
-use crate::vpn_core::offload::{segment_tcp_gso_packet, split_tun_frame, VirtioNetHdr};
+use crate::vpn_core::offload::{materialize_offload_packet, split_tun_frame, VirtioNetHdr};
 use crate::vpn_core::paths::watch_connection_paths;
 use crate::vpn_core::signaling::{
     frame_ip_packet_v2, parse_ip_packet_v2, read_message, write_message, CapabilitiesMessage,
@@ -1431,11 +1431,11 @@ impl VpnServer {
 
                 if let Some(meta) = offload {
                     if !ctx.connection_gso_active || !ctx.local_tun_gso_enabled {
-                        match segment_tcp_gso_packet(&meta, packet) {
-                            Ok(segments) => {
-                                for seg in segments {
+                        match materialize_offload_packet(&meta, packet) {
+                            Ok(packets) => {
+                                for packet in packets {
                                     let req = TunWriteRequest {
-                                        packet: Bytes::from(seg),
+                                        packet: Bytes::from(packet),
                                         offload: None,
                                     };
                                     if !Self::enqueue_tun_write(&tun_write_tx, req, &stats).await {
@@ -1607,19 +1607,21 @@ impl VpnServer {
             if let Some(meta) = offload {
                 if !connection_gso_active {
                     log::trace!(
-                        "Falling back to software segmentation for {} dev {} (client_gso_enabled={})",
+                        "Materializing offload metadata for {} dev {} (client_gso_enabled={})",
                         endpoint_id,
                         device_id,
                         client_gso_enabled
                     );
-                    match segment_tcp_gso_packet(&meta, packet_ref) {
-                        Ok(segments) => {
-                            for segment in segments {
+                    match materialize_offload_packet(&meta, packet_ref) {
+                        Ok(packets) => {
+                            for packet in packets {
                                 let mut write_buf =
-                                    BytesMut::with_capacity(1 + 4 + 1 + segment.len());
-                                if let Err(e) = frame_ip_packet_v2(&mut write_buf, None, &segment) {
+                                    BytesMut::with_capacity(1 + 4 + 1 + packet.len());
+                                if let Err(e) =
+                                    frame_ip_packet_v2(&mut write_buf, None, &packet)
+                                {
                                     log::warn!(
-                                        "Failed to frame segmented packet for {} dev {}: {}",
+                                        "Failed to frame materialized packet for {} dev {}: {}",
                                         endpoint_id,
                                         device_id,
                                         e

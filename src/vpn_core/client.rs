@@ -13,7 +13,7 @@ use crate::vpn_core::device::{
 };
 use crate::vpn_core::error::{VpnError, VpnResult};
 use crate::vpn_core::lock::VpnLock;
-use crate::vpn_core::offload::{segment_tcp_gso_packet, split_tun_frame};
+use crate::vpn_core::offload::{materialize_offload_packet, split_tun_frame};
 use crate::vpn_core::paths::watch_connection_paths;
 use crate::vpn_core::signaling::{
     frame_capabilities_message, frame_ip_packet_v2, parse_ip_packet_v2, read_message,
@@ -258,7 +258,7 @@ impl VpnClient {
         let local_gso_enabled = offload_status.enabled;
         let negotiated_gso = local_gso_enabled && server_info.server_gso_enabled;
         // Data-channel GSO metadata is supported even when local TUN offload is not,
-        // because inbound metadata can be fallback-segmented in software.
+        // because inbound metadata can be materialized in software.
         let advertised_gso = true;
         log::info!(
             "GSO status (client): local={}, server={}, negotiated={}, advertised={}",
@@ -595,17 +595,20 @@ impl VpnClient {
 
                             if let Some(meta) = offload {
                                 if !negotiated_gso {
-                                    match segment_tcp_gso_packet(&meta, packet) {
-                                        Ok(segments) => {
-                                            for seg in segments {
-                                                let frame_size = 1 + 4 + 1 + seg.len();
+                                    match materialize_offload_packet(&meta, packet) {
+                                        Ok(packets) => {
+                                            for packet in packets {
+                                                let frame_size = 1 + 4 + 1 + packet.len();
                                                 let mut write_buf =
                                                     BytesMut::with_capacity(frame_size);
-                                                if let Err(e) =
-                                                    frame_ip_packet_v2(&mut write_buf, None, &seg)
+                                                if let Err(e) = frame_ip_packet_v2(
+                                                    &mut write_buf,
+                                                    None,
+                                                    &packet,
+                                                )
                                                 {
                                                     log::warn!(
-                                                        "Failed to frame segmented packet: {}",
+                                                        "Failed to frame materialized packet: {}",
                                                         e
                                                     );
                                                     continue;
@@ -622,7 +625,7 @@ impl VpnClient {
                                         }
                                         Err(e) => {
                                             log::warn!(
-                                                "Failed to fallback-segment TCP GSO packet: {}",
+                                                "Failed to materialize offload packet: {}",
                                                 e
                                             );
                                         }
@@ -769,11 +772,11 @@ impl VpnClient {
 
                     let write_result = if let Some(meta) = offload {
                         if !local_gso_enabled {
-                            match segment_tcp_gso_packet(&meta, packet) {
-                                Ok(segments) => {
+                            match materialize_offload_packet(&meta, packet) {
+                                Ok(packets) => {
                                     let mut result = Ok(());
-                                    for seg in segments {
-                                        if let Err(e) = tun_writer.write_all(&seg).await {
+                                    for packet in packets {
+                                        if let Err(e) = tun_writer.write_all(&packet).await {
                                             result = Err(e);
                                             break;
                                         }
