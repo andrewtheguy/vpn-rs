@@ -5,7 +5,7 @@
 //! IP-over-QUIC tunnel. IP packets are framed and sent directly over the
 //! encrypted iroh QUIC connection for automatic NAT traversal.
 
-use crate::vpn_core::buffer::{as_mut_byte_slice, uninitialized_vec};
+use crate::vpn_core::buffer::{read_exact_uninit, uninitialized_vec};
 use crate::vpn_core::config::VpnClientConfig;
 use crate::vpn_core::device::{
     add_bypass_route, add_routes, add_routes6_with_src, BypassRouteGuard, Route6Guard, RouteGuard,
@@ -20,7 +20,7 @@ use crate::vpn_core::paths::watch_connection_paths;
 use crate::vpn_core::signaling::{
     append_ip_packet_v2, frame_capabilities_message, parse_ip_packet_v2, read_message,
     write_message, CapabilitiesMessage, DataMessageType, VpnHandshake, VpnHandshakeResponse,
-    HEARTBEAT_PING_BYTE, MAX_HANDSHAKE_SIZE, VPN_ALPN,
+    HEARTBEAT_PING_BYTE, MAX_CAPABILITIES_PAYLOAD, MAX_HANDSHAKE_SIZE, VPN_ALPN,
 };
 use bytes::{Bytes, BytesMut};
 use futures::StreamExt;
@@ -34,6 +34,7 @@ use std::num::NonZeroU32;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio::io::ReadBuf;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
@@ -583,10 +584,7 @@ impl VpnClient {
         // Most allocations are small and served from thread-local caches, making them fast.
         let mut outbound_handle: tokio::task::JoinHandle<Option<String>> =
             tokio::spawn(async move {
-                let mut read_buf = uninitialized_vec(buffer_size);
-                // SAFETY: Buffer is immediately overwritten by tun_reader.read(), and only
-                // the written portion (&read_slice[..n]) is accessed. Skips zeroing overhead.
-                let read_slice = unsafe { as_mut_byte_slice(&mut read_buf) };
+                let mut read_storage = uninitialized_vec(buffer_size);
                 // Long-lived framing arena: frames are appended and split off as
                 // refcounted Bytes views, amortizing allocations across packets.
                 let mut arena = BytesMut::with_capacity(FRAME_ARENA_CHUNK);
@@ -601,6 +599,7 @@ impl VpnClient {
                 }
                 let mut gro_table = TcpGroTable::new();
                 loop {
+                    let mut packet_buf = ReadBuf::uninit(&mut read_storage);
                     let gro_deadline = gro_table
                         .next_deadline(GRO_FLUSH_WINDOW)
                         .map(tokio::time::Instant::from_std);
@@ -615,11 +614,11 @@ impl VpnClient {
                             }
                             continue;
                         }
-                        read_result = tun_reader.read(read_slice) => read_result,
+                        read_result = tun_reader.read_buf(&mut packet_buf) => read_result,
                     };
                     match read_result {
-                        Ok(n) if n > 0 => {
-                            let raw_packet = &read_slice[..n];
+                        Ok(()) if !packet_buf.filled().is_empty() => {
+                            let raw_packet = packet_buf.filled();
                             let (offload, packet) =
                                 match split_tun_frame(raw_packet, tun_reader.vnet_hdr_enabled()) {
                                     Ok(parts) => parts,
@@ -632,7 +631,7 @@ impl VpnClient {
                             if packet_has_local_iroh_udp_port(packet, &local_iroh_udp_ports) {
                                 log::debug!(
                                     "Dropped self-encapsulated iroh UDP packet from TUN ({} bytes)",
-                                    n
+                                    raw_packet.len()
                                 );
                                 continue;
                             }
@@ -720,7 +719,7 @@ impl VpnClient {
                                 return None;
                             }
                         }
-                        Ok(_) => {}
+                        Ok(()) => {}
                         Err(e) => {
                             log::error!("TUN read error: {}", e);
                             // Flush pending coalesced groups before shutting down.
@@ -743,9 +742,7 @@ impl VpnClient {
                 let mut type_buf = [0u8; 1];
                 let mut len_buf = [0u8; 4];
                 let mut data_buf = uninitialized_vec(MAX_IP_PACKET_SIZE);
-                // SAFETY: Buffer is overwritten by read_exact(&mut data_slice[..len]), and only
-                // the written portion (&data_slice[..len]) is accessed. Skips zeroing overhead.
-                let data_slice = unsafe { as_mut_byte_slice(&mut data_buf) };
+                let mut cap_discard = [0u8; MAX_CAPABILITIES_PAYLOAD];
                 let mut consecutive_tun_failures = 0u32;
                 loop {
                     // Read message type
@@ -795,11 +792,10 @@ impl VpnClient {
                                 return Some("Failed to read capabilities length".into());
                             }
                             let n = cap_len[0] as usize;
-                            if n > 0 {
-                                let mut discard = vec![0u8; n];
-                                if data_recv.read_exact(&mut discard).await.is_err() {
-                                    return Some("Failed to read capabilities payload".into());
-                                }
+                            if n > 0
+                                && data_recv.read_exact(&mut cap_discard[..n]).await.is_err()
+                            {
+                                return Some("Failed to read capabilities payload".into());
                             }
                             log::trace!("Unexpected capabilities message received");
                             continue;
@@ -821,7 +817,8 @@ impl VpnClient {
                     }
 
                     // Read frame payload
-                    match data_recv.read_exact(&mut data_slice[..len]).await {
+                    let mut frame_buf = ReadBuf::uninit(&mut data_buf[..len]);
+                    match read_exact_uninit(&mut data_recv, &mut frame_buf).await {
                         Ok(()) => {}
                         Err(e) => {
                             log::error!("Failed to read IP frame: {}", e);
@@ -829,7 +826,7 @@ impl VpnClient {
                         }
                     }
 
-                    let frame = &data_slice[..len];
+                    let frame = frame_buf.filled();
                     let (offload, packet) = match parse_ip_packet_v2(frame) {
                         Ok(parts) => parts,
                         Err(e) => {
