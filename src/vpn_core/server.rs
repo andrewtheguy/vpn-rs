@@ -11,6 +11,7 @@ use crate::vpn_core::device::{TunConfig, TunDevice, TunOffloadStatus};
 use crate::vpn_core::error::{VpnError, VpnResult};
 use crate::vpn_core::offload::{
     materialize_offload_packet, split_tun_frame, CoalescedOutput, TcpGroTable, VirtioNetHdr,
+    GRO_FLUSH_WINDOW,
 };
 use crate::vpn_core::paths::watch_connection_paths;
 use crate::vpn_core::signaling::{
@@ -20,14 +21,13 @@ use crate::vpn_core::signaling::{
 };
 use bytes::{Bytes, BytesMut};
 use dashmap::DashMap;
-use futures::FutureExt;
 use ipnet::{Ipv4Net, Ipv6Net};
 use iroh::{Endpoint, EndpointId};
 use std::collections::{HashMap, HashSet};
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use tokio::io::ReadBuf;
 use tokio::sync::{mpsc, oneshot, RwLock};
 
@@ -41,12 +41,6 @@ const WRITE_BATCH_SIZE: usize = 256;
 /// long-lived `BytesMut` and split off as refcounted `Bytes`, so the
 /// allocator is only hit once per chunk instead of once per packet.
 const FRAME_ARENA_CHUNK: usize = 64 * 1024;
-
-/// Safety cap on how long a software-GRO group may wait for additional
-/// segments. Groups normally flush as soon as the TUN read would block
-/// (drain-then-flush); this window only bounds holding time while packets
-/// keep arriving back-to-back.
-const GRO_FLUSH_WINDOW: Duration = Duration::from_micros(100);
 
 /// Performance statistics for the VPN server.
 ///
@@ -1265,14 +1259,24 @@ impl VpnServer {
         arena: &mut BytesMut,
         packet_tx: &mpsc::Sender<Bytes>,
     ) {
+        let coalesced_frames = outputs.iter().filter(|output| output.is_coalesced()).count();
+        if coalesced_frames > 0 {
+            let coalesced_segments: u64 = outputs
+                .iter()
+                .filter(|output| output.is_coalesced())
+                .map(CoalescedOutput::source_segment_count)
+                .sum();
+            log::trace!(
+                "Software GRO emitted {} TUN->client coalesced frame(s) carrying {} TCP segment(s)",
+                coalesced_frames,
+                coalesced_segments
+            );
+        }
+
         for output in outputs {
             let (offload, packet, packet_count) = match output {
                 CoalescedOutput::Coalesced(hdr, packet) => {
-                    // Number of original segments the coalesced frame carries.
-                    let payload_len = packet.len().saturating_sub(usize::from(hdr.hdr_len));
-                    let gso_size = usize::from(hdr.gso_size).max(1);
-                    let count = payload_len.div_ceil(gso_size).max(1) as u64;
-                    (Some(hdr), packet.as_slice(), count)
+                    (Some(hdr), packet.as_slice(), output.source_segment_count())
                 }
                 CoalescedOutput::Single(packet) => (None, packet.as_slice(), 1),
             };
@@ -1312,9 +1316,10 @@ impl VpnServer {
         arena: &mut BytesMut,
         expired_only: bool,
     ) {
+        let now = Instant::now();
         for state in gro_states.values_mut() {
             let outputs = if expired_only {
-                state.table.flush_expired(Instant::now(), GRO_FLUSH_WINDOW)
+                state.table.flush_expired(now, GRO_FLUSH_WINDOW)
             } else {
                 state.table.flush_all()
             };
@@ -1323,6 +1328,15 @@ impl VpnServer {
         }
         // Evict GRO state for disconnected clients to avoid unbounded growth.
         gro_states.retain(|_, state| !state.packet_tx.is_closed());
+    }
+
+    fn next_gro_deadline(
+        gro_states: &HashMap<(EndpointId, u64), ClientGroState>,
+    ) -> Option<Instant> {
+        gro_states
+            .values()
+            .filter_map(|state| state.table.next_deadline(GRO_FLUSH_WINDOW))
+            .min()
     }
 
     /// Handle client data stream.
@@ -1639,7 +1653,8 @@ impl VpnServer {
         let software_gro = !tun_reader.vnet_hdr_enabled();
         if software_gro {
             log::info!(
-                "Software GRO enabled for TUN->client TCP (server TUN has no offload support)"
+                "Software GRO enabled for TUN->client TCP (server TUN has no offload support; flush_window_us={})",
+                GRO_FLUSH_WINDOW.as_micros()
             );
         }
         let mut gro_states: HashMap<(EndpointId, u64), ClientGroState> = HashMap::new();
@@ -1649,22 +1664,21 @@ impl VpnServer {
             let gro_pending =
                 software_gro && gro_states.values().any(|state| !state.table.is_empty());
             let read_result = if gro_pending {
-                // Safety cap: even while packets keep arriving back-to-back,
-                // never hold a partial group beyond the flush window.
+                // Flush groups whose bounded wait has elapsed before arming
+                // the next deadline across all client GRO tables.
                 self.flush_gro_states(&mut gro_states, &mut arena, true).await;
-                // Drain-then-flush (wireguard-go model): keep coalescing only
-                // while another packet is instantly available; flush pending
-                // groups as soon as the TUN read would block, so GRO adds no
-                // latency to flows that are not arriving back-to-back. A
-                // single Pending poll consumes no data, so dropping the
-                // probed future is safe.
-                match tun_reader.read_buf(&mut packet_buf).now_or_never() {
-                    Some(read_result) => read_result,
-                    None => {
-                        self.flush_gro_states(&mut gro_states, &mut arena, false)
-                            .await;
-                        continue;
+
+                if let Some(deadline) = Self::next_gro_deadline(&gro_states) {
+                    match tun_reader.read_buf_until(&mut packet_buf, deadline).await {
+                        Some(read_result) => read_result,
+                        None => {
+                            self.flush_gro_states(&mut gro_states, &mut arena, true)
+                                .await;
+                            continue;
+                        }
                     }
+                } else {
+                    tun_reader.read_buf(&mut packet_buf).await
                 }
             } else {
                 tun_reader.read_buf(&mut packet_buf).await

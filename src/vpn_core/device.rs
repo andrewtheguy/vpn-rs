@@ -10,6 +10,7 @@ use ipnet::{Ipv4Net, Ipv6Net};
 use std::future::poll_fn;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::pin::Pin;
+use std::time::Instant;
 use tokio::io::{AsyncRead, AsyncWriteExt, ReadBuf};
 use tokio::process::Command;
 use tun::{AbstractDevice, AsyncDevice, Configuration, DeviceReader, DeviceWriter};
@@ -369,6 +370,24 @@ impl TunReader {
         poll_fn(|cx| Pin::new(&mut self.reader).poll_read(cx, buf))
             .await
             .map_err(VpnError::Network)
+    }
+
+    /// Read a packet unless `deadline` arrives first.
+    ///
+    /// Returns `None` when the deadline expires. A timed-out pending read does
+    /// not consume data because `AsyncRead` only advances `ReadBuf` on a ready
+    /// read.
+    pub async fn read_buf_until(
+        &mut self,
+        buf: &mut ReadBuf<'_>,
+        deadline: Instant,
+    ) -> Option<VpnResult<()>> {
+        tokio::time::timeout_at(
+            tokio::time::Instant::from_std(deadline),
+            self.read_buf(buf),
+        )
+        .await
+        .ok()
     }
 }
 
