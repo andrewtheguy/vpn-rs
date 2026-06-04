@@ -13,10 +13,12 @@ use crate::vpn_core::device::{
 };
 use crate::vpn_core::error::{VpnError, VpnResult};
 use crate::vpn_core::lock::VpnLock;
-use crate::vpn_core::offload::{materialize_offload_packet, split_tun_frame};
+use crate::vpn_core::offload::{
+    materialize_offload_packet, split_tun_frame, CoalescedOutput, TcpGroTable,
+};
 use crate::vpn_core::paths::watch_connection_paths;
 use crate::vpn_core::signaling::{
-    frame_capabilities_message, frame_ip_packet_v2, parse_ip_packet_v2, read_message,
+    append_ip_packet_v2, frame_capabilities_message, parse_ip_packet_v2, read_message,
     write_message, CapabilitiesMessage, DataMessageType, VpnHandshake, VpnHandshakeResponse,
     HEARTBEAT_PING_BYTE, MAX_HANDSHAKE_SIZE, VPN_ALPN,
 };
@@ -53,6 +55,19 @@ const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(30);
 /// Memory impact (typical): ~1024 * ~1500 bytes (standard MTU) = ~1.5 MB.
 /// Latency impact: At 100 Mbps, a full 1024-packet buffer adds ~120ms latency.
 const OUTBOUND_CHANNEL_SIZE: usize = 1024;
+
+/// Maximum number of framed packets drained from the outbound channel per
+/// batched QUIC write.
+const WRITE_BATCH_SIZE: usize = 256;
+
+/// Reserve granularity for the framing arena. Frames are appended to a
+/// long-lived `BytesMut` and split off as refcounted `Bytes`, so the
+/// allocator is only hit once per chunk instead of once per packet.
+const FRAME_ARENA_CHUNK: usize = 64 * 1024;
+
+/// Maximum time a software-GRO group may wait for additional segments before
+/// being flushed to the QUIC stream.
+const GRO_FLUSH_WINDOW: Duration = Duration::from_micros(500);
 
 /// Timeout for resolving relay URLs via DNS.
 const RESOLVE_RELAY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -538,9 +553,9 @@ impl VpnClient {
         // Returns error context if write fails for inclusion in shutdown reason.
         let mut writer_handle: tokio::task::JoinHandle<Option<String>> = tokio::spawn(async move {
             let mut data_send = data_send;
-            let mut batch = Vec::with_capacity(64);
+            let mut batch = Vec::with_capacity(WRITE_BATCH_SIZE);
             loop {
-                let count = outbound_rx.recv_many(&mut batch, 64).await;
+                let count = outbound_rx.recv_many(&mut batch, WRITE_BATCH_SIZE).await;
                 if count == 0 {
                     log::trace!("Writer task exiting");
                     break;
@@ -572,8 +587,37 @@ impl VpnClient {
                 // SAFETY: Buffer is immediately overwritten by tun_reader.read(), and only
                 // the written portion (&read_slice[..n]) is accessed. Skips zeroing overhead.
                 let read_slice = unsafe { as_mut_byte_slice(&mut read_buf) };
+                // Long-lived framing arena: frames are appended and split off as
+                // refcounted Bytes views, amortizing allocations across packets.
+                let mut arena = BytesMut::with_capacity(FRAME_ARENA_CHUNK);
+                // Software GRO: on a non-GSO local TUN, coalesce consecutive
+                // same-flow TCP segments into offload-tagged super-frames so a
+                // GSO-capable peer can hand them to its kernel via TSO.
+                let software_gro = !tun_reader.vnet_hdr_enabled();
+                if software_gro {
+                    log::info!(
+                        "Software GRO enabled for outbound TCP (local TUN has no offload support)"
+                    );
+                }
+                let mut gro_table = TcpGroTable::new();
                 loop {
-                    match tun_reader.read(read_slice).await {
+                    let gro_deadline = gro_table
+                        .next_deadline(GRO_FLUSH_WINDOW)
+                        .map(tokio::time::Instant::from_std);
+                    let read_result = tokio::select! {
+                        biased;
+                        _ = tokio::time::sleep_until(
+                            gro_deadline.unwrap_or_else(tokio::time::Instant::now)
+                        ), if gro_deadline.is_some() => {
+                            let outputs = gro_table.flush_expired(Instant::now(), GRO_FLUSH_WINDOW);
+                            if !send_gro_outputs(outputs, &mut arena, &outbound_tx).await {
+                                return None;
+                            }
+                            continue;
+                        }
+                        read_result = tun_reader.read(read_slice) => read_result,
+                    };
+                    match read_result {
                         Ok(n) if n > 0 => {
                             let raw_packet = &read_slice[..n];
                             let (offload, packet) =
@@ -593,28 +637,41 @@ impl VpnClient {
                                 continue;
                             }
 
+                            if software_gro {
+                                // Non-GSO TUN frames never carry offload metadata;
+                                // push the plain IP packet through the GRO table.
+                                let outputs = gro_table.push(packet, Instant::now());
+                                if !send_gro_outputs(outputs, &mut arena, &outbound_tx).await {
+                                    return None;
+                                }
+                                continue;
+                            }
+
                             if let Some(meta) = offload {
                                 if !negotiated_gso {
                                     match materialize_offload_packet(&meta, packet) {
                                         Ok(packets) => {
                                             for packet in packets {
                                                 let frame_size = 1 + 4 + 1 + packet.len();
-                                                let mut write_buf =
-                                                    BytesMut::with_capacity(frame_size);
-                                                if let Err(e) = frame_ip_packet_v2(
-                                                    &mut write_buf,
-                                                    None,
-                                                    &packet,
-                                                )
-                                                {
-                                                    log::warn!(
+                                                if arena.capacity() - arena.len() < frame_size {
+                                                    arena.reserve(
+                                                        FRAME_ARENA_CHUNK.max(frame_size),
+                                                    );
+                                                }
+                                                let written = match append_ip_packet_v2(
+                                                    &mut arena, None, &packet,
+                                                ) {
+                                                    Ok(written) => written,
+                                                    Err(e) => {
+                                                        log::warn!(
                                                         "Failed to frame materialized packet: {}",
                                                         e
                                                     );
-                                                    continue;
-                                                }
+                                                        continue;
+                                                    }
+                                                };
                                                 if outbound_tx
-                                                    .send(write_buf.freeze())
+                                                    .send(arena.split_to(written).freeze())
                                                     .await
                                                     .is_err()
                                                 {
@@ -634,7 +691,7 @@ impl VpnClient {
                                 }
                             }
 
-                            // Allocate buffer sized to actual frame
+                            // Append frame to the arena and split it off as a Bytes view
                             let frame_size = 1
                                 + 4
                                 + 1
@@ -642,15 +699,23 @@ impl VpnClient {
                                     .map(|_| crate::vpn_core::offload::VIRTIO_NET_HDR_LEN)
                                     .unwrap_or(0)
                                 + packet.len();
-                            let mut write_buf = BytesMut::with_capacity(frame_size);
-                            if let Err(e) =
-                                frame_ip_packet_v2(&mut write_buf, offload.as_ref(), packet)
-                            {
-                                log::warn!("Failed to frame packet: {}", e);
-                                continue;
+                            if arena.capacity() - arena.len() < frame_size {
+                                arena.reserve(FRAME_ARENA_CHUNK.max(frame_size));
                             }
+                            let written =
+                                match append_ip_packet_v2(&mut arena, offload.as_ref(), packet) {
+                                    Ok(written) => written,
+                                    Err(e) => {
+                                        log::warn!("Failed to frame packet: {}", e);
+                                        continue;
+                                    }
+                                };
 
-                            if outbound_tx.send(write_buf.freeze()).await.is_err() {
+                            if outbound_tx
+                                .send(arena.split_to(written).freeze())
+                                .await
+                                .is_err()
+                            {
                                 log::warn!("Outbound channel closed");
                                 return None;
                             }
@@ -658,6 +723,9 @@ impl VpnClient {
                         Ok(_) => {}
                         Err(e) => {
                             log::error!("TUN read error: {}", e);
+                            // Flush pending coalesced groups before shutting down.
+                            send_gro_outputs(gro_table.flush_all(), &mut arena, &outbound_tx)
+                                .await;
                             return Some(format!("TUN read error: {}", e));
                         }
                     }
@@ -1309,6 +1377,49 @@ fn calculate_backoff_with_rng(attempt: u32, rng: &mut impl Rng) -> Duration {
 /// Collect local UDP ports bound by the iroh endpoint.
 fn collect_local_iroh_udp_ports(endpoint: &Endpoint) -> HashSet<u16> {
     endpoint.addr().ip_addrs().map(|addr| addr.port()).collect()
+}
+
+/// Frame software-GRO outputs with the framing arena and enqueue them on the
+/// outbound channel.
+///
+/// Returns false if the outbound channel is closed.
+async fn send_gro_outputs(
+    outputs: Vec<CoalescedOutput>,
+    arena: &mut BytesMut,
+    outbound_tx: &mpsc::Sender<Bytes>,
+) -> bool {
+    for output in &outputs {
+        let (offload, packet) = match output {
+            CoalescedOutput::Coalesced(hdr, packet) => (Some(hdr), packet.as_slice()),
+            CoalescedOutput::Single(packet) => (None, packet.as_slice()),
+        };
+        let frame_size = 1
+            + 4
+            + 1
+            + offload
+                .map(|_| crate::vpn_core::offload::VIRTIO_NET_HDR_LEN)
+                .unwrap_or(0)
+            + packet.len();
+        if arena.capacity() - arena.len() < frame_size {
+            arena.reserve(FRAME_ARENA_CHUNK.max(frame_size));
+        }
+        let written = match append_ip_packet_v2(arena, offload, packet) {
+            Ok(written) => written,
+            Err(e) => {
+                log::warn!("Failed to frame coalesced packet: {}", e);
+                continue;
+            }
+        };
+        if outbound_tx
+            .send(arena.split_to(written).freeze())
+            .await
+            .is_err()
+        {
+            log::warn!("Outbound channel closed");
+            return false;
+        }
+    }
+    true
 }
 
 /// Return true if packet is UDP and either source/destination port matches a blocked port.
