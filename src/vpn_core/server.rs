@@ -6,7 +6,7 @@
 //! directly over the encrypted iroh QUIC connection.
 
 use crate::vpn_core::buffer::{read_exact_uninit, uninitialized_vec};
-use crate::vpn_core::config::VpnServerConfig;
+use crate::vpn_core::config::{validate_ip6_strategy, Ip6Strategy, VpnServerConfig};
 use crate::vpn_core::device::{TunConfig, TunDevice, TunOffloadStatus};
 use crate::vpn_core::error::{VpnError, VpnResult};
 use crate::vpn_core::offload::{
@@ -23,6 +23,7 @@ use bytes::{Bytes, BytesMut};
 use dashmap::DashMap;
 use ipnet::{Ipv4Net, Ipv6Net};
 use iroh::{Endpoint, EndpointId};
+use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -298,32 +299,82 @@ impl IpPool {
     }
 }
 
+/// Derive a deterministic 64-bit host suffix from an iroh node id.
+///
+/// Stateless: first 8 bytes (big-endian) of a domain-separated SHA-256 over
+/// the node id, so the same node id always maps to the same suffix.
+fn derive_ip6_suffix(node_id: &EndpointId) -> u64 {
+    let mut hasher = Sha256::new();
+    hasher.update(b"vpn-rs ipv6 addr v1");
+    hasher.update(node_id.as_bytes());
+    let digest = hasher.finalize();
+    u64::from_be_bytes(digest[..8].try_into().expect("sha256 digest >= 8 bytes"))
+}
+
+/// Derive a deterministic IPv6 address within `network` from an iroh node id.
+///
+/// The derived suffix is masked to the host bits, so the address always lands
+/// in the subnet (a no-op for /64; defensive for wider prefixes).
+fn derived_ip6(network: Ipv6Net, node_id: &EndpointId) -> Ipv6Addr {
+    let host_bits: u32 = 128 - u32::from(network.prefix_len());
+    let mask = if host_bits >= 128 {
+        u128::MAX
+    } else {
+        (1u128 << host_bits) - 1
+    };
+    let net_addr: u128 = network.network().into();
+    Ipv6Addr::from(net_addr | (u128::from(derive_ip6_suffix(node_id)) & mask))
+}
+
+/// Allocation strategy state for the IPv6 pool.
+#[derive(Debug)]
+enum Ip6Alloc {
+    /// Sequential allocation: server ::1, clients ::2, ::3, ... with reuse.
+    Sequential {
+        /// Next IP to assign (as u128 for arithmetic).
+        next_ip: u128,
+        /// Maximum IP in the range.
+        max_ip: u128,
+        /// Released IPs available for reuse.
+        released: Vec<Ipv6Addr>,
+    },
+    /// Stateless: addresses are derived on demand from the client node id.
+    NodeId,
+}
+
 /// IPv6 address pool for assigning /128 addresses to clients.
 #[derive(Debug)]
 struct Ip6Pool {
     /// Network CIDR (e.g., fd00::/64).
     network: Ipv6Net,
-    /// Server's IPv6 (first usable address).
+    /// Server's IPv6 (first usable address, or node-id derived).
     server_ip: Ipv6Addr,
-    /// Next IP to assign (as u128 for arithmetic).
-    next_ip: u128,
-    /// Maximum IP in the range.
-    max_ip: u128,
+    /// Allocation strategy (sequential bookkeeping or stateless node-id).
+    alloc: Ip6Alloc,
     /// IPs currently in use (mapped from (client endpoint ID, device ID)).
+    /// In node-id mode this exists only for duplicate detection/rejection
+    /// (plus idempotent re-allocate and release).
     in_use: HashMap<(EndpointId, u64), Ipv6Addr>,
-    /// Released IPs available for reuse.
-    released: Vec<Ipv6Addr>,
 }
 
 impl Ip6Pool {
     /// Create a new IPv6 pool from a network with optional custom server IP.
     ///
-    /// If `server_ip` is None, defaults to ::1 within the network.
-    /// Client IPs start from the address after the server IP.
+    /// Sequential strategy: if `server_ip` is None, defaults to ::1 within the
+    /// network; client IPs start from the address after the server IP.
+    ///
+    /// Node-id strategy: stateless — the server IP is derived from `server_id`
+    /// and client IPs are derived from their node ids at allocation time.
+    /// Requires a /64 or wider network; `server_ip` must be None.
     ///
     /// Returns an error if the prefix length is >= 127 (/127 or /128), as these
     /// networks have no usable addresses for client allocation.
-    fn new(network: Ipv6Net, server_ip: Option<Ipv6Addr>) -> VpnResult<Self> {
+    fn new(
+        network: Ipv6Net,
+        server_ip: Option<Ipv6Addr>,
+        strategy: Ip6Strategy,
+        server_id: EndpointId,
+    ) -> VpnResult<Self> {
         let prefix_len = network.prefix_len();
 
         // /127 has only 2 addresses (server takes ::1, no room for clients)
@@ -335,28 +386,54 @@ impl Ip6Pool {
             )));
         }
 
+        // Strategy constraints (also enforced at config validation; kept here
+        // for direct constructors/tests). No-op for sequential.
+        validate_ip6_strategy(strategy, Some(network), server_ip).map_err(VpnError::config)?;
+
         let net_addr: u128 = network.network().into();
 
-        // Server gets specified IP or defaults to ::1 within network
-        let server_ip = server_ip.unwrap_or_else(|| Ipv6Addr::from(net_addr + 1));
-        let server_ip_u128: u128 = server_ip.into();
+        match strategy {
+            Ip6Strategy::Sequential => {
+                // Server gets specified IP or defaults to ::1 within network
+                let server_ip = server_ip.unwrap_or_else(|| Ipv6Addr::from(net_addr + 1));
+                let server_ip_u128: u128 = server_ip.into();
 
-        // Clients start from address after server IP
-        let next_ip = server_ip_u128 + 1;
+                // Clients start from address after server IP
+                let next_ip = server_ip_u128 + 1;
 
-        // Calculate max_ip based on prefix length
-        let host_bits: u32 = 128 - u32::from(prefix_len);
-        // host_bits is guaranteed >= 2 here because prefix_len < 127, so the shift is safe
-        let max_ip = net_addr + ((1u128 << host_bits) - 1) - 1; // Exclude last address
+                // Calculate max_ip based on prefix length
+                let host_bits: u32 = 128 - u32::from(prefix_len);
+                // host_bits is guaranteed >= 2 here because prefix_len < 127, so the shift is safe
+                let max_ip = net_addr + ((1u128 << host_bits) - 1) - 1; // Exclude last address
 
-        Ok(Self {
-            network,
-            server_ip,
-            next_ip,
-            max_ip,
-            in_use: HashMap::new(),
-            released: Vec::new(),
-        })
+                Ok(Self {
+                    network,
+                    server_ip,
+                    alloc: Ip6Alloc::Sequential {
+                        next_ip,
+                        max_ip,
+                        released: Vec::new(),
+                    },
+                    in_use: HashMap::new(),
+                })
+            }
+            Ip6Strategy::NodeId => {
+                let server_ip = derived_ip6(network, &server_id);
+                // The all-zero suffix is the subnet-router anycast address (~2^-64 chance)
+                if server_ip == network.network() {
+                    return Err(VpnError::config(
+                        "derived server IPv6 collides with the network address; use a different server key or network6".to_string(),
+                    ));
+                }
+
+                Ok(Self {
+                    network,
+                    server_ip,
+                    alloc: Ip6Alloc::NodeId,
+                    in_use: HashMap::new(),
+                })
+            }
+        }
     }
 
     /// Get the server's IPv6 address.
@@ -377,27 +454,57 @@ impl Ip6Pool {
             return Some(ip);
         }
 
-        // Try to reuse a released IP first
-        if let Some(ip) = self.released.pop() {
-            self.in_use.insert(key, ip);
-            return Some(ip);
-        }
+        match self.alloc {
+            Ip6Alloc::Sequential {
+                ref mut next_ip,
+                max_ip,
+                ref mut released,
+            } => {
+                // Try to reuse a released IP first
+                if let Some(ip) = released.pop() {
+                    self.in_use.insert(key, ip);
+                    return Some(ip);
+                }
 
-        // Allocate new IP if available
-        if self.next_ip <= self.max_ip {
-            let ip = Ipv6Addr::from(self.next_ip);
-            self.next_ip += 1;
-            self.in_use.insert(key, ip);
-            Some(ip)
-        } else {
-            None // Pool exhausted
+                // Allocate new IP if available
+                if *next_ip <= max_ip {
+                    let ip = Ipv6Addr::from(*next_ip);
+                    *next_ip += 1;
+                    self.in_use.insert(key, ip);
+                    Some(ip)
+                } else {
+                    None // Pool exhausted
+                }
+            }
+            Ip6Alloc::NodeId => {
+                let ip = derived_ip6(self.network, &endpoint_id);
+                // Reject the subnet-router anycast address, the server's own
+                // address (incl. a client presenting the server's node id), and
+                // duplicates (a second device of the same node id derives the
+                // same address; hash collisions are ~2^-64).
+                if ip == self.network.network()
+                    || ip == self.server_ip
+                    || self.in_use.values().any(|&used| used == ip)
+                {
+                    return None;
+                }
+                self.in_use.insert(key, ip);
+                Some(ip)
+            }
         }
     }
 
     /// Release an IPv6 address when a client disconnects.
     fn release(&mut self, endpoint_id: &EndpointId, device_id: u64) {
         if let Some(ip) = self.in_use.remove(&(*endpoint_id, device_id)) {
-            self.released.push(ip);
+            // Only sequential mode tracks released IPs for reuse; node-id mode
+            // re-derives the same address on reconnect.
+            if let Ip6Alloc::Sequential {
+                ref mut released, ..
+            } = self.alloc
+            {
+                released.push(ip);
+            }
         }
     }
 }
@@ -433,7 +540,10 @@ pub struct VpnServer {
 
 impl VpnServer {
     /// Create a new VPN server.
-    pub async fn new(config: VpnServerConfig) -> VpnResult<Self> {
+    ///
+    /// `server_endpoint_id` is the server's own iroh node id, used to derive
+    /// the server's IPv6 address in node-id strategy mode.
+    pub async fn new(config: VpnServerConfig, server_endpoint_id: EndpointId) -> VpnResult<Self> {
         // Validate configuration
         config.validate().map_err(VpnError::config)?;
 
@@ -451,6 +561,8 @@ impl VpnServer {
             Some(network6) => Some(Arc::new(RwLock::new(Ip6Pool::new(
                 network6,
                 config.server_ip6,
+                config.ip6_strategy,
+                server_endpoint_id,
             )?))),
             None => None,
         };
@@ -2342,7 +2454,7 @@ mod tests {
     #[test]
     fn test_ip6_pool_allocation() {
         let network: Ipv6Net = "fd00::/120".parse().unwrap();
-        let mut pool = Ip6Pool::new(network, None).unwrap();
+        let mut pool = Ip6Pool::new(network, None, Ip6Strategy::Sequential, random_endpoint_id()).unwrap();
 
         // Server should get ::1
         assert_eq!(pool.server_ip(), "fd00::1".parse::<Ipv6Addr>().unwrap());
@@ -2372,7 +2484,7 @@ mod tests {
     fn test_ip6_pool_exhaustion() {
         // Use a tiny /126 network (4 addresses: ::0 network, ::1 server, ::2 client, ::3 last)
         let network: Ipv6Net = "fd00::/126".parse().unwrap();
-        let mut pool = Ip6Pool::new(network, None).unwrap();
+        let mut pool = Ip6Pool::new(network, None, Ip6Strategy::Sequential, random_endpoint_id()).unwrap();
 
         // Server uses ::1, only ::2 available for clients (::3 is excluded as last address)
         let id1 = random_endpoint_id();
@@ -2389,7 +2501,7 @@ mod tests {
     fn test_ip6_pool_rejects_slash127() {
         // /127 network has only 2 addresses - too small for server + clients
         let network: Ipv6Net = "fd00::/127".parse().unwrap();
-        let result = Ip6Pool::new(network, None);
+        let result = Ip6Pool::new(network, None, Ip6Strategy::Sequential, random_endpoint_id());
 
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -2404,7 +2516,7 @@ mod tests {
     fn test_ip6_pool_rejects_slash128() {
         // /128 is a single-address network - unusable for VPN pool
         let network: Ipv6Net = "fd00::/128".parse().unwrap();
-        let result = Ip6Pool::new(network, None);
+        let result = Ip6Pool::new(network, None, Ip6Strategy::Sequential, random_endpoint_id());
 
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -2413,6 +2525,133 @@ mod tests {
             "Expected Config error, got {:?}",
             err
         );
+    }
+
+    // =========================================================================
+    // Ip6Pool node-id strategy tests
+    // =========================================================================
+
+    /// Helper to create a fixed (deterministic) EndpointId for testing
+    fn fixed_endpoint_id(seed: u8) -> EndpointId {
+        iroh::SecretKey::from_bytes(&[seed; 32]).public()
+    }
+
+    #[test]
+    fn test_ip6_nodeid_deterministic() {
+        // Same node id must derive the same address across pool instances
+        let network: Ipv6Net = "fd00::/64".parse().unwrap();
+        let server_id = fixed_endpoint_id(1);
+        let client_id = fixed_endpoint_id(2);
+
+        let mut pool1 = Ip6Pool::new(network, None, Ip6Strategy::NodeId, server_id).unwrap();
+        let mut pool2 = Ip6Pool::new(network, None, Ip6Strategy::NodeId, server_id).unwrap();
+
+        let ip1 = pool1.allocate(client_id, 1).unwrap();
+        let ip2 = pool2.allocate(client_id, 99).unwrap();
+        assert_eq!(ip1, ip2);
+        assert_eq!(ip1, derived_ip6(network, &client_id));
+
+        // Idempotent for the same (endpoint, device) key
+        assert_eq!(pool1.allocate(client_id, 1).unwrap(), ip1);
+    }
+
+    #[test]
+    fn test_ip6_nodeid_distinct_ids_distinct_ips() {
+        let network: Ipv6Net = "fd00::/64".parse().unwrap();
+        let mut pool =
+            Ip6Pool::new(network, None, Ip6Strategy::NodeId, fixed_endpoint_id(1)).unwrap();
+
+        let ip_a = pool.allocate(fixed_endpoint_id(2), 1).unwrap();
+        let ip_b = pool.allocate(fixed_endpoint_id(3), 1).unwrap();
+        assert_ne!(ip_a, ip_b);
+        assert!(network.contains(&ip_a));
+        assert!(network.contains(&ip_b));
+    }
+
+    #[test]
+    fn test_ip6_nodeid_server_ip_derived() {
+        let network: Ipv6Net = "fd00::/64".parse().unwrap();
+        let server_id = fixed_endpoint_id(1);
+        let pool = Ip6Pool::new(network, None, Ip6Strategy::NodeId, server_id).unwrap();
+
+        assert_eq!(pool.server_ip(), derived_ip6(network, &server_id));
+        assert!(network.contains(&pool.server_ip()));
+    }
+
+    #[test]
+    fn test_ip6_nodeid_wider_prefix_in_subnet() {
+        // Wider than /64 (e.g., /56) is allowed; suffix masking keeps the
+        // derived address in-subnet
+        let network: Ipv6Net = "fd00:aa00::/56".parse().unwrap();
+        let mut pool =
+            Ip6Pool::new(network, None, Ip6Strategy::NodeId, fixed_endpoint_id(1)).unwrap();
+
+        let ip = pool.allocate(fixed_endpoint_id(2), 1).unwrap();
+        assert!(network.contains(&ip));
+        assert!(network.contains(&pool.server_ip()));
+    }
+
+    #[test]
+    fn test_ip6_nodeid_rejects_narrower_than_slash64() {
+        let network: Ipv6Net = "fd00::/65".parse().unwrap();
+        let result = Ip6Pool::new(network, None, Ip6Strategy::NodeId, fixed_endpoint_id(1));
+
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("/64 or wider"));
+    }
+
+    #[test]
+    fn test_ip6_nodeid_rejects_custom_server_ip() {
+        let network: Ipv6Net = "fd00::/64".parse().unwrap();
+        let custom: Ipv6Addr = "fd00::1".parse().unwrap();
+        let result = Ip6Pool::new(
+            network,
+            Some(custom),
+            Ip6Strategy::NodeId,
+            fixed_endpoint_id(1),
+        );
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("server_ip6"));
+    }
+
+    #[test]
+    fn test_ip6_nodeid_rejects_server_own_id() {
+        // A client presenting the server's node id derives the server's
+        // address and must be rejected
+        let network: Ipv6Net = "fd00::/64".parse().unwrap();
+        let server_id = fixed_endpoint_id(1);
+        let mut pool = Ip6Pool::new(network, None, Ip6Strategy::NodeId, server_id).unwrap();
+
+        assert!(pool.allocate(server_id, 1).is_none());
+    }
+
+    #[test]
+    fn test_ip6_nodeid_second_device_conflict() {
+        // A second device of the same node id derives the same address ->
+        // duplicate is rejected
+        let network: Ipv6Net = "fd00::/64".parse().unwrap();
+        let client_id = fixed_endpoint_id(2);
+        let mut pool =
+            Ip6Pool::new(network, None, Ip6Strategy::NodeId, fixed_endpoint_id(1)).unwrap();
+
+        assert!(pool.allocate(client_id, 1).is_some());
+        assert!(pool.allocate(client_id, 2).is_none());
+    }
+
+    #[test]
+    fn test_ip6_nodeid_release_realloc_same_ip() {
+        let network: Ipv6Net = "fd00::/64".parse().unwrap();
+        let client_id = fixed_endpoint_id(2);
+        let mut pool =
+            Ip6Pool::new(network, None, Ip6Strategy::NodeId, fixed_endpoint_id(1)).unwrap();
+
+        let ip = pool.allocate(client_id, 1).unwrap();
+        pool.release(&client_id, 1);
+        assert_eq!(pool.allocate(client_id, 2).unwrap(), ip);
     }
 
     // =========================================================================

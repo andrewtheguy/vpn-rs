@@ -1,6 +1,6 @@
 //! Common endpoint helpers for iroh tunnel connections.
 
-use crate::vpn_common::config::{CongestionController, TransportTuning, DEFAULT_RECEIVE_WINDOW};
+use crate::vpn_core::file_config::{CongestionController, TransportTuning, DEFAULT_RECEIVE_WINDOW};
 use anyhow::{Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use iroh::{

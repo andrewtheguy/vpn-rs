@@ -1,4 +1,5 @@
-//! VPN-specific configuration support for vpn-rs.
+//! TOML config-file support: file-level structs, loading, and resolution
+//! into the runtime configuration ([`super::config`]).
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
@@ -42,6 +43,8 @@ pub enum CongestionController {
     NewReno,
 }
 
+pub use super::config::Ip6Strategy;
+
 /// Default QUIC receive window size (8 MB).
 pub const DEFAULT_RECEIVE_WINDOW: u32 = 8 * 1024 * 1024;
 
@@ -70,6 +73,8 @@ pub struct VpnServerIrohConfig {
     pub server_ip: Option<String>,
     pub network6: Option<String>,
     pub server_ip6: Option<String>,
+    #[serde(default)]
+    pub ip6_strategy: Ip6Strategy,
     pub secret_file: Option<PathBuf>,
     pub auth_tokens: Option<Vec<String>>,
     pub auth_tokens_file: Option<PathBuf>,
@@ -211,99 +216,62 @@ fn route6_context(route: &str, section: Option<&str>) -> String {
     }
 }
 
-fn validate_vpn_network(
-    network: &str,
-    server_ip: Option<&str>,
-    section: &str,
-) -> Result<ipnet::Ipv4Net> {
-    let net: ipnet::Ipv4Net = network.parse().with_context(|| {
-        format!(
-            "[{}] Invalid network CIDR '{}'. Expected format: 10.0.0.0/24",
-            section, network
-        )
-    })?;
-
-    if let Some(server_ip_str) = server_ip {
-        let server_ip: std::net::Ipv4Addr = server_ip_str.parse().with_context(|| {
-            format!(
-                "[{}] Invalid server_ip '{}'. Expected IPv4 address",
-                section, server_ip_str
-            )
-        })?;
-        if !net.contains(&server_ip) {
-            anyhow::bail!(
-                "[{}] server_ip '{}' is not within network '{}'",
-                section,
-                server_ip,
-                network
-            );
-        }
-    }
-
-    Ok(net)
-}
-
-fn validate_vpn_network6(
-    network6: &str,
-    server_ip6: Option<&str>,
-    section: &str,
-) -> Result<ipnet::Ipv6Net> {
-    let net: ipnet::Ipv6Net = network6.parse().with_context(|| {
-        format!(
-            "[{}] Invalid network6 CIDR '{}'. Expected format: fd00::/64",
-            section, network6
-        )
-    })?;
-
-    if let Some(server_ip6_str) = server_ip6 {
-        let server_ip6: std::net::Ipv6Addr = server_ip6_str.parse().with_context(|| {
-            format!(
-                "[{}] Invalid server_ip6 '{}'. Expected IPv6 address",
-                section, server_ip6_str
-            )
-        })?;
-        if !net.contains(&server_ip6) {
-            anyhow::bail!(
-                "[{}] server_ip6 '{}' is not within network6 '{}'",
-                section,
-                server_ip6,
-                network6
-            );
-        }
-    }
-
-    Ok(net)
-}
-
 fn validate_vpn_networks(
     network: Option<&str>,
     server_ip: Option<&str>,
     network6: Option<&str>,
     server_ip6: Option<&str>,
+    ip6_strategy: Ip6Strategy,
     section: &str,
 ) -> Result<()> {
-    if network.is_none() && network6.is_none() {
-        anyhow::bail!(
-            "[{}] At least one of 'network' (IPv4) or 'network6' (IPv6) is required.",
-            section
-        );
-    }
+    // Parse the raw strings, then delegate the semantic rules to the shared
+    // validator in super::config (single source of truth with the runtime config).
+    let network: Option<ipnet::Ipv4Net> = network
+        .map(|n| {
+            n.parse().with_context(|| {
+                format!(
+                    "[{}] Invalid network CIDR '{}'. Expected format: 10.0.0.0/24",
+                    section, n
+                )
+            })
+        })
+        .transpose()?;
 
-    if server_ip.is_some() && network.is_none() {
-        anyhow::bail!("[{}] 'server_ip' requires 'network' to be set.", section);
-    }
-    if let Some(net) = network {
-        validate_vpn_network(net, server_ip, section)?;
-    }
+    let server_ip: Option<std::net::Ipv4Addr> = server_ip
+        .map(|ip| {
+            ip.parse().with_context(|| {
+                format!(
+                    "[{}] Invalid server_ip '{}'. Expected IPv4 address",
+                    section, ip
+                )
+            })
+        })
+        .transpose()?;
 
-    if server_ip6.is_some() && network6.is_none() {
-        anyhow::bail!("[{}] 'server_ip6' requires 'network6' to be set.", section);
-    }
-    if let Some(net6) = network6 {
-        validate_vpn_network6(net6, server_ip6, section)?;
-    }
+    let network6: Option<ipnet::Ipv6Net> = network6
+        .map(|n| {
+            n.parse().with_context(|| {
+                format!(
+                    "[{}] Invalid network6 CIDR '{}'. Expected format: fd00::/64",
+                    section, n
+                )
+            })
+        })
+        .transpose()?;
 
-    Ok(())
+    let server_ip6: Option<std::net::Ipv6Addr> = server_ip6
+        .map(|ip| {
+            ip.parse().with_context(|| {
+                format!(
+                    "[{}] Invalid server_ip6 '{}'. Expected IPv6 address",
+                    section, ip
+                )
+            })
+        })
+        .transpose()?;
+
+    super::config::validate_vpn_networks(network, server_ip, network6, server_ip6, ip6_strategy)
+        .map_err(|e| anyhow::anyhow!("[{}] {}", section, e))
 }
 
 fn default_drop_on_full() -> bool {
@@ -350,6 +318,7 @@ impl VpnServerConfig {
                 iroh.server_ip.as_deref(),
                 iroh.network6.as_deref(),
                 iroh.server_ip6.as_deref(),
+                iroh.ip6_strategy,
                 "iroh",
             )?;
 
@@ -476,6 +445,7 @@ pub struct ResolvedVpnServerConfig {
     pub server_ip: Option<String>,
     pub network6: Option<String>,
     pub server_ip6: Option<String>,
+    pub ip6_strategy: Ip6Strategy,
     pub mtu: u16,
     pub secret_file: Option<PathBuf>,
     pub relay_urls: Vec<String>,
@@ -502,6 +472,7 @@ impl ResolvedVpnServerConfig {
             cfg.server_ip.as_deref(),
             cfg.network6.as_deref(),
             cfg.server_ip6.as_deref(),
+            cfg.ip6_strategy,
             "config",
         )?;
 
@@ -532,6 +503,7 @@ impl ResolvedVpnServerConfig {
             server_ip: cfg.server_ip.clone(),
             network6: cfg.network6.clone(),
             server_ip6: cfg.server_ip6.clone(),
+            ip6_strategy: cfg.ip6_strategy,
             mtu,
             secret_file: cfg.secret_file.clone(),
             relay_urls: cfg.shared.relay_urls.clone().unwrap_or_default(),
@@ -720,5 +692,74 @@ impl VpnClientConfigBuilder {
             max_reconnect_attempts: self.max_reconnect_attempts,
             transport: self.transport.unwrap_or_default(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn server_toml(iroh_extra: &str) -> String {
+        format!(
+            r#"
+role = "vpnserver"
+mode = "iroh"
+
+[iroh]
+network6 = "fd00::/64"
+secret_file = "./vpn-server.key"
+auth_tokens = ["token"]
+{iroh_extra}
+"#
+        )
+    }
+
+    #[test]
+    fn test_ip6_strategy_parses_node_id() {
+        let config: VpnServerConfig =
+            toml::from_str(&server_toml(r#"ip6_strategy = "node-id""#)).unwrap();
+        assert_eq!(
+            config.iroh.as_ref().unwrap().ip6_strategy,
+            Ip6Strategy::NodeId
+        );
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_ip6_strategy_defaults_to_sequential() {
+        let config: VpnServerConfig = toml::from_str(&server_toml("")).unwrap();
+        assert_eq!(
+            config.iroh.as_ref().unwrap().ip6_strategy,
+            Ip6Strategy::Sequential
+        );
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_ip6_strategy_node_id_rejects_narrow_subnet() {
+        let toml_str = server_toml(r#"ip6_strategy = "node-id""#)
+            .replace("fd00::/64", "fd00::/65");
+        let config: VpnServerConfig = toml::from_str(&toml_str).unwrap();
+        let err = config.validate().unwrap_err().to_string();
+        assert!(err.contains("/64 or wider"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn test_ip6_strategy_node_id_rejects_server_ip6() {
+        let config: VpnServerConfig = toml::from_str(&server_toml(
+            "ip6_strategy = \"node-id\"\nserver_ip6 = \"fd00::1\"",
+        ))
+        .unwrap();
+        let err = config.validate().unwrap_err().to_string();
+        assert!(err.contains("server_ip6"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn test_ip6_strategy_node_id_requires_network6() {
+        let toml_str = server_toml(r#"ip6_strategy = "node-id""#)
+            .replace("network6 = \"fd00::/64\"", "network = \"10.0.0.0/24\"");
+        let config: VpnServerConfig = toml::from_str(&toml_str).unwrap();
+        let err = config.validate().unwrap_err().to_string();
+        assert!(err.contains("requires 'network6'"), "unexpected error: {err}");
     }
 }

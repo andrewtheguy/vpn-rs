@@ -6,7 +6,6 @@
 #[cfg(not(any(unix, target_os = "windows")))]
 compile_error!("vpn-rs only supports Unix-like systems (Linux, macOS, BSD) and Windows");
 
-mod vpn_common;
 mod vpn_core;
 mod vpn_iroh;
 
@@ -17,7 +16,7 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 use std::num::NonZeroU32;
 use std::path::PathBuf;
 
-use crate::vpn_common::config::{
+use crate::vpn_core::file_config::{
     expand_tilde, load_vpn_client_config, load_vpn_server_config, ResolvedVpnClientConfig,
     ResolvedVpnServerConfig, VpnClientConfig as TomlClientConfig, VpnClientConfigBuilder,
     VpnServerConfig as TomlServerConfig,
@@ -351,6 +350,7 @@ async fn run_vpn_server(resolved: ResolvedVpnServerConfig) -> Result<()> {
         network6,
         server_ip,
         server_ip6,
+        ip6_strategy: resolved.ip6_strategy,
         mtu: resolved.mtu,
         max_clients: 254,
         auth_tokens: Some(valid_tokens),
@@ -382,7 +382,7 @@ async fn run_vpn_server(resolved: ResolvedVpnServerConfig) -> Result<()> {
     );
 
     // Create and run VPN server
-    let server = VpnServer::new(config)
+    let server = VpnServer::new(config, endpoint.id())
         .await
         .context("Failed to create VPN server")?;
 

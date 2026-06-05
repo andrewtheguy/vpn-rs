@@ -9,6 +9,110 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 /// Default MTU for VPN tunnel (1500 - 60 bytes overhead for QUIC/TLS + framing).
 pub const DEFAULT_MTU: u16 = 1440;
 
+/// IPv6 address-assignment strategy for VPN clients.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum Ip6Strategy {
+    /// Sequential allocation: server gets ::1, clients get ::2, ::3, ...
+    #[default]
+    Sequential,
+    /// Stateless deterministic addresses: host suffix derived from the iroh
+    /// node id (clients from their own id, server from its id).
+    /// Requires an IPv6 subnet of /64 or wider.
+    NodeId,
+}
+
+/// Validate node-id strategy requirements: `network6` of /64 or wider and no
+/// `server_ip6` override (the server address is derived from the node id).
+///
+/// A no-op for the sequential strategy.
+///
+/// Single source of truth shared by the TOML config layer ([`file_config`]),
+/// the runtime config ([`VpnServerConfig::validate`]), and the IPv6 pool.
+///
+/// [`file_config`]: crate::vpn_core::file_config
+pub fn validate_ip6_strategy(
+    strategy: Ip6Strategy,
+    network6: Option<Ipv6Net>,
+    server_ip6: Option<Ipv6Addr>,
+) -> Result<(), String> {
+    if strategy != Ip6Strategy::NodeId {
+        return Ok(());
+    }
+
+    let Some(network6) = network6 else {
+        return Err("ip6_strategy 'node-id' requires 'network6' to be set".to_string());
+    };
+    if network6.prefix_len() > 64 {
+        return Err(format!(
+            "ip6_strategy 'node-id' requires an IPv6 subnet of /64 or wider (got /{})",
+            network6.prefix_len()
+        ));
+    }
+    if server_ip6.is_some() {
+        return Err(
+            "'server_ip6' cannot be combined with ip6_strategy 'node-id' (the server address is derived from the server node id)"
+                .to_string(),
+        );
+    }
+
+    Ok(())
+}
+
+/// Validate the combination of VPN networks, server addresses, and IPv6
+/// strategy.
+///
+/// Single source of truth shared by the TOML config layer ([`file_config`])
+/// and the runtime config ([`VpnServerConfig::validate`]).
+///
+/// [`file_config`]: crate::vpn_core::file_config
+pub fn validate_vpn_networks(
+    network: Option<Ipv4Net>,
+    server_ip: Option<Ipv4Addr>,
+    network6: Option<Ipv6Net>,
+    server_ip6: Option<Ipv6Addr>,
+    ip6_strategy: Ip6Strategy,
+) -> Result<(), String> {
+    // At least one network must be configured
+    if network.is_none() && network6.is_none() {
+        return Err(
+            "At least one of 'network' (IPv4) or 'network6' (IPv6) must be configured".to_string(),
+        );
+    }
+
+    // server_ip requires network
+    if server_ip.is_some() && network.is_none() {
+        return Err("'server_ip' requires 'network' to be set".to_string());
+    }
+
+    // server_ip must be within network
+    if let (Some(server_ip), Some(network)) = (server_ip, network) {
+        if !network.contains(&server_ip) {
+            return Err(format!(
+                "'server_ip' {} is not within 'network' {}",
+                server_ip, network
+            ));
+        }
+    }
+
+    // server_ip6 requires network6
+    if server_ip6.is_some() && network6.is_none() {
+        return Err("'server_ip6' requires 'network6' to be set".to_string());
+    }
+
+    // server_ip6 must be within network6
+    if let (Some(server_ip6), Some(network6)) = (server_ip6, network6) {
+        if !network6.contains(&server_ip6) {
+            return Err(format!(
+                "'server_ip6' {} is not within 'network6' {}",
+                server_ip6, network6
+            ));
+        }
+    }
+
+    validate_ip6_strategy(ip6_strategy, network6, server_ip6)
+}
+
 /// VPN server configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VpnServerConfig {
@@ -31,6 +135,12 @@ pub struct VpnServerConfig {
     /// Server's IPv6 VPN address (defaults to first host in network6, e.g., ::1).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server_ip6: Option<Ipv6Addr>,
+
+    /// IPv6 address-assignment strategy (default: sequential).
+    /// `NodeId` derives stateless deterministic addresses from iroh node ids
+    /// and requires `network6` of /64 or wider with no `server_ip6` override.
+    #[serde(default)]
+    pub ip6_strategy: Ip6Strategy,
 
     /// MTU for the TUN device.
     #[serde(default = "default_mtu")]
@@ -122,46 +232,16 @@ impl VpnServerConfig {
     /// - Neither `network` (IPv4) nor `network6` (IPv6) is configured
     /// - `server_ip` is set but `network` is not (orphaned IPv4 server IP)
     /// - `server_ip6` is set but `network6` is not (orphaned IPv6 server IP)
+    /// - node-id strategy is set without `network6` of /64 or wider, or with
+    ///   a `server_ip6` override
     pub fn validate(&self) -> Result<(), String> {
-        // At least one network must be configured
-        if self.network.is_none() && self.network6.is_none() {
-            return Err(
-                "At least one of 'network' (IPv4) or 'network6' (IPv6) must be configured"
-                    .to_string(),
-            );
-        }
-
-        // server_ip requires network
-        if self.server_ip.is_some() && self.network.is_none() {
-            return Err("'server_ip' requires 'network' to be set".to_string());
-        }
-
-        // server_ip must be within network
-        if let (Some(server_ip), Some(network)) = (self.server_ip, self.network) {
-            if !network.contains(&server_ip) {
-                return Err(format!(
-                    "'server_ip' {} is not within 'network' {}",
-                    server_ip, network
-                ));
-            }
-        }
-
-        // server_ip6 requires network6
-        if self.server_ip6.is_some() && self.network6.is_none() {
-            return Err("'server_ip6' requires 'network6' to be set".to_string());
-        }
-
-        // server_ip6 must be within network6
-        if let (Some(server_ip6), Some(network6)) = (self.server_ip6, self.network6) {
-            if !network6.contains(&server_ip6) {
-                return Err(format!(
-                    "'server_ip6' {} is not within 'network6' {}",
-                    server_ip6, network6
-                ));
-            }
-        }
-
-        Ok(())
+        validate_vpn_networks(
+            self.network,
+            self.server_ip,
+            self.network6,
+            self.server_ip6,
+            self.ip6_strategy,
+        )
     }
 }
 
@@ -248,6 +328,7 @@ mod tests {
             network6: None,
             server_ip: None,
             server_ip6: None,
+            ip6_strategy: Ip6Strategy::Sequential,
             mtu: DEFAULT_MTU,
             max_clients: 254,
             auth_tokens: None,
@@ -335,6 +416,56 @@ mod tests {
         let result = config.validate();
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("not within 'network6'"));
+    }
+
+    #[test]
+    fn test_validate_nodeid_requires_network6() {
+        let mut config = minimal_server_config();
+        config.ip6_strategy = Ip6Strategy::NodeId;
+        let result = config.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("requires 'network6'"));
+    }
+
+    #[test]
+    fn test_validate_nodeid_accepts_slash64_and_wider() {
+        let mut config = minimal_server_config();
+        config.ip6_strategy = Ip6Strategy::NodeId;
+        config.network6 = Some("fd00::/64".parse().unwrap());
+        assert!(config.validate().is_ok());
+
+        config.network6 = Some("fd00::/56".parse().unwrap());
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_nodeid_rejects_narrower_than_slash64() {
+        let mut config = minimal_server_config();
+        config.ip6_strategy = Ip6Strategy::NodeId;
+        config.network6 = Some("fd00::/65".parse().unwrap());
+        let result = config.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("/64 or wider"));
+    }
+
+    #[test]
+    fn test_validate_nodeid_rejects_server_ip6() {
+        let mut config = minimal_server_config();
+        config.ip6_strategy = Ip6Strategy::NodeId;
+        config.network6 = Some("fd00::/64".parse().unwrap());
+        config.server_ip6 = Some("fd00::1".parse().unwrap());
+        let result = config.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("'server_ip6'"));
+    }
+
+    #[test]
+    fn test_validate_sequential_unaffected_by_nodeid_rules() {
+        // Sequential allows narrower-than-/64 subnets and a custom server_ip6
+        let mut config = minimal_server_config();
+        config.network6 = Some("fd00::/120".parse().unwrap());
+        config.server_ip6 = Some("fd00::1".parse().unwrap());
+        assert!(config.validate().is_ok());
     }
 
     #[test]
