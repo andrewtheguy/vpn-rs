@@ -4,8 +4,10 @@
 //! for VPN traffic.
 
 use crate::vpn_core::error::{VpnError, VpnResult};
-use crate::vpn_core::offload::{compose_tun_frame, VIRTIO_NET_HDR_LEN};
-use bytes::BytesMut;
+use crate::vpn_core::offload::{
+    assemble_tcp_gso_superframe, compose_tun_frame, plan_tun_write_groups, VIRTIO_NET_HDR_LEN,
+};
+use bytes::{Bytes, BytesMut};
 use ipnet::{Ipv4Net, Ipv6Net};
 use std::future::poll_fn;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -288,6 +290,7 @@ impl TunDevice {
                 vnet_hdr_enabled: self.vnet_hdr_enabled,
                 offload_status: self.offload_status,
                 scratch: BytesMut::with_capacity(buffer_size),
+                groups: Vec::new(),
             },
         ))
     }
@@ -397,6 +400,8 @@ pub struct TunWriter {
     vnet_hdr_enabled: bool,
     offload_status: TunOffloadStatus,
     scratch: BytesMut,
+    /// Reusable group-plan buffer for [`TunWriter::write_batch`].
+    groups: Vec<(usize, usize, bool)>,
 }
 
 impl TunWriter {
@@ -438,9 +443,63 @@ impl TunWriter {
             .map_err(VpnError::Network)
     }
 
-    /// Write all bytes to the TUN device.
-    pub async fn write_all(&mut self, buf: &[u8]) -> VpnResult<()> {
-        self.write_packet(None, buf).await
+    /// Write a drained batch of plain IP packets to the TUN device.
+    ///
+    /// When vnet headers are enabled (Linux with GSO offload), consecutive
+    /// same-flow TCP segments are coalesced into a single `virtio_net_hdr`
+    /// GSO super-frame and written in one syscall, letting the kernel
+    /// re-segment (GRO-like). Everything else — and every packet when vnet
+    /// headers are disabled — is written per-packet, identical to calling
+    /// [`TunWriter::write_packet`] for each.
+    pub async fn write_batch(&mut self, batch: &[Bytes]) -> VpnResult<()> {
+        if !self.vnet_hdr_enabled {
+            for packet in batch {
+                self.write_packet(None, packet).await?;
+            }
+            return Ok(());
+        }
+
+        // Take the plan buffer so `plan_tun_write_groups` can fill it while
+        // `self` stays borrowable for the writes; put it back for reuse.
+        let mut groups = std::mem::take(&mut self.groups);
+        plan_tun_write_groups(batch, &mut groups);
+        let result = self.write_planned_groups(batch, &groups).await;
+        self.groups = groups;
+        result
+    }
+
+    async fn write_planned_groups(
+        &mut self,
+        batch: &[Bytes],
+        groups: &[(usize, usize, bool)],
+    ) -> VpnResult<()> {
+        for &(start, end, coalesce) in groups {
+            if !coalesce {
+                self.write_packet(None, &batch[start]).await?;
+                continue;
+            }
+            match assemble_tcp_gso_superframe(&mut self.scratch, &batch[start..end]) {
+                Ok(()) => {
+                    self.writer
+                        .write_all(&self.scratch)
+                        .await
+                        .map_err(VpnError::Network)?;
+                }
+                Err(e) => {
+                    // Defensive: the planner only emits coalescible runs, so
+                    // this should not happen; degrade to per-packet writes.
+                    log::warn!(
+                        "GSO super-frame assembly failed ({}); writing {} segments individually",
+                        e,
+                        end - start
+                    );
+                    for packet in &batch[start..end] {
+                        self.write_packet(None, packet).await?;
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 }
 

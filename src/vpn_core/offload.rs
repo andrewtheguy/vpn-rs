@@ -6,7 +6,7 @@
 //! - Materializing offload metadata into plain packets when peer/local offload
 //!   support is unavailable.
 
-use bytes::{BufMut, BytesMut};
+use bytes::{BufMut, Bytes, BytesMut};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
@@ -185,6 +185,304 @@ pub fn compose_tun_frame(
         out.put_slice(&header);
     }
     out.put_slice(ip_packet);
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Write-side GRO: coalesce consecutive same-flow TCP segments into a single
+// GSO super-frame so one TUN write replaces N (the kernel re-segments).
+// ---------------------------------------------------------------------------
+
+/// TCP flag bits that disqualify a segment from coalescing (FIN/SYN/RST/URG).
+const TCP_FLAGS_NO_COALESCE: u8 = 0x01 | 0x02 | 0x04 | 0x20;
+
+/// Parsed coalescing-relevant fields of a plain (no vnet header) TCP segment.
+///
+/// Only produced by [`parse_coalescible_tcp`] for segments that satisfy the
+/// per-packet coalescing rules.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TcpSegmentMeta {
+    pub is_ipv6: bool,
+    /// IP header length: always 20 (IPv4, no options) or 40 (IPv6, no
+    /// extension headers).
+    pub ip_header_len: usize,
+    pub tcp_header_len: usize,
+    pub seq: u32,
+    pub payload_len: usize,
+}
+
+impl TcpSegmentMeta {
+    fn header_len(&self) -> usize {
+        self.ip_header_len + self.tcp_header_len
+    }
+}
+
+/// Parse a plain IP packet, returning metadata only if it is a coalescible
+/// pure-data TCP segment.
+///
+/// Returns `None` (excluding the packet from coalescing, never an error) for:
+/// non-TCP packets, IPv4 with options or fragmentation, IPv6 with extension
+/// headers, ECN-marked packets (avoids `VIRTIO_NET_HDR_GSO_ECN` handling),
+/// segments carrying SYN/FIN/RST/URG, empty payloads, and packets whose IP
+/// length fields disagree with the buffer length.
+pub fn parse_coalescible_tcp(packet: &[u8]) -> Option<TcpSegmentMeta> {
+    let version = *packet.first()? >> 4;
+    let (is_ipv6, ip_header_len) = match version {
+        4 => {
+            if packet.len() < 20 {
+                return None;
+            }
+            // No IP options (IHL must be 5) and protocol must be TCP.
+            if packet[0] & 0x0f != 5 || packet[9] != 6 {
+                return None;
+            }
+            // No fragments: MF flag or nonzero fragment offset.
+            let flags_frag = u16::from_be_bytes([packet[6], packet[7]]);
+            if flags_frag & 0x3fff != 0 {
+                return None;
+            }
+            // ECN bits in the ToS byte.
+            if packet[1] & 0x03 != 0 {
+                return None;
+            }
+            // Total length must match the buffer exactly.
+            if usize::from(u16::from_be_bytes([packet[2], packet[3]])) != packet.len() {
+                return None;
+            }
+            (false, 20)
+        }
+        6 => {
+            if packet.len() < 40 {
+                return None;
+            }
+            // Next header must be TCP directly (no extension-header walking).
+            if packet[6] != 6 {
+                return None;
+            }
+            // ECN bits live in the low two bits of the traffic class.
+            let traffic_class = (packet[0] << 4) | (packet[1] >> 4);
+            if traffic_class & 0x03 != 0 {
+                return None;
+            }
+            // Payload length must match the buffer exactly.
+            if usize::from(u16::from_be_bytes([packet[4], packet[5]])) != packet.len() - 40 {
+                return None;
+            }
+            (true, 40)
+        }
+        _ => return None,
+    };
+
+    let tcp_offset = ip_header_len;
+    if packet.len() < tcp_offset + 20 {
+        return None;
+    }
+    let tcp_header_len = usize::from(packet[tcp_offset + 12] >> 4) * 4;
+    if tcp_header_len < 20 || tcp_offset + tcp_header_len > packet.len() {
+        return None;
+    }
+    if packet[tcp_offset + 13] & TCP_FLAGS_NO_COALESCE != 0 {
+        return None;
+    }
+    let payload_len = packet.len() - tcp_offset - tcp_header_len;
+    if payload_len == 0 {
+        return None;
+    }
+
+    Some(TcpSegmentMeta {
+        is_ipv6,
+        ip_header_len,
+        tcp_header_len,
+        seq: u32::from_be_bytes([
+            packet[tcp_offset + 4],
+            packet[tcp_offset + 5],
+            packet[tcp_offset + 6],
+            packet[tcp_offset + 7],
+        ]),
+        payload_len,
+    })
+}
+
+/// Return true if segment `b` can extend a coalescing group ending in `a`:
+/// same flow (5-tuple, TTL/hop-limit, ToS/traffic-class), byte-identical TCP
+/// header length/options/ACK/window, and contiguous sequence numbers.
+///
+/// Note: bulk bursts originate from our own read-side segmenter
+/// ([`segment_tcp_gso_into`]), which copies one identical header (including
+/// options such as timestamps) across all segments of a burst, so identical-
+/// options matching re-merges exactly those bursts.
+fn can_chain(a: &[u8], ma: &TcpSegmentMeta, b: &[u8], mb: &TcpSegmentMeta) -> bool {
+    if ma.is_ipv6 != mb.is_ipv6 || ma.tcp_header_len != mb.tcp_header_len {
+        return false;
+    }
+
+    if ma.is_ipv6 {
+        // Version/traffic-class/flow-label words and src+dst addresses must
+        // match; hop limit too.
+        if a[0..4] != b[0..4] || a[8..40] != b[8..40] || a[7] != b[7] {
+            return false;
+        }
+    } else {
+        // ToS, TTL, and src+dst addresses must match.
+        if a[1] != b[1] || a[8] != b[8] || a[12..20] != b[12..20] {
+            return false;
+        }
+    }
+
+    let t = ma.ip_header_len;
+    // Ports, ACK number, window, and option bytes must be identical.
+    if a[t..t + 4] != b[t..t + 4]
+        || a[t + 8..t + 12] != b[t + 8..t + 12]
+        || a[t + 14..t + 16] != b[t + 14..t + 16]
+        || a[t + 20..t + ma.tcp_header_len] != b[t + 20..t + mb.tcp_header_len]
+    {
+        return false;
+    }
+
+    mb.seq == ma.seq.wrapping_add(ma.payload_len as u32)
+}
+
+/// Partition a drained TUN write batch into runs, preserving order.
+///
+/// Pushes `(start, end, coalesce)` tuples into `out` (cleared first).
+/// `coalesce == true` marks a run of two or more same-flow contiguous TCP
+/// segments with uniform payload size (only the final member may be smaller;
+/// a smaller member closes the run) whose merged IP length stays within
+/// `u16::MAX`. Every other packet becomes a `(i, i + 1, false)` passthrough.
+pub fn plan_tun_write_groups(batch: &[Bytes], out: &mut Vec<(usize, usize, bool)>) {
+    out.clear();
+    let mut i = 0;
+    while i < batch.len() {
+        let Some(first) = parse_coalescible_tcp(&batch[i]) else {
+            out.push((i, i + 1, false));
+            i += 1;
+            continue;
+        };
+
+        // Non-final members must match the first segment's payload size; a
+        // shorter member is accepted as the final one and closes the run.
+        let seg_size = first.payload_len;
+        let mut merged_ip_len = first.header_len() + first.payload_len;
+        let mut prev = first;
+        let mut end = i + 1;
+        while end < batch.len() {
+            let Some(next) = parse_coalescible_tcp(&batch[end]) else {
+                break;
+            };
+            if next.payload_len > seg_size
+                || merged_ip_len + next.payload_len > usize::from(u16::MAX)
+                || !can_chain(&batch[end - 1], &prev, &batch[end], &next)
+            {
+                break;
+            }
+            merged_ip_len += next.payload_len;
+            prev = next;
+            end += 1;
+            if next.payload_len < seg_size {
+                break;
+            }
+        }
+
+        out.push((i, end, end - i >= 2));
+        i = end;
+    }
+}
+
+/// Compute the partial (folded, NOT complemented) TCP pseudo-header checksum
+/// the kernel expects in the TCP checksum field of a `NEEDS_CSUM` frame.
+///
+/// `tcp_len` is the TCP header plus payload length covered by the frame.
+fn tcp_pseudo_header_partial(ip_packet: &[u8], is_ipv6: bool, tcp_len: usize) -> u16 {
+    let mut sum = 0u32;
+    if is_ipv6 {
+        sum = add_bytes(sum, &ip_packet[8..40]);
+        sum = sum.wrapping_add((tcp_len as u32 >> 16) & 0xffff);
+        sum = sum.wrapping_add(tcp_len as u32 & 0xffff);
+    } else {
+        sum = add_bytes(sum, &ip_packet[12..20]);
+        sum = sum.wrapping_add(tcp_len as u32 & 0xffff);
+    }
+    sum = sum.wrapping_add(6u32);
+    fold_checksum(sum)
+}
+
+/// Assemble a TCP GSO super-frame from a run of two or more same-flow
+/// contiguous segments (as planned by [`plan_tun_write_groups`]) into `out`
+/// (cleared first): 10-byte virtio header + IP/TCP headers copied from
+/// `segments[0]` + concatenated payloads.
+///
+/// The copied header is rewritten for the merged frame: IP total length /
+/// IPv6 payload length (and the IPv4 header checksum), plus the TCP checksum
+/// field, which receives the partial pseudo-header sum required by
+/// `VIRTIO_NET_HDR_F_NEEDS_CSUM`. The TCP sequence number stays at
+/// `segments[0]`'s; the kernel renumbers per re-segmented packet. Merged
+/// IPv4 segments' distinct IP IDs collapse to `segments[0]`'s — the kernel
+/// assigns incrementing IDs on re-segmentation, same as real GRO/GSO.
+pub fn assemble_tcp_gso_superframe(out: &mut BytesMut, segments: &[Bytes]) -> Result<(), String> {
+    if segments.len() < 2 {
+        return Err(format!(
+            "GSO super-frame needs at least 2 segments, got {}",
+            segments.len()
+        ));
+    }
+
+    let first = parse_coalescible_tcp(&segments[0])
+        .ok_or_else(|| "first segment is not a coalescible TCP segment".to_string())?;
+    let header_len = first.header_len();
+
+    let mut total_payload = 0usize;
+    for segment in segments {
+        let payload = segment
+            .len()
+            .checked_sub(header_len)
+            .filter(|len| *len > 0)
+            .ok_or_else(|| "segment shorter than flow headers".to_string())?;
+        total_payload += payload;
+    }
+    let merged_ip_len = header_len + total_payload;
+    if merged_ip_len > usize::from(u16::MAX) {
+        return Err(format!(
+            "merged GSO frame too large: {} bytes",
+            merged_ip_len
+        ));
+    }
+
+    let virtio = VirtioNetHdr {
+        flags: VIRTIO_NET_HDR_F_NEEDS_CSUM,
+        gso_type: if first.is_ipv6 {
+            VIRTIO_NET_HDR_GSO_TCPV6
+        } else {
+            VIRTIO_NET_HDR_GSO_TCPV4
+        },
+        hdr_len: header_len as u16,
+        gso_size: first.payload_len as u16,
+        csum_start: first.ip_header_len as u16,
+        csum_offset: 16,
+        num_buffers: 0,
+    };
+
+    out.clear();
+    out.reserve(VIRTIO_NET_HDR_LEN + merged_ip_len);
+    out.put_slice(&virtio.to_bytes());
+    out.put_slice(&segments[0][..header_len]);
+    for segment in segments {
+        out.put_slice(&segment[header_len..]);
+    }
+
+    let ip_frame = &mut out[VIRTIO_NET_HDR_LEN..];
+    if first.is_ipv6 {
+        update_ipv6_payload_length(ip_frame, merged_ip_len)?;
+    } else {
+        update_ipv4_lengths_and_checksum(ip_frame, merged_ip_len)?;
+    }
+
+    let checksum_index = first.ip_header_len + 16;
+    ip_frame[checksum_index] = 0;
+    ip_frame[checksum_index + 1] = 0;
+    let tcp_len = first.tcp_header_len + total_payload;
+    let partial = tcp_pseudo_header_partial(ip_frame, first.is_ipv6, tcp_len);
+    ip_frame[checksum_index..checksum_index + 2].copy_from_slice(&partial.to_be_bytes());
+
     Ok(())
 }
 
@@ -1319,13 +1617,6 @@ mod tests {
         }
     }
 
-    fn fold_ones_complement(mut sum: u32) -> u16 {
-        while (sum >> 16) != 0 {
-            sum = (sum & 0xffff) + (sum >> 16);
-        }
-        sum as u16
-    }
-
     fn make_ipv4_tcp_partial_checksum(packet: &[u8]) -> Vec<u8> {
         let tcp_offset = 20;
         let checksum_index = tcp_offset + 16;
@@ -1334,13 +1625,7 @@ mod tests {
         partial[checksum_index] = 0;
         partial[checksum_index + 1] = 0;
 
-        let mut sum = 0u32;
-        sum = add_bytes(sum, &partial[12..20]);
-        sum = sum.wrapping_add(u32::from(6u16));
-        sum = sum.wrapping_add(u32::from(
-            u16::try_from(tcp_len).expect("test TCP length fits in u16"),
-        ));
-        let pseudo_header_sum = fold_ones_complement(sum);
+        let pseudo_header_sum = tcp_pseudo_header_partial(&partial, false, tcp_len);
         partial[checksum_index..checksum_index + 2]
             .copy_from_slice(&pseudo_header_sum.to_be_bytes());
         partial
@@ -2227,5 +2512,349 @@ mod tests {
         assert_eq!(outputs.len(), 1);
         assert!(matches!(&outputs[0], CoalescedOutput::Single(p) if p == &seg1));
         assert!(!table.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // Write-side GRO coalescing (plan_tun_write_groups /
+    // assemble_tcp_gso_superframe)
+    // -----------------------------------------------------------------------
+
+    /// Build a pure-data TCP segment (ACK only, no options) suitable for
+    /// coalescing, with valid checksums.
+    fn build_data_segment(ipv6: bool, src_port: u16, seq: u32, payload_len: usize) -> Bytes {
+        build_data_segment_with_options(ipv6, src_port, seq, payload_len, &[])
+    }
+
+    /// Same as [`build_data_segment`] but with explicit TCP options.
+    fn build_data_segment_with_options(
+        ipv6: bool,
+        src_port: u16,
+        seq: u32,
+        payload_len: usize,
+        options: &[etherparse::TcpOptionElement],
+    ) -> Bytes {
+        // Derive payload bytes from the sequence number so each segment's
+        // payload is distinguishable.
+        let payload: Vec<u8> = (0..payload_len)
+            .map(|v| ((v as u32).wrapping_add(seq) % 251) as u8)
+            .collect();
+
+        let mut tcp = etherparse::TcpHeader::new(src_port, 443, seq, 65_535);
+        tcp.ack = true;
+        tcp.acknowledgment_number = 0x1122_3344;
+        tcp.set_options(options).expect("valid TCP options");
+
+        let mut packet = Vec::new();
+        if ipv6 {
+            let ip = Ipv6Header {
+                traffic_class: 0,
+                flow_label: etherparse::Ipv6FlowLabel::ZERO,
+                payload_length: u16::try_from(tcp.header_len() + payload.len())
+                    .expect("IPv6 payload length fits in u16"),
+                next_header: IpNumber::TCP,
+                hop_limit: 64,
+                source: [0xfd, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2],
+                destination: [0xfd, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+            };
+            tcp.checksum = tcp
+                .calc_checksum_ipv6(&ip, &payload)
+                .expect("valid IPv6 TCP checksum");
+            ip.write(&mut packet).expect("serialize IPv6 header");
+        } else {
+            let mut ip = Ipv4Header::new(
+                (tcp.header_len() + payload.len()) as u16,
+                64,
+                IpNumber::TCP,
+                [10, 0, 0, 2],
+                [10, 0, 0, 1],
+            )
+            .expect("valid IPv4 header");
+            tcp.checksum = tcp
+                .calc_checksum_ipv4(&ip, &payload)
+                .expect("valid IPv4 TCP checksum");
+            ip.header_checksum = ip.calc_header_checksum();
+            ip.write(&mut packet).expect("serialize IPv4 header");
+        }
+        tcp.write(&mut packet).expect("serialize TCP header");
+        packet.extend_from_slice(&payload);
+        Bytes::from(packet)
+    }
+
+    /// Build a contiguous run of equal-size segments for one flow.
+    fn build_run(ipv6: bool, src_port: u16, base_seq: u32, sizes: &[usize]) -> Vec<Bytes> {
+        let mut seq = base_seq;
+        sizes
+            .iter()
+            .map(|&len| {
+                let seg = build_data_segment(ipv6, src_port, seq, len);
+                seq = seq.wrapping_add(len as u32);
+                seg
+            })
+            .collect()
+    }
+
+    fn plan(batch: &[Bytes]) -> Vec<(usize, usize, bool)> {
+        let mut out = Vec::new();
+        plan_tun_write_groups(batch, &mut out);
+        out
+    }
+
+    #[test]
+    fn test_plan_groups_coalesces_contiguous_run() {
+        let batch = build_run(false, 12345, 10_000, &[1000, 1000, 1000]);
+        assert_eq!(plan(&batch), vec![(0, 3, true)]);
+    }
+
+    #[test]
+    fn test_plan_groups_last_smaller_closes_run() {
+        // The short third segment is accepted as the final member; the
+        // following full-size segment starts a new (singleton) group.
+        let batch = build_run(false, 12345, 10_000, &[1000, 1000, 500, 1000]);
+        assert_eq!(plan(&batch), vec![(0, 3, true), (3, 4, false)]);
+    }
+
+    #[test]
+    fn test_plan_groups_splits_on_seq_gap() {
+        let mut batch = build_run(false, 12345, 10_000, &[1000, 1000]);
+        // Third segment leaves a 1-byte hole in the sequence space.
+        batch.push(build_data_segment(false, 12345, 12_001, 1000));
+        assert_eq!(plan(&batch), vec![(0, 2, true), (2, 3, false)]);
+    }
+
+    #[test]
+    fn test_plan_groups_splits_on_size_increase() {
+        // A larger follow-up segment cannot join (non-final members must
+        // match the first segment's size).
+        let small = build_data_segment(false, 12345, 10_000, 500);
+        let large = build_data_segment(false, 12345, 10_500, 1000);
+        assert_eq!(plan(&[small, large]), vec![(0, 1, false), (1, 2, false)]);
+    }
+
+    #[test]
+    fn test_plan_groups_interleaved_flows_are_singletons() {
+        let a = build_run(false, 1111, 10_000, &[800, 800]);
+        let b = build_run(false, 2222, 50_000, &[800, 800]);
+        let batch = vec![a[0].clone(), b[0].clone(), a[1].clone(), b[1].clone()];
+        assert_eq!(
+            plan(&batch),
+            vec![(0, 1, false), (1, 2, false), (2, 3, false), (3, 4, false)]
+        );
+    }
+
+    #[test]
+    fn test_plan_groups_non_tcp_splits_run() {
+        let run = build_run(false, 12345, 10_000, &[1000, 1000, 1000, 1000]);
+        // Turn the third segment into UDP (protocol byte only; the length
+        // fields stay consistent).
+        let mut udp = run[2].to_vec();
+        udp[9] = 17;
+        let batch = vec![
+            run[0].clone(),
+            run[1].clone(),
+            Bytes::from(udp),
+            run[3].clone(),
+        ];
+        assert_eq!(
+            plan(&batch),
+            vec![(0, 2, true), (2, 3, false), (3, 4, false)]
+        );
+    }
+
+    #[test]
+    fn test_plan_groups_never_merges_across_ip_versions() {
+        let mut batch = build_run(false, 12345, 10_000, &[700, 700]);
+        batch.extend(build_run(true, 12345, 90_000, &[700, 700]));
+        assert_eq!(plan(&batch), vec![(0, 2, true), (2, 4, true)]);
+    }
+
+    #[test]
+    fn test_plan_groups_rejects_flagged_segments() {
+        let run = build_run(false, 12345, 10_000, &[600, 600, 600]);
+        // Set FIN on the middle segment.
+        let mut finned = run[1].to_vec();
+        finned[20 + 13] |= 0x01;
+        let batch = vec![run[0].clone(), Bytes::from(finned), run[2].clone()];
+        assert_eq!(
+            plan(&batch),
+            vec![(0, 1, false), (1, 2, false), (2, 3, false)]
+        );
+    }
+
+    #[test]
+    fn test_plan_groups_rejects_ecn_marked_segments() {
+        let run = build_run(false, 12345, 10_000, &[600, 600]);
+        let mut ecn = run[1].to_vec();
+        ecn[1] |= 0x01; // ECT(1) in the ToS byte
+        let batch = vec![run[0].clone(), Bytes::from(ecn)];
+        assert_eq!(plan(&batch), vec![(0, 1, false), (1, 2, false)]);
+    }
+
+    #[test]
+    fn test_plan_groups_rejects_fragments_options_and_ext_headers() {
+        let v4 = build_data_segment(false, 12345, 10_000, 600);
+
+        let mut fragment = v4.to_vec();
+        fragment[6] |= 0x20; // more-fragments flag
+        assert_eq!(plan(&[Bytes::from(fragment)]), vec![(0, 1, false)]);
+
+        let mut with_options = v4.to_vec();
+        with_options[0] = 0x46; // IHL = 6 (IP options present)
+        assert_eq!(plan(&[Bytes::from(with_options)]), vec![(0, 1, false)]);
+
+        let v6 = build_data_segment(true, 12345, 10_000, 600);
+        let mut ext_header = v6.to_vec();
+        ext_header[6] = 0; // hop-by-hop extension header
+        assert_eq!(plan(&[Bytes::from(ext_header)]), vec![(0, 1, false)]);
+    }
+
+    #[test]
+    fn test_plan_groups_splits_on_differing_ack() {
+        let run = build_run(false, 12345, 10_000, &[600, 600]);
+        let mut acked = run[1].to_vec();
+        acked[20 + 8] ^= 0xff; // change the ACK number
+        let batch = vec![run[0].clone(), Bytes::from(acked)];
+        assert_eq!(plan(&batch), vec![(0, 1, false), (1, 2, false)]);
+    }
+
+    #[test]
+    fn test_plan_groups_coalesces_identical_options_and_splits_on_mismatch() {
+        // Segments from one read-side GSO burst share identical option
+        // bytes (including timestamps) — they must coalesce.
+        let ts = etherparse::TcpOptionElement::Timestamp(123, 456);
+        let a =
+            build_data_segment_with_options(false, 12345, 10_000, 600, std::slice::from_ref(&ts));
+        let b = build_data_segment_with_options(false, 12345, 10_600, 600, &[ts]);
+        assert_eq!(plan(&[a.clone(), b]), vec![(0, 2, true)]);
+
+        // Differing timestamp values must split.
+        let ts2 = etherparse::TcpOptionElement::Timestamp(124, 456);
+        let c = build_data_segment_with_options(false, 12345, 10_600, 600, &[ts2]);
+        assert_eq!(plan(&[a, c]), vec![(0, 1, false), (1, 2, false)]);
+    }
+
+    #[test]
+    fn test_plan_groups_caps_merged_size() {
+        // Three 30000-byte segments: the third would push the merged IP
+        // length past u16::MAX, so the group closes after two.
+        let batch = build_run(false, 12345, 10_000, &[30_000, 30_000, 30_000]);
+        assert_eq!(plan(&batch), vec![(0, 2, true), (2, 3, false)]);
+    }
+
+    #[test]
+    fn test_plan_groups_empty_and_singleton_batches() {
+        assert_eq!(plan(&[]), vec![]);
+        let single = build_data_segment(false, 12345, 10_000, 600);
+        assert_eq!(plan(&[single]), vec![(0, 1, false)]);
+    }
+
+    /// Round-trip helper: assemble a super-frame from `segments`, validate
+    /// the virtio metadata, then re-segment with the read-side segmenter
+    /// (which performs the same finalization the kernel does) and assert the
+    /// output reproduces the original segments byte-for-byte.
+    fn assert_superframe_roundtrip(segments: &[Bytes], ipv6: bool, expected_gso_size: u16) {
+        let mut out = BytesMut::new();
+        assemble_tcp_gso_superframe(&mut out, segments).expect("assemble super-frame");
+
+        let hdr = VirtioNetHdr::from_bytes(&out[..VIRTIO_NET_HDR_LEN]).expect("virtio header");
+        let ip_header_len: u16 = if ipv6 { 40 } else { 20 };
+        assert_eq!(hdr.flags, VIRTIO_NET_HDR_F_NEEDS_CSUM);
+        assert_eq!(
+            hdr.gso_type,
+            if ipv6 {
+                VIRTIO_NET_HDR_GSO_TCPV6
+            } else {
+                VIRTIO_NET_HDR_GSO_TCPV4
+            }
+        );
+        assert_eq!(hdr.csum_start, ip_header_len);
+        assert_eq!(hdr.csum_offset, 16);
+        assert_eq!(hdr.gso_size, expected_gso_size);
+        let tcp_header_len =
+            usize::from(out[VIRTIO_NET_HDR_LEN + usize::from(ip_header_len) + 12] >> 4) * 4;
+        assert_eq!(hdr.hdr_len, ip_header_len + tcp_header_len as u16);
+
+        let ip_frame = &out[VIRTIO_NET_HDR_LEN..];
+        let expected_len: usize = usize::from(hdr.hdr_len)
+            + segments
+                .iter()
+                .map(|s| s.len() - usize::from(hdr.hdr_len))
+                .sum::<usize>();
+        assert_eq!(ip_frame.len(), expected_len);
+        if !ipv6 {
+            // The rewritten IPv4 header must carry the merged total length
+            // and a valid header checksum.
+            let ip = Ipv4Header::from_slice(ip_frame)
+                .expect("IPv4 header parses")
+                .0;
+            assert_eq!(usize::from(ip.total_len), ip_frame.len());
+            assert_eq!(ip.header_checksum, ip.calc_header_checksum());
+        } else {
+            let payload_len = u16::from_be_bytes([ip_frame[4], ip_frame[5]]);
+            assert_eq!(usize::from(payload_len), ip_frame.len() - 40);
+        }
+
+        let resegmented = segment_tcp_gso_packet(&hdr, ip_frame).expect("re-segment");
+        assert_eq!(resegmented.len(), segments.len());
+        for (output, original) in resegmented.iter().zip(segments) {
+            assert_eq!(output.as_slice(), original.as_ref());
+            assert_tcp_checksum_valid(output);
+        }
+    }
+
+    #[test]
+    fn test_assemble_superframe_roundtrip_ipv4() {
+        let segments = build_run(false, 12345, 10_000, &[1000, 1000, 1000]);
+        assert_superframe_roundtrip(&segments, false, 1000);
+    }
+
+    #[test]
+    fn test_assemble_superframe_roundtrip_ipv6() {
+        let segments = build_run(true, 12345, 70_000, &[900, 900, 900, 900]);
+        assert_superframe_roundtrip(&segments, true, 900);
+    }
+
+    #[test]
+    fn test_assemble_superframe_roundtrip_last_smaller() {
+        let segments = build_run(false, 12345, 10_000, &[1200, 1200, 333]);
+        assert_superframe_roundtrip(&segments, false, 1200);
+    }
+
+    #[test]
+    fn test_assemble_superframe_roundtrip_with_options() {
+        let ts = etherparse::TcpOptionElement::Timestamp(7, 9);
+        let a =
+            build_data_segment_with_options(false, 12345, 10_000, 640, std::slice::from_ref(&ts));
+        let b = build_data_segment_with_options(false, 12345, 10_640, 640, &[ts]);
+        assert_superframe_roundtrip(&[a, b], false, 640);
+    }
+
+    #[test]
+    fn test_assemble_superframe_scratch_reuse() {
+        // The same output buffer must produce independent, correct frames
+        // across runs of different sizes.
+        let mut out = BytesMut::new();
+
+        let large = build_run(false, 12345, 10_000, &[1400, 1400, 1400]);
+        assemble_tcp_gso_superframe(&mut out, &large).expect("assemble large");
+        let large_frame = out.to_vec();
+
+        let small = build_run(false, 12345, 90_000, &[300, 300]);
+        assemble_tcp_gso_superframe(&mut out, &small).expect("assemble small");
+        assert_eq!(
+            out.len(),
+            VIRTIO_NET_HDR_LEN + 40 + 600,
+            "small frame must not retain bytes from the larger previous frame"
+        );
+
+        assemble_tcp_gso_superframe(&mut out, &large).expect("assemble large again");
+        assert_eq!(out.to_vec(), large_frame);
+    }
+
+    #[test]
+    fn test_assemble_superframe_rejects_invalid_input() {
+        let single = build_run(false, 12345, 10_000, &[500]);
+        let mut out = BytesMut::new();
+        assert!(assemble_tcp_gso_superframe(&mut out, &single).is_err());
+        assert!(assemble_tcp_gso_superframe(&mut out, &[]).is_err());
     }
 }
