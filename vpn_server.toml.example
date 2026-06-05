@@ -37,8 +37,26 @@ network = "10.0.0.0/24"
 # Clients will be assigned IPs from this network (one /128 per client)
 # network6 = "fd00::/64"
 
+# IPv6 address-assignment strategy (optional, default: "sequential")
+#
+# "sequential" (default): Server gets the first IP (e.g., fd00::1), clients
+#                         get fd00::2, fd00::3, ... in connection order.
+#
+# "node-id":              Stateless deterministic addressing. Each client's
+#                         64-bit host suffix is derived (SHA-256) from its
+#                         iroh node id, so a client always gets the same
+#                         address across reconnects and server restarts —
+#                         no allocation state is kept. The server's address
+#                         is likewise derived from the server's node id.
+#                         Requires 'network6' of /64 or wider (prefix <= 64)
+#                         and cannot be combined with 'server_ip6' (the
+#                         server address is derived, not configured).
+# ip6_strategy = "node-id"
+
 # Server's IPv6 VPN address (optional, defaults to first IP in network6)
 # This becomes the IPv6 gateway for connected clients
+# NOTE: Only valid with the default "sequential" strategy; with "node-id"
+# the server address is derived from the server's node id.
 # server_ip6 = "fd00::1"
 
 # ============================================================================
@@ -48,7 +66,7 @@ network = "10.0.0.0/24"
 #
 # # network = "10.0.0.0/24"  # Comment out or remove for IPv6-only
 # network6 = "fd00::/64"
-# server_ip6 = "fd00::1"
+# ip6_strategy = "node-id"   # or omit for sequential (server_ip6 allowed then)
 #
 # To allow IPv6 clients to reach IPv4 destinations, use external TAYGA setup:
 #   docs/TAYGA_NAT64.md

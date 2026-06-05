@@ -345,12 +345,21 @@ async fn run_vpn_server(resolved: ResolvedVpnServerConfig) -> Result<()> {
         );
     };
 
+    // Map TOML-layer strategy to runtime strategy
+    let ip6_strategy = match resolved.ip6_strategy {
+        vpn_common::config::Ip6Strategy::Sequential => {
+            vpn_core::config::Ip6Strategy::Sequential
+        }
+        vpn_common::config::Ip6Strategy::NodeId => vpn_core::config::Ip6Strategy::NodeId,
+    };
+
     // Create VPN server config
     let config = VpnServerConfig {
         network,
         network6,
         server_ip,
         server_ip6,
+        ip6_strategy,
         mtu: resolved.mtu,
         max_clients: 254,
         auth_tokens: Some(valid_tokens),
@@ -382,7 +391,7 @@ async fn run_vpn_server(resolved: ResolvedVpnServerConfig) -> Result<()> {
     );
 
     // Create and run VPN server
-    let server = VpnServer::new(config)
+    let server = VpnServer::new(config, endpoint.id())
         .await
         .context("Failed to create VPN server")?;
 

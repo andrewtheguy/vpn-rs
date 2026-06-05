@@ -42,6 +42,19 @@ pub enum CongestionController {
     NewReno,
 }
 
+/// IPv6 address-assignment strategy for VPN clients.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum Ip6Strategy {
+    /// Sequential allocation: server gets ::1, clients get ::2, ::3, ...
+    #[default]
+    Sequential,
+    /// Stateless deterministic addresses: host suffix derived from the iroh
+    /// node id (clients from their own id, server from its id).
+    /// Requires an IPv6 subnet of /64 or wider.
+    NodeId,
+}
+
 /// Default QUIC receive window size (8 MB).
 pub const DEFAULT_RECEIVE_WINDOW: u32 = 8 * 1024 * 1024;
 
@@ -70,6 +83,8 @@ pub struct VpnServerIrohConfig {
     pub server_ip: Option<String>,
     pub network6: Option<String>,
     pub server_ip6: Option<String>,
+    #[serde(default)]
+    pub ip6_strategy: Ip6Strategy,
     pub secret_file: Option<PathBuf>,
     pub auth_tokens: Option<Vec<String>>,
     pub auth_tokens_file: Option<PathBuf>,
@@ -306,6 +321,44 @@ fn validate_vpn_networks(
     Ok(())
 }
 
+fn validate_ip6_strategy(
+    strategy: Ip6Strategy,
+    network6: Option<&str>,
+    server_ip6: Option<&str>,
+    section: &str,
+) -> Result<()> {
+    if strategy != Ip6Strategy::NodeId {
+        return Ok(());
+    }
+
+    let Some(network6) = network6 else {
+        anyhow::bail!(
+            "[{}] ip6_strategy = \"node-id\" requires 'network6' to be set.",
+            section
+        );
+    };
+
+    // network6 syntax is validated separately; only check the prefix here if it parses
+    if let Ok(net) = network6.parse::<ipnet::Ipv6Net>() {
+        if net.prefix_len() > 64 {
+            anyhow::bail!(
+                "[{}] ip6_strategy = \"node-id\" requires an IPv6 subnet of /64 or wider (got /{}).",
+                section,
+                net.prefix_len()
+            );
+        }
+    }
+
+    if server_ip6.is_some() {
+        anyhow::bail!(
+            "[{}] 'server_ip6' cannot be combined with ip6_strategy = \"node-id\" (the server address is derived from the server node id).",
+            section
+        );
+    }
+
+    Ok(())
+}
+
 fn default_drop_on_full() -> bool {
     false
 }
@@ -348,6 +401,13 @@ impl VpnServerConfig {
             validate_vpn_networks(
                 iroh.network.as_deref(),
                 iroh.server_ip.as_deref(),
+                iroh.network6.as_deref(),
+                iroh.server_ip6.as_deref(),
+                "iroh",
+            )?;
+
+            validate_ip6_strategy(
+                iroh.ip6_strategy,
                 iroh.network6.as_deref(),
                 iroh.server_ip6.as_deref(),
                 "iroh",
@@ -476,6 +536,7 @@ pub struct ResolvedVpnServerConfig {
     pub server_ip: Option<String>,
     pub network6: Option<String>,
     pub server_ip6: Option<String>,
+    pub ip6_strategy: Ip6Strategy,
     pub mtu: u16,
     pub secret_file: Option<PathBuf>,
     pub relay_urls: Vec<String>,
@@ -500,6 +561,13 @@ impl ResolvedVpnServerConfig {
         validate_vpn_networks(
             cfg.network.as_deref(),
             cfg.server_ip.as_deref(),
+            cfg.network6.as_deref(),
+            cfg.server_ip6.as_deref(),
+            "config",
+        )?;
+
+        validate_ip6_strategy(
+            cfg.ip6_strategy,
             cfg.network6.as_deref(),
             cfg.server_ip6.as_deref(),
             "config",
@@ -532,6 +600,7 @@ impl ResolvedVpnServerConfig {
             server_ip: cfg.server_ip.clone(),
             network6: cfg.network6.clone(),
             server_ip6: cfg.server_ip6.clone(),
+            ip6_strategy: cfg.ip6_strategy,
             mtu,
             secret_file: cfg.secret_file.clone(),
             relay_urls: cfg.shared.relay_urls.clone().unwrap_or_default(),
@@ -720,5 +789,74 @@ impl VpnClientConfigBuilder {
             max_reconnect_attempts: self.max_reconnect_attempts,
             transport: self.transport.unwrap_or_default(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn server_toml(iroh_extra: &str) -> String {
+        format!(
+            r#"
+role = "vpnserver"
+mode = "iroh"
+
+[iroh]
+network6 = "fd00::/64"
+secret_file = "./vpn-server.key"
+auth_tokens = ["token"]
+{iroh_extra}
+"#
+        )
+    }
+
+    #[test]
+    fn test_ip6_strategy_parses_node_id() {
+        let config: VpnServerConfig =
+            toml::from_str(&server_toml(r#"ip6_strategy = "node-id""#)).unwrap();
+        assert_eq!(
+            config.iroh.as_ref().unwrap().ip6_strategy,
+            Ip6Strategy::NodeId
+        );
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_ip6_strategy_defaults_to_sequential() {
+        let config: VpnServerConfig = toml::from_str(&server_toml("")).unwrap();
+        assert_eq!(
+            config.iroh.as_ref().unwrap().ip6_strategy,
+            Ip6Strategy::Sequential
+        );
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_ip6_strategy_node_id_rejects_narrow_subnet() {
+        let toml_str = server_toml(r#"ip6_strategy = "node-id""#)
+            .replace("fd00::/64", "fd00::/65");
+        let config: VpnServerConfig = toml::from_str(&toml_str).unwrap();
+        let err = config.validate().unwrap_err().to_string();
+        assert!(err.contains("/64 or wider"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn test_ip6_strategy_node_id_rejects_server_ip6() {
+        let config: VpnServerConfig = toml::from_str(&server_toml(
+            "ip6_strategy = \"node-id\"\nserver_ip6 = \"fd00::1\"",
+        ))
+        .unwrap();
+        let err = config.validate().unwrap_err().to_string();
+        assert!(err.contains("server_ip6"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn test_ip6_strategy_node_id_requires_network6() {
+        let toml_str = server_toml(r#"ip6_strategy = "node-id""#)
+            .replace("network6 = \"fd00::/64\"", "network = \"10.0.0.0/24\"");
+        let config: VpnServerConfig = toml::from_str(&toml_str).unwrap();
+        let err = config.validate().unwrap_err().to_string();
+        assert!(err.contains("requires 'network6'"), "unexpected error: {err}");
     }
 }

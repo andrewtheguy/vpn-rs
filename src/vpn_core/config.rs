@@ -9,6 +9,19 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 /// Default MTU for VPN tunnel (1500 - 60 bytes overhead for QUIC/TLS + framing).
 pub const DEFAULT_MTU: u16 = 1440;
 
+/// IPv6 address-assignment strategy for VPN clients.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum Ip6Strategy {
+    /// Sequential allocation: server gets ::1, clients get ::2, ::3, ...
+    #[default]
+    Sequential,
+    /// Stateless deterministic addresses: host suffix derived from the iroh
+    /// node id (clients from their own id, server from its id).
+    /// Requires an IPv6 subnet of /64 or wider.
+    NodeId,
+}
+
 /// VPN server configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VpnServerConfig {
@@ -31,6 +44,12 @@ pub struct VpnServerConfig {
     /// Server's IPv6 VPN address (defaults to first host in network6, e.g., ::1).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server_ip6: Option<Ipv6Addr>,
+
+    /// IPv6 address-assignment strategy (default: sequential).
+    /// `NodeId` derives stateless deterministic addresses from iroh node ids
+    /// and requires `network6` of /64 or wider with no `server_ip6` override.
+    #[serde(default)]
+    pub ip6_strategy: Ip6Strategy,
 
     /// MTU for the TUN device.
     #[serde(default = "default_mtu")]
@@ -161,6 +180,25 @@ impl VpnServerConfig {
             }
         }
 
+        // node-id strategy: requires network6 of /64 or wider, no server_ip6 override
+        if self.ip6_strategy == Ip6Strategy::NodeId {
+            let Some(network6) = self.network6 else {
+                return Err("ip6_strategy 'node-id' requires 'network6' to be set".to_string());
+            };
+            if network6.prefix_len() > 64 {
+                return Err(format!(
+                    "ip6_strategy 'node-id' requires an IPv6 subnet of /64 or wider (got /{})",
+                    network6.prefix_len()
+                ));
+            }
+            if self.server_ip6.is_some() {
+                return Err(
+                    "'server_ip6' cannot be combined with ip6_strategy 'node-id' (the server address is derived from the server node id)"
+                        .to_string(),
+                );
+            }
+        }
+
         Ok(())
     }
 }
@@ -248,6 +286,7 @@ mod tests {
             network6: None,
             server_ip: None,
             server_ip6: None,
+            ip6_strategy: Ip6Strategy::Sequential,
             mtu: DEFAULT_MTU,
             max_clients: 254,
             auth_tokens: None,
@@ -335,6 +374,56 @@ mod tests {
         let result = config.validate();
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("not within 'network6'"));
+    }
+
+    #[test]
+    fn test_validate_nodeid_requires_network6() {
+        let mut config = minimal_server_config();
+        config.ip6_strategy = Ip6Strategy::NodeId;
+        let result = config.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("requires 'network6'"));
+    }
+
+    #[test]
+    fn test_validate_nodeid_accepts_slash64_and_wider() {
+        let mut config = minimal_server_config();
+        config.ip6_strategy = Ip6Strategy::NodeId;
+        config.network6 = Some("fd00::/64".parse().unwrap());
+        assert!(config.validate().is_ok());
+
+        config.network6 = Some("fd00::/56".parse().unwrap());
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_nodeid_rejects_narrower_than_slash64() {
+        let mut config = minimal_server_config();
+        config.ip6_strategy = Ip6Strategy::NodeId;
+        config.network6 = Some("fd00::/65".parse().unwrap());
+        let result = config.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("/64 or wider"));
+    }
+
+    #[test]
+    fn test_validate_nodeid_rejects_server_ip6() {
+        let mut config = minimal_server_config();
+        config.ip6_strategy = Ip6Strategy::NodeId;
+        config.network6 = Some("fd00::/64".parse().unwrap());
+        config.server_ip6 = Some("fd00::1".parse().unwrap());
+        let result = config.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("'server_ip6'"));
+    }
+
+    #[test]
+    fn test_validate_sequential_unaffected_by_nodeid_rules() {
+        // Sequential allows narrower-than-/64 subnets and a custom server_ip6
+        let mut config = minimal_server_config();
+        config.network6 = Some("fd00::/120".parse().unwrap());
+        config.server_ip6 = Some("fd00::1".parse().unwrap());
+        assert!(config.validate().is_ok());
     }
 
     #[test]
