@@ -193,7 +193,8 @@ pub fn compose_tun_frame(
 ///
 /// Each segment is built into the caller-provided `scratch` buffer (reused
 /// across segments and across calls) and handed to `emit` as a borrowed
-/// slice. Single-segment fast paths emit `ip_packet` directly with no copy.
+/// slice. The single-segment fast path emits `ip_packet` directly with no
+/// copy unless NEEDS_CSUM requires completing the partial checksum first.
 /// An error returned by `emit` short-circuits segmentation.
 ///
 /// This is used when offload metadata is present but the local write path or
@@ -262,13 +263,19 @@ where
     }
 
     let payload = &ip_packet[header_len..];
-    if payload.is_empty() {
-        return emit(ip_packet);
-    }
-
     let gso_size = usize::from(offload.gso_size);
     if payload.len() <= gso_size {
-        return emit(ip_packet);
+        // Single segment: no resegmentation needed, but a NEEDS_CSUM packet
+        // still carries only the partial pseudo-header checksum, which must
+        // be completed before emitting as a plain packet.
+        if !offload.needs_checksum() {
+            return emit(ip_packet);
+        }
+        scratch.clear();
+        scratch.extend_from_slice(ip_packet);
+        let checksum = finalize_checksum(add_bytes(0, &scratch[tcp_offset..]));
+        scratch[checksum_index..checksum_index + 2].copy_from_slice(&checksum.to_be_bytes());
+        return emit(scratch);
     }
 
     let base_seq = u32::from_be_bytes([
@@ -1614,6 +1621,29 @@ mod tests {
             assert_tcp_checksum_valid(&segment);
             assert_eq!(segment[0] >> 4, 6);
         }
+    }
+
+    #[test]
+    fn test_segment_tcp_gso_single_segment_completes_checksum() {
+        // A NEEDS_CSUM GSO packet whose payload fits in a single segment must
+        // still have its partial pseudo-header checksum completed instead of
+        // being emitted as-is.
+        let packet = build_ipv4_tcp_packet(800);
+        let partial = make_ipv4_tcp_partial_checksum(&packet);
+        let offload = VirtioNetHdr {
+            flags: VIRTIO_NET_HDR_F_NEEDS_CSUM,
+            gso_type: VIRTIO_NET_HDR_GSO_TCPV4,
+            hdr_len: 40,
+            gso_size: 1200,
+            csum_start: 20,
+            csum_offset: 16,
+            num_buffers: 0,
+        };
+
+        let segments = segment_tcp_gso_packet(&offload, &partial).expect("segment");
+        assert_eq!(segments.len(), 1);
+        assert_eq!(segments[0], packet);
+        assert_tcp_checksum_valid(&segments[0]);
     }
 
     #[test]
