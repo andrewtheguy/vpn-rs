@@ -6,8 +6,6 @@
 #[cfg(not(any(unix, target_os = "windows")))]
 compile_error!("vpn-rs only supports Unix-like systems (Linux, macOS, BSD) and Windows");
 
-mod vpn_common;
-mod vpn_config;
 mod vpn_core;
 mod vpn_iroh;
 
@@ -18,7 +16,7 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 use std::num::NonZeroU32;
 use std::path::PathBuf;
 
-use crate::vpn_common::config::{
+use crate::vpn_core::file_config::{
     expand_tilde, load_vpn_client_config, load_vpn_server_config, ResolvedVpnClientConfig,
     ResolvedVpnServerConfig, VpnClientConfig as TomlClientConfig, VpnClientConfigBuilder,
     VpnServerConfig as TomlServerConfig,

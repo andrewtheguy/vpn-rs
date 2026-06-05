@@ -6,7 +6,7 @@
 //! directly over the encrypted iroh QUIC connection.
 
 use crate::vpn_core::buffer::{read_exact_uninit, uninitialized_vec};
-use crate::vpn_core::config::{Ip6Strategy, VpnServerConfig};
+use crate::vpn_core::config::{validate_ip6_strategy, Ip6Strategy, VpnServerConfig};
 use crate::vpn_core::device::{TunConfig, TunDevice, TunOffloadStatus};
 use crate::vpn_core::error::{VpnError, VpnResult};
 use crate::vpn_core::offload::{
@@ -388,8 +388,7 @@ impl Ip6Pool {
 
         // Strategy constraints (also enforced at config validation; kept here
         // for direct constructors/tests). No-op for sequential.
-        crate::vpn_config::validate_ip6_strategy(strategy, Some(network), server_ip)
-            .map_err(VpnError::config)?;
+        validate_ip6_strategy(strategy, Some(network), server_ip).map_err(VpnError::config)?;
 
         let net_addr: u128 = network.network().into();
 

@@ -1,4 +1,5 @@
-//! VPN-specific configuration support for vpn-rs.
+//! TOML config-file support: file-level structs, loading, and resolution
+//! into the runtime configuration ([`super::config`]).
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
@@ -42,7 +43,7 @@ pub enum CongestionController {
     NewReno,
 }
 
-pub use crate::vpn_config::Ip6Strategy;
+pub use super::config::Ip6Strategy;
 
 /// Default QUIC receive window size (8 MB).
 pub const DEFAULT_RECEIVE_WINDOW: u32 = 8 * 1024 * 1024;
@@ -224,7 +225,7 @@ fn validate_vpn_networks(
     section: &str,
 ) -> Result<()> {
     // Parse the raw strings, then delegate the semantic rules to the shared
-    // validator in vpn_config (single source of truth with vpn_core).
+    // validator in super::config (single source of truth with the runtime config).
     let network: Option<ipnet::Ipv4Net> = network
         .map(|n| {
             n.parse().with_context(|| {
@@ -269,7 +270,7 @@ fn validate_vpn_networks(
         })
         .transpose()?;
 
-    crate::vpn_config::validate_vpn_networks(network, server_ip, network6, server_ip6, ip6_strategy)
+    super::config::validate_vpn_networks(network, server_ip, network6, server_ip6, ip6_strategy)
         .map_err(|e| anyhow::anyhow!("[{}] {}", section, e))
 }
 
