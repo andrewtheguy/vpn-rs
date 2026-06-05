@@ -749,6 +749,17 @@ impl VpnServer {
         let tun_writer_handle = tokio::spawn(async move {
             log::info!("TUN writer task started");
             let mut batch = Vec::with_capacity(WRITE_BATCH_SIZE);
+            // Run buffer of consecutive metadata-less packets, flushed through
+            // write_batch so same-flow TCP segments coalesce into GSO
+            // super-frames on Linux (one TUN write instead of N).
+            let mut plain_run: Vec<Bytes> = Vec::with_capacity(WRITE_BATCH_SIZE);
+            // Log and count a write failure; failures shouldn't stop the writer.
+            let log_write_error = |e: VpnError| {
+                tun_writer_stats
+                    .packets_tun_write_failed
+                    .fetch_add(1, Ordering::Relaxed);
+                log::warn!("Failed to write to TUN: {}", e);
+            };
             loop {
                 let count = tun_write_rx.recv_many(&mut batch, WRITE_BATCH_SIZE).await;
                 if count == 0 {
@@ -756,16 +767,25 @@ impl VpnServer {
                 }
 
                 for req in batch.drain(..) {
-                    let write_result = tun_writer
-                        .write_packet(req.offload.as_ref(), &req.packet)
-                        .await;
-                    if let Err(e) = write_result {
-                        tun_writer_stats
-                            .packets_tun_write_failed
-                            .fetch_add(1, Ordering::Relaxed);
-                        log::warn!("Failed to write to TUN: {}", e);
-                        // Continue processing - individual write failures shouldn't stop the writer
+                    let Some(meta) = req.offload else {
+                        plain_run.push(req.packet);
+                        continue;
+                    };
+                    if !plain_run.is_empty() {
+                        if let Err(e) = tun_writer.write_batch(&plain_run).await {
+                            log_write_error(e);
+                        }
+                        plain_run.clear();
                     }
+                    if let Err(e) = tun_writer.write_packet(Some(&meta), &req.packet).await {
+                        log_write_error(e);
+                    }
+                }
+                if !plain_run.is_empty() {
+                    if let Err(e) = tun_writer.write_batch(&plain_run).await {
+                        log_write_error(e);
+                    }
+                    plain_run.clear();
                 }
             }
             log::info!("TUN writer task exiting (channel closed)");

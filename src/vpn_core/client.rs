@@ -850,13 +850,46 @@ impl VpnClient {
             mpsc::channel::<InboundTunWrite>(INBOUND_TUN_CHANNEL_SIZE);
 
         // Spawn dedicated TUN writer task. Batched channel receives reduce
-        // task wakeups; each packet still requires its own TUN write syscall
-        // (utun/wintun have no batching API).
+        // task wakeups; write_batch coalesces consecutive same-flow TCP
+        // segments into GSO super-frames on Linux, and otherwise issues one
+        // TUN write per packet (utun/wintun have no batching API).
         let mut tun_writer_handle: tokio::task::JoinHandle<Option<String>> =
             tokio::spawn(async move {
                 const MAX_TUN_WRITE_FAILURES: u32 = 10;
                 let mut consecutive_tun_failures = 0u32;
+                // Track a write result; returns the disconnect reason once too
+                // many consecutive writes have failed.
+                let mut note_write_result = |result: VpnResult<()>| -> Option<String> {
+                    match result {
+                        Ok(()) => {
+                            consecutive_tun_failures = 0;
+                            None
+                        }
+                        Err(e) => {
+                            consecutive_tun_failures += 1;
+                            if consecutive_tun_failures >= MAX_TUN_WRITE_FAILURES {
+                                log::error!(
+                                    "Too many consecutive TUN write failures ({}), disconnecting: {}",
+                                    consecutive_tun_failures,
+                                    e
+                                );
+                                return Some(format!("TUN write failures exceeded: {}", e));
+                            }
+                            log::warn!(
+                                "Failed to write to TUN ({}/{}): {}",
+                                consecutive_tun_failures,
+                                MAX_TUN_WRITE_FAILURES,
+                                e
+                            );
+                            None
+                        }
+                    }
+                };
                 let mut batch: Vec<InboundTunWrite> = Vec::with_capacity(WRITE_BATCH_SIZE);
+                // Run buffer of consecutive metadata-less packets, flushed
+                // through write_batch so same-flow TCP segments coalesce into
+                // GSO super-frames on Linux (one TUN write instead of N).
+                let mut plain_run: Vec<Bytes> = Vec::with_capacity(WRITE_BATCH_SIZE);
                 loop {
                     let count = tun_write_rx.recv_many(&mut batch, WRITE_BATCH_SIZE).await;
                     if count == 0 {
@@ -864,29 +897,27 @@ impl VpnClient {
                         return None;
                     }
                     for req in batch.drain(..) {
-                        let write_result = match req.offload.as_ref() {
-                            Some(meta) => tun_writer.write_packet(Some(meta), &req.packet).await,
-                            None => tun_writer.write_all(&req.packet).await,
+                        let Some(meta) = req.offload else {
+                            plain_run.push(req.packet);
+                            continue;
                         };
-                        match write_result {
-                            Ok(()) => consecutive_tun_failures = 0,
-                            Err(e) => {
-                                consecutive_tun_failures += 1;
-                                if consecutive_tun_failures >= MAX_TUN_WRITE_FAILURES {
-                                    log::error!(
-                                        "Too many consecutive TUN write failures ({}), disconnecting: {}",
-                                        consecutive_tun_failures,
-                                        e
-                                    );
-                                    return Some(format!("TUN write failures exceeded: {}", e));
-                                }
-                                log::warn!(
-                                    "Failed to write to TUN ({}/{}): {}",
-                                    consecutive_tun_failures,
-                                    MAX_TUN_WRITE_FAILURES,
-                                    e
-                                );
+                        if !plain_run.is_empty() {
+                            let result = tun_writer.write_batch(&plain_run).await;
+                            plain_run.clear();
+                            if let Some(reason) = note_write_result(result) {
+                                return Some(reason);
                             }
+                        }
+                        let result = tun_writer.write_packet(Some(&meta), &req.packet).await;
+                        if let Some(reason) = note_write_result(result) {
+                            return Some(reason);
+                        }
+                    }
+                    if !plain_run.is_empty() {
+                        let result = tun_writer.write_batch(&plain_run).await;
+                        plain_run.clear();
+                        if let Some(reason) = note_write_result(result) {
+                            return Some(reason);
                         }
                     }
                 }
