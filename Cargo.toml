@@ -1,6 +1,6 @@
 [package]
 name = "vpn-rs"
-version = "0.0.12"
+version = "0.0.13"
 edition = "2021"
 description = "IP-over-QUIC VPN tunnel via iroh P2P"
 readme = "README.md"
@@ -37,3 +37,8 @@ url = "2"
 mock_instant = "0.5"
 rand_chacha = "0.9"
 tempfile = "3.24.0"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+panic = "abort"

@@ -56,6 +56,23 @@ kern.ipc.maxsockbuf=8388608
 Secondary knobs if throughput is still UDP-limited: `net.inet.udp.recvspace` (per-socket
 default receive buffer) and `net.inet.udp.maxdgram` (maximum datagram size).
 
+## Throughput Tuning
+
+For maximum throughput on direct P2P paths, configure the QUIC transport in the
+`[iroh.transport]` section (see `vpn_client.toml.example` / `vpn_server.toml.example`)
+on **both** ends:
+
+- `congestion_controller = "bbr"` — TCP carried through the tunnel reacts to its own
+  congestion signals; when the underlying UDP path also drops packets, the default
+  loss-based `cubic` compounds the backoff. BBR models the path instead of reacting to
+  loss and typically sustains higher throughput on lossy or high-latency direct paths.
+- `receive_window` / `send_window` — the 8 MB defaults cover most links. On
+  high-bandwidth, high-latency paths (large bandwidth-delay product), raise them toward
+  the 16 MB maximum so the window does not cap throughput at `window / RTT`.
+
+`cubic` remains the default because it is the safer choice for relay paths and
+general internet use.
+
 ## When To Use It
 
 Use `vpn-rs` when you need:

@@ -5,12 +5,13 @@
 //! tunnels for each connected client. IP packets are framed and sent
 //! directly over the encrypted iroh QUIC connection.
 
-use crate::vpn_core::buffer::{read_exact_uninit, uninitialized_vec};
+use crate::vpn_core::buffer::uninitialized_vec;
 use crate::vpn_core::config::{validate_ip6_strategy, Ip6Strategy, VpnServerConfig};
 use crate::vpn_core::device::{TunConfig, TunDevice, TunOffloadStatus};
 use crate::vpn_core::error::{VpnError, VpnResult};
+use crate::vpn_core::frame_reader::{FrameError, FrameEvent, FrameReader};
 use crate::vpn_core::offload::{
-    materialize_offload_packet, split_tun_frame, CoalescedOutput, TcpGroTable, VirtioNetHdr,
+    materialize_offload_into, split_tun_frame, CoalescedOutput, TcpGroTable, VirtioNetHdr,
     GRO_FLUSH_WINDOW,
 };
 use crate::vpn_core::paths::watch_connection_paths;
@@ -1464,7 +1465,7 @@ impl VpnServer {
     /// At least one of `ctx.assigned_ip` (IPv4) or `ctx.assigned_ip6` (IPv6) must be provided.
     async fn handle_client_data(
         packet_tx: mpsc::Sender<Bytes>,
-        mut data_recv: iroh::endpoint::RecvStream,
+        data_recv: iroh::endpoint::RecvStream,
         ctx: ClientContext,
         tun_write_tx: mpsc::Sender<TunWriteRequest>,
         local_iroh_udp_ports: Arc<HashSet<u16>>,
@@ -1482,34 +1483,19 @@ impl VpnServer {
 
         // Spawn inbound task (QUIC stream -> TUN via channel)
         let mut inbound_handle = tokio::spawn(async move {
-            let mut type_buf = [0u8; 1];
-            let mut len_buf = [0u8; 4];
-            let mut data_buf = uninitialized_vec(MAX_IP_PACKET_SIZE);
-            let mut cap_discard = [0u8; MAX_CAPABILITIES_PAYLOAD];
+            // Buffered reader: pulls large QUIC chunks and parses frames
+            // synchronously instead of three awaited reads per frame.
+            let mut reader = FrameReader::new(data_recv, MAX_IP_PACKET_SIZE);
+            // Reusable buffers for software-materializing offload super-frames:
+            // segments are built in `seg_scratch`, copied once into `seg_arena`,
+            // and handed out as refcounted Bytes views.
+            let mut seg_scratch: Vec<u8> = Vec::new();
+            let mut seg_arena = BytesMut::new();
+            let mut pending_segments: Vec<Bytes> = Vec::new();
             'read_loop: loop {
-                // Read message type
-                match data_recv.read_exact(&mut type_buf).await {
-                    Ok(()) => {}
-                    Err(e) => {
-                        log::debug!("Client {} stream closed: {}", client_id, e);
-                        break;
-                    }
-                }
-
-                let msg_type = match DataMessageType::from_byte(type_buf[0]) {
-                    Some(t) => t,
-                    None => {
-                        log::error!(
-                            "Unknown message type from {}: 0x{:02x}, closing connection",
-                            client_id,
-                            type_buf[0]
-                        );
-                        break;
-                    }
-                };
-
-                match msg_type {
-                    DataMessageType::HeartbeatPing => {
+                let frame = match reader.next_frame().await {
+                    Ok(Some(FrameEvent::IpFrame(frame))) => frame,
+                    Ok(Some(FrameEvent::HeartbeatPing)) => {
                         // Respond with pong via the writer task channel (static Bytes, zero allocation)
                         log::trace!("Heartbeat ping from {}", client_id);
                         let pong = Bytes::from_static(HEARTBEAT_PONG_BYTE);
@@ -1522,60 +1508,43 @@ impl VpnServer {
                         }
                         continue;
                     }
-                    DataMessageType::HeartbeatPong => {
+                    Ok(Some(FrameEvent::HeartbeatPong)) => {
                         // Server shouldn't receive pongs, ignore
                         log::trace!("Unexpected heartbeat pong from {}", client_id);
                         continue;
                     }
-                    DataMessageType::IpPacket => {
-                        // Continue to read IP packet below
-                    }
-                    DataMessageType::Capabilities => {
+                    Ok(Some(FrameEvent::Capabilities)) => {
                         // Capabilities are only valid as the first message and are
                         // consumed in handle_connection_inner before this loop starts.
-                        // Drain the length-prefixed payload to keep the stream aligned.
-                        let mut cap_len = [0u8; 1];
-                        if data_recv.read_exact(&mut cap_len).await.is_err() {
-                            break;
-                        }
-                        let n = cap_len[0] as usize;
-                        if n > 0 && data_recv.read_exact(&mut cap_discard[..n]).await.is_err() {
-                            break;
-                        }
                         log::warn!(
                             "Unexpected capabilities message from {} after stream setup",
                             client_id
                         );
                         continue;
                     }
-                }
-
-                // Read frame length for IP packet
-                match data_recv.read_exact(&mut len_buf).await {
-                    Ok(()) => {}
-                    Err(e) => {
-                        log::debug!("Failed to read IP frame length from {}: {}", client_id, e);
+                    Ok(None) => {
+                        log::debug!("Client {} stream closed", client_id);
                         break;
                     }
-                }
-                let len = u32::from_be_bytes(len_buf) as usize;
-                if len > MAX_IP_PACKET_SIZE {
-                    log::error!("IP frame too large from {}: {}", client_id, len);
-                    break;
-                }
-
-                // Read frame data
-                let mut frame_buf = ReadBuf::uninit(&mut data_buf[..len]);
-                match read_exact_uninit(&mut data_recv, &mut frame_buf).await {
-                    Ok(()) => {}
-                    Err(e) => {
-                        log::debug!("Failed to read IP frame from {}: {}", client_id, e);
+                    Err(FrameError::UnknownType(b)) => {
+                        log::error!(
+                            "Unknown message type from {}: 0x{:02x}, closing connection",
+                            client_id,
+                            b
+                        );
                         break;
                     }
-                }
+                    Err(FrameError::FrameTooLarge(len)) => {
+                        log::error!("IP frame too large from {}: {}", client_id, len);
+                        break;
+                    }
+                    Err(FrameError::Read(e)) => {
+                        log::debug!("Client {} stream closed: {}", client_id, e);
+                        break;
+                    }
+                };
 
-                let frame = frame_buf.filled();
-                let (offload, packet) = match parse_ip_packet_v2(frame) {
+                let (offload, packet) = match parse_ip_packet_v2(&frame) {
                     Ok(parts) => parts,
                     Err(e) => {
                         log::warn!("Invalid IP frame from {}: {}", client_id, e);
@@ -1657,29 +1626,33 @@ impl VpnServer {
 
                 if let Some(meta) = offload {
                     if !ctx.connection_gso_active || !ctx.local_tun_gso_enabled {
-                        match materialize_offload_packet(&meta, packet) {
-                            Ok(packets) => {
-                                for packet in packets {
-                                    let req = TunWriteRequest {
-                                        packet: Bytes::from(packet),
-                                        offload: None,
-                                    };
-                                    if !Self::enqueue_tun_write(&tun_write_tx, req, &stats).await {
-                                        break 'read_loop;
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                log::warn!(
-                                    "Dropping packet with unsupported offload metadata from {}: {}",
-                                    client_id,
-                                    e
-                                );
+                        let materialized =
+                            materialize_offload_into(&meta, packet, &mut seg_scratch, |seg| {
+                                seg_arena.extend_from_slice(seg);
+                                pending_segments.push(seg_arena.split_to(seg.len()).freeze());
+                                Ok(())
+                            });
+                        if let Err(e) = materialized {
+                            pending_segments.clear();
+                            log::warn!(
+                                "Dropping packet with unsupported offload metadata from {}: {}",
+                                client_id,
+                                e
+                            );
+                            continue;
+                        }
+                        for packet in pending_segments.drain(..) {
+                            let req = TunWriteRequest {
+                                packet,
+                                offload: None,
+                            };
+                            if !Self::enqueue_tun_write(&tun_write_tx, req, &stats).await {
+                                break 'read_loop;
                             }
                         }
                     } else {
                         let req = TunWriteRequest {
-                            packet: Bytes::copy_from_slice(packet),
+                            packet: frame.slice_ref(packet),
                             offload: Some(meta),
                         };
                         if !Self::enqueue_tun_write(&tun_write_tx, req, &stats).await {
@@ -1688,7 +1661,7 @@ impl VpnServer {
                     }
                 } else {
                     let req = TunWriteRequest {
-                        packet: Bytes::copy_from_slice(packet),
+                        packet: frame.slice_ref(packet),
                         offload: None,
                     };
                     if !Self::enqueue_tun_write(&tun_write_tx, req, &stats).await {
@@ -1757,6 +1730,10 @@ impl VpnServer {
         // Long-lived framing arena: frames are appended and split off as
         // refcounted Bytes views, amortizing allocations across packets.
         let mut arena = BytesMut::with_capacity(FRAME_ARENA_CHUNK);
+        // Reusable buffers for software-materializing offload super-frames
+        // destined for clients without GSO support.
+        let mut seg_scratch: Vec<u8> = Vec::new();
+        let mut pending_frames: Vec<Bytes> = Vec::new();
         // Software GRO: when the server TUN has no offload support (macOS/
         // Windows, or Linux without vnet headers) the kernel performs no GRO,
         // so coalesce consecutive same-flow TCP segments per destination
@@ -1901,44 +1878,39 @@ impl VpnServer {
                         device_id,
                         client_gso_enabled
                     );
-                    match materialize_offload_packet(&meta, packet_ref) {
-                        Ok(packets) => {
-                            for packet in packets {
-                                let frame_size = 1 + 4 + 1 + packet.len();
-                                if arena.capacity() - arena.len() < frame_size {
-                                    arena.reserve(FRAME_ARENA_CHUNK.max(frame_size));
-                                }
-                                let written =
-                                    match append_ip_packet_v2(&mut arena, None, &packet) {
-                                        Ok(written) => written,
-                                        Err(e) => {
-                                            log::warn!(
-                                        "Failed to frame materialized packet for {} dev {}: {}",
-                                        endpoint_id,
-                                        device_id,
-                                        e
-                                    );
-                                            continue;
-                                        }
-                                    };
-                                Self::enqueue_client_frame(
-                                    &packet_tx,
-                                    arena.split_to(written).freeze(),
-                                    &self.stats,
-                                    self.config.drop_on_full,
-                                    1,
-                                )
-                                .await;
+                    // Segment directly into the framing arena: each emitted
+                    // segment is framed in place and handed out as a
+                    // refcounted Bytes view, with no per-segment Vec.
+                    let materialized =
+                        materialize_offload_into(&meta, packet_ref, &mut seg_scratch, |packet| {
+                            let frame_size = 1 + 4 + 1 + packet.len();
+                            if arena.capacity() - arena.len() < frame_size {
+                                arena.reserve(FRAME_ARENA_CHUNK.max(frame_size));
                             }
-                        }
-                        Err(e) => {
-                            log::warn!(
-                                "Dropping packet with unsupported offload metadata for {} dev {}: {}",
-                                endpoint_id,
-                                device_id,
-                                e
-                            );
-                        }
+                            let written = append_ip_packet_v2(&mut arena, None, packet)
+                                .map_err(|e| e.to_string())?;
+                            pending_frames.push(arena.split_to(written).freeze());
+                            Ok(())
+                        });
+                    if let Err(e) = materialized {
+                        pending_frames.clear();
+                        log::warn!(
+                            "Dropping packet with unsupported offload metadata for {} dev {}: {}",
+                            endpoint_id,
+                            device_id,
+                            e
+                        );
+                        continue;
+                    }
+                    for frame in pending_frames.drain(..) {
+                        Self::enqueue_client_frame(
+                            &packet_tx,
+                            frame,
+                            &self.stats,
+                            self.config.drop_on_full,
+                            1,
+                        )
+                        .await;
                     }
                     continue;
                 }

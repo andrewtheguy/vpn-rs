@@ -5,22 +5,24 @@
 //! IP-over-QUIC tunnel. IP packets are framed and sent directly over the
 //! encrypted iroh QUIC connection for automatic NAT traversal.
 
-use crate::vpn_core::buffer::{read_exact_uninit, uninitialized_vec};
+use crate::vpn_core::buffer::uninitialized_vec;
 use crate::vpn_core::config::VpnClientConfig;
 use crate::vpn_core::device::{
     add_bypass_route, add_routes, add_routes6_with_src, BypassRouteGuard, Route6Guard, RouteGuard,
     TunConfig, TunDevice,
 };
 use crate::vpn_core::error::{VpnError, VpnResult};
+use crate::vpn_core::frame_reader::{FrameEvent, FrameReader};
 use crate::vpn_core::lock::VpnLock;
 use crate::vpn_core::offload::{
-    materialize_offload_packet, split_tun_frame, CoalescedOutput, TcpGroTable, GRO_FLUSH_WINDOW,
+    materialize_offload_into, split_tun_frame, CoalescedOutput, TcpGroTable, VirtioNetHdr,
+    GRO_FLUSH_WINDOW,
 };
 use crate::vpn_core::paths::{format_connection_paths, watch_connection_paths};
 use crate::vpn_core::signaling::{
     append_ip_packet_v2, frame_capabilities_message, parse_ip_packet_v2, read_message,
-    write_message, CapabilitiesMessage, DataMessageType, VpnHandshake, VpnHandshakeResponse,
-    HEARTBEAT_PING_BYTE, MAX_CAPABILITIES_PAYLOAD, MAX_HANDSHAKE_SIZE, VPN_ALPN,
+    write_message, CapabilitiesMessage, VpnHandshake, VpnHandshakeResponse, HEARTBEAT_PING_BYTE,
+    MAX_HANDSHAKE_SIZE, VPN_ALPN,
 };
 use bytes::{Bytes, BytesMut};
 use futures::StreamExt;
@@ -65,6 +67,13 @@ const OUTBOUND_CHANNEL_SIZE: usize = 256;
 /// batched QUIC write.
 const WRITE_BATCH_SIZE: usize = 256;
 
+/// Channel buffer size for inbound packets queued to the TUN writer task.
+///
+/// Decouples QUIC stream draining from TUN write syscalls so the inbound
+/// reader keeps the stream (and its flow-control window) moving while the
+/// writer task issues per-packet TUN writes.
+const INBOUND_TUN_CHANNEL_SIZE: usize = 512;
+
 /// Reserve granularity for the framing arena. Frames are appended to a
 /// long-lived `BytesMut` and split off as refcounted `Bytes`, so the
 /// allocator is only hit once per chunk instead of once per packet.
@@ -78,6 +87,12 @@ const INITIAL_BYPASS_SETUP_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Poll interval for the client-side interactive path status key.
 const PATH_KEY_POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+/// A decoded inbound packet queued for the dedicated TUN writer task.
+struct InboundTunWrite {
+    packet: Bytes,
+    offload: Option<VirtioNetHdr>,
+}
 
 /// VPN client instance.
 pub struct VpnClient {
@@ -592,6 +607,10 @@ impl VpnClient {
                 // Long-lived framing arena: frames are appended and split off as
                 // refcounted Bytes views, amortizing allocations across packets.
                 let mut arena = BytesMut::with_capacity(FRAME_ARENA_CHUNK);
+                // Reusable buffers for software-materializing offload
+                // super-frames when GSO was not negotiated with the server.
+                let mut seg_scratch: Vec<u8> = Vec::new();
+                let mut pending_frames: Vec<Bytes> = Vec::new();
                 // Software GRO: on a non-GSO local TUN, coalesce consecutive
                 // same-flow TCP segments into offload-tagged super-frames so a
                 // GSO-capable peer can hand them to its kernel via TSO.
@@ -663,42 +682,35 @@ impl VpnClient {
 
                             if let Some(meta) = offload {
                                 if !negotiated_gso {
-                                    match materialize_offload_packet(&meta, packet) {
-                                        Ok(packets) => {
-                                            for packet in packets {
-                                                let frame_size = 1 + 4 + 1 + packet.len();
-                                                if arena.capacity() - arena.len() < frame_size {
-                                                    arena.reserve(
-                                                        FRAME_ARENA_CHUNK.max(frame_size),
-                                                    );
-                                                }
-                                                let written = match append_ip_packet_v2(
-                                                    &mut arena, None, &packet,
-                                                ) {
-                                                    Ok(written) => written,
-                                                    Err(e) => {
-                                                        log::warn!(
-                                                        "Failed to frame materialized packet: {}",
-                                                        e
-                                                    );
-                                                        continue;
-                                                    }
-                                                };
-                                                if outbound_tx
-                                                    .send(arena.split_to(written).freeze())
-                                                    .await
-                                                    .is_err()
-                                                {
-                                                    log::warn!("Outbound channel closed");
-                                                    return None;
-                                                }
+                                    // Segment directly into the framing arena:
+                                    // each emitted segment is framed in place
+                                    // and handed out as a refcounted Bytes
+                                    // view, with no per-segment Vec.
+                                    let materialized = materialize_offload_into(
+                                        &meta,
+                                        packet,
+                                        &mut seg_scratch,
+                                        |packet| {
+                                            let frame_size = 1 + 4 + 1 + packet.len();
+                                            if arena.capacity() - arena.len() < frame_size {
+                                                arena.reserve(FRAME_ARENA_CHUNK.max(frame_size));
                                             }
-                                        }
-                                        Err(e) => {
-                                            log::warn!(
-                                                "Failed to materialize offload packet: {}",
-                                                e
-                                            );
+                                            let written =
+                                                append_ip_packet_v2(&mut arena, None, packet)
+                                                    .map_err(|e| e.to_string())?;
+                                            pending_frames.push(arena.split_to(written).freeze());
+                                            Ok(())
+                                        },
+                                    );
+                                    if let Err(e) = materialized {
+                                        pending_frames.clear();
+                                        log::warn!("Failed to materialize offload packet: {}", e);
+                                        continue;
+                                    }
+                                    for frame in pending_frames.drain(..) {
+                                        if outbound_tx.send(frame).await.is_err() {
+                                            log::warn!("Outbound channel closed");
+                                            return None;
                                         }
                                     }
                                     continue;
@@ -746,103 +758,101 @@ impl VpnClient {
                 }
             });
 
-        // Spawn inbound task (QUIC stream -> TUN)
+        // Create channel for inbound packets to decouple QUIC stream draining
+        // from TUN write syscalls. The TUN writer task owns the TunWriter.
+        let (tun_write_tx, mut tun_write_rx) =
+            mpsc::channel::<InboundTunWrite>(INBOUND_TUN_CHANNEL_SIZE);
+
+        // Spawn dedicated TUN writer task. Batched channel receives reduce
+        // task wakeups; each packet still requires its own TUN write syscall
+        // (utun/wintun have no batching API).
+        let mut tun_writer_handle: tokio::task::JoinHandle<Option<String>> =
+            tokio::spawn(async move {
+                const MAX_TUN_WRITE_FAILURES: u32 = 10;
+                let mut consecutive_tun_failures = 0u32;
+                let mut batch: Vec<InboundTunWrite> = Vec::with_capacity(WRITE_BATCH_SIZE);
+                loop {
+                    let count = tun_write_rx.recv_many(&mut batch, WRITE_BATCH_SIZE).await;
+                    if count == 0 {
+                        log::trace!("TUN writer task exiting");
+                        return None;
+                    }
+                    for req in batch.drain(..) {
+                        let write_result = match req.offload.as_ref() {
+                            Some(meta) => tun_writer.write_packet(Some(meta), &req.packet).await,
+                            None => tun_writer.write_all(&req.packet).await,
+                        };
+                        match write_result {
+                            Ok(()) => consecutive_tun_failures = 0,
+                            Err(e) => {
+                                consecutive_tun_failures += 1;
+                                if consecutive_tun_failures >= MAX_TUN_WRITE_FAILURES {
+                                    log::error!(
+                                        "Too many consecutive TUN write failures ({}), disconnecting: {}",
+                                        consecutive_tun_failures,
+                                        e
+                                    );
+                                    return Some(format!("TUN write failures exceeded: {}", e));
+                                }
+                                log::warn!(
+                                    "Failed to write to TUN ({}/{}): {}",
+                                    consecutive_tun_failures,
+                                    MAX_TUN_WRITE_FAILURES,
+                                    e
+                                );
+                            }
+                        }
+                    }
+                }
+            });
+
+        // Spawn inbound task (QUIC stream -> TUN writer channel)
         // data_recv is moved into this task (no Arc/Mutex needed - single owner)
         // Returns error reason if task exits due to an error.
         let inbound_start_time = start_time;
         let mut inbound_handle: tokio::task::JoinHandle<Option<String>> =
             tokio::spawn(async move {
-                const MAX_TUN_WRITE_FAILURES: u32 = 10;
-                let mut data_recv = data_recv;
-                let mut type_buf = [0u8; 1];
-                let mut len_buf = [0u8; 4];
-                let mut data_buf = uninitialized_vec(MAX_IP_PACKET_SIZE);
-                let mut cap_discard = [0u8; MAX_CAPABILITIES_PAYLOAD];
-                let mut consecutive_tun_failures = 0u32;
+                // Buffered reader: pulls large QUIC chunks and parses frames
+                // synchronously instead of three awaited reads per frame.
+                let mut reader = FrameReader::new(data_recv, MAX_IP_PACKET_SIZE);
+                // Reusable buffers for software-materializing offload
+                // super-frames: segments are built in `seg_scratch`, copied
+                // once into `seg_arena`, and handed out as refcounted Bytes.
+                let mut seg_scratch: Vec<u8> = Vec::new();
+                let mut seg_arena = BytesMut::new();
+                let mut pending_segments: Vec<Bytes> = Vec::new();
                 loop {
-                    // Read message type
-                    match data_recv.read_exact(&mut type_buf).await {
-                        Ok(()) => {}
-                        Err(e) => {
-                            log::error!("Failed to read message type: {}", e);
-                            return Some(format!("QUIC read error: {}", e));
-                        }
-                    }
-
-                    let msg_type = match DataMessageType::from_byte(type_buf[0]) {
-                        Some(t) => t,
-                        None => {
-                            // Unknown message type - cannot determine framing, must disconnect
-                            // to avoid stream desynchronization
-                            log::error!(
-                                "Unknown message type: 0x{:02x}, disconnecting",
-                                type_buf[0]
-                            );
-                            return Some(format!("Unknown message type: 0x{:02x}", type_buf[0]));
-                        }
-                    };
-
-                    match msg_type {
-                        DataMessageType::HeartbeatPong => {
+                    let frame = match reader.next_frame().await {
+                        Ok(Some(FrameEvent::IpFrame(frame))) => frame,
+                        Ok(Some(FrameEvent::HeartbeatPong)) => {
                             // Update last pong time
                             let now = inbound_start_time.elapsed().as_millis() as u64;
                             last_pong_inbound.store(now, Ordering::Relaxed);
                             log::trace!("Heartbeat pong received");
                             continue;
                         }
-                        DataMessageType::HeartbeatPing => {
+                        Ok(Some(FrameEvent::HeartbeatPing)) => {
                             // Client shouldn't receive pings, ignore
                             log::trace!("Unexpected heartbeat ping received");
                             continue;
                         }
-                        DataMessageType::IpPacket => {
-                            // Continue to read IP packet below
-                        }
-                        DataMessageType::Capabilities => {
-                            // Capabilities are exchanged once at stream setup and should not
-                            // appear later in steady-state traffic.
-                            // Drain the length-prefixed payload to keep the stream aligned.
-                            let mut cap_len = [0u8; 1];
-                            if data_recv.read_exact(&mut cap_len).await.is_err() {
-                                return Some("Failed to read capabilities length".into());
-                            }
-                            let n = cap_len[0] as usize;
-                            if n > 0
-                                && data_recv.read_exact(&mut cap_discard[..n]).await.is_err()
-                            {
-                                return Some("Failed to read capabilities payload".into());
-                            }
+                        Ok(Some(FrameEvent::Capabilities)) => {
+                            // Capabilities are exchanged once at stream setup and
+                            // should not appear later in steady-state traffic.
                             log::trace!("Unexpected capabilities message received");
                             continue;
                         }
-                    }
-
-                    // Read frame length for IP packet
-                    match data_recv.read_exact(&mut len_buf).await {
-                        Ok(()) => {}
-                        Err(e) => {
-                            log::error!("Failed to read IP frame length: {}", e);
-                            return Some(format!("QUIC read error: {}", e));
+                        Ok(None) => {
+                            log::error!("Data stream closed by server");
+                            return Some("data stream closed by server".to_string());
                         }
-                    }
-                    let len = u32::from_be_bytes(len_buf) as usize;
-                    if len > MAX_IP_PACKET_SIZE {
-                        log::error!("IP frame too large: {}", len);
-                        return Some(format!("IP frame too large: {}", len));
-                    }
-
-                    // Read frame payload
-                    let mut frame_buf = ReadBuf::uninit(&mut data_buf[..len]);
-                    match read_exact_uninit(&mut data_recv, &mut frame_buf).await {
-                        Ok(()) => {}
                         Err(e) => {
-                            log::error!("Failed to read IP frame: {}", e);
-                            return Some(format!("QUIC read error: {}", e));
+                            log::error!("Failed to read data frame: {}", e);
+                            return Some(e.to_string());
                         }
-                    }
+                    };
 
-                    let frame = frame_buf.filled();
-                    let (offload, packet) = match parse_ip_packet_v2(frame) {
+                    let (offload, packet) = match parse_ip_packet_v2(&frame) {
                         Ok(parts) => parts,
                         Err(e) => {
                             log::warn!("Invalid IP frame from peer: {}", e);
@@ -850,52 +860,56 @@ impl VpnClient {
                         }
                     };
 
-                    let write_result = if let Some(meta) = offload {
+                    if let Some(meta) = offload {
                         if !local_gso_enabled {
-                            match materialize_offload_packet(&meta, packet) {
-                                Ok(packets) => {
-                                    let mut result = Ok(());
-                                    for packet in packets {
-                                        if let Err(e) = tun_writer.write_all(&packet).await {
-                                            result = Err(e);
-                                            break;
-                                        }
-                                    }
-                                    result
-                                }
-                                Err(e) => {
-                                    log::warn!(
-                                        "Dropping packet with unsupported offload metadata: {}",
-                                        e
-                                    );
-                                    continue;
+                            let materialized = materialize_offload_into(
+                                &meta,
+                                packet,
+                                &mut seg_scratch,
+                                |seg| {
+                                    seg_arena.extend_from_slice(seg);
+                                    pending_segments
+                                        .push(seg_arena.split_to(seg.len()).freeze());
+                                    Ok(())
+                                },
+                            );
+                            if let Err(e) = materialized {
+                                pending_segments.clear();
+                                log::warn!(
+                                    "Dropping packet with unsupported offload metadata: {}",
+                                    e
+                                );
+                                continue;
+                            }
+                            for packet in pending_segments.drain(..) {
+                                let req = InboundTunWrite {
+                                    packet,
+                                    offload: None,
+                                };
+                                if tun_write_tx.send(req).await.is_err() {
+                                    log::trace!("TUN writer channel closed");
+                                    return None;
                                 }
                             }
                         } else {
-                            tun_writer.write_packet(Some(&meta), packet).await
+                            let req = InboundTunWrite {
+                                packet: frame.slice_ref(packet),
+                                offload: Some(meta),
+                            };
+                            if tun_write_tx.send(req).await.is_err() {
+                                log::trace!("TUN writer channel closed");
+                                return None;
+                            }
                         }
                     } else {
-                        tun_writer.write_all(packet).await
-                    };
-
-                    if let Err(e) = write_result {
-                        consecutive_tun_failures += 1;
-                        if consecutive_tun_failures >= MAX_TUN_WRITE_FAILURES {
-                            log::error!(
-                                "Too many consecutive TUN write failures ({}), disconnecting: {}",
-                                consecutive_tun_failures,
-                                e
-                            );
-                            return Some(format!("TUN write failures exceeded: {}", e));
+                        let req = InboundTunWrite {
+                            packet: frame.slice_ref(packet),
+                            offload: None,
+                        };
+                        if tun_write_tx.send(req).await.is_err() {
+                            log::trace!("TUN writer channel closed");
+                            return None;
                         }
-                        log::warn!(
-                            "Failed to write to TUN ({}/{}): {}",
-                            consecutive_tun_failures,
-                            MAX_TUN_WRITE_FAILURES,
-                            e
-                        );
-                    } else {
-                        consecutive_tun_failures = 0;
                     }
                 }
             });
@@ -938,16 +952,19 @@ impl VpnClient {
         // Wait for any task to complete (or error), then clean up all tasks
         let (first_task, first_result, remaining) = tokio::select! {
             result = &mut outbound_handle => {
-                ("outbound", result, vec![("inbound", inbound_handle), ("heartbeat", heartbeat_handle), ("writer", writer_handle)])
+                ("outbound", result, vec![("inbound", inbound_handle), ("heartbeat", heartbeat_handle), ("writer", writer_handle), ("tun-writer", tun_writer_handle)])
             }
             result = &mut inbound_handle => {
-                ("inbound", result, vec![("outbound", outbound_handle), ("heartbeat", heartbeat_handle), ("writer", writer_handle)])
+                ("inbound", result, vec![("outbound", outbound_handle), ("heartbeat", heartbeat_handle), ("writer", writer_handle), ("tun-writer", tun_writer_handle)])
             }
             result = &mut heartbeat_handle => {
-                ("heartbeat", result, vec![("outbound", outbound_handle), ("inbound", inbound_handle), ("writer", writer_handle)])
+                ("heartbeat", result, vec![("outbound", outbound_handle), ("inbound", inbound_handle), ("writer", writer_handle), ("tun-writer", tun_writer_handle)])
             }
             result = &mut writer_handle => {
-                ("writer", result, vec![("outbound", outbound_handle), ("inbound", inbound_handle), ("heartbeat", heartbeat_handle)])
+                ("writer", result, vec![("outbound", outbound_handle), ("inbound", inbound_handle), ("heartbeat", heartbeat_handle), ("tun-writer", tun_writer_handle)])
+            }
+            result = &mut tun_writer_handle => {
+                ("tun-writer", result, vec![("outbound", outbound_handle), ("inbound", inbound_handle), ("heartbeat", heartbeat_handle), ("writer", writer_handle)])
             }
         };
 

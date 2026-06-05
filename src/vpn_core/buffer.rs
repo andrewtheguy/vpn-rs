@@ -4,11 +4,7 @@
 //! `ReadBuf` to skip zeroing overhead for buffers that will be immediately
 //! overwritten.
 
-use std::future::poll_fn;
-use std::io;
 use std::mem::MaybeUninit;
-use std::pin::Pin;
-use tokio::io::{AsyncRead, ReadBuf};
 
 /// Allocate an uninitialized byte buffer of the specified capacity.
 ///
@@ -39,29 +35,6 @@ pub fn uninitialized_vec(capacity: usize) -> Vec<MaybeUninit<u8>> {
     buf
 }
 
-/// Read until the unfilled portion of `buf` is full.
-///
-/// Tokio's `ReadBuf` safely tracks which bytes were initialized by the reader,
-/// letting callers avoid zeroing large packet buffers without converting
-/// uninitialized memory to `&mut [u8]`.
-#[inline]
-pub async fn read_exact_uninit<R>(reader: &mut R, buf: &mut ReadBuf<'_>) -> io::Result<()>
-where
-    R: AsyncRead + Unpin,
-{
-    while buf.remaining() > 0 {
-        let filled_before = buf.filled().len();
-        poll_fn(|cx| Pin::new(&mut *reader).poll_read(cx, buf)).await?;
-        if buf.filled().len() == filled_before {
-            return Err(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                "early eof",
-            ));
-        }
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -83,7 +56,7 @@ mod tests {
     #[test]
     fn test_uninitialized_vec_write_then_read() {
         let mut buf = uninitialized_vec(100);
-        let mut read_buf = ReadBuf::uninit(&mut buf);
+        let mut read_buf = tokio::io::ReadBuf::uninit(&mut buf);
         let data = b"hello world";
         read_buf.put_slice(data);
         assert_eq!(read_buf.filled(), data);

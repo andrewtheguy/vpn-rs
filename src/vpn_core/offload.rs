@@ -188,14 +188,26 @@ pub fn compose_tun_frame(
     Ok(())
 }
 
-/// Software fallback: segment a TCP GSO packet into plain TCP packets.
+/// Software fallback: segment a TCP GSO packet into plain TCP packets,
+/// emitting each segment via callback without per-segment heap allocation.
+///
+/// Each segment is built into the caller-provided `scratch` buffer (reused
+/// across segments and across calls) and handed to `emit` as a borrowed
+/// slice. The single-segment fast path emits `ip_packet` directly with no
+/// copy unless NEEDS_CSUM requires completing the partial checksum first.
+/// An error returned by `emit` short-circuits segmentation.
 ///
 /// This is used when offload metadata is present but the local write path or
 /// remote peer cannot handle GSO metadata directly.
-pub fn segment_tcp_gso_packet(
+pub fn segment_tcp_gso_into<F>(
     offload: &VirtioNetHdr,
     ip_packet: &[u8],
-) -> Result<Vec<Vec<u8>>, String> {
+    scratch: &mut Vec<u8>,
+    mut emit: F,
+) -> Result<(), String>
+where
+    F: FnMut(&[u8]) -> Result<(), String>,
+{
     if !offload.is_tcp_gso() {
         return Err("offload header is not TCP GSO".to_string());
     }
@@ -251,13 +263,19 @@ pub fn segment_tcp_gso_packet(
     }
 
     let payload = &ip_packet[header_len..];
-    if payload.is_empty() {
-        return Ok(vec![ip_packet.to_vec()]);
-    }
-
     let gso_size = usize::from(offload.gso_size);
     if payload.len() <= gso_size {
-        return Ok(vec![ip_packet.to_vec()]);
+        // Single segment: no resegmentation needed, but a NEEDS_CSUM packet
+        // still carries only the partial pseudo-header checksum, which must
+        // be completed before emitting as a plain packet.
+        if !offload.needs_checksum() {
+            return emit(ip_packet);
+        }
+        scratch.clear();
+        scratch.extend_from_slice(ip_packet);
+        let checksum = finalize_checksum(add_bytes(0, &scratch[tcp_offset..]));
+        scratch[checksum_index..checksum_index + 2].copy_from_slice(&checksum.to_be_bytes());
+        return emit(scratch);
     }
 
     let base_seq = u32::from_be_bytes([
@@ -268,14 +286,14 @@ pub fn segment_tcp_gso_packet(
     ]);
     let original_tcp_flags = ip_packet[tcp_offset + 13];
 
-    let mut out = Vec::with_capacity(payload.len().div_ceil(gso_size));
     for chunk_offset in (0..payload.len()).step_by(gso_size) {
         let chunk_end = (chunk_offset + gso_size).min(payload.len());
         let chunk = &payload[chunk_offset..chunk_end];
 
-        let mut segment = Vec::with_capacity(header_len + chunk.len());
-        segment.extend_from_slice(&ip_packet[..header_len]);
-        segment.extend_from_slice(chunk);
+        scratch.clear();
+        scratch.reserve(header_len + chunk.len());
+        scratch.extend_from_slice(&ip_packet[..header_len]);
+        scratch.extend_from_slice(chunk);
 
         // Sequence number increments by payload bytes emitted in previous segments.
         let chunk_offset_u32 = u32::try_from(chunk_offset).map_err(|_| {
@@ -285,46 +303,71 @@ pub fn segment_tcp_gso_packet(
             )
         })?;
         let seq = base_seq.wrapping_add(chunk_offset_u32);
-        segment[tcp_offset + 4..tcp_offset + 8].copy_from_slice(&seq.to_be_bytes());
+        scratch[tcp_offset + 4..tcp_offset + 8].copy_from_slice(&seq.to_be_bytes());
 
         // FIN/PSH belong only on the last segment.
         if chunk_end < payload.len() {
-            segment[tcp_offset + 13] = original_tcp_flags & !(0x01 | 0x08);
+            scratch[tcp_offset + 13] = original_tcp_flags & !(0x01 | 0x08);
         }
 
         // Update IP length fields and checksum first.
         match version {
-            4 => update_ipv4_lengths_and_checksum(&mut segment, header_len + chunk.len())?,
-            6 => update_ipv6_payload_length(&mut segment, header_len + chunk.len())?,
+            4 => update_ipv4_lengths_and_checksum(scratch, header_len + chunk.len())?,
+            6 => update_ipv6_payload_length(scratch, header_len + chunk.len())?,
             _ => unreachable!(),
         }
 
         // Recalculate TCP checksum for this segment.
-        segment[checksum_index] = 0;
-        segment[checksum_index + 1] = 0;
+        scratch[checksum_index] = 0;
+        scratch[checksum_index + 1] = 0;
         let checksum = match version {
-            4 => tcp_checksum_ipv4(&segment, tcp_offset)?,
-            6 => tcp_checksum_ipv6(&segment, tcp_offset)?,
+            4 => tcp_checksum_ipv4(scratch, tcp_offset)?,
+            6 => tcp_checksum_ipv6(scratch, tcp_offset)?,
             _ => unreachable!(),
         };
-        segment[checksum_index..checksum_index + 2].copy_from_slice(&checksum.to_be_bytes());
+        scratch[checksum_index..checksum_index + 2].copy_from_slice(&checksum.to_be_bytes());
 
-        out.push(segment);
+        emit(scratch)?;
     }
 
-    Ok(out)
+    Ok(())
 }
 
-/// Convert offload metadata into one or more plain IP packets.
+/// Software fallback: segment a TCP GSO packet into plain TCP packets.
 ///
-/// TCP GSO packets are segmented. Checksum-only packets have their partial
-/// checksum completed and are returned as a single plain IP packet.
-pub fn materialize_offload_packet(
+/// Allocating wrapper around [`segment_tcp_gso_into`]; production paths use
+/// the streaming variant.
+#[cfg(test)]
+pub fn segment_tcp_gso_packet(
     offload: &VirtioNetHdr,
     ip_packet: &[u8],
 ) -> Result<Vec<Vec<u8>>, String> {
+    let mut out = Vec::new();
+    let mut scratch = Vec::new();
+    segment_tcp_gso_into(offload, ip_packet, &mut scratch, |seg| {
+        out.push(seg.to_vec());
+        Ok(())
+    })?;
+    Ok(out)
+}
+
+/// Convert offload metadata into one or more plain IP packets, emitting each
+/// via callback without per-packet heap allocation.
+///
+/// TCP GSO packets are segmented via [`segment_tcp_gso_into`]. Checksum-only
+/// packets have their partial checksum completed into `scratch` and emitted
+/// once; packets needing no work are emitted directly with no copy.
+pub fn materialize_offload_into<F>(
+    offload: &VirtioNetHdr,
+    ip_packet: &[u8],
+    scratch: &mut Vec<u8>,
+    mut emit: F,
+) -> Result<(), String>
+where
+    F: FnMut(&[u8]) -> Result<(), String>,
+{
     if offload.is_tcp_gso() {
-        return segment_tcp_gso_packet(offload, ip_packet);
+        return segment_tcp_gso_into(offload, ip_packet, scratch, emit);
     }
 
     if offload.gso_type != VIRTIO_NET_HDR_GSO_NONE {
@@ -334,14 +377,44 @@ pub fn materialize_offload_packet(
         ));
     }
 
-    Ok(vec![complete_checksum_offload_packet(offload, ip_packet)?])
+    let Some((csum_start, checksum_index)) = validate_checksum_offload(offload, ip_packet)? else {
+        return emit(ip_packet);
+    };
+
+    scratch.clear();
+    scratch.extend_from_slice(ip_packet);
+    let checksum = finalize_checksum(add_bytes(0, &scratch[csum_start..]));
+    scratch[checksum_index..checksum_index + 2].copy_from_slice(&checksum.to_be_bytes());
+    emit(scratch)
 }
 
-/// Complete checksum-only virtio metadata and return a plain IP packet.
-pub fn complete_checksum_offload_packet(
+/// Convert offload metadata into one or more plain IP packets.
+///
+/// Allocating wrapper around [`materialize_offload_into`]; production paths
+/// use the streaming variant.
+#[cfg(test)]
+pub fn materialize_offload_packet(
     offload: &VirtioNetHdr,
     ip_packet: &[u8],
-) -> Result<Vec<u8>, String> {
+) -> Result<Vec<Vec<u8>>, String> {
+    let mut out = Vec::new();
+    let mut scratch = Vec::new();
+    materialize_offload_into(offload, ip_packet, &mut scratch, |packet| {
+        out.push(packet.to_vec());
+        Ok(())
+    })?;
+    Ok(out)
+}
+
+/// Validate checksum-only virtio metadata.
+///
+/// Returns `Ok(None)` when no checksum completion is needed, or
+/// `Ok(Some((csum_start, checksum_index)))` when the partial checksum at
+/// `checksum_index` must be finalized over `packet[csum_start..]`.
+fn validate_checksum_offload(
+    offload: &VirtioNetHdr,
+    ip_packet: &[u8],
+) -> Result<Option<(usize, usize)>, String> {
     if offload.gso_type != VIRTIO_NET_HDR_GSO_NONE {
         return Err(format!(
             "checksum completion requires GSO_NONE, got 0x{:02x}",
@@ -354,7 +427,7 @@ pub fn complete_checksum_offload_packet(
     }
 
     if !offload.needs_checksum() {
-        return Ok(ip_packet.to_vec());
+        return Ok(None);
     }
 
     let unsupported_flags = offload.flags
@@ -391,6 +464,22 @@ pub fn complete_checksum_offload_packet(
             ip_packet.len()
         ));
     }
+
+    Ok(Some((csum_start, checksum_index)))
+}
+
+/// Complete checksum-only virtio metadata and return a plain IP packet.
+///
+/// Allocating wrapper kept for tests; production paths use
+/// [`materialize_offload_into`].
+#[cfg(test)]
+pub fn complete_checksum_offload_packet(
+    offload: &VirtioNetHdr,
+    ip_packet: &[u8],
+) -> Result<Vec<u8>, String> {
+    let Some((csum_start, checksum_index)) = validate_checksum_offload(offload, ip_packet)? else {
+        return Ok(ip_packet.to_vec());
+    };
 
     let mut out = ip_packet.to_vec();
     let checksum = finalize_checksum(add_bytes(0, &out[csum_start..]));
@@ -1532,6 +1621,143 @@ mod tests {
             assert_tcp_checksum_valid(&segment);
             assert_eq!(segment[0] >> 4, 6);
         }
+    }
+
+    #[test]
+    fn test_segment_tcp_gso_single_segment_completes_checksum() {
+        // A NEEDS_CSUM GSO packet whose payload fits in a single segment must
+        // still have its partial pseudo-header checksum completed instead of
+        // being emitted as-is.
+        let packet = build_ipv4_tcp_packet(800);
+        let partial = make_ipv4_tcp_partial_checksum(&packet);
+        let offload = VirtioNetHdr {
+            flags: VIRTIO_NET_HDR_F_NEEDS_CSUM,
+            gso_type: VIRTIO_NET_HDR_GSO_TCPV4,
+            hdr_len: 40,
+            gso_size: 1200,
+            csum_start: 20,
+            csum_offset: 16,
+            num_buffers: 0,
+        };
+
+        let segments = segment_tcp_gso_packet(&offload, &partial).expect("segment");
+        assert_eq!(segments.len(), 1);
+        assert_eq!(segments[0], packet);
+        assert_tcp_checksum_valid(&segments[0]);
+    }
+
+    #[test]
+    fn test_segment_tcp_gso_into_scratch_reuse() {
+        // Streaming output must match the collecting wrapper, including when
+        // the scratch buffer is reused across packets of different sizes.
+        let offload = VirtioNetHdr {
+            flags: 0,
+            gso_type: VIRTIO_NET_HDR_GSO_TCPV4,
+            hdr_len: 40,
+            gso_size: 1200,
+            csum_start: 20,
+            csum_offset: 16,
+            num_buffers: 0,
+        };
+
+        let mut scratch = Vec::new();
+        for payload_len in [3500, 800, 2401] {
+            let packet = build_ipv4_tcp_packet(payload_len);
+            let expected = segment_tcp_gso_packet(&offload, &packet).expect("segment");
+
+            let mut streamed = Vec::new();
+            segment_tcp_gso_into(&offload, &packet, &mut scratch, |seg| {
+                streamed.push(seg.to_vec());
+                Ok(())
+            })
+            .expect("segment into");
+
+            assert_eq!(streamed, expected, "payload_len={}", payload_len);
+        }
+    }
+
+    #[test]
+    fn test_segment_tcp_gso_into_emit_error_short_circuits() {
+        let packet = build_ipv4_tcp_packet(3500);
+        let offload = VirtioNetHdr {
+            flags: 0,
+            gso_type: VIRTIO_NET_HDR_GSO_TCPV4,
+            hdr_len: 40,
+            gso_size: 1200,
+            csum_start: 20,
+            csum_offset: 16,
+            num_buffers: 0,
+        };
+
+        let mut scratch = Vec::new();
+        let mut emitted = 0usize;
+        let err = segment_tcp_gso_into(&offload, &packet, &mut scratch, |_| {
+            emitted += 1;
+            if emitted == 2 {
+                Err("stop".to_string())
+            } else {
+                Ok(())
+            }
+        })
+        .expect_err("emit error propagates");
+        assert_eq!(err, "stop");
+        assert_eq!(emitted, 2, "segmentation stops after emit error");
+    }
+
+    #[test]
+    fn test_materialize_offload_into_checksum_only() {
+        let packet = build_ipv4_tcp_packet(400);
+        let partial = make_ipv4_tcp_partial_checksum(&packet);
+        let offload = VirtioNetHdr {
+            flags: VIRTIO_NET_HDR_F_NEEDS_CSUM,
+            gso_type: VIRTIO_NET_HDR_GSO_NONE,
+            hdr_len: 0,
+            gso_size: 0,
+            csum_start: 20,
+            csum_offset: 16,
+            num_buffers: 0,
+        };
+
+        let expected = complete_checksum_offload_packet(&offload, &partial).expect("complete");
+
+        let mut scratch = Vec::new();
+        let mut streamed = Vec::new();
+        materialize_offload_into(&offload, &partial, &mut scratch, |pkt| {
+            streamed.push(pkt.to_vec());
+            Ok(())
+        })
+        .expect("materialize into");
+
+        assert_eq!(streamed.len(), 1);
+        assert_eq!(streamed[0], expected);
+        assert_tcp_checksum_valid(&streamed[0]);
+    }
+
+    #[test]
+    fn test_materialize_offload_into_no_checksum_passthrough() {
+        // No NEEDS_CSUM: the packet must be emitted unchanged with no copy
+        // into scratch.
+        let packet = build_ipv4_tcp_packet(200);
+        let offload = VirtioNetHdr {
+            flags: 0,
+            gso_type: VIRTIO_NET_HDR_GSO_NONE,
+            hdr_len: 0,
+            gso_size: 0,
+            csum_start: 0,
+            csum_offset: 0,
+            num_buffers: 0,
+        };
+
+        let mut scratch = Vec::new();
+        let mut streamed = Vec::new();
+        materialize_offload_into(&offload, &packet, &mut scratch, |pkt| {
+            streamed.push(pkt.to_vec());
+            Ok(())
+        })
+        .expect("materialize into");
+
+        assert_eq!(streamed, vec![packet]);
+        assert!(scratch.is_empty(), "passthrough must not touch scratch");
     }
 
     #[test]
