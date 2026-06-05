@@ -42,18 +42,7 @@ pub enum CongestionController {
     NewReno,
 }
 
-/// IPv6 address-assignment strategy for VPN clients.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
-#[serde(rename_all = "kebab-case")]
-pub enum Ip6Strategy {
-    /// Sequential allocation: server gets ::1, clients get ::2, ::3, ...
-    #[default]
-    Sequential,
-    /// Stateless deterministic addresses: host suffix derived from the iroh
-    /// node id (clients from their own id, server from its id).
-    /// Requires an IPv6 subnet of /64 or wider.
-    NodeId,
-}
+pub use crate::vpn_config::Ip6Strategy;
 
 /// Default QUIC receive window size (8 MB).
 pub const DEFAULT_RECEIVE_WINDOW: u32 = 8 * 1024 * 1024;
@@ -226,137 +215,62 @@ fn route6_context(route: &str, section: Option<&str>) -> String {
     }
 }
 
-fn validate_vpn_network(
-    network: &str,
-    server_ip: Option<&str>,
-    section: &str,
-) -> Result<ipnet::Ipv4Net> {
-    let net: ipnet::Ipv4Net = network.parse().with_context(|| {
-        format!(
-            "[{}] Invalid network CIDR '{}'. Expected format: 10.0.0.0/24",
-            section, network
-        )
-    })?;
-
-    if let Some(server_ip_str) = server_ip {
-        let server_ip: std::net::Ipv4Addr = server_ip_str.parse().with_context(|| {
-            format!(
-                "[{}] Invalid server_ip '{}'. Expected IPv4 address",
-                section, server_ip_str
-            )
-        })?;
-        if !net.contains(&server_ip) {
-            anyhow::bail!(
-                "[{}] server_ip '{}' is not within network '{}'",
-                section,
-                server_ip,
-                network
-            );
-        }
-    }
-
-    Ok(net)
-}
-
-fn validate_vpn_network6(
-    network6: &str,
-    server_ip6: Option<&str>,
-    section: &str,
-) -> Result<ipnet::Ipv6Net> {
-    let net: ipnet::Ipv6Net = network6.parse().with_context(|| {
-        format!(
-            "[{}] Invalid network6 CIDR '{}'. Expected format: fd00::/64",
-            section, network6
-        )
-    })?;
-
-    if let Some(server_ip6_str) = server_ip6 {
-        let server_ip6: std::net::Ipv6Addr = server_ip6_str.parse().with_context(|| {
-            format!(
-                "[{}] Invalid server_ip6 '{}'. Expected IPv6 address",
-                section, server_ip6_str
-            )
-        })?;
-        if !net.contains(&server_ip6) {
-            anyhow::bail!(
-                "[{}] server_ip6 '{}' is not within network6 '{}'",
-                section,
-                server_ip6,
-                network6
-            );
-        }
-    }
-
-    Ok(net)
-}
-
 fn validate_vpn_networks(
     network: Option<&str>,
     server_ip: Option<&str>,
     network6: Option<&str>,
     server_ip6: Option<&str>,
+    ip6_strategy: Ip6Strategy,
     section: &str,
 ) -> Result<()> {
-    if network.is_none() && network6.is_none() {
-        anyhow::bail!(
-            "[{}] At least one of 'network' (IPv4) or 'network6' (IPv6) is required.",
-            section
-        );
-    }
+    // Parse the raw strings, then delegate the semantic rules to the shared
+    // validator in vpn_config (single source of truth with vpn_core).
+    let network: Option<ipnet::Ipv4Net> = network
+        .map(|n| {
+            n.parse().with_context(|| {
+                format!(
+                    "[{}] Invalid network CIDR '{}'. Expected format: 10.0.0.0/24",
+                    section, n
+                )
+            })
+        })
+        .transpose()?;
 
-    if server_ip.is_some() && network.is_none() {
-        anyhow::bail!("[{}] 'server_ip' requires 'network' to be set.", section);
-    }
-    if let Some(net) = network {
-        validate_vpn_network(net, server_ip, section)?;
-    }
+    let server_ip: Option<std::net::Ipv4Addr> = server_ip
+        .map(|ip| {
+            ip.parse().with_context(|| {
+                format!(
+                    "[{}] Invalid server_ip '{}'. Expected IPv4 address",
+                    section, ip
+                )
+            })
+        })
+        .transpose()?;
 
-    if server_ip6.is_some() && network6.is_none() {
-        anyhow::bail!("[{}] 'server_ip6' requires 'network6' to be set.", section);
-    }
-    if let Some(net6) = network6 {
-        validate_vpn_network6(net6, server_ip6, section)?;
-    }
+    let network6: Option<ipnet::Ipv6Net> = network6
+        .map(|n| {
+            n.parse().with_context(|| {
+                format!(
+                    "[{}] Invalid network6 CIDR '{}'. Expected format: fd00::/64",
+                    section, n
+                )
+            })
+        })
+        .transpose()?;
 
-    Ok(())
-}
+    let server_ip6: Option<std::net::Ipv6Addr> = server_ip6
+        .map(|ip| {
+            ip.parse().with_context(|| {
+                format!(
+                    "[{}] Invalid server_ip6 '{}'. Expected IPv6 address",
+                    section, ip
+                )
+            })
+        })
+        .transpose()?;
 
-fn validate_ip6_strategy(
-    strategy: Ip6Strategy,
-    network6: Option<&str>,
-    server_ip6: Option<&str>,
-    section: &str,
-) -> Result<()> {
-    if strategy != Ip6Strategy::NodeId {
-        return Ok(());
-    }
-
-    let Some(network6) = network6 else {
-        anyhow::bail!(
-            "[{}] ip6_strategy = \"node-id\" requires 'network6' to be set.",
-            section
-        );
-    };
-
-    // network6 syntax is validated separately; only check the prefix here if it parses
-    if let Ok(net) = network6.parse::<ipnet::Ipv6Net>() {
-        if net.prefix_len() > 64 {
-            anyhow::bail!(
-                "[{}] ip6_strategy = \"node-id\" requires an IPv6 subnet of /64 or wider (got /{}).",
-                section,
-                net.prefix_len()
-            );
-        }
-    }
-
-    if server_ip6.is_some() {
-        anyhow::bail!(
-            "[{}] 'server_ip6' cannot be combined with ip6_strategy = \"node-id\" (the server address is derived from the server node id).",
-            section
-        );
-    }
-
-    Ok(())
+    crate::vpn_config::validate_vpn_networks(network, server_ip, network6, server_ip6, ip6_strategy)
+        .map_err(|e| anyhow::anyhow!("[{}] {}", section, e))
 }
 
 fn default_drop_on_full() -> bool {
@@ -403,13 +317,7 @@ impl VpnServerConfig {
                 iroh.server_ip.as_deref(),
                 iroh.network6.as_deref(),
                 iroh.server_ip6.as_deref(),
-                "iroh",
-            )?;
-
-            validate_ip6_strategy(
                 iroh.ip6_strategy,
-                iroh.network6.as_deref(),
-                iroh.server_ip6.as_deref(),
                 "iroh",
             )?;
 
@@ -563,13 +471,7 @@ impl ResolvedVpnServerConfig {
             cfg.server_ip.as_deref(),
             cfg.network6.as_deref(),
             cfg.server_ip6.as_deref(),
-            "config",
-        )?;
-
-        validate_ip6_strategy(
             cfg.ip6_strategy,
-            cfg.network6.as_deref(),
-            cfg.server_ip6.as_deref(),
             "config",
         )?;
 

@@ -386,6 +386,11 @@ impl Ip6Pool {
             )));
         }
 
+        // Strategy constraints (also enforced at config validation; kept here
+        // for direct constructors/tests). No-op for sequential.
+        crate::vpn_config::validate_ip6_strategy(strategy, Some(network), server_ip)
+            .map_err(VpnError::config)?;
+
         let net_addr: u128 = network.network().into();
 
         match strategy {
@@ -414,18 +419,6 @@ impl Ip6Pool {
                 })
             }
             Ip6Strategy::NodeId => {
-                if prefix_len > 64 {
-                    return Err(VpnError::config(format!(
-                        "ip6_strategy 'node-id' requires an IPv6 subnet of /64 or wider (got /{})",
-                        prefix_len
-                    )));
-                }
-                if server_ip.is_some() {
-                    return Err(VpnError::config(
-                        "'server_ip6' cannot be combined with ip6_strategy 'node-id' (the server address is derived from the server node id)".to_string(),
-                    ));
-                }
-
                 let server_ip = derived_ip6(network, &server_id);
                 // The all-zero suffix is the subnet-router anycast address (~2^-64 chance)
                 if server_ip == network.network() {

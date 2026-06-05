@@ -7,6 +7,7 @@
 compile_error!("vpn-rs only supports Unix-like systems (Linux, macOS, BSD) and Windows");
 
 mod vpn_common;
+mod vpn_config;
 mod vpn_core;
 mod vpn_iroh;
 
@@ -345,21 +346,13 @@ async fn run_vpn_server(resolved: ResolvedVpnServerConfig) -> Result<()> {
         );
     };
 
-    // Map TOML-layer strategy to runtime strategy
-    let ip6_strategy = match resolved.ip6_strategy {
-        vpn_common::config::Ip6Strategy::Sequential => {
-            vpn_core::config::Ip6Strategy::Sequential
-        }
-        vpn_common::config::Ip6Strategy::NodeId => vpn_core::config::Ip6Strategy::NodeId,
-    };
-
     // Create VPN server config
     let config = VpnServerConfig {
         network,
         network6,
         server_ip,
         server_ip6,
-        ip6_strategy,
+        ip6_strategy: resolved.ip6_strategy,
         mtu: resolved.mtu,
         max_clients: 254,
         auth_tokens: Some(valid_tokens),
