@@ -9,13 +9,27 @@ use crate::vpn_core::offload::{
 };
 use bytes::{Bytes, BytesMut};
 use ipnet::{Ipv4Net, Ipv6Net};
+#[cfg(not(target_os = "macos"))]
 use std::future::poll_fn;
+#[cfg(target_os = "macos")]
+use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+#[cfg(target_os = "macos")]
+use std::os::fd::{AsRawFd, IntoRawFd, RawFd};
+#[cfg(not(target_os = "macos"))]
 use std::pin::Pin;
+#[cfg(target_os = "macos")]
+use std::sync::Arc;
 use std::time::Instant;
-use tokio::io::{AsyncRead, AsyncWriteExt, ReadBuf};
+#[cfg(target_os = "macos")]
+use tokio::io::unix::AsyncFd;
+#[cfg(not(target_os = "macos"))]
+use tokio::io::{AsyncRead, AsyncWriteExt};
+use tokio::io::ReadBuf;
 use tokio::process::Command;
-use tun::{AbstractDevice, AsyncDevice, Configuration, DeviceReader, DeviceWriter};
+#[cfg(not(target_os = "macos"))]
+use tun::{AsyncDevice, DeviceReader, DeviceWriter};
+use tun::{AbstractDevice, Configuration};
 
 #[cfg(target_os = "linux")]
 use std::os::fd::AsRawFd;
@@ -165,10 +179,42 @@ impl TunOffloadStatus {
     }
 }
 
+#[cfg(target_os = "macos")]
+struct MacosTunFd {
+    fd: RawFd,
+}
+
+#[cfg(target_os = "macos")]
+impl AsRawFd for MacosTunFd {
+    fn as_raw_fd(&self) -> RawFd {
+        self.fd
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for MacosTunFd {
+    fn drop(&mut self) {
+        if self.fd >= 0 {
+            // Best effort: there is no useful recovery path during TUN teardown.
+            unsafe {
+                libc::close(self.fd);
+            }
+            self.fd = -1;
+        }
+    }
+}
+
+enum TunDeviceInner {
+    #[cfg(not(target_os = "macos"))]
+    Async(AsyncDevice),
+    #[cfg(target_os = "macos")]
+    Macos(Arc<AsyncFd<MacosTunFd>>),
+}
+
 /// A managed TUN device with async I/O.
 pub struct TunDevice {
-    /// The underlying async TUN device.
-    device: AsyncDevice,
+    /// Platform-specific TUN handle.
+    device: TunDeviceInner,
     /// Device name.
     name: String,
     /// Configured MTU.
@@ -205,19 +251,55 @@ impl TunDevice {
             platform_config.vnet_hdr(true);
         });
 
-        // Create the async device
-        let device = tun::create_as_async(&tun_config)
-            .map_err(|e| VpnError::tun_device_with_source("Failed to create TUN device", e))?;
+        #[cfg(target_os = "macos")]
+        let (device, name, offload_status) = {
+            // macOS utun always carries a 4-byte packet-info header on the raw
+            // fd. The generic `tun` async wrapper strips/prepends that header by
+            // copying each packet. Keep the configured device but take ownership
+            // of the raw fd so reads use readv() and writes use writev().
+            let device = tun::create(&tun_config)
+                .map_err(|e| VpnError::tun_device_with_source("Failed to create TUN device", e))?;
+            let name = device
+                .tun_name()
+                .map_err(|e| VpnError::tun_device_with_source("Failed to get TUN name", e))?;
+            let raw_fd = device.into_raw_fd();
+            if let Err(e) = set_macos_nonblocking(raw_fd) {
+                unsafe {
+                    libc::close(raw_fd);
+                }
+                return Err(VpnError::tun_device_with_source(
+                    "Failed to set macOS TUN fd nonblocking",
+                    e,
+                ));
+            }
+            let fd = AsyncFd::new(MacosTunFd { fd: raw_fd }).map_err(|e| {
+                VpnError::tun_device_with_source("Failed to register macOS TUN fd", e)
+            })?;
+            (
+                TunDeviceInner::Macos(Arc::new(fd)),
+                name,
+                TunOffloadStatus::disabled("TUN offload not supported on macOS utun"),
+            )
+        };
 
-        let name = device
-            .tun_name()
-            .map_err(|e| VpnError::tun_device_with_source("Failed to get TUN name", e))?;
+        #[cfg(not(target_os = "macos"))]
+        let (device, name, offload_status) = {
+            // Create the async device
+            let device = tun::create_as_async(&tun_config)
+                .map_err(|e| VpnError::tun_device_with_source("Failed to create TUN device", e))?;
 
-        #[cfg(target_os = "linux")]
-        let offload_status = configure_linux_tun_offload(&device, config.enable_gso);
-        #[cfg(not(target_os = "linux"))]
-        let offload_status =
-            TunOffloadStatus::disabled("TUN offload not supported on this platform");
+            let name = device
+                .tun_name()
+                .map_err(|e| VpnError::tun_device_with_source("Failed to get TUN name", e))?;
+
+            #[cfg(target_os = "linux")]
+            let offload_status = configure_linux_tun_offload(&device, config.enable_gso);
+            #[cfg(not(target_os = "linux"))]
+            let offload_status =
+                TunOffloadStatus::disabled("TUN offload not supported on this platform");
+
+            (TunDeviceInner::Async(device), name, offload_status)
+        };
 
         #[cfg(target_os = "linux")]
         if offload_status.enabled {
@@ -230,6 +312,9 @@ impl TunDevice {
                 log::info!("Linux TUN GSO disabled on device {}: {}", name, reason);
             }
         }
+
+        #[cfg(target_os = "macos")]
+        log::info!("Using macOS raw utun fast path on device {}", name);
 
         log::info!("Created TUN device: {} with IP {}", name, config.address);
 
@@ -258,12 +343,12 @@ impl TunDevice {
         &self.offload_status
     }
 
-    /// Get the buffer size for reading packets (MTU + packet info header).
+    /// Get the buffer size for reading packets from this abstraction.
     pub fn buffer_size(&self) -> usize {
         if self.vnet_hdr_enabled {
             65535 + VIRTIO_NET_HDR_LEN
         } else {
-            self.mtu as usize + tun::PACKET_INFORMATION_LENGTH
+            self.mtu as usize
         }
     }
 
@@ -273,27 +358,60 @@ impl TunDevice {
         // Save buffer_size before moving self.device
         let buffer_size = self.buffer_size();
 
-        let (writer, reader) = self
-            .device
-            .split()
-            .map_err(|e| VpnError::tun_device_with_source("Failed to split TUN device", e))?;
+        match self.device {
+            #[cfg(target_os = "macos")]
+            TunDeviceInner::Macos(fd) => Ok((
+                TunReader {
+                    inner: TunReaderInner::Macos(fd.clone()),
+                    buffer_size,
+                    vnet_hdr_enabled: self.vnet_hdr_enabled,
+                    offload_status: self.offload_status.clone(),
+                },
+                TunWriter {
+                    inner: TunWriterInner::Macos(fd),
+                    vnet_hdr_enabled: self.vnet_hdr_enabled,
+                    offload_status: self.offload_status,
+                    scratch: BytesMut::with_capacity(buffer_size),
+                    groups: Vec::new(),
+                },
+            )),
+            #[cfg(not(target_os = "macos"))]
+            TunDeviceInner::Async(device) => {
+                let (writer, reader) = device.split().map_err(|e| {
+                    VpnError::tun_device_with_source("Failed to split TUN device", e)
+                })?;
 
-        Ok((
-            TunReader {
-                reader,
-                buffer_size,
-                vnet_hdr_enabled: self.vnet_hdr_enabled,
-                offload_status: self.offload_status.clone(),
-            },
-            TunWriter {
-                writer,
-                vnet_hdr_enabled: self.vnet_hdr_enabled,
-                offload_status: self.offload_status,
-                scratch: BytesMut::with_capacity(buffer_size),
-                groups: Vec::new(),
-            },
-        ))
+                Ok((
+                    TunReader {
+                        inner: TunReaderInner::Async(reader),
+                        buffer_size,
+                        vnet_hdr_enabled: self.vnet_hdr_enabled,
+                        offload_status: self.offload_status.clone(),
+                    },
+                    TunWriter {
+                        inner: TunWriterInner::Async(writer),
+                        vnet_hdr_enabled: self.vnet_hdr_enabled,
+                        offload_status: self.offload_status,
+                        scratch: BytesMut::with_capacity(buffer_size),
+                        groups: Vec::new(),
+                    },
+                ))
+            }
+        }
     }
+}
+
+#[cfg(target_os = "macos")]
+fn set_macos_nonblocking(fd: RawFd) -> io::Result<()> {
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let result = unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) };
+    if result < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]
@@ -340,9 +458,16 @@ fn configure_linux_tun_offload(device: &AsyncDevice, enable_gso: bool) -> TunOff
     TunOffloadStatus::enabled()
 }
 
+enum TunReaderInner {
+    #[cfg(not(target_os = "macos"))]
+    Async(DeviceReader),
+    #[cfg(target_os = "macos")]
+    Macos(Arc<AsyncFd<MacosTunFd>>),
+}
+
 /// Read half of a split TUN device.
 pub struct TunReader {
-    reader: DeviceReader,
+    inner: TunReaderInner,
     buffer_size: usize,
     vnet_hdr_enabled: bool,
     offload_status: TunOffloadStatus,
@@ -370,9 +495,16 @@ impl TunReader {
     /// zeroing large packet buffers while keeping initialized-byte tracking in
     /// Tokio's safe `ReadBuf` abstraction.
     pub async fn read_buf(&mut self, buf: &mut ReadBuf<'_>) -> VpnResult<()> {
-        poll_fn(|cx| Pin::new(&mut self.reader).poll_read(cx, buf))
-            .await
-            .map_err(VpnError::Network)
+        match &mut self.inner {
+            #[cfg(target_os = "macos")]
+            TunReaderInner::Macos(fd) => macos_read_buf(fd, buf).await,
+            #[cfg(not(target_os = "macos"))]
+            TunReaderInner::Async(reader) => {
+                poll_fn(|cx| Pin::new(&mut *reader).poll_read(cx, buf))
+                    .await
+                    .map_err(VpnError::Network)
+            }
+        }
     }
 
     /// Read a packet unless `deadline` arrives first.
@@ -394,9 +526,85 @@ impl TunReader {
     }
 }
 
+#[cfg(target_os = "macos")]
+async fn macos_read_buf(fd: &AsyncFd<MacosTunFd>, buf: &mut ReadBuf<'_>) -> VpnResult<()> {
+    loop {
+        let mut guard = fd.readable().await.map_err(VpnError::Network)?;
+        match guard.try_io(|inner| macos_read_packet(inner.get_ref().as_raw_fd(), buf)) {
+            Ok(result) => return result.map_err(VpnError::Network),
+            Err(_would_block) => continue,
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_read_packet(fd: RawFd, buf: &mut ReadBuf<'_>) -> io::Result<()> {
+    if buf.remaining() == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "macOS TUN read buffer is full",
+        ));
+    }
+
+    let mut packet_info = [0u8; tun::PACKET_INFORMATION_LENGTH];
+    let unfilled = buf.unfilled_mut();
+    let iov = [
+        libc::iovec {
+            iov_base: packet_info.as_mut_ptr() as *mut libc::c_void,
+            iov_len: packet_info.len(),
+        },
+        libc::iovec {
+            iov_base: unfilled.as_mut_ptr() as *mut libc::c_void,
+            iov_len: unfilled.len(),
+        },
+    ];
+    let amount = unsafe { libc::readv(fd, iov.as_ptr(), iov.len() as libc::c_int) };
+    if amount < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let amount = amount as usize;
+    if amount <= packet_info.len() {
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "macOS TUN frame did not contain an IP payload",
+        ));
+    }
+
+    validate_macos_packet_info(packet_info)?;
+    let payload_len = amount - packet_info.len();
+    unsafe {
+        // The kernel initialized exactly `payload_len` bytes in `unfilled` via
+        // the second iovec.
+        buf.assume_init(payload_len);
+    }
+    buf.advance(payload_len);
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn validate_macos_packet_info(
+    packet_info: [u8; tun::PACKET_INFORMATION_LENGTH],
+) -> io::Result<()> {
+    let protocol = u32::from_be_bytes(packet_info);
+    if protocol == libc::AF_INET as u32 || protocol == libc::AF_INET6 as u32 {
+        return Ok(());
+    }
+    Err(io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!("unsupported macOS utun packet protocol {}", protocol),
+    ))
+}
+
+enum TunWriterInner {
+    #[cfg(not(target_os = "macos"))]
+    Async(DeviceWriter),
+    #[cfg(target_os = "macos")]
+    Macos(Arc<AsyncFd<MacosTunFd>>),
+}
+
 /// Write half of a split TUN device.
 pub struct TunWriter {
-    writer: DeviceWriter,
+    inner: TunWriterInner,
     vnet_hdr_enabled: bool,
     offload_status: TunOffloadStatus,
     scratch: BytesMut,
@@ -429,18 +637,28 @@ impl TunWriter {
                     "cannot compose TUN frame with empty IP payload",
                 ));
             }
-            return self
-                .writer
-                .write_all(ip_packet)
-                .await
-                .map_err(VpnError::Network);
+            match &mut self.inner {
+                #[cfg(target_os = "macos")]
+                TunWriterInner::Macos(fd) => return macos_write_packet(fd, ip_packet).await,
+                #[cfg(not(target_os = "macos"))]
+                TunWriterInner::Async(writer) => {
+                    return writer.write_all(ip_packet).await.map_err(VpnError::Network);
+                }
+            }
         }
         compose_tun_frame(&mut self.scratch, self.vnet_hdr_enabled, offload, ip_packet)
             .map_err(VpnError::tun_device)?;
-        self.writer
-            .write_all(&self.scratch)
-            .await
-            .map_err(VpnError::Network)
+        match &mut self.inner {
+            #[cfg(target_os = "macos")]
+            TunWriterInner::Macos(_) => Err(VpnError::tun_device(
+                "macOS TUN writer cannot write vnet header frames",
+            )),
+            #[cfg(not(target_os = "macos"))]
+            TunWriterInner::Async(writer) => writer
+                .write_all(&self.scratch)
+                .await
+                .map_err(VpnError::Network),
+        }
     }
 
     /// Write a drained batch of plain IP packets to the TUN device.
@@ -480,10 +698,21 @@ impl TunWriter {
             }
             match assemble_tcp_gso_superframe(&mut self.scratch, &batch[start..end]) {
                 Ok(()) => {
-                    self.writer
-                        .write_all(&self.scratch)
-                        .await
-                        .map_err(VpnError::Network)?;
+                    match &mut self.inner {
+                        #[cfg(target_os = "macos")]
+                        TunWriterInner::Macos(_) => {
+                            return Err(VpnError::tun_device(
+                                "macOS TUN writer cannot write GSO super-frames",
+                            ));
+                        }
+                        #[cfg(not(target_os = "macos"))]
+                        TunWriterInner::Async(writer) => {
+                            writer
+                                .write_all(&self.scratch)
+                                .await
+                                .map_err(VpnError::Network)?;
+                        }
+                    }
                 }
                 Err(e) => {
                     // Defensive: the planner only emits coalescible runs, so
@@ -501,6 +730,76 @@ impl TunWriter {
         }
         Ok(())
     }
+}
+
+#[cfg(target_os = "macos")]
+async fn macos_write_packet(fd: &AsyncFd<MacosTunFd>, ip_packet: &[u8]) -> VpnResult<()> {
+    let packet_info = macos_packet_info_for_ip_packet(ip_packet).map_err(VpnError::Network)?;
+    loop {
+        let mut guard = fd.writable().await.map_err(VpnError::Network)?;
+        match guard.try_io(|inner| {
+            macos_write_packet_once(inner.get_ref().as_raw_fd(), &packet_info, ip_packet)
+        }) {
+            Ok(result) => return result.map_err(VpnError::Network),
+            Err(_would_block) => continue,
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_packet_info_for_ip_packet(
+    ip_packet: &[u8],
+) -> io::Result<[u8; tun::PACKET_INFORMATION_LENGTH]> {
+    let Some(first) = ip_packet.first() else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "cannot write empty packet to macOS TUN",
+        ));
+    };
+    let address_family = match first >> 4 {
+        4 => libc::AF_INET,
+        6 => libc::AF_INET6,
+        version => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("unsupported IP version {} for macOS TUN", version),
+            ))
+        }
+    };
+    Ok((address_family as u32).to_be_bytes())
+}
+
+#[cfg(target_os = "macos")]
+fn macos_write_packet_once(
+    fd: RawFd,
+    packet_info: &[u8; tun::PACKET_INFORMATION_LENGTH],
+    ip_packet: &[u8],
+) -> io::Result<()> {
+    let iov = [
+        libc::iovec {
+            iov_base: packet_info.as_ptr() as *mut libc::c_void,
+            iov_len: packet_info.len(),
+        },
+        libc::iovec {
+            iov_base: ip_packet.as_ptr() as *mut libc::c_void,
+            iov_len: ip_packet.len(),
+        },
+    ];
+    let amount = unsafe { libc::writev(fd, iov.as_ptr(), iov.len() as libc::c_int) };
+    if amount < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let expected = packet_info.len() + ip_packet.len();
+    if amount as usize != expected {
+        return Err(io::Error::new(
+            io::ErrorKind::WriteZero,
+            format!(
+                "short macOS TUN write: wrote {} of {} bytes",
+                amount, expected
+            ),
+        ));
+    }
+    Ok(())
 }
 
 /// Check if an error message indicates that a resource already exists.
