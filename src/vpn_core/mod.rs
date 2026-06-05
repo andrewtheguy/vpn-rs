@@ -32,6 +32,7 @@ pub mod config;
 pub mod device;
 pub mod error;
 pub mod file_config;
+pub mod frame_reader;
 pub mod lock;
 pub mod offload;
 pub mod paths;
