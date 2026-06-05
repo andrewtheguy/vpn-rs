@@ -547,7 +547,11 @@ fn macos_read_packet(fd: RawFd, buf: &mut ReadBuf<'_>) -> io::Result<()> {
     }
 
     let mut packet_info = [0u8; tun::PACKET_INFORMATION_LENGTH];
-    let unfilled = buf.unfilled_mut();
+    let unfilled = unsafe {
+        // `readv` writes into this region before we expose bytes via
+        // `assume_init` and `advance`.
+        buf.unfilled_mut()
+    };
     let iov = [
         libc::iovec {
             iov_base: packet_info.as_mut_ptr() as *mut libc::c_void,
