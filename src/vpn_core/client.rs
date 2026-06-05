@@ -21,13 +21,14 @@ use crate::vpn_core::offload::{
 use crate::vpn_core::paths::{format_connection_paths, watch_connection_paths};
 use crate::vpn_core::signaling::{
     append_ip_packet_v2, frame_capabilities_message, parse_ip_packet_v2, read_message,
-    write_message, CapabilitiesMessage, VpnHandshake, VpnHandshakeResponse, HEARTBEAT_PING_BYTE,
-    MAX_HANDSHAKE_SIZE, VPN_ALPN,
+    write_message, CapabilitiesMessage, VpnHandshake, VpnHandshakeResponse, WireTransport,
+    HEARTBEAT_PING_BYTE, MAX_HANDSHAKE_SIZE, VPN_ALPN,
 };
+use crate::vpn_core::transport::build_quic_transport_config;
 use bytes::{Bytes, BytesMut};
 use futures::StreamExt;
 use ipnet::{Ipv4Net, Ipv6Net};
-use iroh::endpoint::{PathList, RecvStream, SendStream};
+use iroh::endpoint::{ConnectOptions, PathList, RecvStream, SendStream};
 use iroh::{Endpoint, EndpointAddr, EndpointId, RelayUrl, TransportAddr};
 use rand::Rng;
 use std::collections::{HashMap, HashSet};
@@ -126,6 +127,10 @@ pub struct ServerInfo {
     pub server_ip6: Option<Ipv6Addr>,
     /// Whether server-side Linux TUN GSO is enabled.
     pub server_gso_enabled: bool,
+    /// QUIC transport settings dictated by the server.
+    pub transport: WireTransport,
+    /// MTU dictated by the server for the client TUN device.
+    pub mtu: u16,
 }
 
 impl VpnClient {
@@ -161,48 +166,78 @@ impl VpnClient {
     ///   iroh will attempt hole punching for direct P2P connections, falling back
     ///   to relay transport if needed.
     pub async fn connect(&self, endpoint: &Endpoint, relay_urls: &[String]) -> VpnResult<()> {
-        // Parse server endpoint ID
-        let server_id: EndpointId = self.config.server_node_id.parse().map_err(|e| {
-            VpnError::config_with_source(
-                format!("Invalid server node ID: {}", self.config.server_node_id),
-                e,
-            )
-        })?;
+        let endpoint_addr = self.resolve_server_addr(relay_urls)?;
 
-        log::info!("Connecting to VPN server: {}", server_id);
-
-        // Build EndpointAddr with relay hints if available.
-        // When DNS discovery is disabled, relay URLs are required for the
-        // connection to succeed. iroh uses the relay for initial connection
-        // routing while still attempting hole punching for direct P2P.
-        let endpoint_addr = if !relay_urls.is_empty() {
-            let mut addr = EndpointAddr::new(server_id);
-            for relay_url_str in relay_urls {
-                let relay_url: RelayUrl = relay_url_str.parse().map_err(|e| {
-                    VpnError::config_with_source(format!("Invalid relay URL: {}", relay_url_str), e)
-                })?;
-                addr = addr.with_relay_url(relay_url);
-            }
-            log::info!("Using {} relay hint(s) for connection", relay_urls.len());
-            addr
-        } else {
-            EndpointAddr::new(server_id)
-        };
-
-        // Connect to server
+        // Connect to server with the baseline transport tuning (the client
+        // endpoint defaults). The server dictates the effective transport
+        // settings in the handshake response.
         let connection = endpoint
-            .connect(endpoint_addr, VPN_ALPN)
+            .connect(endpoint_addr.clone(), VPN_ALPN)
             .await
             .map_err(|e| VpnError::Signaling(format!("Failed to connect to server: {}", e)))?;
 
         log::info!("Connected to server, performing handshake...");
 
+        // Perform handshake on first stream
+        let mut server_info = self.perform_handshake(&connection).await?;
+
+        // The congestion controller (and send window) cannot be changed on a
+        // live connection, so when the server dictates non-baseline transport
+        // settings, reconnect once with a per-connection transport config.
+        let baseline = WireTransport::default();
+        let connection = if server_info.transport == baseline {
+            connection
+        } else {
+            log::info!(
+                "Server dictates non-default transport settings (cc={:?}, receive={}KB, send={}KB), reconnecting to apply them...",
+                server_info.transport.congestion_controller,
+                server_info.transport.receive_window / 1024,
+                server_info.transport.send_window / 1024
+            );
+            connection.close(0u32.into(), b"transport upgrade");
+
+            let tuning = server_info.transport.to_tuning();
+            let transport_config = build_quic_transport_config(&tuning)
+                .map_err(|e| VpnError::Signaling(format!("Failed to build transport config: {}", e)))?;
+            let connection = endpoint
+                .connect_with_opts(
+                    endpoint_addr,
+                    VPN_ALPN,
+                    ConnectOptions::new().with_transport_config(transport_config),
+                )
+                .await
+                .map_err(|e| {
+                    VpnError::Signaling(format!("Failed to reconnect to server: {}", e))
+                })?
+                .await
+                .map_err(|e| {
+                    VpnError::Signaling(format!("Failed to reconnect to server: {}", e))
+                })?;
+
+            // Re-handshake on the upgraded connection. The server allocates
+            // the same addresses (keyed by endpoint ID + device ID).
+            let applied_transport = server_info.transport;
+            let new_info = self.perform_handshake(&connection).await?;
+            if new_info.transport != applied_transport {
+                // Server changed its answer mid-flight (e.g. restart with new
+                // config). Proceed with the connection we have instead of
+                // risking a reconnect loop.
+                log::warn!(
+                    "Server transport settings changed during reconnect (expected {:?}, got {:?}); continuing",
+                    applied_transport,
+                    new_info.transport
+                );
+            }
+            server_info = new_info;
+            // Keep the transport actually applied to this connection, not the
+            // second response's answer, so later logging reflects reality.
+            server_info.transport = applied_transport;
+            connection
+        };
+
         // Monitor and report connection path changes (e.g., relay -> direct)
         let _path_watcher = watch_connection_paths(&connection, "Connection");
         let _path_keypress = spawn_connection_path_keypress_logger(&connection);
-
-        // Perform handshake on first stream
-        let server_info = self.perform_handshake(&connection).await?;
 
         log::info!("Handshake successful:");
         // Log IPv4 info if provided
@@ -234,6 +269,13 @@ impl VpnClient {
             log::info!("  Mode: IPv4-only");
         }
         log::info!("  Server GSO enabled: {}", server_info.server_gso_enabled);
+        log::info!("  MTU (server-dictated): {}", server_info.mtu);
+        log::info!(
+            "  Transport (server-dictated): cc={:?}, receive={}KB, send={}KB",
+            server_info.transport.congestion_controller,
+            server_info.transport.receive_window / 1024,
+            server_info.transport.send_window / 1024
+        );
 
         // Create TUN device
         let tun_device = self.create_tun_device(&server_info)?;
@@ -311,7 +353,7 @@ impl VpnClient {
             }
         }
 
-        // Capabilities must be the first data-stream message in protocol v2.
+        // Capabilities must be the first data-stream message.
         let mut capabilities_buf = BytesMut::with_capacity(3);
         frame_capabilities_message(
             &mut capabilities_buf,
@@ -354,6 +396,37 @@ impl VpnClient {
             local_iroh_udp_ports,
         )
         .await
+    }
+
+    /// Resolve the server's `EndpointAddr` with relay hints if available.
+    ///
+    /// When DNS discovery is disabled, relay URLs are required for the
+    /// connection to succeed. iroh uses the relay for initial connection
+    /// routing while still attempting hole punching for direct P2P.
+    fn resolve_server_addr(&self, relay_urls: &[String]) -> VpnResult<EndpointAddr> {
+        // Parse server endpoint ID
+        let server_id: EndpointId = self.config.server_node_id.parse().map_err(|e| {
+            VpnError::config_with_source(
+                format!("Invalid server node ID: {}", self.config.server_node_id),
+                e,
+            )
+        })?;
+
+        log::info!("Connecting to VPN server: {}", server_id);
+
+        if relay_urls.is_empty() {
+            return Ok(EndpointAddr::new(server_id));
+        }
+
+        let mut addr = EndpointAddr::new(server_id);
+        for relay_url_str in relay_urls {
+            let relay_url: RelayUrl = relay_url_str.parse().map_err(|e| {
+                VpnError::config_with_source(format!("Invalid relay URL: {}", relay_url_str), e)
+            })?;
+            addr = addr.with_relay_url(relay_url);
+        }
+        log::info!("Using {} relay hint(s) for connection", relay_urls.len());
+        Ok(addr)
     }
 
     /// Perform VPN handshake with the server.
@@ -438,6 +511,8 @@ impl VpnClient {
             network6,
             server_ip6,
             server_gso_enabled: response.server_gso_enabled,
+            transport: response.transport,
+            mtu: response.mtu,
         })
     }
 
@@ -457,16 +532,16 @@ impl VpnClient {
             // Dual-stack: both IPv4 and IPv6
             (Some(ip4), Some(net4), Some(gw4), Some(ip6), Some(net6), Some(_gw6)) => {
                 TunConfig::new(ip4, net4.netmask(), gw4)
-                    .with_mtu(self.config.mtu)
+                    .with_mtu(server_info.mtu)
                     .with_ipv6(ip6, net6.prefix_len())?
             }
             // IPv4-only
             (Some(ip4), Some(net4), Some(gw4), None, None, None) => {
-                TunConfig::new(ip4, net4.netmask(), gw4).with_mtu(self.config.mtu)
+                TunConfig::new(ip4, net4.netmask(), gw4).with_mtu(server_info.mtu)
             }
             // IPv6-only
             (None, None, None, Some(ip6), Some(net6), Some(_gw6)) => {
-                TunConfig::ipv6_only(ip6, net6.prefix_len(), self.config.mtu)?
+                TunConfig::ipv6_only(ip6, net6.prefix_len(), server_info.mtu)?
             }
             // Invalid: should be caught earlier in perform_handshake
             _ => {

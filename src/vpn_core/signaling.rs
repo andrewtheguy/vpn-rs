@@ -7,6 +7,7 @@
 //! connection capabilities.
 
 use crate::vpn_core::error::{VpnError, VpnResult};
+use crate::vpn_core::file_config::{CongestionController, TransportTuning};
 use crate::vpn_core::offload::{VirtioNetHdr, VIRTIO_NET_HDR_LEN};
 use bytes::{BufMut, BytesMut};
 use ipnet::{Ipv4Net, Ipv6Net};
@@ -14,10 +15,10 @@ use serde::{Deserialize, Serialize};
 use std::net::{Ipv4Addr, Ipv6Addr};
 
 /// VPN protocol version.
-pub const VPN_PROTOCOL_VERSION: u16 = 2;
+pub const VPN_PROTOCOL_VERSION: u16 = 3;
 
 /// ALPN identifier for VPN mode.
-pub const VPN_ALPN: &[u8] = b"vpn-rs/2";
+pub const VPN_ALPN: &[u8] = b"vpn-rs/3";
 
 /// Bit flag indicating support for GSO metadata on data-stream packets.
 const CAPABILITIES_GSO_BIT: u8 = 1 << 0;
@@ -74,6 +75,50 @@ impl VpnHandshake {
     }
 }
 
+/// Concrete QUIC transport settings dictated by the server.
+///
+/// Unlike [`TransportTuning`] (config-shaped, with optional pre-default
+/// values), this carries fully resolved values so the client never has to
+/// replicate the server's defaulting logic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WireTransport {
+    /// Congestion controller algorithm both sides should use.
+    pub congestion_controller: CongestionController,
+    /// QUIC connection/stream receive window in bytes (post-default).
+    pub receive_window: u32,
+    /// QUIC send window in bytes (post-default).
+    pub send_window: u32,
+}
+
+impl WireTransport {
+    /// Resolve a config-shaped [`TransportTuning`] into concrete wire values.
+    pub fn from_tuning(tuning: &TransportTuning) -> Self {
+        let (receive_window, send_window) = tuning.effective_windows();
+        Self {
+            congestion_controller: tuning.congestion_controller,
+            receive_window,
+            send_window,
+        }
+    }
+
+    /// Convert back into a [`TransportTuning`] for transport-config building.
+    pub fn to_tuning(self) -> TransportTuning {
+        TransportTuning {
+            congestion_controller: self.congestion_controller,
+            receive_window: Some(self.receive_window),
+            send_window: Some(self.send_window),
+        }
+    }
+}
+
+impl Default for WireTransport {
+    /// The baseline every client connects with before learning the
+    /// server-dictated settings (must match the client endpoint defaults).
+    fn default() -> Self {
+        Self::from_tuning(&TransportTuning::default())
+    }
+}
+
 /// VPN handshake response from server to client.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VpnHandshakeResponse {
@@ -83,6 +128,10 @@ pub struct VpnHandshakeResponse {
     pub accepted: bool,
     /// Server-local TUN GSO/offload status.
     pub server_gso_enabled: bool,
+    /// QUIC transport settings the client must adopt.
+    pub transport: WireTransport,
+    /// MTU the client must use for its TUN device.
+    pub mtu: u16,
     /// Assigned VPN IP address for the client (IPv4).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assigned_ip: Option<Ipv4Addr>,
@@ -120,11 +169,15 @@ impl VpnHandshakeResponse {
         network: Ipv4Net,
         server_ip: Ipv4Addr,
         server_gso_enabled: bool,
+        transport: WireTransport,
+        mtu: u16,
     ) -> Self {
         Self {
             version: VPN_PROTOCOL_VERSION,
             accepted: true,
             server_gso_enabled,
+            transport,
+            mtu,
             assigned_ip: Some(assigned_ip),
             network: Some(network),
             server_ip: Some(server_ip),
@@ -136,6 +189,7 @@ impl VpnHandshakeResponse {
     }
 
     /// Create an accepted response with dual-stack (IPv4 + IPv6).
+    #[allow(clippy::too_many_arguments)]
     pub fn accepted_dual_stack(
         assigned_ip: Ipv4Addr,
         network: Ipv4Net,
@@ -144,11 +198,15 @@ impl VpnHandshakeResponse {
         network6: Ipv6Net,
         server_ip6: Ipv6Addr,
         server_gso_enabled: bool,
+        transport: WireTransport,
+        mtu: u16,
     ) -> Self {
         Self {
             version: VPN_PROTOCOL_VERSION,
             accepted: true,
             server_gso_enabled,
+            transport,
+            mtu,
             assigned_ip: Some(assigned_ip),
             network: Some(network),
             server_ip: Some(server_ip),
@@ -167,11 +225,15 @@ impl VpnHandshakeResponse {
         network6: Ipv6Net,
         server_ip6: Ipv6Addr,
         server_gso_enabled: bool,
+        transport: WireTransport,
+        mtu: u16,
     ) -> Self {
         Self {
             version: VPN_PROTOCOL_VERSION,
             accepted: true,
             server_gso_enabled,
+            transport,
+            mtu,
             assigned_ip: None,
             network: None,
             server_ip: None,
@@ -183,11 +245,16 @@ impl VpnHandshakeResponse {
     }
 
     /// Create a rejected response.
+    ///
+    /// Transport/MTU values are placeholders; clients ignore them when
+    /// `accepted == false`.
     pub fn rejected(reason: impl Into<String>, server_gso_enabled: bool) -> Self {
         Self {
             version: VPN_PROTOCOL_VERSION,
             accepted: false,
             server_gso_enabled,
+            transport: WireTransport::default(),
+            mtu: crate::vpn_core::file_config::DEFAULT_VPN_MTU,
             assigned_ip: None,
             network: None,
             server_ip: None,
@@ -550,16 +617,25 @@ mod tests {
 
     #[test]
     fn test_response_accepted_roundtrip() {
+        let transport = WireTransport {
+            congestion_controller: CongestionController::Bbr,
+            receive_window: 4 * 1024 * 1024,
+            send_window: 2 * 1024 * 1024,
+        };
         let response = VpnHandshakeResponse::accepted(
             "10.0.0.2".parse().expect("parse IPv4"),
             "10.0.0.0/24".parse().expect("parse network"),
             "10.0.0.1".parse().expect("parse server ip"),
             true,
+            transport,
+            1420,
         );
         let encoded = response.encode().expect("encode response");
         let decoded = VpnHandshakeResponse::decode(&encoded).expect("decode response");
         assert!(decoded.accepted);
         assert!(decoded.server_gso_enabled);
+        assert_eq!(decoded.transport, transport);
+        assert_eq!(decoded.mtu, 1420);
         assert_eq!(
             decoded.assigned_ip,
             Some("10.0.0.2".parse().expect("parse IPv4"))
@@ -583,6 +659,8 @@ mod tests {
             network6,
             server_ip6,
             false,
+            WireTransport::default(),
+            1440,
         );
 
         let encoded = response.encode().expect("encode response");
@@ -590,6 +668,8 @@ mod tests {
 
         assert!(decoded.accepted);
         assert!(!decoded.server_gso_enabled);
+        assert_eq!(decoded.transport, WireTransport::default());
+        assert_eq!(decoded.mtu, 1440);
         assert_eq!(decoded.assigned_ip, Some(assigned_ip));
         assert_eq!(decoded.network, Some(network));
         assert_eq!(decoded.server_ip, Some(server_ip));
@@ -615,8 +695,14 @@ mod tests {
         let network6: Ipv6Net = "fd00::/64".parse().expect("parse network6");
         let server_ip6: Ipv6Addr = "fd00::1".parse().expect("parse server ip6");
 
-        let response =
-            VpnHandshakeResponse::accepted_ipv6_only(assigned_ip6, network6, server_ip6, true);
+        let response = VpnHandshakeResponse::accepted_ipv6_only(
+            assigned_ip6,
+            network6,
+            server_ip6,
+            true,
+            WireTransport::default(),
+            1440,
+        );
 
         let encoded = response.encode().expect("encode response");
         let decoded = VpnHandshakeResponse::decode(&encoded).expect("decode response");
@@ -638,6 +724,8 @@ mod tests {
             version: VPN_PROTOCOL_VERSION,
             accepted: true,
             server_gso_enabled: false,
+            transport: WireTransport::default(),
+            mtu: 1440,
             assigned_ip: None,
             network: None,
             server_ip: None,
@@ -653,6 +741,45 @@ mod tests {
         let raw = serde_json::to_vec(&response).expect("serialize response");
         let decoded = VpnHandshakeResponse::decode(&raw);
         assert!(decoded.is_err());
+    }
+
+    #[test]
+    fn test_wire_transport_from_tuning_resolves_defaults() {
+        use crate::vpn_core::file_config::DEFAULT_RECEIVE_WINDOW;
+
+        // No windows configured: both fall back to the default receive window.
+        let wire = WireTransport::from_tuning(&TransportTuning::default());
+        assert_eq!(wire.congestion_controller, CongestionController::Cubic);
+        assert_eq!(wire.receive_window, DEFAULT_RECEIVE_WINDOW);
+        assert_eq!(wire.send_window, DEFAULT_RECEIVE_WINDOW);
+
+        // Send window defaults to the configured receive window.
+        let wire = WireTransport::from_tuning(&TransportTuning {
+            congestion_controller: CongestionController::Bbr,
+            receive_window: Some(1024),
+            send_window: None,
+        });
+        assert_eq!(wire.congestion_controller, CongestionController::Bbr);
+        assert_eq!(wire.receive_window, 1024);
+        assert_eq!(wire.send_window, 1024);
+
+        // Round-trip back into a fully-specified tuning.
+        let tuning = wire.to_tuning();
+        assert_eq!(tuning.congestion_controller, CongestionController::Bbr);
+        assert_eq!(tuning.receive_window, Some(1024));
+        assert_eq!(tuning.send_window, Some(1024));
+        assert_eq!(WireTransport::from_tuning(&tuning), wire);
+    }
+
+    #[test]
+    fn test_response_rejects_old_protocol_version() {
+        let mut response = VpnHandshakeResponse::rejected("nope", false);
+        response.version = 2;
+        let raw = serde_json::to_vec(&response).expect("serialize response");
+        let err = VpnHandshakeResponse::decode(&raw).expect_err("v2 response should be rejected");
+        assert!(err
+            .to_string()
+            .contains("Unsupported handshake response protocol version"));
     }
 
     #[test]

@@ -1,15 +1,15 @@
 //! Common endpoint helpers for iroh tunnel connections.
 
-use crate::vpn_core::file_config::{CongestionController, TransportTuning, DEFAULT_RECEIVE_WINDOW};
+use crate::vpn_core::file_config::TransportTuning;
+use crate::vpn_core::transport::build_quic_transport_config;
 use anyhow::{Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use iroh::{
     address_lookup::{DnsAddressLookup, PkarrPublisher, PkarrResolver},
-    endpoint::{presets, Builder as EndpointBuilder, ControllerFactory, QuicTransportConfig},
+    endpoint::{presets, Builder as EndpointBuilder},
     Endpoint, EndpointId, RelayMap, RelayMode, RelayUrl, SecretKey,
 };
 use iroh_mdns_address_lookup::MdnsAddressLookup;
-use noq_proto::congestion::{Bbr3Config, CubicConfig, NewRenoConfig};
 use log::info;
 use std::path::Path;
 use std::sync::Arc;
@@ -17,49 +17,6 @@ use std::time::Duration;
 use url::Url;
 
 pub const RELAY_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-
-/// QUIC keep-alive interval for tunnel connections.
-///
-/// Active connections send pings at this interval to prevent idle timeout.
-/// This value matches iroh's relay ping interval (15s), which is designed to be
-/// well under half common QUIC idle timeout defaults (30s is typical in many
-/// implementations and protocol discussions). This codebase uses a more generous
-/// [`QUIC_IDLE_TIMEOUT`] of 300s for long-running tunnels, but 15s keep-alive
-/// remains appropriate for NAT traversal and prompt dead-connection detection.
-///
-/// For long-running tunnels, 15s is a good balance between:
-/// - Keeping NAT mappings alive (most NAT timeouts are 30-120s)
-/// - Not wasting bandwidth with excessive pings
-/// - Detecting dead connections reasonably quickly
-///
-/// Reference: iroh uses 1s for endpoint default, 15s for relay pings.
-pub const QUIC_KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(15);
-
-/// QUIC idle timeout for tunnel connections.
-///
-/// Connections without activity (no data or keep-alive pings) for this duration
-/// are considered dead and closed. With QUIC_KEEP_ALIVE_INTERVAL enabled,
-/// this timeout only triggers for truly unresponsive connections.
-///
-/// 5 minutes is generous for tunnels where the underlying TCP/UDP connection
-/// may have long idle periods between bursts of activity.
-pub const QUIC_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
-
-/// Create a congestion controller factory based on the selected algorithm.
-fn create_congestion_controller_factory(
-    controller: CongestionController,
-) -> Arc<dyn ControllerFactory + Send + Sync> {
-    match controller {
-        CongestionController::Cubic => Arc::new(CubicConfig::default()),
-        CongestionController::Bbr => {
-            // noq-proto 1.0 removed the original BBR implementation; Bbr3 is
-            // its replacement but is marked experimental upstream.
-            info!("BBR congestion control is backed by the experimental Bbr3 implementation");
-            Arc::new(Bbr3Config::default())
-        }
-        CongestionController::NewReno => Arc::new(NewRenoConfig::default()),
-    }
-}
 
 /// Load secret key from file (base64 encoded).
 pub fn load_secret(path: &Path) -> Result<SecretKey> {
@@ -127,72 +84,15 @@ pub fn print_relay_status(relay_urls: &[String], relay_only: bool, using_custom_
 /// * `relay_only` - If true, only use relay connections (no direct P2P).
 /// * `dns_server` - Optional custom DNS server URL (e.g., "https://dns.example.com"), or "none" to disable DNS discovery
 /// * `secret_key` - Optional secret key (required for publishing to custom DNS server)
-/// * `transport_tuning` - Optional transport layer tuning (congestion control, buffer sizes)
+/// * `transport_tuning` - Transport layer tuning (congestion control, buffer sizes)
 pub fn create_endpoint_builder(
     relay_mode: RelayMode,
     relay_only: bool,
     dns_server: Option<&str>,
     secret_key: Option<&SecretKey>,
-    transport_tuning: Option<&TransportTuning>,
+    transport_tuning: &TransportTuning,
 ) -> Result<EndpointBuilder> {
-    // Configure transport with keep-alive and idle timeout.
-    // See QUIC_KEEP_ALIVE_INTERVAL and QUIC_IDLE_TIMEOUT constants for rationale.
-    let mut transport_config = QuicTransportConfig::builder();
-    let idle_timeout = QUIC_IDLE_TIMEOUT
-        .try_into()
-        .context("converting QUIC_IDLE_TIMEOUT to IdleTimeout")?;
-    transport_config = transport_config.max_idle_timeout(Some(idle_timeout));
-    transport_config = transport_config.keep_alive_interval(QUIC_KEEP_ALIVE_INTERVAL);
-
-    // Apply transport tuning if provided
-    if let Some(tuning) = transport_tuning {
-        // Set congestion controller
-        let factory = create_congestion_controller_factory(tuning.congestion_controller);
-        transport_config = transport_config.congestion_controller_factory(factory);
-        info!(
-            "Using {:?} congestion controller",
-            tuning.congestion_controller
-        );
-
-        // Set receive window (flow control) for connection + streams
-        let receive_window = tuning.receive_window.unwrap_or(DEFAULT_RECEIVE_WINDOW);
-        transport_config = transport_config.receive_window(receive_window.into());
-        transport_config = transport_config.stream_receive_window(receive_window.into());
-
-        // Set send window (defaults to receive window if not specified)
-        let send_window = tuning.send_window.unwrap_or(receive_window);
-        transport_config = transport_config.send_window(send_window.into());
-
-        info!(
-            "Iroh transport: cc={:?}, stream/receive={}KB, send={}KB",
-            tuning.congestion_controller,
-            receive_window / 1024,
-            send_window / 1024
-        );
-        let recv_source = if tuning.receive_window.is_none() {
-            "default"
-        } else {
-            "config"
-        };
-        let send_source = if tuning.send_window.is_none() {
-            if tuning.receive_window.is_none() {
-                "default"
-            } else {
-                "derived"
-            }
-        } else {
-            "config"
-        };
-        info!(
-            "Transport windows: stream/receive={}KB ({}), send={}KB ({})",
-            receive_window / 1024,
-            recv_source,
-            send_window / 1024,
-            send_source
-        );
-    }
-
-    let transport_config = transport_config.build();
+    let transport_config = build_quic_transport_config(transport_tuning)?;
     // iroh 1.0 requires the crypto provider to be set explicitly on the
     // builder when starting from the `Empty` preset — the `tls-ring` feature
     // only makes the ring backend available, it does not wire it in.
@@ -247,7 +147,7 @@ pub async fn create_server_endpoint(
     secret: Option<SecretKey>,
     dns_server: Option<&str>,
     alpn: &[u8],
-    transport_tuning: Option<&TransportTuning>,
+    transport_tuning: &TransportTuning,
 ) -> Result<Endpoint> {
     let relay_mode = parse_relay_mode(relay_urls)?;
     let using_custom_relay = !matches!(relay_mode, RelayMode::Default);
@@ -289,12 +189,14 @@ pub async fn create_server_endpoint(
 
 /// Create a client endpoint.
 /// If a secret key is provided, the client will use a persistent identity for authentication.
+///
+/// The endpoint is always built with default transport tuning (the baseline);
+/// server-dictated tuning is applied per-connection after the handshake.
 pub async fn create_client_endpoint(
     relay_urls: &[String],
     relay_only: bool,
     dns_server: Option<&str>,
     secret_key: Option<&SecretKey>,
-    transport_tuning: Option<&TransportTuning>,
 ) -> Result<Endpoint> {
     let relay_mode = parse_relay_mode(relay_urls)?;
     let using_custom_relay = !matches!(relay_mode, RelayMode::Default);
@@ -305,7 +207,7 @@ pub async fn create_client_endpoint(
         relay_only,
         dns_server,
         secret_key,
-        transport_tuning,
+        &TransportTuning::default(),
     )?;
 
     // Set the secret key for persistent identity (used for authentication)

@@ -15,9 +15,10 @@ use crate::vpn_core::offload::{
     GRO_FLUSH_WINDOW,
 };
 use crate::vpn_core::paths::watch_connection_paths;
+use crate::vpn_core::file_config::TransportTuning;
 use crate::vpn_core::signaling::{
     append_ip_packet_v2, parse_ip_packet_v2, read_message, write_message, CapabilitiesMessage,
-    DataMessageType, VpnHandshake, VpnHandshakeResponse, HEARTBEAT_PONG_BYTE,
+    DataMessageType, VpnHandshake, VpnHandshakeResponse, WireTransport, HEARTBEAT_PONG_BYTE,
     MAX_CAPABILITIES_PAYLOAD, MAX_HANDSHAKE_SIZE,
 };
 use bytes::{Bytes, BytesMut};
@@ -537,6 +538,8 @@ pub struct VpnServer {
     next_session_id: AtomicU64,
     /// Performance statistics (atomic counters, no locking overhead).
     stats: Arc<VpnServerStats>,
+    /// Resolved transport settings dictated to clients in the handshake.
+    wire_transport: WireTransport,
 }
 
 impl VpnServer {
@@ -544,7 +547,14 @@ impl VpnServer {
     ///
     /// `server_endpoint_id` is the server's own iroh node id, used to derive
     /// the server's IPv6 address in node-id strategy mode.
-    pub async fn new(config: VpnServerConfig, server_endpoint_id: EndpointId) -> VpnResult<Self> {
+    ///
+    /// `transport` is the server's transport tuning, resolved and dictated to
+    /// clients during the handshake.
+    pub async fn new(
+        config: VpnServerConfig,
+        server_endpoint_id: EndpointId,
+        transport: &TransportTuning,
+    ) -> VpnResult<Self> {
         // Validate configuration
         config.validate().map_err(VpnError::config)?;
 
@@ -589,6 +599,7 @@ impl VpnServer {
             active_connections: AtomicUsize::new(0),
             next_session_id: AtomicU64::new(1),
             stats: Arc::new(VpnServerStats::new()),
+            wire_transport: WireTransport::from_tuning(transport),
         })
     }
 
@@ -996,6 +1007,8 @@ impl VpnServer {
                     ip6_pool.network(),
                     ip6_pool.server_ip(),
                     self.tun_offload_status.enabled,
+                    self.wire_transport,
+                    self.config.mtu,
                 )
             }
             // IPv4-only
@@ -1006,6 +1019,8 @@ impl VpnServer {
                     ip_pool.network(),
                     ip_pool.server_ip(),
                     self.tun_offload_status.enabled,
+                    self.wire_transport,
+                    self.config.mtu,
                 )
             }
             // IPv6-only
@@ -1016,6 +1031,8 @@ impl VpnServer {
                     ip6_pool.network(),
                     ip6_pool.server_ip(),
                     self.tun_offload_status.enabled,
+                    self.wire_transport,
+                    self.config.mtu,
                 )
             }
             // Should not happen - checked above
@@ -1058,7 +1075,7 @@ impl VpnServer {
 
         log::info!("Client {} data stream established", remote_id);
 
-        // Capabilities must be the first data-stream message in protocol v2.
+        // Capabilities must be the first data-stream message.
         let mut first_type = [0u8; 1];
         data_recv
             .read_exact(&mut first_type)

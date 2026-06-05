@@ -38,6 +38,7 @@ pub mod offload;
 pub mod paths;
 pub mod server;
 pub mod signaling;
+pub mod transport;
 
 // Re-exports for convenience
 pub use client::VpnClient;

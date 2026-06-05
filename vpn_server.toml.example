@@ -75,16 +75,15 @@ network = "10.0.0.0/24"
 # Performance Tuning
 # ============================================================================
 
-# Linux GSO offload is automatic in protocol v2 (no config toggle).
+# Linux GSO offload is automatic (no config toggle).
 # On startup, server logs local TUN GSO status.
 # Per-client, server logs: `server_local`, `client_reported`, and `active` GSO status.
 
-# MTU for VPN packets (576-1500, default: 1420)
+# MTU for VPN packets (576-1500, default: 1440)
 # Lower values may help with fragmentation issues
+# NOTE: The MTU is dictated to clients during the handshake; clients do not
+# configure it themselves.
 # mtu = 1420
-
-# QUIC keepalive interval in seconds (10-300, default: 25)
-# keepalive_secs = 25
 
 # ============================================================================
 # Channel Buffer Sizes
@@ -192,6 +191,10 @@ auth_tokens = ["<YOUR_AUTH_TOKEN>"]  # Replace with real token from generate-tok
 # ============================================================================
 # Fine-tune QUIC transport layer for performance optimization.
 # All values have sensible defaults - only configure if needed.
+#
+# NOTE: These settings are dictated to clients during the handshake. Clients
+# always connect with defaults and reconnect once to apply non-default values,
+# so the server is the single source of truth for transport tuning.
 
 [iroh.transport]
 # Congestion controller algorithm (default: cubic)
