@@ -411,6 +411,25 @@ impl TunWriter {
         offload: Option<&crate::vpn_core::offload::VirtioNetHdr>,
         ip_packet: &[u8],
     ) -> VpnResult<()> {
+        if !self.vnet_hdr_enabled {
+            // No header to prepend: write the packet directly, skipping the
+            // scratch-buffer copy.
+            if offload.is_some() {
+                return Err(VpnError::tun_device(
+                    "received offload metadata but local TUN does not use vnet headers",
+                ));
+            }
+            if ip_packet.is_empty() {
+                return Err(VpnError::tun_device(
+                    "cannot compose TUN frame with empty IP payload",
+                ));
+            }
+            return self
+                .writer
+                .write_all(ip_packet)
+                .await
+                .map_err(VpnError::Network);
+        }
         compose_tun_frame(&mut self.scratch, self.vnet_hdr_enabled, offload, ip_packet)
             .map_err(VpnError::tun_device)?;
         self.writer

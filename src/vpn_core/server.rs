@@ -1748,8 +1748,12 @@ impl VpnServer {
         }
         let mut gro_states: HashMap<(EndpointId, u64), ClientGroState> = HashMap::new();
 
+        // Persistent ReadBuf: tracks the initialized region across iterations
+        // so the TUN reader's `initialize_unfilled()` only zeroes the buffer
+        // once instead of on every read.
+        let mut packet_buf = ReadBuf::uninit(&mut read_storage);
         loop {
-            let mut packet_buf = ReadBuf::uninit(&mut read_storage);
+            packet_buf.clear();
             let gro_pending =
                 software_gro && gro_states.values().any(|state| !state.table.is_empty());
             let read_result = if gro_pending {
@@ -1860,14 +1864,19 @@ impl VpnServer {
                             packet_tx: packet_tx.clone(),
                         });
                 // Keep the freshest sender in case the client reconnected.
-                state.packet_tx = packet_tx;
-                let outputs = state.table.push(packet_ref, Instant::now());
-                if !outputs.is_empty() {
-                    let packet_tx = state.packet_tx.clone();
-                    self.send_gro_outputs_to_client(&outputs, &mut arena, &packet_tx)
+                if !state.packet_tx.same_channel(&packet_tx) {
+                    state.packet_tx = packet_tx.clone();
+                }
+                let result = state.table.push(packet_ref, Instant::now());
+                if !result.outputs.is_empty() {
+                    self.send_gro_outputs_to_client(&result.outputs, &mut arena, &packet_tx)
                         .await;
                 }
-                continue;
+                if !result.pass_through {
+                    continue;
+                }
+                // Pass-through: fall through to the plain framing below,
+                // avoiding any packet copy.
             }
 
             if let Some(meta) = offload {
