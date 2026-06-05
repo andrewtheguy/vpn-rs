@@ -246,17 +246,13 @@ impl VpnServerConfig {
 }
 
 /// VPN client configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct VpnClientConfig {
     /// Server's iroh node ID.
     pub server_node_id: String,
 
     /// Authentication token (vpn-auth format: `v` + Base64URL payload).
     pub auth_token: Option<String>,
-
-    /// MTU for the TUN device.
-    #[serde(default = "default_mtu")]
-    pub mtu: u16,
 
     /// IPv4 routes to send through the VPN (CIDRs), e.g., 0.0.0.0/0 for full tunnel.
     /// Optional: with no routes configured, only the assigned VPN addresses are reachable.
@@ -266,18 +262,6 @@ pub struct VpnClientConfig {
     /// IPv6 routes to send through the VPN (CIDRs). Optional for dual-stack.
     #[serde(default)]
     pub routes6: Vec<Ipv6Net>,
-}
-
-impl Default for VpnClientConfig {
-    fn default() -> Self {
-        Self {
-            server_node_id: String::new(),
-            auth_token: None,
-            mtu: DEFAULT_MTU,
-            routes: vec![],
-            routes6: vec![],
-        }
-    }
 }
 
 impl VpnClientConfig {

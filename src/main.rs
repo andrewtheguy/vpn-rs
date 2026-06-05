@@ -69,10 +69,6 @@ enum Command {
         #[arg(short = 'n', long)]
         server_node_id: Option<String>,
 
-        /// MTU for VPN packets (default: 1440, valid range: 576-1500)
-        #[arg(long, value_parser = clap::value_parser!(u16).range(576..=1500))]
-        mtu: Option<u16>,
-
         /// Custom relay server URL(s) for failover
         #[arg(long = "relay-url")]
         relay_urls: Vec<String>,
@@ -219,7 +215,6 @@ async fn main() -> Result<()> {
             config,
             default_config,
             server_node_id,
-            mtu,
             relay_urls,
             dns_server,
             auth_token,
@@ -257,7 +252,6 @@ async fn main() -> Result<()> {
                 .apply_config(cfg.as_ref().and_then(|c| c.iroh()))
                 .apply_cli(
                     server_node_id,
-                    mtu,
                     auth_token,
                     auth_token_file.map(|p| expand_tilde(&p)),
                     routes,
@@ -370,7 +364,7 @@ async fn run_vpn_server(resolved: ResolvedVpnServerConfig) -> Result<()> {
         Some(secret_key),
         resolved.dns_server.as_deref(),
         VPN_ALPN,
-        Some(&resolved.transport),
+        &resolved.transport,
     )
     .await
     .context("Failed to create iroh endpoint")?;
@@ -382,7 +376,7 @@ async fn run_vpn_server(resolved: ResolvedVpnServerConfig) -> Result<()> {
     );
 
     // Create and run VPN server
-    let server = VpnServer::new(config, endpoint.id())
+    let server = VpnServer::new(config, endpoint.id(), &resolved.transport)
         .await
         .context("Failed to create VPN server")?;
 
@@ -438,7 +432,6 @@ async fn run_vpn_client(resolved: ResolvedVpnClientConfig) -> Result<()> {
     // Create VPN client config
     let config = VpnClientConfig {
         server_node_id: resolved.server_node_id.clone(),
-        mtu: resolved.mtu,
         auth_token: Some(token),
         routes: parsed_routes,
         routes6: parsed_routes6,
@@ -453,7 +446,6 @@ async fn run_vpn_client(resolved: ResolvedVpnClientConfig) -> Result<()> {
         false, // relay_only - direct P2P preferred for VPN performance
         resolved.dns_server.as_deref(),
         None, // No persistent secret key - ephemeral
-        Some(&resolved.transport),
     )
     .await
     .context("Failed to create iroh endpoint")?;

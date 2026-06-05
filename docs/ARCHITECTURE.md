@@ -92,10 +92,16 @@ sequenceDiagram
     S->>S: Validate auth token
     S->>S: Store client (EndpointId, device_id)
     S->>S: Allocate IP(s) from pool(s)
-    S-->>C: VpnHandshakeResponse {assigned_ip, network, server_ip, ...}
+    S-->>C: VpnHandshakeResponse {assigned_ip, network, server_ip, transport, mtu, ...}
+
+    Note over C,S: Transport Upgrade (only if server dictates non-default tuning)
+    C->>C: Compare dictated transport vs baseline
+    C->>CI: Close + reconnect with per-connection transport config
+    C->>S: VpnHandshake (re-handshake, same device_id → same IPs)
+    S-->>C: VpnHandshakeResponse
 
     Note over C,S: TUN Device Setup
-    C->>C: Create TUN device (tun0)
+    C->>C: Create TUN device (tun0, server-dictated MTU)
     C->>C: Assign IP(s) (10.0.0.2, fd00::2)
     C->>C: Configure routes
     S->>S: Create TUN device (tun0)
@@ -114,7 +120,7 @@ sequenceDiagram
 
 **`VpnHandshakeResponse` Fields:**
 
-The response includes different fields depending on the server's address configuration:
+The response includes different address fields depending on the server's address configuration:
 
 | Mode | Fields in Response |
 |------|-------------------|
@@ -123,6 +129,17 @@ The response includes different fields depending on the server's address configu
 | Dual-stack | All six fields: `assigned_ip`, `network`, `server_ip`, `assigned_ip6`, `network6`, `server_ip6` |
 
 When `network6` is configured on the server, clients receive IPv6 addresses alongside IPv4 (dual-stack) or IPv6-only if `network` is omitted.
+
+Every accepted response additionally carries the server-dictated settings (see "Server-Dictated Configuration" below): `transport` (`WireTransport`: congestion controller and concrete receive/send windows) and `mtu`.
+
+### Server-Dictated Configuration
+
+The server is the single source of truth for QUIC transport tuning (`[iroh.transport]`: congestion controller, receive/send windows) and the VPN `mtu`. Clients do not configure these; the server sends the fully resolved values in the handshake response and the client applies them:
+
+- **MTU**: the client creates its TUN device after the handshake, using the dictated `mtu` directly.
+- **Transport tuning**: the congestion controller (and send window) cannot be changed on a live QUIC connection, so the client always connects with the default baseline (cubic, 8 MB windows). If the dictated `transport` differs from that baseline, the client closes the connection and reconnects once with a per-connection transport config (`Endpoint::connect_with_opts`), then re-handshakes. The same `device_id` is reused, so the server's idempotent IP allocation returns the same addresses. When the server runs default tuning, no extra reconnect occurs.
+
+The shared builder (`build_quic_transport_config` in `src/vpn_core/transport.rs`) is used for both endpoint creation and the per-connection upgrade, so both paths apply identical keep-alive, idle-timeout, congestion-controller and window settings. The wire values are resolved via `TransportTuning::effective_windows()` on the server, guaranteeing they match what the server's own endpoint uses.
 
 ### Direct IP over QUIC Integration
 

@@ -36,16 +36,12 @@ auth_token = "<YOUR_AUTH_TOKEN>"  # Replace with real token from generate-token
 # Performance Tuning
 # ============================================================================
 
-# Linux GSO offload is automatic in protocol v2 (no config toggle).
+# Linux GSO offload is automatic (no config toggle).
 # Client connection logs report local, server, and negotiated GSO status.
 
-# MTU for VPN packets (576-1500, default: 1420)
-# Lower values may help with fragmentation issues
-mtu = 1420
-
-# QUIC keepalive interval in seconds (10-300, default: 25)
-# Lower values keep NAT mappings alive but increase overhead
-keepalive_secs = 25
+# MTU and QUIC transport tuning (congestion controller, receive/send windows)
+# are dictated by the server during the handshake and cannot be configured
+# on the client.
 
 # ============================================================================
 # Routing (Optional)
@@ -119,26 +115,3 @@ keepalive_secs = 25
 #   1. Common relay server - both specify the same relay_urls
 #   2. mDNS - automatic discovery on the same local network
 # dns_server = "none"
-
-# ============================================================================
-# Transport Tuning (Optional)
-# ============================================================================
-# Fine-tune QUIC transport layer for performance optimization.
-# All values have sensible defaults - only configure if needed.
-
-[iroh.transport]
-# Congestion controller algorithm (default: cubic)
-# - cubic: Loss-based, widely deployed, best for general internet
-# - bbr: Model-based, may perform better on high-bandwidth/high-latency links
-# - newreno: Classic TCP-like, most conservative
-# congestion_controller = "cubic"
-
-# QUIC receive window in bytes (default: 8388608 = 8MB)
-# Controls flow control - larger values allow more in-flight data
-# Valid range: 1024 (1KB) to 16777216 (16MB)
-# receive_window = 8388608
-
-# QUIC send window in bytes (default: 8388608 = 8MB)
-# Controls how much data can be sent before acknowledgment
-# Valid range: 1024 (1KB) to 16777216 (16MB)
-# send_window = 8388608
