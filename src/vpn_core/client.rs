@@ -622,13 +622,17 @@ impl VpnClient {
                     );
                 }
                 let mut gro_table = TcpGroTable::new();
+                // Persistent ReadBuf: tracks the initialized region across
+                // iterations so the TUN reader's `initialize_unfilled()` only
+                // zeroes the buffer once instead of on every read.
+                let mut packet_buf = ReadBuf::uninit(&mut read_storage);
                 loop {
-                    let mut packet_buf = ReadBuf::uninit(&mut read_storage);
+                    packet_buf.clear();
                     let read_result = if software_gro && !gro_table.is_empty() {
                         // Flush groups whose bounded wait has elapsed before
                         // arming the next deadline.
                         let expired = gro_table.flush_expired(Instant::now(), GRO_FLUSH_WINDOW);
-                        if !send_gro_outputs(expired, &mut arena, &outbound_tx).await {
+                        if !send_gro_outputs(&expired, &mut arena, &outbound_tx).await {
                             return None;
                         }
 
@@ -638,7 +642,8 @@ impl VpnClient {
                                 None => {
                                     let expired =
                                         gro_table.flush_expired(Instant::now(), GRO_FLUSH_WINDOW);
-                                    if !send_gro_outputs(expired, &mut arena, &outbound_tx).await {
+                                    if !send_gro_outputs(&expired, &mut arena, &outbound_tx).await
+                                    {
                                         return None;
                                     }
                                     continue;
@@ -673,11 +678,17 @@ impl VpnClient {
                             if software_gro {
                                 // Non-GSO TUN frames never carry offload metadata;
                                 // push the plain IP packet through the GRO table.
-                                let outputs = gro_table.push(packet, Instant::now());
-                                if !send_gro_outputs(outputs, &mut arena, &outbound_tx).await {
+                                let result = gro_table.push(packet, Instant::now());
+                                if !send_gro_outputs(&result.outputs, &mut arena, &outbound_tx)
+                                    .await
+                                {
                                     return None;
                                 }
-                                continue;
+                                if !result.pass_through {
+                                    continue;
+                                }
+                                // Pass-through: fall through to the plain
+                                // framing below, avoiding any packet copy.
                             }
 
                             if let Some(meta) = offload {
@@ -750,7 +761,7 @@ impl VpnClient {
                         Err(e) => {
                             log::error!("TUN read error: {}", e);
                             // Flush pending coalesced groups before shutting down.
-                            send_gro_outputs(gro_table.flush_all(), &mut arena, &outbound_tx)
+                            send_gro_outputs(&gro_table.flush_all(), &mut arena, &outbound_tx)
                                 .await;
                             return Some(format!("TUN read error: {}", e));
                         }
@@ -1601,7 +1612,7 @@ fn collect_local_iroh_udp_ports(endpoint: &Endpoint) -> HashSet<u16> {
 ///
 /// Returns false if the outbound channel is closed.
 async fn send_gro_outputs(
-    outputs: Vec<CoalescedOutput>,
+    outputs: &[CoalescedOutput],
     arena: &mut BytesMut,
     outbound_tx: &mpsc::Sender<Bytes>,
 ) -> bool {
@@ -1619,7 +1630,7 @@ async fn send_gro_outputs(
         );
     }
 
-    for output in &outputs {
+    for output in outputs {
         let (offload, packet) = match output {
             CoalescedOutput::Coalesced(hdr, packet) => (Some(hdr), packet.as_slice()),
             CoalescedOutput::Single(packet) => (None, packet.as_slice()),
