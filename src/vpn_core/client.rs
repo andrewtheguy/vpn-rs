@@ -216,18 +216,22 @@ impl VpnClient {
 
             // Re-handshake on the upgraded connection. The server allocates
             // the same addresses (keyed by endpoint ID + device ID).
+            let applied_transport = server_info.transport;
             let new_info = self.perform_handshake(&connection).await?;
-            if new_info.transport != server_info.transport {
+            if new_info.transport != applied_transport {
                 // Server changed its answer mid-flight (e.g. restart with new
                 // config). Proceed with the connection we have instead of
                 // risking a reconnect loop.
                 log::warn!(
                     "Server transport settings changed during reconnect (expected {:?}, got {:?}); continuing",
-                    server_info.transport,
+                    applied_transport,
                     new_info.transport
                 );
             }
             server_info = new_info;
+            // Keep the transport actually applied to this connection, not the
+            // second response's answer, so later logging reflects reality.
+            server_info.transport = applied_transport;
             connection
         };
 
