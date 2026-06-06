@@ -11,8 +11,7 @@ use crate::vpn_core::device::{TunConfig, TunDevice, TunOffloadStatus};
 use crate::vpn_core::error::{VpnError, VpnResult};
 use crate::vpn_core::frame_reader::{FrameError, FrameEvent, FrameReader};
 use crate::vpn_core::offload::{
-    materialize_offload_into, split_tun_frame, CoalescedOutput, TcpGroTable, VirtioNetHdr,
-    GRO_FLUSH_WINDOW,
+    materialize_offload_into, CoalescedOutput, TcpGroTable, VirtioNetHdr, GRO_FLUSH_WINDOW,
 };
 use crate::vpn_core::paths::watch_connection_paths;
 use crate::vpn_core::file_config::TransportTuning;
@@ -1831,7 +1830,7 @@ impl VpnServer {
             self.stats.tun_packets_read.fetch_add(1, Ordering::Relaxed);
 
             let (offload, packet_ref) =
-                match split_tun_frame(raw_frame, tun_reader.vnet_hdr_enabled()) {
+                match tun_reader.split_frame(raw_frame) {
                     Ok(parts) => parts,
                     Err(e) => {
                         log::warn!("Failed to parse TUN frame from server device: {}", e);

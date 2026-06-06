@@ -38,6 +38,11 @@
 
 ## macOS Performance Tuning
 
+On macOS, `vpn-rs` uses the kernel `utun` interface directly. The packet hot path
+keeps the 4-byte `utun` address-family header in the read buffer and uses vectored
+writes for `[header, packet]`, avoiding the extra packet copy that generic TUN
+wrappers often pay when adding or removing that header.
+
 QUIC requests large UDP socket buffers, but macOS clamps `SO_RCVBUF`/`SO_SNDBUF` to
 `kern.ipc.maxsockbuf`, which is small by default. An undersized buffer causes UDP drops
 under load, which QUIC sees as packet loss and answers with congestion backoff, capping

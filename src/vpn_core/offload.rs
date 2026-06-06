@@ -154,6 +154,7 @@ pub fn split_tun_frame(
 ///
 /// If `vnet_hdr_enabled` is true, a 10-byte virtio header is prepended. If no
 /// offload header is provided, a zeroed header is used for plain packets.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 pub fn compose_tun_frame(
     out: &mut BytesMut,
     vnet_hdr_enabled: bool,
