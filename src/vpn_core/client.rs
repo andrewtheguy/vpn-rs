@@ -15,8 +15,7 @@ use crate::vpn_core::error::{VpnError, VpnResult};
 use crate::vpn_core::frame_reader::{FrameEvent, FrameReader};
 use crate::vpn_core::lock::VpnLock;
 use crate::vpn_core::offload::{
-    materialize_offload_into, split_tun_frame, CoalescedOutput, TcpGroTable, VirtioNetHdr,
-    GRO_FLUSH_WINDOW,
+    materialize_offload_into, CoalescedOutput, TcpGroTable, VirtioNetHdr, GRO_FLUSH_WINDOW,
 };
 use crate::vpn_core::paths::{format_connection_paths, watch_connection_paths};
 use crate::vpn_core::signaling::{
@@ -734,7 +733,7 @@ impl VpnClient {
                         Ok(()) if !packet_buf.filled().is_empty() => {
                             let raw_packet = packet_buf.filled();
                             let (offload, packet) =
-                                match split_tun_frame(raw_packet, tun_reader.vnet_hdr_enabled()) {
+                                match tun_reader.split_frame(raw_packet) {
                                     Ok(parts) => parts,
                                     Err(e) => {
                                         log::warn!("Failed to parse TUN frame: {}", e);

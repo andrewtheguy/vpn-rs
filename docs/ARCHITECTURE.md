@@ -202,6 +202,7 @@ The outbound loops on both sides are a `tokio::select!` between the TUN read and
 - **Batched writes**: writers drain up to `WRITE_BATCH_SIZE` (256) framed packets per `recv_many` and submit them with one `write_all_chunks` call.
 - **Framing arena**: frames are appended to a long-lived 64 KB `BytesMut` (`append_ip_packet_v2`) and split off as refcounted `Bytes` views, so the allocator is hit once per arena chunk instead of once per packet.
 - **Zero-copy sends**: `Bytes` flow from framing through the channel to the QUIC write without copying.
+- **macOS utun fast path**: Darwin TUN splitting duplicates the `utun` fd and drives it with `AsyncFd` directly. Reads fill the packet arena with the 4-byte address-family prefix still attached, then strip that prefix by slicing; writes use `writev([prefix, packet])` so the IP packet does not need to be copied into a temporary header-prepended buffer.
 
 ### IP Pool Management
 
