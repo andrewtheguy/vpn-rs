@@ -837,11 +837,10 @@ impl VpnServer {
         tun_reader_handle.abort();
 
         // Wait for TUN writer to drain any remaining packets and exit
-        if let Err(e) = tun_writer_handle.await {
-            if !e.is_cancelled() {
+        if let Err(e) = tun_writer_handle.await
+            && !e.is_cancelled() {
                 log::warn!("TUN writer task panicked: {}", e);
             }
-        }
 
         log::info!("TUN tasks shutdown complete");
         Ok(())
@@ -1292,18 +1291,16 @@ impl VpnServer {
 
         if let Some((endpoint_id, dev_id)) = endpoint_to_release {
             // Release IPv4 if allocated for this session
-            if release_ipv4 {
-                if let Some(ref ip_pool) = ip_pool {
+            if release_ipv4
+                && let Some(ref ip_pool) = ip_pool {
                     ip_pool.write().await.release(&endpoint_id, dev_id);
                 }
-            }
 
             // Release IPv6 if allocated for this session
-            if release_ipv6 {
-                if let Some(ref ip6_pool) = ip6_pool {
+            if release_ipv6
+                && let Some(ref ip6_pool) = ip6_pool {
                     ip6_pool.write().await.release(&endpoint_id, dev_id);
                 }
-            }
         }
 
         result
@@ -1915,8 +1912,8 @@ impl VpnServer {
                 // avoiding any packet copy.
             }
 
-            if let Some(meta) = offload {
-                if !connection_gso_active {
+            if let Some(meta) = offload
+                && !connection_gso_active {
                     log::trace!(
                         "Materializing offload metadata for {} dev {} (client_gso_enabled={})",
                         endpoint_id,
@@ -1959,7 +1956,6 @@ impl VpnServer {
                     }
                     continue;
                 }
-            }
 
             let frame_size = 1
                 + 4
@@ -2730,11 +2726,10 @@ mod tests {
         packet_to_client[0] = 0x45; // IPv4
         packet_to_client[16..20].copy_from_slice(&client_ip.octets());
 
-        if let Some(PacketIp::V4(dest)) = extract_dest_ip(&packet_to_client) {
-            if ip_to_endpoint.get(&dest).is_none() {
+        if let Some(PacketIp::V4(dest)) = extract_dest_ip(&packet_to_client)
+            && ip_to_endpoint.get(&dest).is_none() {
                 stats.packets_no_route.fetch_add(1, Ordering::Relaxed);
             }
-        }
         assert_eq!(stats.packets_no_route.load(Ordering::Relaxed), 0);
 
         // Create packet destined for unknown IP - should increment no_route
@@ -2743,11 +2738,10 @@ mod tests {
         packet_to_unknown[0] = 0x45; // IPv4
         packet_to_unknown[16..20].copy_from_slice(&unknown_ip.octets());
 
-        if let Some(PacketIp::V4(dest)) = extract_dest_ip(&packet_to_unknown) {
-            if ip_to_endpoint.get(&dest).is_none() {
+        if let Some(PacketIp::V4(dest)) = extract_dest_ip(&packet_to_unknown)
+            && ip_to_endpoint.get(&dest).is_none() {
                 stats.packets_no_route.fetch_add(1, Ordering::Relaxed);
             }
-        }
         assert_eq!(stats.packets_no_route.load(Ordering::Relaxed), 1);
 
         // Packet destined outside network entirely
@@ -2756,11 +2750,10 @@ mod tests {
         packet_external[0] = 0x45;
         packet_external[16..20].copy_from_slice(&external_ip.octets());
 
-        if let Some(PacketIp::V4(dest)) = extract_dest_ip(&packet_external) {
-            if !network.contains(&dest) || ip_to_endpoint.get(&dest).is_none() {
+        if let Some(PacketIp::V4(dest)) = extract_dest_ip(&packet_external)
+            && (!network.contains(&dest) || ip_to_endpoint.get(&dest).is_none()) {
                 stats.packets_no_route.fetch_add(1, Ordering::Relaxed);
             }
-        }
         assert_eq!(stats.packets_no_route.load(Ordering::Relaxed), 2);
     }
 

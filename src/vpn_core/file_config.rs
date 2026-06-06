@@ -404,11 +404,10 @@ pub fn expand_tilde(path: &Path) -> PathBuf {
         if let Some(home) = dirs::home_dir() {
             return home.join(stripped);
         }
-    } else if path_str == "~" {
-        if let Some(home) = dirs::home_dir() {
+    } else if path_str == "~"
+        && let Some(home) = dirs::home_dir() {
             return home;
         }
-    }
     path.to_path_buf()
 }
 
