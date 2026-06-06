@@ -101,6 +101,12 @@ pub fn create_endpoint_builder(
         .transport_config(transport_config)
         .crypto_provider(Arc::new(rustls::crypto::ring::default_provider()));
 
+    #[cfg(target_os = "macos")]
+    info!(
+        "Batched UDP datapath (sendmsg_x/recvmsg_x) compiled in; \
+         activation is logged by netwatch at debug level"
+    );
+
     if relay_only {
         builder = builder.clear_ip_transports();
     }

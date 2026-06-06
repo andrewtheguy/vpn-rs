@@ -179,9 +179,13 @@ pub fn validate_transport_tuning(tuning: &TransportTuning, section: &str) -> Res
 }
 
 fn validate_mtu(mtu: u16, section: &str) -> Result<()> {
-    if !(576..=1500).contains(&mtu) {
+    // Packets ride a reliable QUIC stream, so the tunnel MTU is decoupled from
+    // the outer path MTU. Values above 1500 ("jumbo" tunnel MTU) reduce
+    // per-packet TUN syscall overhead, which matters most on macOS where utun
+    // has no batching or offload APIs.
+    if mtu < 576 {
         anyhow::bail!(
-            "[{}] MTU {} is out of range. Valid range: 576-1500",
+            "[{}] MTU {} is out of range. Valid range: 576-65535",
             section,
             mtu
         );
@@ -749,6 +753,20 @@ auth_tokens = ["token"]
         let config: VpnServerConfig = toml::from_str(&toml_str).unwrap();
         let err = config.validate().unwrap_err().to_string();
         assert!(err.contains("requires 'network6'"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn test_mtu_accepts_jumbo_values() {
+        let config: VpnServerConfig =
+            toml::from_str(&server_toml("mtu = 16000")).unwrap();
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_mtu_rejects_below_minimum() {
+        let config: VpnServerConfig = toml::from_str(&server_toml("mtu = 500")).unwrap();
+        let err = config.validate().unwrap_err().to_string();
+        assert!(err.contains("out of range"), "unexpected error: {err}");
     }
 
     #[test]

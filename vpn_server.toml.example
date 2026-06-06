@@ -79,10 +79,20 @@ network = "10.0.0.0/24"
 # On startup, server logs local TUN GSO status.
 # Per-client, server logs: `server_local`, `client_reported`, and `active` GSO status.
 
-# MTU for VPN packets (576-1500, default: 1440)
+# MTU for VPN packets (576-65535, default: 1440)
 # Lower values may help with fragmentation issues
 # NOTE: The MTU is dictated to clients during the handshake; clients do not
 # configure it themselves.
+#
+# Jumbo tunnel MTU: packets are carried over a reliable QUIC stream, so the
+# tunnel MTU is independent of the physical path MTU — values above 1500 do
+# NOT cause fragmentation. A larger MTU means fewer, bigger packets through
+# the TUN device, which significantly reduces per-packet syscall overhead on
+# macOS clients (utun has no batching/offload APIs; Linux gets the same
+# effect from GSO/GRO automatically). Trade-off: on lossy paths, larger
+# packets slightly increase head-of-line blocking latency for interactive
+# traffic. Suggested starting point for throughput-oriented setups with
+# macOS clients: 8000-16000. See docs/MACOS_PERFORMANCE.md.
 # mtu = 1420
 
 # ============================================================================

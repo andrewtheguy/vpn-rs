@@ -2300,8 +2300,7 @@ dependencies = [
 [[package]]
 name = "netwatch"
 version = "0.18.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2071e0c2b5b229622c459096b84f1ad51afa150cdeeefdad491ef3704e581d91"
+source = "git+https://github.com/andrewchen5678/net-tools?branch=apple-fast-datapath#129d2e86ed6fe617424191c18d38f046b9711e6c"
 dependencies = [
  "atomic-waker",
  "bytes",
@@ -4126,6 +4125,7 @@ dependencies = [
  "libc",
  "log",
  "mock_instant",
+ "netwatch",
  "noq-proto",
  "rand 0.9.4",
  "rand_chacha",
