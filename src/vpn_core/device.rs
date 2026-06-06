@@ -438,7 +438,7 @@ impl DarwinTunReader {
 fn read_utun_frame_into(fd: RawFd, buf: &mut ReadBuf<'_>) -> io::Result<()> {
     if buf.remaining() == 0 {
         return Err(io::Error::new(
-            io::ErrorKind::WriteZero,
+            io::ErrorKind::InvalidInput,
             "utun read buffer is full",
         ));
     }
