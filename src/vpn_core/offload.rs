@@ -154,6 +154,7 @@ pub fn split_tun_frame(
 ///
 /// If `vnet_hdr_enabled` is true, a 10-byte virtio header is prepended. If no
 /// offload header is provided, a zeroed header is used for plain packets.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub fn compose_tun_frame(
     out: &mut BytesMut,
     vnet_hdr_enabled: bool,
@@ -194,6 +195,7 @@ pub fn compose_tun_frame(
 // ---------------------------------------------------------------------------
 
 /// TCP flag bits that disqualify a segment from coalescing (FIN/SYN/RST/URG).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 const TCP_FLAGS_NO_COALESCE: u8 = 0x01 | 0x02 | 0x04 | 0x20;
 
 /// Parsed coalescing-relevant fields of a plain (no vnet header) TCP segment.
@@ -201,6 +203,7 @@ const TCP_FLAGS_NO_COALESCE: u8 = 0x01 | 0x02 | 0x04 | 0x20;
 /// Only produced by [`parse_coalescible_tcp`] for segments that satisfy the
 /// per-packet coalescing rules.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub struct TcpSegmentMeta {
     pub is_ipv6: bool,
     /// IP header length: always 20 (IPv4, no options) or 40 (IPv6, no
@@ -212,6 +215,7 @@ pub struct TcpSegmentMeta {
 }
 
 impl TcpSegmentMeta {
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     fn header_len(&self) -> usize {
         self.ip_header_len + self.tcp_header_len
     }
@@ -225,6 +229,7 @@ impl TcpSegmentMeta {
 /// headers, ECN-marked packets (avoids `VIRTIO_NET_HDR_GSO_ECN` handling),
 /// segments carrying SYN/FIN/RST/URG, empty payloads, and packets whose IP
 /// length fields disagree with the buffer length.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub fn parse_coalescible_tcp(packet: &[u8]) -> Option<TcpSegmentMeta> {
     let version = *packet.first()? >> 4;
     let (is_ipv6, ip_header_len) = match version {
@@ -311,6 +316,7 @@ pub fn parse_coalescible_tcp(packet: &[u8]) -> Option<TcpSegmentMeta> {
 /// ([`segment_tcp_gso_into`]), which copies one identical header (including
 /// options such as timestamps) across all segments of a burst, so identical-
 /// options matching re-merges exactly those bursts.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn can_chain(a: &[u8], ma: &TcpSegmentMeta, b: &[u8], mb: &TcpSegmentMeta) -> bool {
     if ma.is_ipv6 != mb.is_ipv6 || ma.tcp_header_len != mb.tcp_header_len {
         return false;
@@ -349,6 +355,7 @@ fn can_chain(a: &[u8], ma: &TcpSegmentMeta, b: &[u8], mb: &TcpSegmentMeta) -> bo
 /// segments with uniform payload size (only the final member may be smaller;
 /// a smaller member closes the run) whose merged IP length stays within
 /// `u16::MAX`. Every other packet becomes a `(i, i + 1, false)` passthrough.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub fn plan_tun_write_groups(batch: &[Bytes], out: &mut Vec<(usize, usize, bool)>) {
     out.clear();
     let mut i = 0;
@@ -392,6 +399,7 @@ pub fn plan_tun_write_groups(batch: &[Bytes], out: &mut Vec<(usize, usize, bool)
 /// the kernel expects in the TCP checksum field of a `NEEDS_CSUM` frame.
 ///
 /// `tcp_len` is the TCP header plus payload length covered by the frame.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn tcp_pseudo_header_partial(ip_packet: &[u8], is_ipv6: bool, tcp_len: usize) -> u16 {
     let mut sum = 0u32;
     if is_ipv6 {
@@ -418,6 +426,7 @@ fn tcp_pseudo_header_partial(ip_packet: &[u8], is_ipv6: bool, tcp_len: usize) ->
 /// `segments[0]`'s; the kernel renumbers per re-segmented packet. Merged
 /// IPv4 segments' distinct IP IDs collapse to `segments[0]`'s — the kernel
 /// assigns incrementing IDs on re-segmentation, same as real GRO/GSO.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub fn assemble_tcp_gso_superframe(out: &mut BytesMut, segments: &[Bytes]) -> Result<(), String> {
     if segments.len() < 2 {
         return Err(format!(

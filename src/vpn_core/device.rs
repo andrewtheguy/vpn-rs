@@ -4,10 +4,13 @@
 //! for VPN traffic.
 
 use crate::vpn_core::error::{VpnError, VpnResult};
+#[cfg(target_os = "linux")]
 use crate::vpn_core::offload::{
     assemble_tcp_gso_superframe, compose_tun_frame, plan_tun_write_groups, VIRTIO_NET_HDR_LEN,
 };
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
+#[cfg(target_os = "linux")]
+use bytes::BytesMut;
 use ipnet::{Ipv4Net, Ipv6Net};
 use std::future::poll_fn;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -171,12 +174,21 @@ pub struct TunDevice {
     device: AsyncDevice,
     /// Device name.
     name: String,
-    /// Configured MTU.
+    /// Configured MTU. Only read on non-Linux, where [`TunDevice::buffer_size`]
+    /// is MTU-sized; Linux sizes buffers for 64 KiB GSO super-frames instead.
+    #[cfg_attr(target_os = "linux", allow(dead_code))]
     mtu: u16,
-    /// Whether this TUN device uses vnet headers in read/write frames.
-    vnet_hdr_enabled: bool,
     /// Linux GSO/offload status for this device.
     offload_status: TunOffloadStatus,
+}
+
+/// Whether TUN read/write frames carry the 10-byte Linux vnet header.
+///
+/// Compile-time constant: only Linux supports vnet headers and batched
+/// GSO writes; macOS (utun) and Windows (wintun) write one plain IP
+/// packet per syscall with no offload support.
+const fn vnet_hdr_enabled() -> bool {
+    cfg!(target_os = "linux")
 }
 
 impl TunDevice {
@@ -243,7 +255,6 @@ impl TunDevice {
             device,
             name,
             mtu: config.mtu,
-            vnet_hdr_enabled: cfg!(target_os = "linux"),
             offload_status,
         })
     }
@@ -260,9 +271,12 @@ impl TunDevice {
 
     /// Get the buffer size for reading packets (MTU + packet info header).
     pub fn buffer_size(&self) -> usize {
-        if self.vnet_hdr_enabled {
+        #[cfg(target_os = "linux")]
+        {
             65535 + VIRTIO_NET_HDR_LEN
-        } else {
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
             self.mtu as usize + tun::PACKET_INFORMATION_LENGTH
         }
     }
@@ -282,14 +296,14 @@ impl TunDevice {
             TunReader {
                 reader,
                 buffer_size,
-                vnet_hdr_enabled: self.vnet_hdr_enabled,
                 offload_status: self.offload_status.clone(),
             },
             TunWriter {
                 writer,
-                vnet_hdr_enabled: self.vnet_hdr_enabled,
                 offload_status: self.offload_status,
+                #[cfg(target_os = "linux")]
                 scratch: BytesMut::with_capacity(buffer_size),
+                #[cfg(target_os = "linux")]
                 groups: Vec::new(),
             },
         ))
@@ -344,7 +358,6 @@ fn configure_linux_tun_offload(device: &AsyncDevice, enable_gso: bool) -> TunOff
 pub struct TunReader {
     reader: DeviceReader,
     buffer_size: usize,
-    vnet_hdr_enabled: bool,
     offload_status: TunOffloadStatus,
 }
 
@@ -355,8 +368,8 @@ impl TunReader {
     }
 
     /// Return true if raw TUN reads include the 10-byte Linux vnet header.
-    pub fn vnet_hdr_enabled(&self) -> bool {
-        self.vnet_hdr_enabled
+    pub const fn vnet_hdr_enabled(&self) -> bool {
+        vnet_hdr_enabled()
     }
 
     /// Get local offload status associated with this TUN reader.
@@ -397,10 +410,13 @@ impl TunReader {
 /// Write half of a split TUN device.
 pub struct TunWriter {
     writer: DeviceWriter,
-    vnet_hdr_enabled: bool,
     offload_status: TunOffloadStatus,
+    /// Reusable frame-assembly buffer for vnet-header composition and GSO
+    /// super-frames (Linux only; other platforms write plain IP directly).
+    #[cfg(target_os = "linux")]
     scratch: BytesMut,
     /// Reusable group-plan buffer for [`TunWriter::write_batch`].
+    #[cfg(target_os = "linux")]
     groups: Vec<(usize, usize, bool)>,
 }
 
@@ -411,31 +427,38 @@ impl TunWriter {
     }
 
     /// Write an IP packet to the TUN device, optionally including offload metadata.
+    #[cfg(not(target_os = "linux"))]
     pub async fn write_packet(
         &mut self,
         offload: Option<&crate::vpn_core::offload::VirtioNetHdr>,
         ip_packet: &[u8],
     ) -> VpnResult<()> {
-        if !self.vnet_hdr_enabled {
-            // No header to prepend: write the packet directly, skipping the
-            // scratch-buffer copy.
-            if offload.is_some() {
-                return Err(VpnError::tun_device(
-                    "received offload metadata but local TUN does not use vnet headers",
-                ));
-            }
-            if ip_packet.is_empty() {
-                return Err(VpnError::tun_device(
-                    "cannot compose TUN frame with empty IP payload",
-                ));
-            }
-            return self
-                .writer
-                .write_all(ip_packet)
-                .await
-                .map_err(VpnError::Network);
+        // No vnet header to prepend: write the packet directly, skipping any
+        // scratch-buffer copy.
+        if offload.is_some() {
+            return Err(VpnError::tun_device(
+                "received offload metadata but local TUN does not use vnet headers",
+            ));
         }
-        compose_tun_frame(&mut self.scratch, self.vnet_hdr_enabled, offload, ip_packet)
+        if ip_packet.is_empty() {
+            return Err(VpnError::tun_device(
+                "cannot compose TUN frame with empty IP payload",
+            ));
+        }
+        self.writer
+            .write_all(ip_packet)
+            .await
+            .map_err(VpnError::Network)
+    }
+
+    /// Write an IP packet to the TUN device, optionally including offload metadata.
+    #[cfg(target_os = "linux")]
+    pub async fn write_packet(
+        &mut self,
+        offload: Option<&crate::vpn_core::offload::VirtioNetHdr>,
+        ip_packet: &[u8],
+    ) -> VpnResult<()> {
+        compose_tun_frame(&mut self.scratch, true, offload, ip_packet)
             .map_err(VpnError::tun_device)?;
         self.writer
             .write_all(&self.scratch)
@@ -445,20 +468,25 @@ impl TunWriter {
 
     /// Write a drained batch of plain IP packets to the TUN device.
     ///
-    /// When vnet headers are enabled (Linux with GSO offload), consecutive
-    /// same-flow TCP segments are coalesced into a single `virtio_net_hdr`
-    /// GSO super-frame and written in one syscall, letting the kernel
-    /// re-segment (GRO-like). Everything else — and every packet when vnet
-    /// headers are disabled — is written per-packet, identical to calling
+    /// macOS (utun) and Windows (wintun) have no batching or GSO API, so
+    /// each packet is written individually, identical to calling
     /// [`TunWriter::write_packet`] for each.
+    #[cfg(not(target_os = "linux"))]
     pub async fn write_batch(&mut self, batch: &[Bytes]) -> VpnResult<()> {
-        if !self.vnet_hdr_enabled {
-            for packet in batch {
-                self.write_packet(None, packet).await?;
-            }
-            return Ok(());
+        for packet in batch {
+            self.write_packet(None, packet).await?;
         }
+        Ok(())
+    }
 
+    /// Write a drained batch of plain IP packets to the TUN device.
+    ///
+    /// Consecutive same-flow TCP segments are coalesced into a single
+    /// `virtio_net_hdr` GSO super-frame and written in one syscall, letting
+    /// the kernel re-segment (GRO-like). Everything else is written
+    /// per-packet, identical to calling [`TunWriter::write_packet`] for each.
+    #[cfg(target_os = "linux")]
+    pub async fn write_batch(&mut self, batch: &[Bytes]) -> VpnResult<()> {
         // Take the plan buffer so `plan_tun_write_groups` can fill it while
         // `self` stays borrowable for the writes; put it back for reuse.
         let mut groups = std::mem::take(&mut self.groups);
@@ -468,6 +496,7 @@ impl TunWriter {
         result
     }
 
+    #[cfg(target_os = "linux")]
     async fn write_planned_groups(
         &mut self,
         batch: &[Bytes],
