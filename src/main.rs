@@ -227,11 +227,10 @@ async fn main() -> Result<()> {
         } => {
             // Load config file if specified
             let (cfg, from_file) = resolve_client_config(config, default_config)?;
-            if from_file {
-                if let Some(ref c) = cfg {
+            if from_file
+                && let Some(ref c) = cfg {
                     c.validate()?;
                 }
-            }
 
             // Convert mutually exclusive flags to Option<bool>
             // --auto-reconnect => Some(true), --no-auto-reconnect => Some(false), neither => None

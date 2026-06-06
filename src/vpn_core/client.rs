@@ -765,8 +765,8 @@ impl VpnClient {
                                 // framing below, avoiding any packet copy.
                             }
 
-                            if let Some(meta) = offload {
-                                if !negotiated_gso {
+                            if let Some(meta) = offload
+                                && !negotiated_gso {
                                     // Segment directly into the framing arena:
                                     // each emitted segment is framed in place
                                     // and handed out as a refcounted Bytes
@@ -800,7 +800,6 @@ impl VpnClient {
                                     }
                                     continue;
                                 }
-                            }
 
                             // Append frame to the arena and split it off as a Bytes view
                             let frame_size = 1
@@ -1191,12 +1190,11 @@ impl VpnClient {
                     }
 
                     // Check max attempts (None = unlimited)
-                    if let Some(max) = max_attempts {
-                        if attempt >= max.get() {
+                    if let Some(max) = max_attempts
+                        && attempt >= max.get() {
                             log::error!("Max reconnection attempts ({}) exceeded", max);
                             return Err(VpnError::MaxReconnectAttemptsExceeded(max));
                         }
-                    }
 
                     // Calculate backoff delay
                     let delay = calculate_backoff(attempt);

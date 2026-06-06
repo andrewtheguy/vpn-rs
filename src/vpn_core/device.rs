@@ -1897,14 +1897,13 @@ pub async fn add_bypass_route(
     // Query current route to this IP before adding any VPN routes
     let route_info = query_route_for_ip(peer_ip).await?;
 
-    if let Some(disallowed) = disallow_device {
-        if route_info.device == disallowed {
+    if let Some(disallowed) = disallow_device
+        && route_info.device == disallowed {
             return Err(VpnError::tun_device(format!(
                 "Refusing bypass route for {}: route lookup resolved via VPN tunnel interface {}",
                 peer_ip, disallowed
             )));
         }
-    }
 
     log::info!(
         "Adding bypass route for ICE peer {} via {} (gateway: {:?})",

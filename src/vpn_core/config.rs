@@ -86,14 +86,13 @@ pub fn validate_vpn_networks(
     }
 
     // server_ip must be within network
-    if let (Some(server_ip), Some(network)) = (server_ip, network) {
-        if !network.contains(&server_ip) {
+    if let (Some(server_ip), Some(network)) = (server_ip, network)
+        && !network.contains(&server_ip) {
             return Err(format!(
                 "'server_ip' {} is not within 'network' {}",
                 server_ip, network
             ));
         }
-    }
 
     // server_ip6 requires network6
     if server_ip6.is_some() && network6.is_none() {
@@ -101,14 +100,13 @@ pub fn validate_vpn_networks(
     }
 
     // server_ip6 must be within network6
-    if let (Some(server_ip6), Some(network6)) = (server_ip6, network6) {
-        if !network6.contains(&server_ip6) {
+    if let (Some(server_ip6), Some(network6)) = (server_ip6, network6)
+        && !network6.contains(&server_ip6) {
             return Err(format!(
                 "'server_ip6' {} is not within 'network6' {}",
                 server_ip6, network6
             ));
         }
-    }
 
     validate_ip6_strategy(ip6_strategy, network6, server_ip6)
 }

@@ -1365,11 +1365,9 @@ impl TcpGroTable {
                 .iter()
                 .min_by_key(|(_, g)| g.order)
                 .map(|(k, _)| *k)
-            {
-                if let Some(group) = self.groups.remove(&oldest) {
+                && let Some(group) = self.groups.remove(&oldest) {
                     Self::emit(group, out);
                 }
-            }
         }
 
         let order = self.next_order;
