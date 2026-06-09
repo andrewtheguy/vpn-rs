@@ -1,27 +1,32 @@
 //! Buffered frame reader for the VPN data channel.
 //!
-//! Replaces per-frame `read_exact` sequences (type byte, length, payload) with
-//! a single accumulator fed by large `RecvStream::read_chunk` pulls. Complete
-//! frames are parsed synchronously from the buffer, so the QUIC stream is only
-//! awaited when more data is genuinely needed — typically once per many frames
-//! instead of three times per frame.
+//! Reads protocol headers exactly and fills payload buffers directly from the
+//! QUIC stream. Payloads are read into `BytesMut` spare capacity via
+//! `ReadBuf::uninit`, avoiding zero-fill before the stream overwrites those
+//! bytes.
 
-use bytes::{Buf, Bytes, BytesMut};
+#[cfg(test)]
+use bytes::Buf;
+use bytes::{Bytes, BytesMut};
 use iroh::endpoint::RecvStream;
+use std::future::poll_fn;
+use std::mem::MaybeUninit;
+use std::pin::Pin;
+use tokio::io::{AsyncRead, ReadBuf};
 
-use crate::vpn_core::signaling::DataMessageType;
+use crate::vpn_core::signaling::{DataMessageType, MAX_CAPABILITIES_PAYLOAD};
 
-/// Max bytes pulled per `read_chunk` call. Bounds a single buffered read so
-/// the accumulator stays small; the QUIC receive window still governs total
-/// in-flight data.
-const READ_CHUNK_MAX: usize = 256 * 1024;
+/// Reserve granularity for exact-read payload storage. Completed frame payloads
+/// are split out as `Bytes`, while unused tail capacity remains available for
+/// later reads.
+const FRAME_READ_ARENA_CHUNK: usize = 64 * 1024;
 
 /// One parsed data-channel message.
 #[derive(Debug)]
 pub enum FrameEvent {
     /// IP packet v2 frame payload (the bytes after type + frame length:
-    /// offload_len byte + optional virtio header + IP packet). Zero-copy view
-    /// into the accumulator; run `parse_ip_packet_v2` on it.
+    /// offload_len byte + optional virtio header + IP packet). Run
+    /// `parse_ip_packet_v2` on it.
     IpFrame(Bytes),
     HeartbeatPing,
     HeartbeatPong,
@@ -53,7 +58,50 @@ impl std::fmt::Display for FrameError {
     }
 }
 
-/// Buffered reader that owns the data-channel `RecvStream`.
+#[derive(Debug)]
+enum ExactReadError {
+    FinishedEarly(usize),
+    Read(std::io::Error),
+}
+
+/// Read until `read_buf` is full without requiring an initialized `&mut [u8]`.
+///
+/// This mirrors iroh's `RecvStream::read_exact`, but works with
+/// `ReadBuf::uninit` so payload storage can be filled without a zeroing pass.
+async fn read_exact_uninit<R>(
+    reader: &mut R,
+    read_buf: &mut ReadBuf<'_>,
+) -> Result<(), ExactReadError>
+where
+    R: AsyncRead + Unpin,
+{
+    let initial_filled = read_buf.filled().len();
+    while read_buf.remaining() > 0 {
+        let before = read_buf.filled().len();
+        poll_fn(|cx| Pin::new(&mut *reader).poll_read(cx, read_buf))
+            .await
+            .map_err(ExactReadError::Read)?;
+        let after = read_buf.filled().len();
+        if after == before {
+            return Err(ExactReadError::FinishedEarly(
+                after.saturating_sub(initial_filled),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn map_exact_read_error(error: ExactReadError, context: &str, expected: usize) -> FrameError {
+    match error {
+        ExactReadError::FinishedEarly(read) => FrameError::Read(format!(
+            "stream ended mid-{} ({} of {} bytes)",
+            context, read, expected
+        )),
+        ExactReadError::Read(e) => FrameError::Read(format!("failed to read {}: {}", context, e)),
+    }
+}
+
+/// Exact frame reader that owns the data-channel `RecvStream`.
 pub struct FrameReader {
     stream: RecvStream,
     buf: BytesMut,
@@ -69,33 +117,96 @@ impl FrameReader {
         }
     }
 
-    /// Pull the next complete frame, awaiting the stream only when the
-    /// accumulator lacks one. Returns `Ok(None)` on clean end of stream.
+    /// Pull the next complete frame. Returns `Ok(None)` on clean end of stream.
     pub async fn next_frame(&mut self) -> Result<Option<FrameEvent>, FrameError> {
-        loop {
-            if let Some(event) = parse_one(&mut self.buf, self.max_ip_frame)? {
-                return Ok(Some(event));
-            }
-            match self.stream.read_chunk(READ_CHUNK_MAX).await {
-                Ok(Some(chunk)) => self.buf.extend_from_slice(&chunk),
-                Ok(None) => {
-                    return if self.buf.is_empty() {
-                        Ok(None)
-                    } else {
-                        Err(FrameError::Read(format!(
-                            "stream ended mid-frame ({} buffered bytes)",
-                            self.buf.len()
-                        )))
-                    };
+        let Some(type_byte) = self.read_message_type().await? else {
+            return Ok(None);
+        };
+
+        match DataMessageType::from_byte(type_byte) {
+            None => Err(FrameError::UnknownType(type_byte)),
+            Some(DataMessageType::HeartbeatPing) => Ok(Some(FrameEvent::HeartbeatPing)),
+            Some(DataMessageType::HeartbeatPong) => Ok(Some(FrameEvent::HeartbeatPong)),
+            Some(DataMessageType::Capabilities) => {
+                let mut len_buf = [0u8; 1];
+                self.read_exact_stack(&mut len_buf, "capabilities length")
+                    .await?;
+
+                let payload_len = usize::from(len_buf[0]);
+                if payload_len > 0 {
+                    let mut discard = [MaybeUninit::<u8>::uninit(); MAX_CAPABILITIES_PAYLOAD];
+                    let mut read_buf = ReadBuf::uninit(&mut discard[..payload_len]);
+                    read_exact_uninit(&mut self.stream, &mut read_buf).await.map_err(|e| {
+                        map_exact_read_error(e, "capabilities payload", payload_len)
+                    })?;
                 }
-                Err(e) => return Err(FrameError::Read(e.to_string())),
+
+                Ok(Some(FrameEvent::Capabilities))
+            }
+            Some(DataMessageType::IpPacket) => {
+                let mut len_buf = [0u8; 4];
+                self.read_exact_stack(&mut len_buf, "IP frame length")
+                    .await?;
+
+                let frame_len = u32::from_be_bytes(len_buf) as usize;
+                if frame_len > self.max_ip_frame {
+                    return Err(FrameError::FrameTooLarge(frame_len));
+                }
+
+                let frame = self.read_frame_payload(frame_len).await?;
+                Ok(Some(FrameEvent::IpFrame(frame)))
             }
         }
+    }
+
+    async fn read_message_type(&mut self) -> Result<Option<u8>, FrameError> {
+        let mut type_buf = [0u8; 1];
+        let mut read_buf = ReadBuf::new(&mut type_buf);
+        match read_exact_uninit(&mut self.stream, &mut read_buf).await {
+            Ok(()) => Ok(Some(type_buf[0])),
+            Err(ExactReadError::FinishedEarly(0)) => Ok(None),
+            Err(e) => Err(map_exact_read_error(e, "message type", 1)),
+        }
+    }
+
+    async fn read_exact_stack(
+        &mut self,
+        buf: &mut [u8],
+        context: &str,
+    ) -> Result<(), FrameError> {
+        let expected = buf.len();
+        let mut read_buf = ReadBuf::new(buf);
+        read_exact_uninit(&mut self.stream, &mut read_buf)
+            .await
+            .map_err(|e| map_exact_read_error(e, context, expected))
+    }
+
+    async fn read_frame_payload(&mut self, frame_len: usize) -> Result<Bytes, FrameError> {
+        debug_assert!(self.buf.is_empty());
+        if self.buf.capacity() < frame_len {
+            self.buf.reserve(FRAME_READ_ARENA_CHUNK.max(frame_len));
+        }
+
+        {
+            let spare = self.buf.spare_capacity_mut();
+            let mut read_buf = ReadBuf::uninit(&mut spare[..frame_len]);
+            read_exact_uninit(&mut self.stream, &mut read_buf)
+                .await
+                .map_err(|e| map_exact_read_error(e, "IP frame payload", frame_len))?;
+        }
+
+        // SAFETY: the exact read above initialized exactly `frame_len` bytes
+        // in `spare_capacity_mut`, starting at the current empty buffer tail.
+        unsafe {
+            self.buf.set_len(frame_len);
+        }
+        Ok(self.buf.split_to(frame_len).freeze())
     }
 }
 
 /// Parse one complete frame from the front of `buf`, consuming its bytes.
 /// Returns `Ok(None)` when the buffer does not yet hold a complete frame.
+#[cfg(test)]
 fn parse_one(buf: &mut BytesMut, max_ip_frame: usize) -> Result<Option<FrameEvent>, FrameError> {
     let Some(&type_byte) = buf.first() else {
         return Ok(None);
@@ -150,6 +261,7 @@ mod tests {
         append_ip_packet_v2, frame_capabilities_message, parse_ip_packet_v2, CapabilitiesMessage,
         HEARTBEAT_PING_BYTE, HEARTBEAT_PONG_BYTE,
     };
+    use tokio::io::AsyncWriteExt;
 
     const TEST_MAX_FRAME: usize = 65536 + 64;
 
@@ -296,5 +408,37 @@ mod tests {
             Some(FrameEvent::Capabilities)
         ));
         assert!(buf.is_empty(), "payload must be fully consumed");
+    }
+
+    #[tokio::test]
+    async fn read_exact_uninit_fills_uninitialized_storage() {
+        let (mut writer, mut reader) = tokio::io::duplex(2);
+        let writer_task = tokio::spawn(async move {
+            writer.write_all(b"hello").await.expect("write payload");
+        });
+
+        let mut storage = [MaybeUninit::<u8>::uninit(); 5];
+        let mut read_buf = ReadBuf::uninit(&mut storage);
+        read_exact_uninit(&mut reader, &mut read_buf)
+            .await
+            .expect("exact read");
+
+        assert_eq!(read_buf.filled(), b"hello");
+        writer_task.await.expect("writer task");
+    }
+
+    #[tokio::test]
+    async fn read_exact_uninit_reports_early_eof() {
+        let (mut writer, mut reader) = tokio::io::duplex(4);
+        writer.write_all(b"abc").await.expect("write partial");
+        drop(writer);
+
+        let mut storage = [MaybeUninit::<u8>::uninit(); 5];
+        let mut read_buf = ReadBuf::uninit(&mut storage);
+        match read_exact_uninit(&mut reader, &mut read_buf).await {
+            Err(ExactReadError::FinishedEarly(3)) => {}
+            other => panic!("expected FinishedEarly(3), got {:?}", other),
+        }
+        assert_eq!(read_buf.filled(), b"abc");
     }
 }
