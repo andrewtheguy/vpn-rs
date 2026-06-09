@@ -242,6 +242,8 @@ ping 10.0.0.1
 
 Use `vpn_server.toml.example` and `vpn_client.toml.example` for full tunables. MTU and transport tuning are server-side settings dictated to clients during the handshake.
 
+MTU accepts `576-9216` (default `1440`). A jumbo MTU (e.g. `9000`) significantly raises throughput on clients whose TUN does one packet per syscall (notably macOS `utun`, which has no GSO) — it roughly tripled macOS sender throughput in testing. **Only use jumbo when tunneled traffic stays VPN-to-VPN (split tunnel / site-to-site / LAN);** in full-tunnel mode a large inner packet egressing to the internet through a ~1500-MTU path causes fragmentation or PMTUD blackholes. See `vpn_server.toml.example` for the full rationale.
+
 ## Split Tunneling
 
 Route additional networks through VPN with repeatable `--route` and `--route6`:

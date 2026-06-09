@@ -79,11 +79,25 @@ network = "10.0.0.0/24"
 # On startup, server logs local TUN GSO status.
 # Per-client, server logs: `server_local`, `client_reported`, and `active` GSO status.
 
-# MTU for VPN packets (576-1500, default: 1440)
-# Lower values may help with fragmentation issues
+# MTU for VPN packets (576-9216, default: 1440)
+# Lower values may help with fragmentation issues.
 # NOTE: The MTU is dictated to clients during the handshake; clients do not
-# configure it themselves.
-# mtu = 1420
+# configure it themselves. All clients share this one value.
+#
+# Jumbo MTU (e.g. 9000) for high-throughput LANs / site-to-site:
+#   Throughput on clients whose TUN does one packet per syscall (notably macOS
+#   utun, which has no GSO) is bound by the per-packet cost, so it scales with
+#   MTU. Raising the MTU to 9000 roughly tripled macOS sender throughput in
+#   testing (~1 -> ~3 Gbit/s). The encrypted transport re-segments to the path
+#   MTU, so no jumbo physical frames are required for tunnel traffic itself.
+#
+#   CAUTION - only safe when tunneled traffic stays VPN-to-VPN (split tunnel,
+#   site-to-site, LAN). In FULL-TUNNEL mode, a 9000-byte inner packet routed to
+#   the internet is forwarded out the server's real NIC (MTU ~1500), forcing
+#   fragmentation or a PMTUD blackhole (ICMP "frag needed" is often dropped),
+#   which silently stalls connections. Keep the default 1440 for full-tunnel /
+#   internet egress; only raise it when you control the end-to-end path.
+# mtu = 1440   # default; set to 9000 for a controlled jumbo LAN (see above)
 
 # ============================================================================
 # Channel Buffer Sizes
