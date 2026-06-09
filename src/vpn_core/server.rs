@@ -1516,8 +1516,8 @@ impl VpnServer {
 
         // Spawn inbound task (QUIC stream -> TUN via channel)
         let mut inbound_handle = tokio::spawn(async move {
-            // Buffered reader: pulls large QUIC chunks and parses frames
-            // synchronously instead of three awaited reads per frame.
+            // Exact frame reader: fills frame payload storage directly from
+            // QUIC without zero-initializing the payload buffer.
             let mut reader = FrameReader::new(data_recv, MAX_IP_PACKET_SIZE);
             // Reusable buffers for software-materializing offload super-frames:
             // segments are built in `seg_scratch`, copied once into `seg_arena`,
