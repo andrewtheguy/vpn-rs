@@ -195,8 +195,18 @@ impl FrameReader {
                 .map_err(|e| map_exact_read_error(e, "IP frame payload", frame_len))?;
         }
 
-        // SAFETY: the exact read above initialized exactly `frame_len` bytes
-        // in `spare_capacity_mut`, starting at the current empty buffer tail.
+        // This is the only `unsafe` in the codebase that is not an FFI/OS call
+        // (libc, ioctl, raw fds). It is a deliberate performance choice, not a
+        // requirement: reading straight into `spare_capacity_mut` lets us build
+        // an owned, zero-copy `Bytes` from the reused arena without the memset
+        // that a safe `resize(frame_len, 0)` + `read_exact` would incur on every
+        // frame (the no-zero-fill goal stated in this module's doc comment).
+        //
+        // SAFETY: `read_exact_uninit` returns `Ok(())` only when its `ReadBuf`
+        // is fully filled, so the exact read above initialized exactly
+        // `frame_len` bytes in `spare_capacity_mut`, starting at the current
+        // empty buffer tail (asserted above). Any short read returns early and
+        // never reaches this `set_len`.
         unsafe {
             self.buf.set_len(frame_len);
         }
