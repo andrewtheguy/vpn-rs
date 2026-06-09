@@ -9,7 +9,7 @@
 
 > [!WARNING]
 > **No Backward Compatibility in 0.0.x:** While `vpn-rs` remains in the `0.0.x` series, there is no backward compatibility between any versions. Regenerate server keys and refresh configs on every upgrade.
-> The current wire protocol is v3 (`ALPN: vpn-rs/3`), and older peers are rejected.
+> The current wire protocol is v4 (`ALPN: vpn-rs/4`), and older peers are rejected.
 
 > [!CAUTION]
 > **Pre-release Proof of Concept:** `vpn-rs` is still prerelease software and currently in a proof-of-concept stage. Expect rough edges and breaking changes.
@@ -30,7 +30,10 @@
 
 ## Protocol and Linux GSO
 
-- Wire protocol v3 is required on both peers. Mixed-version pairs will not connect.
+- Wire protocol v4 is required on both peers. Mixed-version pairs will not connect.
+- The iroh data channel uses four bidirectional QUIC streams. Data packets are
+  striped by packet contents/TCP sequence so one high-throughput flow can avoid
+  a single reliable stream's head-of-line stalls.
 - On Linux, TUN offload is attempted automatically at startup (`vnet_hdr` + TCP GSO flags).
 - No GSO config toggle is exposed in config files.
 - If Linux offload setup fails, VPN traffic continues in non-GSO mode and logs a warning.

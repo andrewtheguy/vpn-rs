@@ -15,10 +15,13 @@ use serde::{Deserialize, Serialize};
 use std::net::{Ipv4Addr, Ipv6Addr};
 
 /// VPN protocol version.
-pub const VPN_PROTOCOL_VERSION: u16 = 3;
+pub const VPN_PROTOCOL_VERSION: u16 = 4;
 
 /// ALPN identifier for VPN mode.
-pub const VPN_ALPN: &[u8] = b"vpn-rs/3";
+pub const VPN_ALPN: &[u8] = b"vpn-rs/4";
+
+/// Number of bidirectional QUIC streams used by the iroh data channel.
+pub const IROH_DATA_STREAM_COUNT: usize = 4;
 
 /// Bit flag indicating support for GSO metadata on data-stream packets.
 const CAPABILITIES_GSO_BIT: u8 = 1 << 0;

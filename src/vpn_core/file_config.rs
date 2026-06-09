@@ -184,7 +184,7 @@ const MIN_VPN_MTU: u16 = 576;
 /// Maximum VPN tunnel MTU. Jumbo frames are allowed because throughput on
 /// per-packet-syscall-bound platforms (notably macOS `utun`, which has no GSO
 /// and reads one packet per syscall) scales ~linearly with MTU. The transport
-/// re-segments to the path MTU (TCP MSS for the dummy, QUIC datagrams for iroh),
+/// re-segments to the path MTU (TCP MSS for the dummy, QUIC packets for iroh),
 /// so a large *inner* MTU needs no jumbo physical frames.
 const MAX_VPN_MTU: u16 = 9216;
 

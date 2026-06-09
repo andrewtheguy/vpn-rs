@@ -9,6 +9,7 @@ use crate::vpn_core::buffer::uninitialized_vec;
 use crate::vpn_core::config::{validate_ip6_strategy, Ip6Strategy, VpnServerConfig};
 use crate::vpn_core::device::{TunConfig, TunDevice, TunOffloadStatus};
 use crate::vpn_core::error::{VpnError, VpnResult};
+use crate::vpn_core::flow::packet_route_index;
 use crate::vpn_core::frame_reader::{FrameError, FrameEvent, FrameReader};
 use crate::vpn_core::offload::{
     materialize_offload_into, CoalescedOutput, TcpGroTable, VirtioNetHdr, GRO_FLUSH_WINDOW,
@@ -18,7 +19,7 @@ use crate::vpn_core::file_config::TransportTuning;
 use crate::vpn_core::signaling::{
     append_ip_packet_v2, parse_ip_packet_v2, read_message, write_message, CapabilitiesMessage,
     DataMessageType, VpnHandshake, VpnHandshakeResponse, WireTransport, HEARTBEAT_PONG_BYTE,
-    MAX_CAPABILITIES_PAYLOAD, MAX_HANDSHAKE_SIZE,
+    IROH_DATA_STREAM_COUNT, MAX_CAPABILITIES_PAYLOAD, MAX_HANDSHAKE_SIZE,
 };
 use bytes::{Bytes, BytesMut};
 use dashmap::DashMap;
@@ -31,7 +32,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::io::ReadBuf;
-use tokio::sync::{mpsc, oneshot, RwLock};
+use tokio::sync::{mpsc, RwLock};
 
 /// Maximum data-channel IP frame size (IP packet + optional offload metadata).
 const MAX_IP_PACKET_SIZE: usize = 65536 + 64;
@@ -91,10 +92,10 @@ struct ClientState {
     assigned_ip: Option<Ipv4Addr>,
     /// Client's assigned IPv6 VPN address (optional, for dual-stack or IPv6-only).
     assigned_ip6: Option<Ipv6Addr>,
-    /// Channel to send framed packets to the client's dedicated writer task.
-    /// The writer task owns the SendStream and performs actual I/O.
+    /// Channels to send framed packets to the client's dedicated writer tasks.
+    /// Each writer task owns one SendStream and performs actual I/O.
     /// Uses Bytes for zero-copy sends (freeze BytesMut instead of cloning Vec).
-    packet_tx: mpsc::Sender<Bytes>,
+    packet_txs: Arc<Vec<mpsc::Sender<Bytes>>>,
     /// Reported client local GSO capability from initial capabilities message.
     client_gso_enabled: bool,
     /// Effective per-connection GSO mode (server local && client reported).
@@ -123,6 +124,15 @@ struct ClientContext {
 struct TunWriteRequest {
     packet: Bytes,
     offload: Option<VirtioNetHdr>,
+}
+
+#[derive(Clone)]
+struct ClientInboundState {
+    packet_txs: Arc<Vec<mpsc::Sender<Bytes>>>,
+    ctx: Arc<ClientContext>,
+    tun_write_tx: mpsc::Sender<TunWriteRequest>,
+    local_iroh_udp_ports: Arc<HashSet<u16>>,
+    stats: Arc<VpnServerStats>,
 }
 
 /// IP address pool for assigning addresses to clients.
@@ -1085,46 +1095,9 @@ impl VpnServer {
             (None, None) => unreachable!(),
         }
 
-        // Accept data stream for IP packets
-        let (data_send, mut data_recv) = connection
-            .accept_bi()
-            .await
-            .map_err(|e| VpnError::Signaling(format!("Failed to accept data stream: {}", e)))?;
-
-        log::info!("Client {} data stream established", remote_id);
-
-        // Capabilities must be the first data-stream message.
-        let mut first_type = [0u8; 1];
-        data_recv
-            .read_exact(&mut first_type)
-            .await
-            .map_err(|e| VpnError::Signaling(format!("Failed to read capabilities type: {}", e)))?;
-        let _first_type = Self::parse_first_client_message_type(first_type[0])?;
-        let mut caps_len_buf = [0u8; 1];
-        data_recv
-            .read_exact(&mut caps_len_buf)
-            .await
-            .map_err(|e| {
-                VpnError::Signaling(format!("Failed to read capabilities length: {}", e))
-            })?;
-        let caps_len = caps_len_buf[0] as usize;
-        if caps_len > MAX_CAPABILITIES_PAYLOAD {
-            return Err(VpnError::Signaling(format!(
-                "Capabilities payload too large: {}",
-                caps_len
-            )));
-        }
-        let mut caps_payload = vec![0u8; caps_len];
-        data_recv.read_exact(&mut caps_payload).await.map_err(|e| {
-            VpnError::Signaling(format!("Failed to read capabilities payload: {}", e))
-        })?;
-        let caps = CapabilitiesMessage::decode_payload(&caps_payload);
-        log::debug!(
-            "Client {} capabilities payload ({} bytes): {:02x?}",
-            remote_id,
-            caps_len,
-            caps_payload
-        );
+        // Accept the iroh data stream set for IP packets.
+        let (data_sends, data_recvs, caps) =
+            Self::accept_client_data_streams(&connection, remote_id).await?;
         let connection_gso_active = self.tun_offload_status.enabled && caps.gso_enabled;
         log::info!(
             "Client {} GSO status: server_local={}, client_reported={}, active={}",
@@ -1134,55 +1107,27 @@ impl VpnServer {
             connection_gso_active
         );
 
-        // Create channel for sending framed packets to this client's writer task.
-        // The writer task owns the SendStream and performs actual I/O, decoupling
+        // Create channels for sending framed packets to this client's writer tasks.
+        // Each writer task owns one SendStream and performs actual I/O, decoupling
         // packet production from stream writes to reduce locking overhead.
         // Uses Bytes for zero-copy sends (freeze BytesMut instead of cloning Vec).
         // Channel size is configurable via VpnServerConfig::client_channel_size.
-        let (packet_tx, mut packet_rx) = mpsc::channel::<Bytes>(self.config.client_channel_size);
-
-        // Create oneshot channel for writer error signaling.
-        // When writer fails, it sends the error through this channel to trigger
-        // immediate cleanup instead of waiting for heartbeat timeout.
-        let (writer_error_tx, writer_error_rx) = oneshot::channel::<String>();
-
-        // Spawn dedicated writer task that owns the SendStream.
-        // Returns error through oneshot channel for immediate cleanup propagation.
-        // At least one of assigned_ip or assigned_ip6 must be set at this point
         let writer_client_id = assigned_ip
             .map(|ip| ip.to_string())
             .or_else(|| assigned_ip6.map(|ip| ip.to_string()))
             .expect("at least one IP must be assigned");
-        let mut data_send = data_send;
-        let writer_handle = tokio::spawn(async move {
-            let mut batch = Vec::with_capacity(WRITE_BATCH_SIZE);
-            let error = loop {
-                let count = packet_rx.recv_many(&mut batch, WRITE_BATCH_SIZE).await;
-                if count == 0 {
-                    // Channel closed (normal shutdown) - signal end of stream to peer
-                    if let Err(e) = data_send.finish() {
-                        log::warn!(
-                            "Failed to finish QUIC stream for client {}: {}",
-                            writer_client_id,
-                            e
-                        );
-                        break Some(format!("QUIC finish error: {}", e));
-                    }
-                    break None;
-                }
 
-                if let Err(e) = data_send.write_all_chunks(batch.as_mut_slice()).await {
-                    log::warn!("Failed to write to client {}: {}", writer_client_id, e);
-                    break Some(format!("QUIC write error: {}", e));
-                }
-                batch.clear();
-            };
-            log::trace!("Writer task for {} exiting", writer_client_id);
-            // Signal error to trigger immediate cleanup (ignore send error if receiver dropped)
-            if let Some(err_msg) = error {
-                let _ = writer_error_tx.send(err_msg);
-            }
-        });
+        // Create channel for writer error signaling.
+        // When writer fails, it sends the error through this channel to trigger
+        // immediate cleanup instead of waiting for heartbeat timeout.
+        let (writer_error_tx, writer_error_rx) = mpsc::channel::<String>(IROH_DATA_STREAM_COUNT);
+
+        let (packet_txs, writer_handles) = spawn_client_writer_tasks(
+            data_sends,
+            writer_client_id,
+            self.config.client_channel_size,
+            writer_error_tx,
+        );
 
         // Generate unique session ID for this connection
         // Used to detect stale cleanup when same client reconnects quickly
@@ -1193,14 +1138,14 @@ impl VpnServer {
             session_id,
             assigned_ip,
             assigned_ip6,
-            packet_tx: packet_tx.clone(),
+            packet_txs: packet_txs.clone(),
             client_gso_enabled: caps.gso_enabled,
             connection_gso_active,
         };
 
         // Reconnect handling: if a client with the same (EndpointId, DeviceId) exists,
         // we can safely overwrite its entry in the map with the new connection state.
-        // The old ClientState's packet_tx sender is dropped, causing its writer task
+        // The old ClientState's packet_txs senders are dropped, causing writer tasks
         // to exit when the channel closes. The session_id check in cleanup prevents
         // stale cleanup tasks from affecting the new connection.
         let client_key = (remote_id, device_id);
@@ -1226,7 +1171,7 @@ impl VpnServer {
         let ip6_to_endpoint = self.ip6_to_endpoint.clone();
 
         // Run client handler (blocks until client disconnects or writer fails)
-        // packet_tx is used for heartbeat responses (sent via the writer task)
+        // packet_txs are used for heartbeat responses (sent via writer task 0)
         // writer_error_rx triggers immediate cleanup on write failures
         let ctx = ClientContext {
             assigned_ip,
@@ -1239,8 +1184,8 @@ impl VpnServer {
             local_tun_gso_enabled: self.tun_offload_status.enabled,
         };
         let result = Self::handle_client_data(
-            packet_tx,
-            data_recv,
+            packet_txs,
+            data_recvs,
             ctx,
             tun_write_tx,
             local_iroh_udp_ports,
@@ -1249,8 +1194,10 @@ impl VpnServer {
         )
         .await;
 
-        // Abort writer task if still running (cleanup on any exit path)
-        writer_handle.abort();
+        // Abort writer tasks if still running (cleanup on any exit path)
+        for handle in writer_handles {
+            handle.abort();
+        }
 
         if let Err(ref e) = result {
             log::error!("Client {} data error: {}", remote_id, e);
@@ -1323,6 +1270,99 @@ impl VpnServer {
         Ok(msg_type)
     }
 
+    async fn accept_client_data_streams(
+        connection: &iroh::endpoint::Connection,
+        remote_id: EndpointId,
+    ) -> VpnResult<(
+        Vec<iroh::endpoint::SendStream>,
+        Vec<iroh::endpoint::RecvStream>,
+        CapabilitiesMessage,
+    )> {
+        let mut data_sends = Vec::with_capacity(IROH_DATA_STREAM_COUNT);
+        let mut data_recvs = Vec::with_capacity(IROH_DATA_STREAM_COUNT);
+        let mut first_caps: Option<CapabilitiesMessage> = None;
+
+        for stream_index in 0..IROH_DATA_STREAM_COUNT {
+            let (data_send, mut data_recv) = connection.accept_bi().await.map_err(|e| {
+                VpnError::Signaling(format!(
+                    "Failed to accept data stream {}: {}",
+                    stream_index, e
+                ))
+            })?;
+
+            let caps = Self::read_client_capabilities(&mut data_recv, remote_id, stream_index)
+                .await?;
+            if let Some(expected) = first_caps
+                && expected.gso_enabled != caps.gso_enabled {
+                    return Err(VpnError::Signaling(format!(
+                        "Client {} sent inconsistent GSO capability on stream {}",
+                        remote_id, stream_index
+                    )));
+                }
+            first_caps.get_or_insert(caps);
+            data_sends.push(data_send);
+            data_recvs.push(data_recv);
+        }
+
+        log::info!(
+            "Client {} data streams established: {}",
+            remote_id,
+            IROH_DATA_STREAM_COUNT
+        );
+        Ok((
+            data_sends,
+            data_recvs,
+            first_caps.expect("at least one data stream"),
+        ))
+    }
+
+    async fn read_client_capabilities(
+        data_recv: &mut iroh::endpoint::RecvStream,
+        remote_id: EndpointId,
+        stream_index: usize,
+    ) -> VpnResult<CapabilitiesMessage> {
+        let mut first_type = [0u8; 1];
+        data_recv.read_exact(&mut first_type).await.map_err(|e| {
+            VpnError::Signaling(format!(
+                "Failed to read capabilities type from client {} stream {}: {}",
+                remote_id, stream_index, e
+            ))
+        })?;
+        let _first_type = Self::parse_first_client_message_type(first_type[0])?;
+
+        let mut caps_len_buf = [0u8; 1];
+        data_recv.read_exact(&mut caps_len_buf).await.map_err(|e| {
+            VpnError::Signaling(format!(
+                "Failed to read capabilities length from client {} stream {}: {}",
+                remote_id, stream_index, e
+            ))
+        })?;
+        let caps_len = caps_len_buf[0] as usize;
+        if caps_len > MAX_CAPABILITIES_PAYLOAD {
+            return Err(VpnError::Signaling(format!(
+                "Capabilities payload too large from client {} stream {}: {}",
+                remote_id, stream_index, caps_len
+            )));
+        }
+
+        let mut caps_payload = vec![0u8; caps_len];
+        data_recv.read_exact(&mut caps_payload).await.map_err(|e| {
+            VpnError::Signaling(format!(
+                "Failed to read capabilities payload from client {} stream {}: {}",
+                remote_id, stream_index, e
+            ))
+        })?;
+        let caps = CapabilitiesMessage::decode_payload(&caps_payload);
+        log::debug!(
+            "Client {} stream {} capabilities payload ({} bytes): {:02x?}",
+            remote_id,
+            stream_index,
+            caps_len,
+            caps_payload
+        );
+        Ok(caps)
+    }
+
     /// Enqueue a TUN write request to be processed by the dedicated TUN writer task.
     ///
     /// Returns `true` if the request was successfully enqueued, `false` if the channel is closed.
@@ -1356,19 +1396,25 @@ impl VpnServer {
         }
     }
 
-    /// Enqueue a framed data-stream packet for a client writer task.
-    /// Enqueue a framed packet on a client's channel.
+    /// Enqueue a framed packet on a specific client stream route.
     ///
     /// `packet_count` is the number of original IP packets the frame carries
     /// (>1 for software-GRO coalesced frames) so per-packet stats stay
     /// comparable regardless of coalescing.
-    async fn enqueue_client_frame(
-        packet_tx: &mpsc::Sender<Bytes>,
+    async fn enqueue_client_frame_on_route(
+        packet_txs: &Arc<Vec<mpsc::Sender<Bytes>>>,
+        route_index: usize,
         frame: Bytes,
         stats: &Arc<VpnServerStats>,
         drop_on_full: bool,
         packet_count: u64,
     ) {
+        if packet_txs.is_empty() {
+            log::warn!("No client data streams available for outbound frame");
+            return;
+        }
+        let packet_tx = &packet_txs[route_index % packet_txs.len()];
+
         match packet_tx.try_send(frame) {
             Ok(()) => {
                 stats
@@ -1397,13 +1443,34 @@ impl VpnServer {
         }
     }
 
+    /// Enqueue a framed packet on the client stream selected by packet contents.
+    async fn enqueue_client_frame(
+        packet_txs: &Arc<Vec<mpsc::Sender<Bytes>>>,
+        packet: &[u8],
+        frame: Bytes,
+        stats: &Arc<VpnServerStats>,
+        drop_on_full: bool,
+        packet_count: u64,
+    ) {
+        let route_index = packet_route_index(packet, packet_txs.len());
+        Self::enqueue_client_frame_on_route(
+            packet_txs,
+            route_index,
+            frame,
+            stats,
+            drop_on_full,
+            packet_count,
+        )
+        .await;
+    }
+
     /// Frame software-GRO outputs with the framing arena and enqueue them on
-    /// a client's packet channel.
+    /// the routed client packet channels.
     async fn send_gro_outputs_to_client(
         &self,
         outputs: &[CoalescedOutput],
         arena: &mut BytesMut,
-        packet_tx: &mpsc::Sender<Bytes>,
+        packet_txs: &Arc<Vec<mpsc::Sender<Bytes>>>,
     ) {
         let coalesced_frames = outputs.iter().filter(|output| output.is_coalesced()).count();
         if coalesced_frames > 0 {
@@ -1444,7 +1511,8 @@ impl VpnServer {
                 }
             };
             Self::enqueue_client_frame(
-                packet_tx,
+                packet_txs,
+                packet,
                 arena.split_to(written).freeze(),
                 &self.stats,
                 self.config.drop_on_full,
@@ -1469,11 +1537,11 @@ impl VpnServer {
             } else {
                 state.table.flush_all()
             };
-            self.send_gro_outputs_to_client(&outputs, arena, &state.packet_tx)
+            self.send_gro_outputs_to_client(&outputs, arena, &state.packet_txs)
                 .await;
         }
         // Evict GRO state for disconnected clients to avoid unbounded growth.
-        gro_states.retain(|_, state| !state.packet_tx.is_closed());
+        gro_states.retain(|_, state| state.packet_txs.iter().any(|tx| !tx.is_closed()));
     }
 
     fn next_gro_deadline(
@@ -1485,11 +1553,11 @@ impl VpnServer {
             .min()
     }
 
-    /// Handle client data stream.
+    /// Handle client data streams.
     ///
     /// This function processes incoming data from the client and responds to heartbeats.
     /// It exits when either:
-    /// - The client disconnects (inbound stream closes)
+    /// - The client disconnects (an inbound stream closes)
     /// - The writer task fails (error received via writer_error_rx)
     ///
     /// TUN writes are sent through the `tun_write_tx` channel to a dedicated writer task,
@@ -1497,14 +1565,20 @@ impl VpnServer {
     ///
     /// At least one of `ctx.assigned_ip` (IPv4) or `ctx.assigned_ip6` (IPv6) must be provided.
     async fn handle_client_data(
-        packet_tx: mpsc::Sender<Bytes>,
-        data_recv: iroh::endpoint::RecvStream,
+        packet_txs: Arc<Vec<mpsc::Sender<Bytes>>>,
+        data_recvs: Vec<iroh::endpoint::RecvStream>,
         ctx: ClientContext,
         tun_write_tx: mpsc::Sender<TunWriteRequest>,
         local_iroh_udp_ports: Arc<HashSet<u16>>,
-        writer_error_rx: oneshot::Receiver<String>,
+        mut writer_error_rx: mpsc::Receiver<String>,
         stats: Arc<VpnServerStats>,
     ) -> VpnResult<()> {
+        if data_recvs.is_empty() {
+            return Err(VpnError::Signaling(
+                "client data channel has no receive streams".into(),
+            ));
+        }
+
         // Create client identifier string for logging (used both in spawned task and select!)
         // At least one of assigned_ip or assigned_ip6 must be set (enforced by caller)
         let client_id = ctx
@@ -1513,229 +1587,67 @@ impl VpnServer {
             .or_else(|| ctx.assigned_ip6.map(|ip| ip.to_string()))
             .expect("at least one IP must be assigned");
         let client_id_outer = client_id.clone(); // For use in select! block
+        let ctx = Arc::new(ctx);
+        let inbound_state = ClientInboundState {
+            packet_txs,
+            ctx,
+            tun_write_tx,
+            local_iroh_udp_ports,
+            stats,
+        };
 
-        // Spawn inbound task (QUIC stream -> TUN via channel)
-        let mut inbound_handle = tokio::spawn(async move {
-            // Exact frame reader: fills frame payload storage directly from
-            // QUIC without zero-initializing the payload buffer.
-            let mut reader = FrameReader::new(data_recv, MAX_IP_PACKET_SIZE);
-            // Reusable buffers for software-materializing offload super-frames:
-            // segments are built in `seg_scratch`, copied once into `seg_arena`,
-            // and handed out as refcounted Bytes views.
-            let mut seg_scratch: Vec<u8> = Vec::new();
-            let mut seg_arena = BytesMut::new();
-            let mut pending_segments: Vec<Bytes> = Vec::new();
-            'read_loop: loop {
-                let frame = match reader.next_frame().await {
-                    Ok(Some(FrameEvent::IpFrame(frame))) => frame,
-                    Ok(Some(FrameEvent::HeartbeatPing)) => {
-                        // Respond with pong via the writer task channel (static Bytes, zero allocation)
-                        log::trace!("Heartbeat ping from {}", client_id);
-                        let pong = Bytes::from_static(HEARTBEAT_PONG_BYTE);
-                        if packet_tx.send(pong).await.is_err() {
-                            log::warn!(
-                                "Failed to send heartbeat pong to {}: channel closed",
-                                client_id
-                            );
-                            break;
-                        }
-                        continue;
-                    }
-                    Ok(Some(FrameEvent::HeartbeatPong)) => {
-                        // Server shouldn't receive pongs, ignore
-                        log::trace!("Unexpected heartbeat pong from {}", client_id);
-                        continue;
-                    }
-                    Ok(Some(FrameEvent::Capabilities)) => {
-                        // Capabilities are only valid as the first message and are
-                        // consumed in handle_connection_inner before this loop starts.
-                        log::warn!(
-                            "Unexpected capabilities message from {} after stream setup",
-                            client_id
-                        );
-                        continue;
-                    }
-                    Ok(None) => {
-                        log::debug!("Client {} stream closed", client_id);
-                        break;
-                    }
-                    Err(FrameError::UnknownType(b)) => {
-                        log::error!(
-                            "Unknown message type from {}: 0x{:02x}, closing connection",
-                            client_id,
-                            b
-                        );
-                        break;
-                    }
-                    Err(FrameError::FrameTooLarge(len)) => {
-                        log::error!("IP frame too large from {}: {}", client_id, len);
-                        break;
-                    }
-                    Err(FrameError::Read(e)) => {
-                        log::debug!("Client {} stream closed: {}", client_id, e);
-                        break;
-                    }
-                };
+        let (inbound_done_tx, mut inbound_done_rx) =
+            mpsc::channel::<(usize, Option<String>)>(data_recvs.len());
+        let mut inbound_handles = Vec::with_capacity(data_recvs.len());
 
-                let (offload, packet) = match parse_ip_packet_v2(&frame) {
-                    Ok(parts) => parts,
-                    Err(e) => {
-                        log::warn!("Invalid IP frame from {}: {}", client_id, e);
-                        continue;
-                    }
-                };
-
-                if packet_has_local_iroh_udp_port(packet, &local_iroh_udp_ports) {
-                    log::debug!(
-                        "Dropped self-encapsulated iroh UDP packet from client {}",
-                        client_id
-                    );
-                    continue;
-                }
-
-                // Validate source IP to prevent inter-client IP spoofing.
-                // We only reject packets if the source IP belongs to another client,
-                // allowing clients to use their own public IPs (useful for dual-stack).
-                let source_valid = if ctx.disable_spoofing_check {
-                    // Spoofing check disabled - allow all packets
-                    true
-                } else {
-                    match extract_source_ip(packet) {
-                        Some(PacketIp::V4(src_ip)) => {
-                            // Check if this IP belongs to another client
-                            match ctx.ip_to_endpoint.get(&src_ip) {
-                                Some(ref owner) if *owner.value() == ctx.client_key => true, // Our own assigned IP
-                                Some(_) => {
-                                    // IP belongs to another client - actual spoofing
-                                    log::warn!(
-                                        "IPv4 inter-client spoofing from client {}: source {} belongs to another client",
-                                        client_id, src_ip
-                                    );
-                                    false
-                                }
-                                None => true, // Not a VPN-assigned IP - allow (e.g., client's public IP)
-                            }
-                        }
-                        Some(PacketIp::V6(src_ip)) => {
-                            // Silently drop link-local packets (fe80::/10) - these are normal
-                            // OS traffic (neighbor discovery, etc.) that shouldn't be forwarded
-                            let src_bytes = src_ip.octets();
-                            let is_link_local =
-                                src_bytes[0] == 0xfe && (src_bytes[1] & 0xc0) == 0x80;
-                            if is_link_local {
-                                // Link-local IPv6 packets are dropped (can't route across VPN)
-                                false
-                            } else {
-                                // Check if this IP belongs to another client
-                                match ctx.ip6_to_endpoint.get(&src_ip) {
-                                    Some(ref owner) if *owner.value() == ctx.client_key => true, // Our own assigned IP
-                                    Some(_) => {
-                                        // IP belongs to another client - actual spoofing
-                                        log::warn!(
-                                            "IPv6 inter-client spoofing from client {}: source {} belongs to another client",
-                                            client_id, src_ip
-                                        );
-                                        false
-                                    }
-                                    None => true, // Not a VPN-assigned IP - allow (e.g., client's public IP)
-                                }
-                            }
-                        }
-                        None => {
-                            log::warn!(
-                                "Failed to parse source IP from packet from client {}",
-                                client_id
-                            );
-                            false
-                        }
-                    }
-                };
-
-                if !source_valid {
-                    // Drop spoofed packet
-                    stats.packets_spoofed.fetch_add(1, Ordering::Relaxed);
-                    continue;
-                }
-
-                if let Some(meta) = offload {
-                    if !ctx.connection_gso_active || !ctx.local_tun_gso_enabled {
-                        let materialized =
-                            materialize_offload_into(&meta, packet, &mut seg_scratch, |seg| {
-                                seg_arena.extend_from_slice(seg);
-                                pending_segments.push(seg_arena.split_to(seg.len()).freeze());
-                                Ok(())
-                            });
-                        if let Err(e) = materialized {
-                            pending_segments.clear();
-                            log::warn!(
-                                "Dropping packet with unsupported offload metadata from {}: {}",
-                                client_id,
-                                e
-                            );
-                            continue;
-                        }
-                        for packet in pending_segments.drain(..) {
-                            let req = TunWriteRequest {
-                                packet,
-                                offload: None,
-                            };
-                            if !Self::enqueue_tun_write(&tun_write_tx, req, &stats).await {
-                                break 'read_loop;
-                            }
-                        }
-                    } else {
-                        let req = TunWriteRequest {
-                            packet: frame.slice_ref(packet),
-                            offload: Some(meta),
-                        };
-                        if !Self::enqueue_tun_write(&tun_write_tx, req, &stats).await {
-                            break;
-                        }
-                    }
-                } else {
-                    let req = TunWriteRequest {
-                        packet: frame.slice_ref(packet),
-                        offload: None,
-                    };
-                    if !Self::enqueue_tun_write(&tun_write_tx, req, &stats).await {
-                        break;
-                    }
-                }
-            }
-        });
+        for (stream_index, data_recv) in data_recvs.into_iter().enumerate() {
+            let inbound_state = inbound_state.clone();
+            let client_id = client_id.clone();
+            let inbound_done_tx = inbound_done_tx.clone();
+            inbound_handles.push(tokio::spawn(async move {
+                let reason = Self::run_client_inbound_stream(
+                    stream_index,
+                    client_id,
+                    data_recv,
+                    inbound_state,
+                )
+                .await;
+                let _ = inbound_done_tx.send((stream_index, reason)).await;
+            }));
+        }
+        drop(inbound_done_tx);
+        drop(inbound_state);
 
         // Wait for either:
-        // - Inbound task completes (client disconnection or stream error)
+        // - Any inbound task completes (client disconnection or stream error)
         // - Writer task signals an error (QUIC write failure)
         // This ensures immediate cleanup on writer failure instead of waiting for heartbeat timeout.
         tokio::select! {
-            inbound_result = &mut inbound_handle => {
-                // Inspect JoinHandle result to catch panics
-                match inbound_result {
-                    Ok(()) => {
-                        // Client disconnected normally or stream error
-                        log::trace!("Client {} inbound task completed", client_id_outer);
-                    }
-                    Err(e) if e.is_panic() => {
-                        log::error!("Client {} inbound task panicked: {}", client_id_outer, e);
-                        return Err(VpnError::ConnectionLost(format!("inbound task panicked: {}", e)));
-                    }
-                    Err(e) => {
-                        // Cancelled or other JoinError
-                        log::debug!("Client {} inbound task failed: {}", client_id_outer, e);
-                        return Err(VpnError::ConnectionLost(format!("inbound task failed: {}", e)));
+            inbound_done = inbound_done_rx.recv() => {
+                for handle in inbound_handles {
+                    handle.abort();
+                }
+                if let Some((stream_index, reason)) = inbound_done {
+                    log::trace!(
+                        "Client {} inbound stream {} completed",
+                        client_id_outer,
+                        stream_index
+                    );
+                    if let Some(reason) = reason {
+                        return Err(VpnError::ConnectionLost(reason));
                     }
                 }
             }
-            writer_err = writer_error_rx => {
-                // Writer task failed - abort inbound task and return error
-                inbound_handle.abort();
+            writer_err = writer_error_rx.recv() => {
+                for handle in inbound_handles {
+                    handle.abort();
+                }
                 match writer_err {
-                    Ok(err_msg) => {
+                    Some(err_msg) => {
                         log::debug!("Client {} writer failed: {}", client_id_outer, err_msg);
                         return Err(VpnError::ConnectionLost(err_msg));
                     }
-                    Err(_) => {
+                    None => {
                         // Sender dropped without error (normal shutdown via channel close)
                         log::trace!("Client {} writer channel closed", client_id_outer);
                     }
@@ -1744,6 +1656,200 @@ impl VpnServer {
         }
 
         Ok(())
+    }
+
+    async fn run_client_inbound_stream(
+        stream_index: usize,
+        client_id: String,
+        data_recv: iroh::endpoint::RecvStream,
+        state: ClientInboundState,
+    ) -> Option<String> {
+        let ClientInboundState {
+            packet_txs,
+            ctx,
+            tun_write_tx,
+            local_iroh_udp_ports,
+            stats,
+        } = state;
+
+        // Exact frame reader: fills frame payload storage directly from
+        // QUIC without zero-initializing the payload buffer.
+        let mut reader = FrameReader::new(data_recv, MAX_IP_PACKET_SIZE);
+        // Reusable buffers for software-materializing offload super-frames:
+        // segments are built in `seg_scratch`, copied once into `seg_arena`,
+        // and handed out as refcounted Bytes views.
+        let mut seg_scratch: Vec<u8> = Vec::new();
+        let mut seg_arena = BytesMut::new();
+        let mut pending_segments: Vec<Bytes> = Vec::new();
+        'read_loop: loop {
+            let frame = match reader.next_frame().await {
+                Ok(Some(FrameEvent::IpFrame(frame))) => frame,
+                Ok(Some(FrameEvent::HeartbeatPing)) => {
+                    log::trace!("Heartbeat ping from {} stream {}", client_id, stream_index);
+                    let pong = Bytes::from_static(HEARTBEAT_PONG_BYTE);
+                    if send_client_control_frame(&packet_txs, pong).await.is_err() {
+                        log::warn!(
+                            "Failed to send heartbeat pong to {}: channel closed",
+                            client_id
+                        );
+                        break;
+                    }
+                    continue;
+                }
+                Ok(Some(FrameEvent::HeartbeatPong)) => {
+                    log::trace!("Unexpected heartbeat pong from {}", client_id);
+                    continue;
+                }
+                Ok(Some(FrameEvent::Capabilities)) => {
+                    log::warn!(
+                        "Unexpected capabilities message from {} after stream setup",
+                        client_id
+                    );
+                    continue;
+                }
+                Ok(None) => {
+                    log::debug!("Client {} stream {} closed", client_id, stream_index);
+                    break;
+                }
+                Err(FrameError::UnknownType(b)) => {
+                    log::error!(
+                        "Unknown message type from {} stream {}: 0x{:02x}, closing connection",
+                        client_id,
+                        stream_index,
+                        b
+                    );
+                    break;
+                }
+                Err(FrameError::FrameTooLarge(len)) => {
+                    log::error!(
+                        "IP frame too large from {} stream {}: {}",
+                        client_id,
+                        stream_index,
+                        len
+                    );
+                    break;
+                }
+                Err(FrameError::Read(e)) => {
+                    log::debug!(
+                        "Client {} stream {} closed: {}",
+                        client_id,
+                        stream_index,
+                        e
+                    );
+                    break;
+                }
+            };
+
+            let (offload, packet) = match parse_ip_packet_v2(&frame) {
+                Ok(parts) => parts,
+                Err(e) => {
+                    log::warn!("Invalid IP frame from {}: {}", client_id, e);
+                    continue;
+                }
+            };
+
+            if packet_has_local_iroh_udp_port(packet, &local_iroh_udp_ports) {
+                log::debug!(
+                    "Dropped self-encapsulated iroh UDP packet from client {}",
+                    client_id
+                );
+                continue;
+            }
+
+            let source_valid = if ctx.disable_spoofing_check {
+                true
+            } else {
+                match extract_source_ip(packet) {
+                    Some(PacketIp::V4(src_ip)) => match ctx.ip_to_endpoint.get(&src_ip) {
+                        Some(ref owner) if *owner.value() == ctx.client_key => true,
+                        Some(_) => {
+                            log::warn!(
+                                "IPv4 inter-client spoofing from client {}: source {} belongs to another client",
+                                client_id,
+                                src_ip
+                            );
+                            false
+                        }
+                        None => true,
+                    },
+                    Some(PacketIp::V6(src_ip)) => {
+                        let src_bytes = src_ip.octets();
+                        let is_link_local = src_bytes[0] == 0xfe && (src_bytes[1] & 0xc0) == 0x80;
+                        if is_link_local {
+                            false
+                        } else {
+                            match ctx.ip6_to_endpoint.get(&src_ip) {
+                                Some(ref owner) if *owner.value() == ctx.client_key => true,
+                                Some(_) => {
+                                    log::warn!(
+                                        "IPv6 inter-client spoofing from client {}: source {} belongs to another client",
+                                        client_id,
+                                        src_ip
+                                    );
+                                    false
+                                }
+                                None => true,
+                            }
+                        }
+                    }
+                    None => {
+                        log::warn!("Failed to parse source IP from packet from client {}", client_id);
+                        false
+                    }
+                }
+            };
+
+            if !source_valid {
+                stats.packets_spoofed.fetch_add(1, Ordering::Relaxed);
+                continue;
+            }
+
+            if let Some(meta) = offload {
+                if !ctx.connection_gso_active || !ctx.local_tun_gso_enabled {
+                    let materialized =
+                        materialize_offload_into(&meta, packet, &mut seg_scratch, |seg| {
+                            seg_arena.extend_from_slice(seg);
+                            pending_segments.push(seg_arena.split_to(seg.len()).freeze());
+                            Ok(())
+                        });
+                    if let Err(e) = materialized {
+                        pending_segments.clear();
+                        log::warn!(
+                            "Dropping packet with unsupported offload metadata from {}: {}",
+                            client_id,
+                            e
+                        );
+                        continue;
+                    }
+                    for packet in pending_segments.drain(..) {
+                        let req = TunWriteRequest {
+                            packet,
+                            offload: None,
+                        };
+                        if !Self::enqueue_tun_write(&tun_write_tx, req, &stats).await {
+                            break 'read_loop;
+                        }
+                    }
+                } else {
+                    let req = TunWriteRequest {
+                        packet: frame.slice_ref(packet),
+                        offload: Some(meta),
+                    };
+                    if !Self::enqueue_tun_write(&tun_write_tx, req, &stats).await {
+                        break;
+                    }
+                }
+            } else {
+                let req = TunWriteRequest {
+                    packet: frame.slice_ref(packet),
+                    offload: None,
+                };
+                if !Self::enqueue_tun_write(&tun_write_tx, req, &stats).await {
+                    break;
+                }
+            }
+        }
+        None
     }
 
     /// Run the TUN reader - reads packets from TUN and routes to clients.
@@ -1766,7 +1872,7 @@ impl VpnServer {
         // Reusable buffers for software-materializing offload super-frames
         // destined for clients without GSO support.
         let mut seg_scratch: Vec<u8> = Vec::new();
-        let mut pending_frames: Vec<Bytes> = Vec::new();
+        let mut pending_frames: Vec<(usize, Bytes)> = Vec::new();
         // Software GRO: when the server TUN has no offload support (macOS/
         // Windows, or Linux without vnet headers) the kernel performs no GRO,
         // so coalesce consecutive same-flow TCP segments per destination
@@ -1871,10 +1977,10 @@ impl VpnServer {
             let client_key = (endpoint_id, device_id);
 
             // Get client's packet channel sender (DashMap lookup is lock-free)
-            let (packet_tx, client_gso_enabled, connection_gso_active) =
+            let (packet_txs, client_gso_enabled, connection_gso_active) =
                 match self.clients.get(&client_key) {
                     Some(c) => (
-                        c.packet_tx.clone(),
+                        c.packet_txs.clone(),
                         c.client_gso_enabled,
                         c.connection_gso_active,
                     ),
@@ -1889,20 +1995,17 @@ impl VpnServer {
                 // plain IP packet through the client's GRO table. The client
                 // accepts offload-tagged frames regardless of its own TUN
                 // (it software-segments when needed).
-                let state =
-                    gro_states
-                        .entry(client_key)
-                        .or_insert_with(|| ClientGroState {
-                            table: TcpGroTable::new(),
-                            packet_tx: packet_tx.clone(),
-                        });
+                let state = gro_states.entry(client_key).or_insert_with(|| ClientGroState {
+                    table: TcpGroTable::new(),
+                    packet_txs: packet_txs.clone(),
+                });
                 // Keep the freshest sender in case the client reconnected.
-                if !state.packet_tx.same_channel(&packet_tx) {
-                    state.packet_tx = packet_tx.clone();
+                if !same_packet_channels(&state.packet_txs, &packet_txs) {
+                    state.packet_txs = packet_txs.clone();
                 }
                 let result = state.table.push(packet_ref, Instant::now());
                 if !result.outputs.is_empty() {
-                    self.send_gro_outputs_to_client(&result.outputs, &mut arena, &packet_tx)
+                    self.send_gro_outputs_to_client(&result.outputs, &mut arena, &packet_txs)
                         .await;
                 }
                 if !result.pass_through {
@@ -1931,7 +2034,10 @@ impl VpnServer {
                             }
                             let written = append_ip_packet_v2(&mut arena, None, packet)
                                 .map_err(|e| e.to_string())?;
-                            pending_frames.push(arena.split_to(written).freeze());
+                            pending_frames.push((
+                                packet_route_index(packet, packet_txs.len()),
+                                arena.split_to(written).freeze(),
+                            ));
                             Ok(())
                         });
                     if let Err(e) = materialized {
@@ -1944,9 +2050,10 @@ impl VpnServer {
                         );
                         continue;
                     }
-                    for frame in pending_frames.drain(..) {
-                        Self::enqueue_client_frame(
-                            &packet_tx,
+                    for (route_index, frame) in pending_frames.drain(..) {
+                        Self::enqueue_client_frame_on_route(
+                            &packet_txs,
+                            route_index,
                             frame,
                             &self.stats,
                             self.config.drop_on_full,
@@ -1981,7 +2088,8 @@ impl VpnServer {
             };
 
             Self::enqueue_client_frame(
-                &packet_tx,
+                &packet_txs,
+                packet_ref,
                 arena.split_to(written).freeze(),
                 &self.stats,
                 self.config.drop_on_full,
@@ -1994,10 +2102,93 @@ impl VpnServer {
     }
 }
 
+fn spawn_client_writer_tasks(
+    data_sends: Vec<iroh::endpoint::SendStream>,
+    client_id: String,
+    channel_size: usize,
+    writer_error_tx: mpsc::Sender<String>,
+) -> (
+    Arc<Vec<mpsc::Sender<Bytes>>>,
+    Vec<tokio::task::JoinHandle<()>>,
+) {
+    let mut packet_txs = Vec::with_capacity(data_sends.len());
+    let mut writer_handles = Vec::with_capacity(data_sends.len());
+
+    for (stream_index, data_send) in data_sends.into_iter().enumerate() {
+        let (packet_tx, mut packet_rx) = mpsc::channel::<Bytes>(channel_size);
+        packet_txs.push(packet_tx);
+
+        let writer_error_tx = writer_error_tx.clone();
+        let client_id = client_id.clone();
+        writer_handles.push(tokio::spawn(async move {
+            let mut data_send = data_send;
+            let mut batch = Vec::with_capacity(WRITE_BATCH_SIZE);
+            let error = loop {
+                let count = packet_rx.recv_many(&mut batch, WRITE_BATCH_SIZE).await;
+                if count == 0 {
+                    // Channel closed (normal shutdown) - signal end of stream to peer.
+                    if let Err(e) = data_send.finish() {
+                        log::warn!(
+                            "Failed to finish QUIC stream {} for client {}: {}",
+                            stream_index,
+                            client_id,
+                            e
+                        );
+                        break Some(format!("QUIC finish error: {}", e));
+                    }
+                    break None;
+                }
+
+                if let Err(e) = data_send.write_all_chunks(batch.as_mut_slice()).await {
+                    log::warn!(
+                        "Failed to write to client {} stream {}: {}",
+                        client_id,
+                        stream_index,
+                        e
+                    );
+                    break Some(format!("QUIC write error: {}", e));
+                }
+                batch.clear();
+            };
+            log::trace!(
+                "Writer task for client {} stream {} exiting",
+                client_id,
+                stream_index
+            );
+            if let Some(err_msg) = error {
+                let _ = writer_error_tx.send(err_msg).await;
+            }
+        }));
+    }
+
+    (Arc::new(packet_txs), writer_handles)
+}
+
+async fn send_client_control_frame(
+    packet_txs: &Arc<Vec<mpsc::Sender<Bytes>>>,
+    frame: Bytes,
+) -> Result<(), ()> {
+    let Some(packet_tx) = packet_txs.first() else {
+        return Err(());
+    };
+    packet_tx.send(frame).await.map_err(|_| ())
+}
+
+fn same_packet_channels(
+    left: &Arc<Vec<mpsc::Sender<Bytes>>>,
+    right: &Arc<Vec<mpsc::Sender<Bytes>>>,
+) -> bool {
+    left.len() == right.len()
+        && left
+            .iter()
+            .zip(right.iter())
+            .all(|(left, right)| left.same_channel(right))
+}
+
 /// Per-client software-GRO accumulation state for the server TUN reader.
 struct ClientGroState {
     table: TcpGroTable,
-    packet_tx: mpsc::Sender<Bytes>,
+    packet_txs: Arc<Vec<mpsc::Sender<Bytes>>>,
 }
 
 /// IP address extracted from a packet (source or destination).

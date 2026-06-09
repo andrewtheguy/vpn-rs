@@ -19,7 +19,7 @@
 //! ┌─────────────────────────────────────────────────────────────┐
 //! │                        vpn-core                           │
 //! ├─────────────────────────────────────────────────────────────┤
-//! │  TUN Device ◄──► QUIC Stream (iroh) ◄──► Peer              │
+//! │  TUN Device ◄──► QUIC Stream Set (iroh) ◄──► Peer          │
 //! └─────────────────────────────────────────────────────────────┘
 //! ```
 
@@ -33,6 +33,7 @@ pub mod config;
 pub mod device;
 pub mod error;
 pub mod file_config;
+pub mod flow;
 pub mod frame_reader;
 pub mod lock;
 pub mod offload;

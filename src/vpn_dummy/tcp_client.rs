@@ -82,8 +82,8 @@ pub async fn run_dummy_client(server: SocketAddr, mtu_override: Option<u16>) -> 
 
     run_tunnel(
         tun,
-        write_half,
-        read_half,
+        vec![write_half],
+        vec![read_half],
         response.server_gso_enabled,
         None,
         Arc::new(HashSet::new()),

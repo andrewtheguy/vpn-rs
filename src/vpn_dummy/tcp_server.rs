@@ -104,8 +104,8 @@ async fn handle_connection(
     // Run the shared pipeline. The peer's advertised GSO is the client's.
     run_tunnel(
         tun,
-        write_half,
-        read_half,
+        vec![write_half],
+        vec![read_half],
         client_caps.gso_enabled,
         None,
         Arc::new(HashSet::new()),

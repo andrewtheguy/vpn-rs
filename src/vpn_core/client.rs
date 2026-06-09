@@ -13,6 +13,7 @@ use crate::vpn_core::device::{
     TunConfig, TunDevice,
 };
 use crate::vpn_core::error::{VpnError, VpnResult};
+use crate::vpn_core::flow::frame_route_index;
 use crate::vpn_core::frame_reader::{FrameEvent, FrameReader};
 use crate::vpn_core::lock::VpnLock;
 use crate::vpn_core::offload::{
@@ -22,11 +23,12 @@ use crate::vpn_core::paths::{format_connection_paths, watch_connection_paths};
 use crate::vpn_core::signaling::{
     append_ip_packet_v2, frame_capabilities_message, parse_ip_packet_v2, read_message,
     write_message, CapabilitiesMessage, VpnHandshake, VpnHandshakeResponse, WireTransport,
-    HEARTBEAT_PING_BYTE, HEARTBEAT_PONG_BYTE, MAX_HANDSHAKE_SIZE, VPN_ALPN,
+    HEARTBEAT_PING_BYTE, HEARTBEAT_PONG_BYTE, IROH_DATA_STREAM_COUNT, MAX_HANDSHAKE_SIZE,
+    VPN_ALPN,
 };
 use crate::vpn_core::transport::build_quic_transport_config;
 use bytes::{Bytes, BytesMut};
-use futures::StreamExt;
+use futures::{future::select_all, StreamExt};
 use ipnet::{Ipv4Net, Ipv6Net};
 use iroh::endpoint::{ConnectOptions, PathList};
 use iroh::{Endpoint, EndpointAddr, EndpointId, RelayUrl, TransportAddr};
@@ -68,6 +70,9 @@ const OUTBOUND_CHANNEL_SIZE: usize = 256;
 /// batched QUIC write.
 const WRITE_BATCH_SIZE: usize = 256;
 
+const IPV4_MIN_HEADER: usize = 20;
+const IPV6_MIN_HEADER: usize = 40;
+
 /// Channel buffer size for inbound packets queued to the TUN writer task.
 ///
 /// Decouples QUIC stream draining from TUN write syscalls so the inbound
@@ -93,6 +98,29 @@ const PATH_KEY_POLL_INTERVAL: Duration = Duration::from_millis(100);
 struct InboundTunWrite {
     packet: Bytes,
     offload: Option<VirtioNetHdr>,
+}
+
+#[derive(Clone)]
+struct FrameRouter {
+    senders: Arc<Vec<mpsc::Sender<Bytes>>>,
+}
+
+impl FrameRouter {
+    fn new(senders: Vec<mpsc::Sender<Bytes>>) -> Self {
+        debug_assert!(!senders.is_empty());
+        Self {
+            senders: Arc::new(senders),
+        }
+    }
+
+    async fn send_frame(&self, frame: Bytes) -> bool {
+        let index = frame_route_index(&frame, self.senders.len());
+        self.senders[index].send(frame).await.is_ok()
+    }
+
+    async fn send_control(&self, frame: Bytes) -> bool {
+        self.senders[0].send(frame).await.is_ok()
+    }
 }
 
 /// VPN client instance.
@@ -323,14 +351,6 @@ impl VpnClient {
                 None
             };
 
-        // Open data stream for IP packets
-        let (mut data_send, data_recv) = connection
-            .open_bi()
-            .await
-            .map_err(|e| VpnError::Signaling(format!("Failed to open data stream: {}", e)))?;
-
-        log::info!("VPN data stream opened");
-
         let offload_status = tun_device.offload_status();
         let local_gso_enabled = offload_status.enabled;
         let negotiated_gso = local_gso_enabled && server_info.server_gso_enabled;
@@ -353,18 +373,11 @@ impl VpnClient {
             }
         }
 
-        // Capabilities must be the first data-stream message.
-        let mut capabilities_buf = BytesMut::with_capacity(3);
-        frame_capabilities_message(
-            &mut capabilities_buf,
-            CapabilitiesMessage {
-                gso_enabled: advertised_gso,
-            },
-        );
-        data_send
-            .write_all(&capabilities_buf)
-            .await
-            .map_err(|e| VpnError::Signaling(format!("Failed to send capabilities: {}", e)))?;
+        // Open data streams for IP packets. Capabilities must be the first
+        // message on every stream so the server can validate the full stream
+        // set before routing packets.
+        let (data_sends, data_recvs) =
+            open_client_data_streams(&connection, advertised_gso).await?;
 
         log::info!("VPN tunnel established!");
         log::info!("  TUN device: {}", tun_device.name());
@@ -389,8 +402,8 @@ impl VpnClient {
         // Pass the bypass route task so it's aborted when VPN ends
         run_tunnel(
             tun_device,
-            data_send,
-            data_recv,
+            data_sends,
+            data_recvs,
             server_info.server_gso_enabled,
             bypass_route_task,
             local_iroh_udp_ports,
@@ -621,21 +634,60 @@ impl VpnClient {
 
 }
 
+async fn open_client_data_streams(
+    connection: &iroh::endpoint::Connection,
+    advertised_gso: bool,
+) -> VpnResult<(
+    Vec<iroh::endpoint::SendStream>,
+    Vec<iroh::endpoint::RecvStream>,
+)> {
+    let mut data_sends = Vec::with_capacity(IROH_DATA_STREAM_COUNT);
+    let mut data_recvs = Vec::with_capacity(IROH_DATA_STREAM_COUNT);
+
+    let mut capabilities_buf = BytesMut::with_capacity(3);
+    frame_capabilities_message(
+        &mut capabilities_buf,
+        CapabilitiesMessage {
+            gso_enabled: advertised_gso,
+        },
+    );
+
+    for stream_index in 0..IROH_DATA_STREAM_COUNT {
+        let (mut data_send, data_recv) = connection.open_bi().await.map_err(|e| {
+            VpnError::Signaling(format!(
+                "Failed to open data stream {}: {}",
+                stream_index, e
+            ))
+        })?;
+        data_send.write_all(&capabilities_buf).await.map_err(|e| {
+            VpnError::Signaling(format!(
+                "Failed to send capabilities on data stream {}: {}",
+                stream_index, e
+            ))
+        })?;
+        data_sends.push(data_send);
+        data_recvs.push(data_recv);
+    }
+
+    log::info!("VPN data streams opened: {}", IROH_DATA_STREAM_COUNT);
+    Ok((data_sends, data_recvs))
+}
+
 /// Run the VPN packet processing loop over an arbitrary transport.
 ///
-/// Generic over the data-channel write half (`W: ChunkedWrite`) and read half
-/// (`R: AsyncRead`), so the exact same hot path serves both the iroh QUIC
-/// transport and the plain-TCP dummy benchmark transport (`vpn_dummy`). Takes no
-/// `self`: it only shovels framed IP packets between the TUN device and the
-/// transport, plus heartbeats. This is the single shared pipeline whose
-/// throughput the dummy mode benchmarks against iroh.
+/// Generic over data-channel write streams (`W: ChunkedWrite`) and read streams
+/// (`R: AsyncRead`), so the same hot path serves both the iroh QUIC transport
+/// and the plain-TCP dummy benchmark transport (`vpn_dummy`). Takes no `self`:
+/// it only shovels framed IP packets between the TUN device and the transport,
+/// plus heartbeats. This is the single shared pipeline whose throughput the
+/// dummy mode benchmarks against iroh.
 ///
 /// `server_gso_enabled` is the *peer's* advertised GSO capability (the server's
 /// for a client, the client's for the dummy server).
 pub(crate) async fn run_tunnel<W, R>(
     tun_device: TunDevice,
-    data_send: W,
-    data_recv: R,
+    data_sends: Vec<W>,
+    data_recvs: Vec<R>,
     server_gso_enabled: bool,
     bypass_route_task: Option<JoinHandle<()>>,
     local_iroh_udp_ports: Arc<HashSet<u16>>,
@@ -644,6 +696,12 @@ where
     W: ChunkedWrite + 'static,
     R: tokio::io::AsyncRead + Unpin + Send + 'static,
 {
+        if data_sends.is_empty() || data_recvs.is_empty() {
+            return Err(VpnError::Signaling(
+                "data channel requires at least one send and receive stream".into(),
+            ));
+        }
+
         // Split TUN device
         let (mut tun_reader, mut tun_writer) = tun_device.split()?;
         let local_gso_enabled = tun_reader.offload_status().enabled;
@@ -651,41 +709,45 @@ where
         let negotiated_gso = local_gso_enabled && server_gso_enabled;
         let buffer_size = tun_reader.buffer_size();
 
-        // Create channel for outbound data to decouple packet production from stream writes.
-        // The writer task owns the SendStream and performs actual I/O, eliminating
-        // per-packet mutex overhead from the TUN reader and heartbeat tasks.
-        // Uses Bytes for zero-copy sends (freeze BytesMut instead of cloning Vec).
-        let (outbound_tx, mut outbound_rx) = mpsc::channel::<Bytes>(OUTBOUND_CHANNEL_SIZE);
-        let outbound_tx_heartbeat = outbound_tx.clone();
-        // Lets the inbound task reply to heartbeat pings with pongs, making the
-        // loop symmetric for the dummy-TCP transport (where both ends ping).
-        let outbound_tx_pong = outbound_tx.clone();
+        let mut task_handles: Vec<tokio::task::JoinHandle<(String, Option<String>)>> = Vec::new();
 
-        // Spawn dedicated writer task that owns the SendStream.
-        // Uses batch receives and chunked QUIC writes for better throughput.
-        // Returns error context if write fails for inclusion in shutdown reason.
-        let mut writer_handle: tokio::task::JoinHandle<Option<String>> = tokio::spawn(async move {
-            let mut data_send = data_send;
-            let mut batch = Vec::with_capacity(WRITE_BATCH_SIZE);
-            loop {
-                let count = outbound_rx.recv_many(&mut batch, WRITE_BATCH_SIZE).await;
-                if count == 0 {
-                    log::trace!("Writer task exiting");
-                    break;
+        // One outbound channel and writer task per transport stream. Data
+        // frames are striped by packet contents/TCP sequence so a single heavy
+        // flow is not pinned behind one reliable stream's head-of-line stalls.
+        let mut outbound_txs = Vec::with_capacity(data_sends.len());
+        for (stream_index, data_send) in data_sends.into_iter().enumerate() {
+            let (outbound_tx, mut outbound_rx) = mpsc::channel::<Bytes>(OUTBOUND_CHANNEL_SIZE);
+            outbound_txs.push(outbound_tx);
+            task_handles.push(tokio::spawn(async move {
+                let name = format!("writer-{}", stream_index);
+                let mut data_send = data_send;
+                let mut batch = Vec::with_capacity(WRITE_BATCH_SIZE);
+                loop {
+                    let count = outbound_rx.recv_many(&mut batch, WRITE_BATCH_SIZE).await;
+                    if count == 0 {
+                        log::trace!("Writer task {} exiting", stream_index);
+                        break;
+                    }
+                    if let Err(e) = data_send.write_all_chunks(batch.as_mut_slice()).await {
+                        log::warn!(
+                            "Failed to write to data stream {}: {}",
+                            stream_index,
+                            e
+                        );
+                        return (name, Some(format!("QUIC write error: {}", e)));
+                    }
+                    batch.clear();
                 }
-                if let Err(e) = data_send.write_all_chunks(batch.as_mut_slice()).await {
-                    log::warn!("Failed to write to QUIC stream: {}", e);
-                    return Some(format!("QUIC write error: {}", e));
-                }
-                batch.clear();
-            }
-            None
-        });
+                (name, None)
+            }));
+        }
+        let outbound_router = FrameRouter::new(outbound_txs);
+        let heartbeat_router = outbound_router.clone();
+        let pong_router = outbound_router.clone();
 
         // Track last heartbeat pong received (as millis since start_time for atomic access)
         let start_time = Instant::now();
         let last_pong = Arc::new(AtomicU64::new(start_time.elapsed().as_millis() as u64));
-        let last_pong_inbound = last_pong.clone();
         let last_pong_heartbeat = last_pong.clone();
 
         // Spawn outbound task (TUN -> frame IP packet -> channel -> writer task)
@@ -694,8 +756,9 @@ where
         // Memory note: Each packet requires a small allocation (5 bytes framing + packet length).
         // We allocate based on actual packet size to avoid over-allocation for small packets.
         // Most allocations are small and served from thread-local caches, making them fast.
-        let mut outbound_handle: tokio::task::JoinHandle<Option<String>> =
-            tokio::spawn(async move {
+        let outbound_router_for_tun = outbound_router.clone();
+        task_handles.push(tokio::spawn(async move {
+                let name = "outbound".to_string();
                 let mut read_storage = uninitialized_vec(buffer_size);
                 // Long-lived framing arena: frames are appended and split off as
                 // refcounted Bytes views, amortizing allocations across packets.
@@ -725,8 +788,9 @@ where
                         // Flush groups whose bounded wait has elapsed before
                         // arming the next deadline.
                         let expired = gro_table.flush_expired(Instant::now(), GRO_FLUSH_WINDOW);
-                        if !send_gro_outputs(&expired, &mut arena, &outbound_tx).await {
-                            return None;
+                        if !send_gro_outputs(&expired, &mut arena, &outbound_router_for_tun).await
+                        {
+                            return (name, None);
                         }
 
                         if let Some(deadline) = gro_table.next_deadline(GRO_FLUSH_WINDOW) {
@@ -735,9 +799,14 @@ where
                                 None => {
                                     let expired =
                                         gro_table.flush_expired(Instant::now(), GRO_FLUSH_WINDOW);
-                                    if !send_gro_outputs(&expired, &mut arena, &outbound_tx).await
+                                    if !send_gro_outputs(
+                                        &expired,
+                                        &mut arena,
+                                        &outbound_router_for_tun,
+                                    )
+                                    .await
                                     {
-                                        return None;
+                                        return (name, None);
                                     }
                                     continue;
                                 }
@@ -772,10 +841,14 @@ where
                                 // Non-GSO TUN frames never carry offload metadata;
                                 // push the plain IP packet through the GRO table.
                                 let result = gro_table.push(packet, Instant::now());
-                                if !send_gro_outputs(&result.outputs, &mut arena, &outbound_tx)
-                                    .await
+                                if !send_gro_outputs(
+                                    &result.outputs,
+                                    &mut arena,
+                                    &outbound_router_for_tun,
+                                )
+                                .await
                                 {
-                                    return None;
+                                    return (name, None);
                                 }
                                 if !result.pass_through {
                                     continue;
@@ -812,9 +885,9 @@ where
                                         continue;
                                     }
                                     for frame in pending_frames.drain(..) {
-                                        if outbound_tx.send(frame).await.is_err() {
+                                        if !outbound_router_for_tun.send_frame(frame).await {
                                             log::warn!("Outbound channel closed");
-                                            return None;
+                                            return (name, None);
                                         }
                                     }
                                     continue;
@@ -840,26 +913,29 @@ where
                                     }
                                 };
 
-                            if outbound_tx
-                                .send(arena.split_to(written).freeze())
+                            if !outbound_router_for_tun
+                                .send_frame(arena.split_to(written).freeze())
                                 .await
-                                .is_err()
                             {
                                 log::warn!("Outbound channel closed");
-                                return None;
+                                return (name, None);
                             }
                         }
                         Ok(()) => {}
                         Err(e) => {
                             log::error!("TUN read error: {}", e);
                             // Flush pending coalesced groups before shutting down.
-                            send_gro_outputs(&gro_table.flush_all(), &mut arena, &outbound_tx)
-                                .await;
-                            return Some(format!("TUN read error: {}", e));
+                            send_gro_outputs(
+                                &gro_table.flush_all(),
+                                &mut arena,
+                                &outbound_router_for_tun,
+                            )
+                            .await;
+                            return (name, Some(format!("TUN read error: {}", e)));
                         }
                     }
                 }
-            });
+            }));
 
         // Create channel for inbound packets to decouple QUIC stream draining
         // from TUN write syscalls. The TUN writer task owns the TunWriter.
@@ -870,8 +946,8 @@ where
         // task wakeups; write_batch coalesces consecutive same-flow TCP
         // segments into GSO super-frames on Linux, and otherwise issues one
         // TUN write per packet (utun/wintun have no batching API).
-        let mut tun_writer_handle: tokio::task::JoinHandle<Option<String>> =
-            tokio::spawn(async move {
+        task_handles.push(tokio::spawn(async move {
+                let name = "tun-writer".to_string();
                 const MAX_TUN_WRITE_FAILURES: u32 = 10;
                 let mut consecutive_tun_failures = 0u32;
                 // Track a write result; returns the disconnect reason once too
@@ -911,7 +987,7 @@ where
                     let count = tun_write_rx.recv_many(&mut batch, WRITE_BATCH_SIZE).await;
                     if count == 0 {
                         log::trace!("TUN writer task exiting");
-                        return None;
+                        return (name, None);
                     }
                     for req in batch.drain(..) {
                         let Some(meta) = req.offload else {
@@ -922,32 +998,34 @@ where
                             let result = tun_writer.write_batch(&plain_run).await;
                             plain_run.clear();
                             if let Some(reason) = note_write_result(result) {
-                                return Some(reason);
+                                return (name, Some(reason));
                             }
                         }
                         let result = tun_writer.write_packet(Some(&meta), &req.packet).await;
                         if let Some(reason) = note_write_result(result) {
-                            return Some(reason);
+                            return (name, Some(reason));
                         }
                     }
                     if !plain_run.is_empty() {
                         let result = tun_writer.write_batch(&plain_run).await;
                         plain_run.clear();
                         if let Some(reason) = note_write_result(result) {
-                            return Some(reason);
+                            return (name, Some(reason));
                         }
                     }
                 }
-            });
+            }));
 
-        // Spawn inbound task (QUIC stream -> TUN writer channel)
-        // data_recv is moved into this task (no Arc/Mutex needed - single owner)
-        // Returns error reason if task exits due to an error.
-        let inbound_start_time = start_time;
-        let mut inbound_handle: tokio::task::JoinHandle<Option<String>> =
-            tokio::spawn(async move {
+        // Spawn inbound tasks (transport stream -> TUN writer channel).
+        for (stream_index, data_recv) in data_recvs.into_iter().enumerate() {
+            let inbound_start_time = start_time;
+            let last_pong_inbound = last_pong.clone();
+            let tun_write_tx = tun_write_tx.clone();
+            let pong_router = pong_router.clone();
+            task_handles.push(tokio::spawn(async move {
+                let name = format!("inbound-{}", stream_index);
                 // Exact frame reader: fills frame payload storage directly
-                // from QUIC without zero-initializing the payload buffer.
+                // from the transport without zero-initializing the payload buffer.
                 let mut reader = FrameReader::new(data_recv, MAX_IP_PACKET_SIZE);
                 // Reusable buffers for software-materializing offload
                 // super-frames: segments are built in `seg_scratch`, copied
@@ -969,13 +1047,12 @@ where
                             // Reply with a pong. In the iroh client path the
                             // server never pings, so this only fires for the
                             // symmetric dummy-TCP transport.
-                            if outbound_tx_pong
-                                .send(Bytes::from_static(HEARTBEAT_PONG_BYTE))
+                            if !pong_router
+                                .send_control(Bytes::from_static(HEARTBEAT_PONG_BYTE))
                                 .await
-                                .is_err()
                             {
                                 log::trace!("Outbound channel closed (pong)");
-                                return None;
+                                return (name, None);
                             }
                             continue;
                         }
@@ -986,12 +1063,19 @@ where
                             continue;
                         }
                         Ok(None) => {
-                            log::error!("Data stream closed by server");
-                            return Some("data stream closed by server".to_string());
+                            log::error!("Data stream {} closed by server", stream_index);
+                            return (
+                                name,
+                                Some(format!("data stream {} closed by server", stream_index)),
+                            );
                         }
                         Err(e) => {
-                            log::error!("Failed to read data frame: {}", e);
-                            return Some(e.to_string());
+                            log::error!(
+                                "Failed to read data frame on stream {}: {}",
+                                stream_index,
+                                e
+                            );
+                            return (name, Some(e.to_string()));
                         }
                     };
 
@@ -1031,7 +1115,7 @@ where
                                 };
                                 if tun_write_tx.send(req).await.is_err() {
                                     log::trace!("TUN writer channel closed");
-                                    return None;
+                                    return (name, None);
                                 }
                             }
                         } else {
@@ -1041,7 +1125,7 @@ where
                             };
                             if tun_write_tx.send(req).await.is_err() {
                                 log::trace!("TUN writer channel closed");
-                                return None;
+                                return (name, None);
                             }
                         }
                     } else {
@@ -1051,16 +1135,18 @@ where
                         };
                         if tun_write_tx.send(req).await.is_err() {
                             log::trace!("TUN writer channel closed");
-                            return None;
+                            return (name, None);
                         }
                     }
                 }
-            });
+            }));
+        }
+        drop(tun_write_tx);
 
         // Spawn heartbeat task (sends pings via channel, checks for timeout)
         // Returns error reason if task exits due to timeout.
-        let mut heartbeat_handle: tokio::task::JoinHandle<Option<String>> =
-            tokio::spawn(async move {
+        task_handles.push(tokio::spawn(async move {
+                let name = "heartbeat".to_string();
                 let heartbeat_start = start_time;
                 loop {
                     tokio::time::sleep(HEARTBEAT_INTERVAL).await;
@@ -1076,43 +1162,30 @@ where
                             elapsed_ms as f64 / 1000.0,
                             HEARTBEAT_TIMEOUT.as_secs_f64()
                         );
-                        return Some(format!(
-                            "Heartbeat timeout: no pong for {:.1}s",
-                            elapsed_ms as f64 / 1000.0
-                        ));
+                        return (
+                            name,
+                            Some(format!(
+                                "Heartbeat timeout: no pong for {:.1}s",
+                                elapsed_ms as f64 / 1000.0
+                            )),
+                        );
                     }
 
                     // Send ping via channel to writer task (static Bytes, zero allocation)
                     let ping = Bytes::from_static(HEARTBEAT_PING_BYTE);
-                    if outbound_tx_heartbeat.send(ping).await.is_err() {
+                    if !heartbeat_router.send_control(ping).await {
                         log::warn!("Failed to send heartbeat ping: channel closed");
-                        return None; // Normal exit, channel closed
+                        return (name, None); // Normal exit, channel closed
                     }
                     log::trace!("Heartbeat ping sent");
                 }
-            });
+            }));
 
-        // Wait for any task to complete (or error), then clean up all tasks
-        let (first_task, first_result, remaining) = tokio::select! {
-            result = &mut outbound_handle => {
-                ("outbound", result, vec![("inbound", inbound_handle), ("heartbeat", heartbeat_handle), ("writer", writer_handle), ("tun-writer", tun_writer_handle)])
-            }
-            result = &mut inbound_handle => {
-                ("inbound", result, vec![("outbound", outbound_handle), ("heartbeat", heartbeat_handle), ("writer", writer_handle), ("tun-writer", tun_writer_handle)])
-            }
-            result = &mut heartbeat_handle => {
-                ("heartbeat", result, vec![("outbound", outbound_handle), ("inbound", inbound_handle), ("writer", writer_handle), ("tun-writer", tun_writer_handle)])
-            }
-            result = &mut writer_handle => {
-                ("writer", result, vec![("outbound", outbound_handle), ("inbound", inbound_handle), ("heartbeat", heartbeat_handle), ("tun-writer", tun_writer_handle)])
-            }
-            result = &mut tun_writer_handle => {
-                ("tun-writer", result, vec![("outbound", outbound_handle), ("inbound", inbound_handle), ("heartbeat", heartbeat_handle), ("writer", writer_handle)])
-            }
-        };
+        // Wait for any task to complete (or error), then clean up all tasks.
+        let (first_result, _, remaining) = select_all(task_handles).await;
 
         // Abort remaining tasks to ensure they stop
-        for (_, handle) in &remaining {
+        for handle in &remaining {
             handle.abort();
         }
 
@@ -1122,9 +1195,9 @@ where
         }
 
         // Await all remaining handles to ensure cleanup (aborted tasks return Cancelled)
-        let mut all_results = vec![(first_task, first_result)];
-        for (name, handle) in remaining {
-            all_results.push((name, handle.await));
+        let mut all_results = vec![first_result];
+        for handle in remaining {
+            all_results.push(handle.await);
         }
 
         // Wait for bypass route task to clean up (guards will be dropped)
@@ -1134,13 +1207,13 @@ where
 
         // Build comprehensive reason from all task results
         let mut reasons = Vec::new();
-        for (name, result) in &all_results {
+        for result in &all_results {
             match result {
-                Ok(Some(error_reason)) => {
+                Ok((_, Some(error_reason))) => {
                     // Task exited with an error reason
                     reasons.push(error_reason.clone());
                 }
-                Ok(None) => {
+                Ok((name, None)) => {
                     // Task completed normally (channel closed, etc.)
                     reasons.push(format!("{} task ended", name));
                 }
@@ -1148,10 +1221,10 @@ where
                     // Expected for aborted tasks, don't include in reason
                 }
                 Err(e) if e.is_panic() => {
-                    reasons.push(format!("{} task panicked: {}", name, e));
+                    reasons.push(format!("task panicked: {}", e));
                 }
                 Err(e) => {
-                    reasons.push(format!("{} task failed: {}", name, e));
+                    reasons.push(format!("task failed: {}", e));
                 }
             }
         }
@@ -1746,7 +1819,7 @@ fn collect_local_iroh_udp_ports(endpoint: &Endpoint) -> HashSet<u16> {
 async fn send_gro_outputs(
     outputs: &[CoalescedOutput],
     arena: &mut BytesMut,
-    outbound_tx: &mpsc::Sender<Bytes>,
+    outbound_router: &FrameRouter,
 ) -> bool {
     let coalesced_frames = outputs.iter().filter(|output| output.is_coalesced()).count();
     if coalesced_frames > 0 {
@@ -1784,10 +1857,9 @@ async fn send_gro_outputs(
                 continue;
             }
         };
-        if outbound_tx
-            .send(arena.split_to(written).freeze())
+        if !outbound_router
+            .send_frame(arena.split_to(written).freeze())
             .await
-            .is_err()
         {
             log::warn!("Outbound channel closed");
             return false;
@@ -1813,17 +1885,14 @@ fn packet_has_local_iroh_udp_port(packet: &[u8], blocked_ports: &HashSet<u16>) -
 /// For IPv6, only packets with UDP as the first next-header are parsed.
 #[inline]
 fn extract_udp_ports(packet: &[u8]) -> Option<(u16, u16)> {
-    const IPV4_MIN_HEADER_BYTES: usize = 20;
-    const IPV6_MIN_HEADER_BYTES: usize = 40;
-
-    if packet.len() < IPV4_MIN_HEADER_BYTES {
+    if packet.len() < IPV4_MIN_HEADER {
         return None;
     }
 
     match packet[0] >> 4 {
         4 => {
             let ihl = usize::from(packet[0] & 0x0f) * 4;
-            if ihl < IPV4_MIN_HEADER_BYTES || packet.len() < ihl + 8 {
+            if ihl < IPV4_MIN_HEADER || packet.len() < ihl + 8 {
                 return None;
             }
             if packet[9] != 17 {
@@ -1834,7 +1903,7 @@ fn extract_udp_ports(packet: &[u8]) -> Option<(u16, u16)> {
             Some((src, dst))
         }
         6 => {
-            if packet.len() < IPV6_MIN_HEADER_BYTES + 8 {
+            if packet.len() < IPV6_MIN_HEADER + 8 {
                 return None;
             }
             if packet[6] != 17 {
