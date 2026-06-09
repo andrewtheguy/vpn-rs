@@ -155,7 +155,10 @@ enum Command {
         #[arg(long, default_value = "10.9.0.0/24")]
         network: Ipv4Net,
 
-        /// MTU for the TUN device
+        /// MTU for the TUN device. On per-packet-syscall-bound clients (macOS
+        /// utun), throughput scales ~linearly with MTU, so raise this (e.g.
+        /// --mtu 9000) to benchmark past the ~1 Gbps single-packet ceiling. The
+        /// TCP transport re-segments, so no jumbo physical frames are needed.
         #[arg(long, default_value_t = 1440)]
         mtu: u16,
     },
