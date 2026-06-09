@@ -84,6 +84,10 @@ network = "10.0.0.0/24"
 # NOTE: The MTU is dictated to clients during the handshake; clients do not
 # configure it themselves. All clients share this one value.
 #
+# IPv6: keep mtu >= 1280. IPv6 mandates a 1280-byte minimum link MTU, so for
+# IPv6-only or dual-stack (network6) deployments a lower value causes
+# fragmentation / packet loss on the IPv6 path.
+#
 # Jumbo MTU (e.g. 9000) for high-throughput LANs / site-to-site:
 #   Throughput on clients whose TUN does one packet per syscall (notably macOS
 #   utun, which has no GSO) is bound by the per-packet cost, so it scales with

@@ -18,9 +18,9 @@ use std::num::NonZeroU32;
 use std::path::PathBuf;
 
 use crate::vpn_core::file_config::{
-    expand_tilde, load_vpn_client_config, load_vpn_server_config, ResolvedVpnClientConfig,
-    ResolvedVpnServerConfig, VpnClientConfig as TomlClientConfig, VpnClientConfigBuilder,
-    VpnServerConfig as TomlServerConfig,
+    expand_tilde, load_vpn_client_config, load_vpn_server_config, validate_mtu,
+    ResolvedVpnClientConfig, ResolvedVpnServerConfig, VpnClientConfig as TomlClientConfig,
+    VpnClientConfigBuilder, VpnServerConfig as TomlServerConfig,
 };
 use crate::vpn_iroh::auth;
 use crate::vpn_iroh::iroh_mode::endpoint::{
@@ -314,10 +314,14 @@ async fn main() -> Result<()> {
             network,
             mtu,
         } => {
+            validate_mtu(mtu, "dummy-server")?;
             vpn_dummy::run_dummy_server(listen, network, mtu).await?;
             Ok(())
         }
         Command::DummyClient { server, mtu } => {
+            if let Some(mtu) = mtu {
+                validate_mtu(mtu, "dummy-client")?;
+            }
             vpn_dummy::run_dummy_client(server, mtu).await?;
             Ok(())
         }

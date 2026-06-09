@@ -188,7 +188,7 @@ const MIN_VPN_MTU: u16 = 576;
 /// so a large *inner* MTU needs no jumbo physical frames.
 const MAX_VPN_MTU: u16 = 9216;
 
-fn validate_mtu(mtu: u16, section: &str) -> Result<()> {
+pub(crate) fn validate_mtu(mtu: u16, section: &str) -> Result<()> {
     if !(MIN_VPN_MTU..=MAX_VPN_MTU).contains(&mtu) {
         anyhow::bail!(
             "[{}] MTU {} is out of range. Valid range: {}-{}",
