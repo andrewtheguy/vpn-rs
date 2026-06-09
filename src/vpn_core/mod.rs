@@ -30,6 +30,7 @@ pub mod buffer;
 pub mod chunked_write;
 pub mod client;
 pub mod config;
+pub mod datagram;
 pub mod device;
 pub mod error;
 pub mod file_config;

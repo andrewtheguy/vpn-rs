@@ -179,14 +179,18 @@ pub fn validate_transport_tuning(tuning: &TransportTuning, section: &str) -> Res
 }
 
 /// Minimum VPN tunnel MTU.
-const MIN_VPN_MTU: u16 = 576;
+pub(crate) const MIN_VPN_MTU: u16 = 576;
 
-/// Maximum VPN tunnel MTU. Jumbo frames are allowed because throughput on
-/// per-packet-syscall-bound platforms (notably macOS `utun`, which has no GSO
-/// and reads one packet per syscall) scales ~linearly with MTU. The transport
-/// re-segments to the path MTU (TCP MSS for the dummy, QUIC datagrams for iroh),
-/// so a large *inner* MTU needs no jumbo physical frames.
-const MAX_VPN_MTU: u16 = 9216;
+/// Maximum VPN tunnel MTU.
+///
+/// The iroh data plane carries each IP packet in a single unreliable QUIC
+/// datagram, which cannot be fragmented and is hard-capped at the path's
+/// `max_datagram_size` (~1200-1400 bytes). A tunnel MTU larger than the
+/// underlying path can carry could never be sent, so jumbo frames are no longer
+/// allowed: the static ceiling matches the default, and the effective MTU is
+/// additionally clamped at runtime to `max_datagram_size - DATAGRAM_IP_OVERHEAD`
+/// once the connection is up (see `signaling::clamp_tunnel_mtu`).
+const MAX_VPN_MTU: u16 = DEFAULT_VPN_MTU;
 
 pub(crate) fn validate_mtu(mtu: u16, section: &str) -> Result<()> {
     if !(MIN_VPN_MTU..=MAX_VPN_MTU).contains(&mtu) {

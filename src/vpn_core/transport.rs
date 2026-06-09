@@ -51,6 +51,20 @@ pub const QUIC_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 /// `min_mtu`, so black-hole detection can still drop back to 1200.
 pub const QUIC_INITIAL_MTU: u16 = 1300;
 
+/// Lower bound for the QUIC datagram send/receive buffers.
+///
+/// The data plane carries IP packets as unreliable datagrams. Unlike streams,
+/// datagrams are not flow-controlled by a window; these buffers are the only
+/// backpressure point (replacing the old bounded mpsc + stream window). At
+/// ~1.4 KB per datagram, 4 MiB holds ~2900 queued datagrams — a few ms of
+/// buffering at multi-Gbps, large enough that bursty TUN reads don't stall on
+/// `send_datagram_wait`, small enough to bound memory and surface backpressure.
+const DATAGRAM_BUFFER_MIN: usize = 4 * 1024 * 1024;
+
+/// Upper bound for the QUIC datagram send/receive buffers, so a large
+/// configured window does not translate into an unbounded datagram queue.
+const DATAGRAM_BUFFER_MAX: usize = 8 * 1024 * 1024;
+
 /// Create a congestion controller factory based on the selected algorithm.
 fn create_congestion_controller_factory(
     controller: CongestionController,
@@ -125,6 +139,19 @@ pub fn build_quic_transport_config(tuning: &TransportTuning) -> Result<QuicTrans
     info!(
         "Transport MTU: initial={} (discovery enabled)",
         QUIC_INITIAL_MTU
+    );
+
+    // Enable unreliable QUIC datagrams (required for the data plane and for
+    // `Connection::max_datagram_size()` to return `Some`). Size the buffers off
+    // the configured receive window so config stays coherent, clamped to a sane
+    // range (see DATAGRAM_BUFFER_MIN/MAX).
+    let datagram_buffer = (receive_window as usize)
+        .clamp(DATAGRAM_BUFFER_MIN, DATAGRAM_BUFFER_MAX);
+    transport_config = transport_config.datagram_receive_buffer_size(Some(datagram_buffer));
+    transport_config = transport_config.datagram_send_buffer_size(datagram_buffer);
+    info!(
+        "Transport datagrams enabled: send/receive buffer={}KB",
+        datagram_buffer / 1024
     );
 
     Ok(transport_config.build())

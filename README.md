@@ -217,7 +217,7 @@ ping 10.0.0.1
 
 Use `vpn_server.toml.example` and `vpn_client.toml.example` for full tunables. MTU and transport tuning are server-side settings dictated to clients during the handshake.
 
-MTU accepts `576-9216` (default `1440`). A jumbo MTU (e.g. `9000`) significantly raises throughput on clients whose TUN does one packet per syscall (notably macOS `utun`, which has no GSO) — it roughly tripled macOS sender throughput in testing. **Only use jumbo when tunneled traffic stays VPN-to-VPN (split tunnel / site-to-site / LAN);** in full-tunnel mode a large inner packet egressing to the internet through a ~1500-MTU path causes fragmentation or PMTUD blackholes. **For IPv6-only or dual-stack deployments, keep the MTU at or above `1280`** — IPv6 mandates a 1280-byte minimum link MTU, so a lower value causes fragmentation/packet loss on the IPv6 path. See `vpn_server.toml.example` for the full rationale.
+MTU accepts `576-1440` (default `1440`). IP packets are carried as unreliable QUIC datagrams (one packet per datagram), which cannot be fragmented and are capped at the path's `max_datagram_size` (~1200-1400 bytes), so jumbo MTUs are not supported. The configured value is automatically clamped down at connection time to whatever the path's datagram size allows; the server logs the effective MTU when it clamps. **For IPv6-only or dual-stack deployments, keep the MTU at or above `1280`** — IPv6 mandates a 1280-byte minimum link MTU, so a lower value causes fragmentation/packet loss on the IPv6 path. See `vpn_server.toml.example` for the full rationale.
 
 ## Split Tunneling
 

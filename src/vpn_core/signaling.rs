@@ -7,7 +7,7 @@
 //! connection capabilities.
 
 use crate::vpn_core::error::{VpnError, VpnResult};
-use crate::vpn_core::file_config::{CongestionController, TransportTuning};
+use crate::vpn_core::file_config::{CongestionController, TransportTuning, MIN_VPN_MTU};
 use crate::vpn_core::offload::{VirtioNetHdr, VIRTIO_NET_HDR_LEN};
 use bytes::{BufMut, BytesMut};
 use ipnet::{Ipv4Net, Ipv6Net};
@@ -586,6 +586,90 @@ pub fn parse_ip_packet_v2(frame_payload: &[u8]) -> VpnResult<(Option<VirtioNetHd
     Ok((offload, &frame_payload[offload_end..]))
 }
 
+/// Datagram framing overhead before the IP packet: type byte + offload_len byte.
+///
+/// Unlike the stream framing (`append_ip_packet_v2`), datagrams carry no 4-byte
+/// length prefix (the datagram boundary *is* the message boundary). The data
+/// plane always splits GSO super-frames into individual packets before sending,
+/// so no `virtio_net_hdr` ever rides the wire and the overhead is exactly these
+/// two header bytes.
+pub const DATAGRAM_IP_OVERHEAD: usize = 2;
+
+/// Append a framed IP packet for transmission as a single QUIC datagram,
+/// returning the number of bytes written.
+///
+/// Datagram layout: `[type: 0x00] [offload_len: 1 byte] [offload: N bytes] [ip_packet]`
+///
+/// This is `append_ip_packet_v2` without the 4-byte frame length: a datagram
+/// has an intrinsic length, so the prefix is redundant. The data plane passes
+/// `offload = None` (super-frames are split first), but the parameter is kept
+/// for symmetry and testing.
+#[inline]
+pub fn append_ip_datagram(
+    buf: &mut BytesMut,
+    offload: Option<&VirtioNetHdr>,
+    ip_packet: &[u8],
+) -> VpnResult<usize> {
+    if ip_packet.is_empty() {
+        return Err(VpnError::Signaling(
+            "Cannot frame empty IP packet".to_string(),
+        ));
+    }
+
+    const _: () = assert!(
+        VIRTIO_NET_HDR_LEN <= u8::MAX as usize,
+        "VIRTIO_NET_HDR_LEN must fit in u8"
+    );
+    let offload_len: u8 = if offload.is_some() {
+        VIRTIO_NET_HDR_LEN as u8
+    } else {
+        0
+    };
+    let total = 1 + 1 + usize::from(offload_len) + ip_packet.len();
+
+    buf.reserve(total);
+    buf.put_u8(DataMessageType::IpPacket.as_byte());
+    buf.put_u8(offload_len);
+    if let Some(hdr) = offload {
+        buf.put_slice(&hdr.to_bytes());
+    }
+    buf.put_slice(ip_packet);
+    Ok(total)
+}
+
+/// Parse an IP packet datagram (`[type] [offload_len] [offload] [ip]`).
+///
+/// Returns the optional offload metadata and the IP packet slice. Non-IP
+/// datagram types are a protocol error: heartbeats and capabilities ride the
+/// reliable control stream, never datagrams.
+#[inline]
+pub fn parse_ip_datagram(datagram: &[u8]) -> VpnResult<(Option<VirtioNetHdr>, &[u8])> {
+    let Some(&type_byte) = datagram.first() else {
+        return Err(VpnError::Signaling("Empty datagram".to_string()));
+    };
+    if type_byte != DataMessageType::IpPacket.as_byte() {
+        return Err(VpnError::Signaling(format!(
+            "Unexpected datagram message type 0x{:02x} (only IP packets are sent as datagrams)",
+            type_byte
+        )));
+    }
+    parse_ip_packet_v2(&datagram[1..])
+}
+
+/// Clamp a configured tunnel MTU so that a framed IP packet always fits in a
+/// single QUIC datagram.
+///
+/// A framed datagram is `DATAGRAM_IP_OVERHEAD + ip_packet_len` bytes, so the
+/// largest IP packet that fits is `max_datagram_size - DATAGRAM_IP_OVERHEAD`.
+/// Returns the clamped MTU, or `None` when the path cannot carry a usable
+/// tunnel (datagram budget below [`MIN_VPN_MTU`]).
+pub fn clamp_tunnel_mtu(config_mtu: u16, max_datagram_size: usize) -> Option<u16> {
+    let budget = max_datagram_size.checked_sub(DATAGRAM_IP_OVERHEAD)?;
+    let budget = u16::try_from(budget).unwrap_or(u16::MAX);
+    let mtu = config_mtu.min(budget);
+    (mtu >= MIN_VPN_MTU).then_some(mtu)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -975,5 +1059,89 @@ mod tests {
         payload.extend_from_slice(&[0u8; VIRTIO_NET_HDR_LEN]);
         let err = parse_ip_packet_v2(&payload).expect_err("empty payload must fail");
         assert!(err.to_string().contains("IP frame payload too short"));
+    }
+
+    /// Minimal IPv4-looking packet (>= 20 bytes, version nibble 4).
+    fn ipv4_packet(len: usize) -> Vec<u8> {
+        assert!(len >= 20);
+        let mut packet = vec![0xab; len];
+        packet[0] = 0x45;
+        packet
+    }
+
+    #[test]
+    fn test_ip_datagram_roundtrip_no_offload() {
+        let packet = ipv4_packet(64);
+        let mut buf = BytesMut::new();
+        let written = append_ip_datagram(&mut buf, None, &packet).expect("frame datagram");
+        // Datagram overhead is exactly type + offload_len, no 4-byte length.
+        assert_eq!(written, DATAGRAM_IP_OVERHEAD + packet.len());
+        assert_eq!(buf.len(), written);
+
+        let (offload, parsed) = parse_ip_datagram(&buf).expect("parse datagram");
+        assert!(offload.is_none());
+        assert_eq!(parsed, &packet[..]);
+    }
+
+    #[test]
+    fn test_ip_datagram_roundtrip_with_offload() {
+        let hdr = VirtioNetHdr {
+            flags: 1,
+            gso_type: 1,
+            hdr_len: 40,
+            gso_size: 1200,
+            csum_start: 20,
+            csum_offset: 16,
+            num_buffers: 0,
+        };
+        let packet = ipv4_packet(40);
+        let mut buf = BytesMut::new();
+        append_ip_datagram(&mut buf, Some(&hdr), &packet).expect("frame datagram");
+        let (offload, parsed) = parse_ip_datagram(&buf).expect("parse datagram");
+        assert_eq!(offload, Some(hdr));
+        assert_eq!(parsed, &packet[..]);
+    }
+
+    #[test]
+    fn test_append_ip_datagram_rejects_empty() {
+        let mut buf = BytesMut::new();
+        assert!(append_ip_datagram(&mut buf, None, &[]).is_err());
+    }
+
+    #[test]
+    fn test_parse_ip_datagram_rejects_non_ip_type() {
+        let datagram = [DataMessageType::HeartbeatPing.as_byte(), 0, 0];
+        let err = parse_ip_datagram(&datagram).expect_err("non-IP datagram must fail");
+        assert!(err.to_string().contains("Unexpected datagram message type"));
+    }
+
+    #[test]
+    fn test_parse_ip_datagram_rejects_empty() {
+        assert!(parse_ip_datagram(&[]).is_err());
+    }
+
+    #[test]
+    fn test_clamp_tunnel_mtu_clamps_to_datagram_budget() {
+        // Configured 1400 but datagram budget only allows 1300 - 2 = 1298.
+        assert_eq!(clamp_tunnel_mtu(1400, 1300), Some(1298));
+        // Configured MTU smaller than budget is kept as-is.
+        assert_eq!(clamp_tunnel_mtu(1280, 1400), Some(1280));
+    }
+
+    #[test]
+    fn test_clamp_tunnel_mtu_rejects_tiny_datagram() {
+        // Budget below the VPN MTU floor yields None (path unusable).
+        assert_eq!(clamp_tunnel_mtu(1400, MIN_VPN_MTU as usize), None);
+        assert_eq!(clamp_tunnel_mtu(1400, 1), None);
+        assert_eq!(clamp_tunnel_mtu(1400, 0), None);
+    }
+
+    #[test]
+    fn test_clamp_tunnel_mtu_boundary() {
+        // Exactly MIN_VPN_MTU of budget is acceptable.
+        let budget = MIN_VPN_MTU as usize + DATAGRAM_IP_OVERHEAD;
+        assert_eq!(clamp_tunnel_mtu(1400, budget), Some(MIN_VPN_MTU));
+        // One byte less is not.
+        assert_eq!(clamp_tunnel_mtu(1400, budget - 1), None);
     }
 }
