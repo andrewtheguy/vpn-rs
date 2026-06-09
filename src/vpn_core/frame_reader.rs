@@ -182,7 +182,7 @@ impl FrameReader {
     }
 
     async fn read_frame_payload(&mut self, frame_len: usize) -> Result<Bytes, FrameError> {
-        debug_assert!(self.buf.is_empty());
+        assert!(self.buf.is_empty());
         if self.buf.capacity() < frame_len {
             self.buf.reserve(FRAME_READ_ARENA_CHUNK.max(frame_len));
         }
