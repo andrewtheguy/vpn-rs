@@ -8,7 +8,6 @@
 #[cfg(test)]
 use bytes::Buf;
 use bytes::{Bytes, BytesMut};
-use iroh::endpoint::RecvStream;
 use std::future::poll_fn;
 use std::mem::MaybeUninit;
 use std::pin::Pin;
@@ -101,15 +100,19 @@ fn map_exact_read_error(error: ExactReadError, context: &str, expected: usize) -
     }
 }
 
-/// Exact frame reader that owns the data-channel `RecvStream`.
-pub struct FrameReader {
-    stream: RecvStream,
+/// Exact frame reader that owns the data-channel read stream.
+///
+/// Generic over any [`AsyncRead`] source: iroh's `RecvStream` for the QUIC
+/// transport, or a plain `tokio::net::tcp::OwnedReadHalf` for the dummy TCP
+/// benchmark transport. The only requirement is `AsyncRead + Unpin`.
+pub struct FrameReader<R> {
+    stream: R,
     buf: BytesMut,
     max_ip_frame: usize,
 }
 
-impl FrameReader {
-    pub fn new(stream: RecvStream, max_ip_frame: usize) -> Self {
+impl<R: AsyncRead + Unpin> FrameReader<R> {
+    pub fn new(stream: R, max_ip_frame: usize) -> Self {
         Self {
             stream,
             buf: BytesMut::new(),
@@ -418,6 +421,30 @@ mod tests {
             Some(FrameEvent::Capabilities)
         ));
         assert!(buf.is_empty(), "payload must be fully consumed");
+    }
+
+    #[tokio::test]
+    async fn frame_reader_reads_over_generic_async_read() {
+        // Proves FrameReader works over a non-iroh AsyncRead (here a duplex
+        // stream, standing in for the dummy TCP transport's read half).
+        let (mut writer, reader) = tokio::io::duplex(4096);
+        let first = ipv4_packet(40, 7);
+        let second = ipv4_packet(60, 9);
+        let mut framed = framed_ip_packet(None, &first);
+        framed.extend_from_slice(&framed_ip_packet(None, &second));
+        let writer_task = tokio::spawn(async move {
+            writer.write_all(&framed).await.expect("write frames");
+        });
+
+        let mut reader = FrameReader::new(reader, TEST_MAX_FRAME);
+        let frame = expect_ip_frame(reader.next_frame().await.expect("read first"));
+        assert_eq!(parse_ip_packet_v2(&frame).unwrap().1, &first[..]);
+        let frame = expect_ip_frame(reader.next_frame().await.expect("read second"));
+        assert_eq!(parse_ip_packet_v2(&frame).unwrap().1, &second[..]);
+
+        writer_task.await.expect("writer task");
+        // Writer dropped: clean end of stream yields None.
+        assert!(reader.next_frame().await.expect("clean eof").is_none());
     }
 
     #[tokio::test]

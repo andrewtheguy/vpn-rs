@@ -6,6 +6,7 @@
 //! encrypted iroh QUIC connection for automatic NAT traversal.
 
 use crate::vpn_core::buffer::uninitialized_vec;
+use crate::vpn_core::chunked_write::ChunkedWrite;
 use crate::vpn_core::config::VpnClientConfig;
 use crate::vpn_core::device::{
     add_bypass_route, add_routes, add_routes6_with_src, BypassRouteGuard, Route6Guard, RouteGuard,
@@ -21,13 +22,13 @@ use crate::vpn_core::paths::{format_connection_paths, watch_connection_paths};
 use crate::vpn_core::signaling::{
     append_ip_packet_v2, frame_capabilities_message, parse_ip_packet_v2, read_message,
     write_message, CapabilitiesMessage, VpnHandshake, VpnHandshakeResponse, WireTransport,
-    HEARTBEAT_PING_BYTE, MAX_HANDSHAKE_SIZE, VPN_ALPN,
+    HEARTBEAT_PING_BYTE, HEARTBEAT_PONG_BYTE, MAX_HANDSHAKE_SIZE, VPN_ALPN,
 };
 use crate::vpn_core::transport::build_quic_transport_config;
 use bytes::{Bytes, BytesMut};
 use futures::StreamExt;
 use ipnet::{Ipv4Net, Ipv6Net};
-use iroh::endpoint::{ConnectOptions, PathList, RecvStream, SendStream};
+use iroh::endpoint::{ConnectOptions, PathList};
 use iroh::{Endpoint, EndpointAddr, EndpointId, RelayUrl, TransportAddr};
 use rand::Rng;
 use std::collections::{HashMap, HashSet};
@@ -386,7 +387,7 @@ impl VpnClient {
 
         // Run the VPN packet loop (tunneled over iroh)
         // Pass the bypass route task so it's aborted when VPN ends
-        self.run_vpn_loop(
+        run_tunnel(
             tun_device,
             data_send,
             data_recv,
@@ -618,16 +619,31 @@ impl VpnClient {
         Some(handle)
     }
 
-    /// Run the VPN packet processing loop (tunneled over iroh QUIC).
-    async fn run_vpn_loop(
-        &self,
-        tun_device: TunDevice,
-        data_send: SendStream,
-        data_recv: RecvStream,
-        server_gso_enabled: bool,
-        bypass_route_task: Option<JoinHandle<()>>,
-        local_iroh_udp_ports: Arc<HashSet<u16>>,
-    ) -> VpnResult<()> {
+}
+
+/// Run the VPN packet processing loop over an arbitrary transport.
+///
+/// Generic over the data-channel write half (`W: ChunkedWrite`) and read half
+/// (`R: AsyncRead`), so the exact same hot path serves both the iroh QUIC
+/// transport and the plain-TCP dummy benchmark transport (`vpn_dummy`). Takes no
+/// `self`: it only shovels framed IP packets between the TUN device and the
+/// transport, plus heartbeats. This is the single shared pipeline whose
+/// throughput the dummy mode benchmarks against iroh.
+///
+/// `server_gso_enabled` is the *peer's* advertised GSO capability (the server's
+/// for a client, the client's for the dummy server).
+pub(crate) async fn run_tunnel<W, R>(
+    tun_device: TunDevice,
+    data_send: W,
+    data_recv: R,
+    server_gso_enabled: bool,
+    bypass_route_task: Option<JoinHandle<()>>,
+    local_iroh_udp_ports: Arc<HashSet<u16>>,
+) -> VpnResult<()>
+where
+    W: ChunkedWrite + 'static,
+    R: tokio::io::AsyncRead + Unpin + Send + 'static,
+{
         // Split TUN device
         let (mut tun_reader, mut tun_writer) = tun_device.split()?;
         let local_gso_enabled = tun_reader.offload_status().enabled;
@@ -641,6 +657,9 @@ impl VpnClient {
         // Uses Bytes for zero-copy sends (freeze BytesMut instead of cloning Vec).
         let (outbound_tx, mut outbound_rx) = mpsc::channel::<Bytes>(OUTBOUND_CHANNEL_SIZE);
         let outbound_tx_heartbeat = outbound_tx.clone();
+        // Lets the inbound task reply to heartbeat pings with pongs, making the
+        // loop symmetric for the dummy-TCP transport (where both ends ping).
+        let outbound_tx_pong = outbound_tx.clone();
 
         // Spawn dedicated writer task that owns the SendStream.
         // Uses batch receives and chunked QUIC writes for better throughput.
@@ -947,8 +966,17 @@ impl VpnClient {
                             continue;
                         }
                         Ok(Some(FrameEvent::HeartbeatPing)) => {
-                            // Client shouldn't receive pings, ignore
-                            log::trace!("Unexpected heartbeat ping received");
+                            // Reply with a pong. In the iroh client path the
+                            // server never pings, so this only fires for the
+                            // symmetric dummy-TCP transport.
+                            if outbound_tx_pong
+                                .send(Bytes::from_static(HEARTBEAT_PONG_BYTE))
+                                .await
+                                .is_err()
+                            {
+                                log::trace!("Outbound channel closed (pong)");
+                                return None;
+                            }
                             continue;
                         }
                         Ok(Some(FrameEvent::Capabilities)) => {
@@ -1137,8 +1165,9 @@ impl VpnClient {
 
         // Any task ending means connection is lost
         Err(VpnError::ConnectionLost(reason))
-    }
+}
 
+impl VpnClient {
     /// Connect to the VPN server with automatic reconnection on failure.
     ///
     /// This method wraps `connect()` with a reconnection loop that handles

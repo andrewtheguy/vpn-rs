@@ -7,12 +7,13 @@
 compile_error!("vpn-rs only supports Unix-like systems (Linux, macOS, BSD) and Windows");
 
 mod vpn_core;
+mod vpn_dummy;
 mod vpn_iroh;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use ipnet::{Ipv4Net, Ipv6Net};
-use std::net::{Ipv4Addr, Ipv6Addr};
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::num::NonZeroU32;
 use std::path::PathBuf;
 
@@ -139,6 +140,37 @@ enum Command {
         /// Number of tokens to generate (default: 1)
         #[arg(short, long, default_value = "1")]
         count: usize,
+    },
+    /// Run a dummy plain-TCP VPN server for benchmarking (no iroh/encryption).
+    ///
+    /// Reuses the full VPN packet pipeline but replaces iroh's QUIC connection
+    /// with a single plain TCP socket, to A/B benchmark the pipeline against the
+    /// iroh transport. IPv4-only, single client, static IP assignment.
+    DummyServer {
+        /// Address to listen on (e.g. 0.0.0.0:5599)
+        #[arg(short, long)]
+        listen: SocketAddr,
+
+        /// IPv4 VPN network CIDR (server takes the first host, client the second)
+        #[arg(long, default_value = "10.9.0.0/24")]
+        network: Ipv4Net,
+
+        /// MTU for the TUN device
+        #[arg(long, default_value_t = 1440)]
+        mtu: u16,
+    },
+    /// Run a dummy plain-TCP VPN client for benchmarking (no iroh/encryption).
+    ///
+    /// Connects to a `dummy-server` over plain TCP. See `dummy-server` for the
+    /// benchmarking rationale.
+    DummyClient {
+        /// Dummy server address to connect to (e.g. 192.0.2.1:5599)
+        #[arg(short, long)]
+        server: SocketAddr,
+
+        /// Override the TUN MTU (defaults to the server-provided MTU)
+        #[arg(long)]
+        mtu: Option<u16>,
     },
 }
 
@@ -272,6 +304,18 @@ async fn main() -> Result<()> {
             for _ in 0..count {
                 println!("{}", auth::generate_token());
             }
+            Ok(())
+        }
+        Command::DummyServer {
+            listen,
+            network,
+            mtu,
+        } => {
+            vpn_dummy::run_dummy_server(listen, network, mtu).await?;
+            Ok(())
+        }
+        Command::DummyClient { server, mtu } => {
+            vpn_dummy::run_dummy_client(server, mtu).await?;
             Ok(())
         }
     }
