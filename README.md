@@ -11,9 +11,6 @@
 > **No Backward Compatibility in 0.0.x:** While `vpn-rs` remains in the `0.0.x` series, there is no backward compatibility between any versions. Regenerate server keys and refresh configs on every upgrade.
 > The current wire protocol is v3 (`ALPN: vpn-rs/3`), and older peers are rejected.
 
-> [!CAUTION]
-> **Pre-release Proof of Concept:** `vpn-rs` is still prerelease software and currently in a proof-of-concept stage. Expect rough edges and breaking changes.
-
 > [!NOTE]
 > Running `vpn-rs` requires root/Administrator privileges to create TUN devices and routes.
 
