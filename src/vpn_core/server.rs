@@ -11,7 +11,7 @@ use crate::vpn_core::device::{TunConfig, TunDevice, TunOffloadStatus};
 use crate::vpn_core::error::{VpnError, VpnResult};
 use crate::vpn_core::frame_reader::{FrameError, FrameEvent, FrameReader};
 use crate::vpn_core::offload::{
-    materialize_offload_into, CoalescedOutput, TcpGroTable, VirtioNetHdr, GRO_FLUSH_WINDOW,
+    materialize_offload_into, CoalescedOutput, TcpGroTable, VirtioNetHdr,
 };
 use crate::vpn_core::paths::watch_connection_paths;
 use crate::vpn_core::file_config::TransportTuning;
@@ -29,7 +29,6 @@ use std::collections::{HashMap, HashSet};
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
 use tokio::io::ReadBuf;
 use tokio::sync::{mpsc, oneshot, RwLock};
 
@@ -1454,35 +1453,20 @@ impl VpnServer {
         }
     }
 
-    /// Flush per-client software-GRO tables (expired groups only, or all)
-    /// and evict state for disconnected clients.
+    /// Drain all pending per-client software-GRO groups and evict state for
+    /// disconnected clients.
     async fn flush_gro_states(
         &self,
         gro_states: &mut HashMap<(EndpointId, u64), ClientGroState>,
         arena: &mut BytesMut,
-        expired_only: bool,
     ) {
-        let now = Instant::now();
         for state in gro_states.values_mut() {
-            let outputs = if expired_only {
-                state.table.flush_expired(now, GRO_FLUSH_WINDOW)
-            } else {
-                state.table.flush_all()
-            };
+            let outputs = state.table.flush_all();
             self.send_gro_outputs_to_client(&outputs, arena, &state.packet_tx)
                 .await;
         }
         // Evict GRO state for disconnected clients to avoid unbounded growth.
         gro_states.retain(|_, state| !state.packet_tx.is_closed());
-    }
-
-    fn next_gro_deadline(
-        gro_states: &HashMap<(EndpointId, u64), ClientGroState>,
-    ) -> Option<Instant> {
-        gro_states
-            .values()
-            .filter_map(|state| state.table.next_deadline(GRO_FLUSH_WINDOW))
-            .min()
     }
 
     /// Handle client data stream.
@@ -1775,8 +1759,7 @@ impl VpnServer {
         let software_gro = !tun_reader.vnet_hdr_enabled();
         if software_gro {
             log::info!(
-                "Software GRO enabled for TUN->client TCP (server TUN has no offload support; flush_window_us={})",
-                GRO_FLUSH_WINDOW.as_micros()
+                "Software GRO enabled for TUN->client TCP (server TUN has no offload support; event-driven drain-then-flush)"
             );
         }
         let mut gro_states: HashMap<(EndpointId, u64), ClientGroState> = HashMap::new();
@@ -1789,22 +1772,16 @@ impl VpnServer {
             packet_buf.clear();
             let gro_pending =
                 software_gro && gro_states.values().any(|state| !state.table.is_empty());
+            // Event-driven GRO: keep pulling segments already queued on the
+            // TUN; the instant it drains, emit every pending coalesced group
+            // across all client tables and block for the next packet.
             let read_result = if gro_pending {
-                // Flush groups whose bounded wait has elapsed before arming
-                // the next deadline across all client GRO tables.
-                self.flush_gro_states(&mut gro_states, &mut arena, true).await;
-
-                if let Some(deadline) = Self::next_gro_deadline(&gro_states) {
-                    match tun_reader.read_buf_until(&mut packet_buf, deadline).await {
-                        Some(read_result) => read_result,
-                        None => {
-                            self.flush_gro_states(&mut gro_states, &mut arena, true)
-                                .await;
-                            continue;
-                        }
+                match tun_reader.try_read_buf(&mut packet_buf) {
+                    Some(read_result) => read_result,
+                    None => {
+                        self.flush_gro_states(&mut gro_states, &mut arena).await;
+                        tun_reader.read_buf(&mut packet_buf).await
                     }
-                } else {
-                    tun_reader.read_buf(&mut packet_buf).await
                 }
             } else {
                 tun_reader.read_buf(&mut packet_buf).await
@@ -1817,8 +1794,7 @@ impl VpnServer {
                 Err(e) => {
                     log::error!("TUN read error: {}", e);
                     // Flush pending coalesced groups before shutting down.
-                    self.flush_gro_states(&mut gro_states, &mut arena, false)
-                        .await;
+                    self.flush_gro_states(&mut gro_states, &mut arena).await;
                     break;
                 }
             }
@@ -1900,7 +1876,7 @@ impl VpnServer {
                 if !state.packet_tx.same_channel(&packet_tx) {
                     state.packet_tx = packet_tx.clone();
                 }
-                let result = state.table.push(packet_ref, Instant::now());
+                let result = state.table.push(packet_ref);
                 if !result.outputs.is_empty() {
                     self.send_gro_outputs_to_client(&result.outputs, &mut arena, &packet_tx)
                         .await;
