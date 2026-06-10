@@ -10,9 +10,7 @@ use crate::vpn_core::config::{validate_ip6_strategy, Ip6Strategy, VpnServerConfi
 use crate::vpn_core::device::{TunConfig, TunDevice, TunOffloadStatus};
 use crate::vpn_core::error::{VpnError, VpnResult};
 use crate::vpn_core::frame_reader::{FrameError, FrameEvent, FrameReader};
-use crate::vpn_core::offload::{
-    materialize_offload_into, CoalescedOutput, TcpGroTable, VirtioNetHdr, GRO_FLUSH_WINDOW,
-};
+use crate::vpn_core::offload::{materialize_offload_into, VirtioNetHdr};
 use crate::vpn_core::paths::watch_connection_paths;
 use crate::vpn_core::file_config::TransportTuning;
 use crate::vpn_core::signaling::{
@@ -29,7 +27,6 @@ use std::collections::{HashMap, HashSet};
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
 use tokio::io::ReadBuf;
 use tokio::sync::{mpsc, oneshot, RwLock};
 
@@ -1356,38 +1353,24 @@ impl VpnServer {
         }
     }
 
-    /// Enqueue a framed data-stream packet for a client writer task.
-    /// Enqueue a framed packet on a client's channel.
-    ///
-    /// `packet_count` is the number of original IP packets the frame carries
-    /// (>1 for software-GRO coalesced frames) so per-packet stats stay
-    /// comparable regardless of coalescing.
+    /// Enqueue a framed data-stream packet on a client's channel.
     async fn enqueue_client_frame(
         packet_tx: &mpsc::Sender<Bytes>,
         frame: Bytes,
         stats: &Arc<VpnServerStats>,
         drop_on_full: bool,
-        packet_count: u64,
     ) {
         match packet_tx.try_send(frame) {
             Ok(()) => {
-                stats
-                    .packets_to_clients
-                    .fetch_add(packet_count, Ordering::Relaxed);
+                stats.packets_to_clients.fetch_add(1, Ordering::Relaxed);
             }
             Err(mpsc::error::TrySendError::Full(frame)) => {
                 if drop_on_full {
-                    stats
-                        .packets_dropped_full
-                        .fetch_add(packet_count, Ordering::Relaxed);
+                    stats.packets_dropped_full.fetch_add(1, Ordering::Relaxed);
                 } else {
-                    stats
-                        .packets_backpressure
-                        .fetch_add(packet_count, Ordering::Relaxed);
+                    stats.packets_backpressure.fetch_add(1, Ordering::Relaxed);
                     if packet_tx.send(frame).await.is_ok() {
-                        stats
-                            .packets_to_clients
-                            .fetch_add(packet_count, Ordering::Relaxed);
+                        stats.packets_to_clients.fetch_add(1, Ordering::Relaxed);
                     }
                 }
             }
@@ -1395,94 +1378,6 @@ impl VpnServer {
                 // Channel closed during disconnect.
             }
         }
-    }
-
-    /// Frame software-GRO outputs with the framing arena and enqueue them on
-    /// a client's packet channel.
-    async fn send_gro_outputs_to_client(
-        &self,
-        outputs: &[CoalescedOutput],
-        arena: &mut BytesMut,
-        packet_tx: &mpsc::Sender<Bytes>,
-    ) {
-        let coalesced_frames = outputs.iter().filter(|output| output.is_coalesced()).count();
-        if coalesced_frames > 0 {
-            let coalesced_segments: u64 = outputs
-                .iter()
-                .filter(|output| output.is_coalesced())
-                .map(CoalescedOutput::source_segment_count)
-                .sum();
-            log::trace!(
-                "Software GRO emitted {} TUN->client coalesced frame(s) carrying {} TCP segment(s)",
-                coalesced_frames,
-                coalesced_segments
-            );
-        }
-
-        for output in outputs {
-            let (offload, packet, packet_count) = match output {
-                CoalescedOutput::Coalesced(hdr, packet) => {
-                    (Some(hdr), packet.as_slice(), output.source_segment_count())
-                }
-                CoalescedOutput::Single(packet) => (None, packet.as_slice(), 1),
-            };
-            let frame_size = 1
-                + 4
-                + 1
-                + offload
-                    .map(|_| crate::vpn_core::offload::VIRTIO_NET_HDR_LEN)
-                    .unwrap_or(0)
-                + packet.len();
-            if arena.capacity() - arena.len() < frame_size {
-                arena.reserve(FRAME_ARENA_CHUNK.max(frame_size));
-            }
-            let written = match append_ip_packet_v2(arena, offload, packet) {
-                Ok(written) => written,
-                Err(e) => {
-                    log::warn!("Failed to frame coalesced packet: {}", e);
-                    continue;
-                }
-            };
-            Self::enqueue_client_frame(
-                packet_tx,
-                arena.split_to(written).freeze(),
-                &self.stats,
-                self.config.drop_on_full,
-                packet_count,
-            )
-            .await;
-        }
-    }
-
-    /// Flush per-client software-GRO tables (expired groups only, or all)
-    /// and evict state for disconnected clients.
-    async fn flush_gro_states(
-        &self,
-        gro_states: &mut HashMap<(EndpointId, u64), ClientGroState>,
-        arena: &mut BytesMut,
-        expired_only: bool,
-    ) {
-        let now = Instant::now();
-        for state in gro_states.values_mut() {
-            let outputs = if expired_only {
-                state.table.flush_expired(now, GRO_FLUSH_WINDOW)
-            } else {
-                state.table.flush_all()
-            };
-            self.send_gro_outputs_to_client(&outputs, arena, &state.packet_tx)
-                .await;
-        }
-        // Evict GRO state for disconnected clients to avoid unbounded growth.
-        gro_states.retain(|_, state| !state.packet_tx.is_closed());
-    }
-
-    fn next_gro_deadline(
-        gro_states: &HashMap<(EndpointId, u64), ClientGroState>,
-    ) -> Option<Instant> {
-        gro_states
-            .values()
-            .filter_map(|state| state.table.next_deadline(GRO_FLUSH_WINDOW))
-            .min()
     }
 
     /// Handle client data stream.
@@ -1767,19 +1662,6 @@ impl VpnServer {
         // destined for clients without GSO support.
         let mut seg_scratch: Vec<u8> = Vec::new();
         let mut pending_frames: Vec<Bytes> = Vec::new();
-        // Software GRO: when the server TUN has no offload support (macOS/
-        // Windows, or Linux without vnet headers) the kernel performs no GRO,
-        // so coalesce consecutive same-flow TCP segments per destination
-        // client before framing. On a GSO-enabled Linux TUN this path is
-        // entirely bypassed: the kernel already hands us coalesced frames.
-        let software_gro = !tun_reader.vnet_hdr_enabled();
-        if software_gro {
-            log::info!(
-                "Software GRO enabled for TUN->client TCP (server TUN has no offload support; flush_window_us={})",
-                GRO_FLUSH_WINDOW.as_micros()
-            );
-        }
-        let mut gro_states: HashMap<(EndpointId, u64), ClientGroState> = HashMap::new();
 
         // Persistent ReadBuf: tracks the initialized region across iterations
         // so the TUN reader's `initialize_unfilled()` only zeroes the buffer
@@ -1787,28 +1669,7 @@ impl VpnServer {
         let mut packet_buf = ReadBuf::uninit(&mut read_storage);
         loop {
             packet_buf.clear();
-            let gro_pending =
-                software_gro && gro_states.values().any(|state| !state.table.is_empty());
-            let read_result = if gro_pending {
-                // Flush groups whose bounded wait has elapsed before arming
-                // the next deadline across all client GRO tables.
-                self.flush_gro_states(&mut gro_states, &mut arena, true).await;
-
-                if let Some(deadline) = Self::next_gro_deadline(&gro_states) {
-                    match tun_reader.read_buf_until(&mut packet_buf, deadline).await {
-                        Some(read_result) => read_result,
-                        None => {
-                            self.flush_gro_states(&mut gro_states, &mut arena, true)
-                                .await;
-                            continue;
-                        }
-                    }
-                } else {
-                    tun_reader.read_buf(&mut packet_buf).await
-                }
-            } else {
-                tun_reader.read_buf(&mut packet_buf).await
-            };
+            let read_result = tun_reader.read_buf(&mut packet_buf).await;
 
             // Read packet from TUN device
             match read_result {
@@ -1816,9 +1677,6 @@ impl VpnServer {
                 Ok(()) => continue,
                 Err(e) => {
                     log::error!("TUN read error: {}", e);
-                    // Flush pending coalesced groups before shutting down.
-                    self.flush_gro_states(&mut gro_states, &mut arena, false)
-                        .await;
                     break;
                 }
             }
@@ -1884,34 +1742,6 @@ impl VpnServer {
                     }
                 };
 
-            if software_gro && client_gso_enabled {
-                // Non-GSO TUN frames never carry offload metadata; push the
-                // plain IP packet through the client's GRO table. The client
-                // accepts offload-tagged frames regardless of its own TUN
-                // (it software-segments when needed).
-                let state =
-                    gro_states
-                        .entry(client_key)
-                        .or_insert_with(|| ClientGroState {
-                            table: TcpGroTable::new(),
-                            packet_tx: packet_tx.clone(),
-                        });
-                // Keep the freshest sender in case the client reconnected.
-                if !state.packet_tx.same_channel(&packet_tx) {
-                    state.packet_tx = packet_tx.clone();
-                }
-                let result = state.table.push(packet_ref, Instant::now());
-                if !result.outputs.is_empty() {
-                    self.send_gro_outputs_to_client(&result.outputs, &mut arena, &packet_tx)
-                        .await;
-                }
-                if !result.pass_through {
-                    continue;
-                }
-                // Pass-through: fall through to the plain framing below,
-                // avoiding any packet copy.
-            }
-
             if let Some(meta) = offload
                 && !connection_gso_active {
                     log::trace!(
@@ -1950,7 +1780,6 @@ impl VpnServer {
                             frame,
                             &self.stats,
                             self.config.drop_on_full,
-                            1,
                         )
                         .await;
                     }
@@ -1985,19 +1814,12 @@ impl VpnServer {
                 arena.split_to(written).freeze(),
                 &self.stats,
                 self.config.drop_on_full,
-                1,
             )
             .await;
         }
 
         Ok(())
     }
-}
-
-/// Per-client software-GRO accumulation state for the server TUN reader.
-struct ClientGroState {
-    table: TcpGroTable,
-    packet_tx: mpsc::Sender<Bytes>,
 }
 
 /// IP address extracted from a packet (source or destination).

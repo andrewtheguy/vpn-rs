@@ -15,9 +15,7 @@ use crate::vpn_core::device::{
 use crate::vpn_core::error::{VpnError, VpnResult};
 use crate::vpn_core::frame_reader::{FrameEvent, FrameReader};
 use crate::vpn_core::lock::VpnLock;
-use crate::vpn_core::offload::{
-    materialize_offload_into, CoalescedOutput, TcpGroTable, VirtioNetHdr, GRO_FLUSH_WINDOW,
-};
+use crate::vpn_core::offload::{materialize_offload_into, VirtioNetHdr};
 use crate::vpn_core::paths::{format_connection_paths, watch_connection_paths};
 use crate::vpn_core::signaling::{
     append_ip_packet_v2, frame_capabilities_message, parse_ip_packet_v2, read_message,
@@ -704,50 +702,13 @@ where
                 // super-frames when GSO was not negotiated with the server.
                 let mut seg_scratch: Vec<u8> = Vec::new();
                 let mut pending_frames: Vec<Bytes> = Vec::new();
-                // Software GRO: on a non-GSO local TUN, coalesce consecutive
-                // same-flow TCP segments into offload-tagged super-frames so a
-                // GSO-capable peer can hand them to its kernel via TSO.
-                let software_gro = !tun_reader.vnet_hdr_enabled();
-                if software_gro {
-                    log::info!(
-                        "Software GRO enabled for outbound TCP (local TUN has no offload support; flush_window_us={})",
-                        GRO_FLUSH_WINDOW.as_micros()
-                    );
-                }
-                let mut gro_table = TcpGroTable::new();
                 // Persistent ReadBuf: tracks the initialized region across
                 // iterations so the TUN reader's `initialize_unfilled()` only
                 // zeroes the buffer once instead of on every read.
                 let mut packet_buf = ReadBuf::uninit(&mut read_storage);
                 loop {
                     packet_buf.clear();
-                    let read_result = if software_gro && !gro_table.is_empty() {
-                        // Flush groups whose bounded wait has elapsed before
-                        // arming the next deadline.
-                        let expired = gro_table.flush_expired(Instant::now(), GRO_FLUSH_WINDOW);
-                        if !send_gro_outputs(&expired, &mut arena, &outbound_tx).await {
-                            return None;
-                        }
-
-                        if let Some(deadline) = gro_table.next_deadline(GRO_FLUSH_WINDOW) {
-                            match tun_reader.read_buf_until(&mut packet_buf, deadline).await {
-                                Some(read_result) => read_result,
-                                None => {
-                                    let expired =
-                                        gro_table.flush_expired(Instant::now(), GRO_FLUSH_WINDOW);
-                                    if !send_gro_outputs(&expired, &mut arena, &outbound_tx).await
-                                    {
-                                        return None;
-                                    }
-                                    continue;
-                                }
-                            }
-                        } else {
-                            tun_reader.read_buf(&mut packet_buf).await
-                        }
-                    } else {
-                        tun_reader.read_buf(&mut packet_buf).await
-                    };
+                    let read_result = tun_reader.read_buf(&mut packet_buf).await;
                     match read_result {
                         Ok(()) if !packet_buf.filled().is_empty() => {
                             let raw_packet = packet_buf.filled();
@@ -766,22 +727,6 @@ where
                                     raw_packet.len()
                                 );
                                 continue;
-                            }
-
-                            if software_gro {
-                                // Non-GSO TUN frames never carry offload metadata;
-                                // push the plain IP packet through the GRO table.
-                                let result = gro_table.push(packet, Instant::now());
-                                if !send_gro_outputs(&result.outputs, &mut arena, &outbound_tx)
-                                    .await
-                                {
-                                    return None;
-                                }
-                                if !result.pass_through {
-                                    continue;
-                                }
-                                // Pass-through: fall through to the plain
-                                // framing below, avoiding any packet copy.
                             }
 
                             if let Some(meta) = offload
@@ -852,9 +797,6 @@ where
                         Ok(()) => {}
                         Err(e) => {
                             log::error!("TUN read error: {}", e);
-                            // Flush pending coalesced groups before shutting down.
-                            send_gro_outputs(&gro_table.flush_all(), &mut arena, &outbound_tx)
-                                .await;
                             return Some(format!("TUN read error: {}", e));
                         }
                     }
@@ -1737,63 +1679,6 @@ fn calculate_backoff_with_rng(attempt: u32, rng: &mut impl Rng) -> Duration {
 /// Collect local UDP ports bound by the iroh endpoint.
 fn collect_local_iroh_udp_ports(endpoint: &Endpoint) -> HashSet<u16> {
     endpoint.addr().ip_addrs().map(|addr| addr.port()).collect()
-}
-
-/// Frame software-GRO outputs with the framing arena and enqueue them on the
-/// outbound channel.
-///
-/// Returns false if the outbound channel is closed.
-async fn send_gro_outputs(
-    outputs: &[CoalescedOutput],
-    arena: &mut BytesMut,
-    outbound_tx: &mpsc::Sender<Bytes>,
-) -> bool {
-    let coalesced_frames = outputs.iter().filter(|output| output.is_coalesced()).count();
-    if coalesced_frames > 0 {
-        let coalesced_segments: u64 = outputs
-            .iter()
-            .filter(|output| output.is_coalesced())
-            .map(CoalescedOutput::source_segment_count)
-            .sum();
-        log::trace!(
-            "Software GRO emitted {} outbound coalesced frame(s) carrying {} TCP segment(s)",
-            coalesced_frames,
-            coalesced_segments
-        );
-    }
-
-    for output in outputs {
-        let (offload, packet) = match output {
-            CoalescedOutput::Coalesced(hdr, packet) => (Some(hdr), packet.as_slice()),
-            CoalescedOutput::Single(packet) => (None, packet.as_slice()),
-        };
-        let frame_size = 1
-            + 4
-            + 1
-            + offload
-                .map(|_| crate::vpn_core::offload::VIRTIO_NET_HDR_LEN)
-                .unwrap_or(0)
-            + packet.len();
-        if arena.capacity() - arena.len() < frame_size {
-            arena.reserve(FRAME_ARENA_CHUNK.max(frame_size));
-        }
-        let written = match append_ip_packet_v2(arena, offload, packet) {
-            Ok(written) => written,
-            Err(e) => {
-                log::warn!("Failed to frame coalesced packet: {}", e);
-                continue;
-            }
-        };
-        if outbound_tx
-            .send(arena.split_to(written).freeze())
-            .await
-            .is_err()
-        {
-            log::warn!("Outbound channel closed");
-            return false;
-        }
-    }
-    true
 }
 
 /// Return true if packet is UDP and either source/destination port matches a blocked port.

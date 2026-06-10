@@ -16,7 +16,6 @@ use std::future::poll_fn;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 #[cfg(not(target_os = "macos"))]
 use std::pin::Pin;
-use std::time::Instant;
 #[cfg(not(target_os = "macos"))]
 use tokio::io::{AsyncRead, AsyncWriteExt};
 use tokio::io::ReadBuf;
@@ -568,11 +567,6 @@ impl TunReader {
         self.buffer_size
     }
 
-    /// Return true if raw TUN reads include the 10-byte Linux vnet header.
-    pub fn vnet_hdr_enabled(&self) -> bool {
-        self.vnet_hdr_enabled
-    }
-
     /// Split a raw TUN frame into offload metadata and the IP packet payload.
     pub fn split_frame<'a>(
         &self,
@@ -612,24 +606,6 @@ impl TunReader {
             #[cfg(target_os = "macos")]
             TunReaderInner::Darwin(reader) => reader.read_buf(buf).await,
         }
-    }
-
-    /// Read a packet unless `deadline` arrives first.
-    ///
-    /// Returns `None` when the deadline expires. A timed-out pending read does
-    /// not consume data because `AsyncRead` only advances `ReadBuf` on a ready
-    /// read.
-    pub async fn read_buf_until(
-        &mut self,
-        buf: &mut ReadBuf<'_>,
-        deadline: Instant,
-    ) -> Option<VpnResult<()>> {
-        tokio::time::timeout_at(
-            tokio::time::Instant::from_std(deadline),
-            self.read_buf(buf),
-        )
-        .await
-        .ok()
     }
 }
 
