@@ -10,13 +10,13 @@ use crate::vpn_core::offload::{
 #[cfg(not(target_os = "macos"))]
 use crate::vpn_core::offload::compose_tun_frame;
 use bytes::{Bytes, BytesMut};
+use futures::FutureExt;
 use ipnet::{Ipv4Net, Ipv6Net};
 #[cfg(not(target_os = "macos"))]
 use std::future::poll_fn;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 #[cfg(not(target_os = "macos"))]
 use std::pin::Pin;
-use std::time::Instant;
 #[cfg(not(target_os = "macos"))]
 use tokio::io::{AsyncRead, AsyncWriteExt};
 use tokio::io::ReadBuf;
@@ -614,22 +614,15 @@ impl TunReader {
         }
     }
 
-    /// Read a packet unless `deadline` arrives first.
+    /// Non-blocking single-poll read.
     ///
-    /// Returns `None` when the deadline expires. A timed-out pending read does
-    /// not consume data because `AsyncRead` only advances `ReadBuf` on a ready
-    /// read.
-    pub async fn read_buf_until(
-        &mut self,
-        buf: &mut ReadBuf<'_>,
-        deadline: Instant,
-    ) -> Option<VpnResult<()>> {
-        tokio::time::timeout_at(
-            tokio::time::Instant::from_std(deadline),
-            self.read_buf(buf),
-        )
-        .await
-        .ok()
+    /// Returns `None` when the TUN has no packet ready right now. The poll
+    /// consumes no bytes (tokio caches FD readiness and only clears it after a
+    /// real `read` returns `WouldBlock`), and the next `read_buf().await`
+    /// re-polls and re-registers the waker, so no wakeup is lost. This lets the
+    /// caller drain everything currently queued and flush when the TUN drains.
+    pub fn try_read_buf(&mut self, buf: &mut ReadBuf<'_>) -> Option<VpnResult<()>> {
+        self.read_buf(buf).now_or_never()
     }
 }
 

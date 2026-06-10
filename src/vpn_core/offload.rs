@@ -8,10 +8,6 @@
 
 use bytes::{BufMut, Bytes, BytesMut};
 use std::collections::HashMap;
-use std::time::{Duration, Instant};
-
-/// Bounded wait for adjacent TCP segments in software GRO before flushing.
-pub(crate) const GRO_FLUSH_WINDOW: Duration = Duration::from_micros(500);
 
 /// Size of the Linux virtio header used by TUN when `IFF_VNET_HDR` is enabled.
 pub const VIRTIO_NET_HDR_LEN: usize = 10;
@@ -895,7 +891,6 @@ struct GroGroup {
     segment_count: usize,
     /// Expected sequence number of the next in-order segment.
     next_seq: u32,
-    created_at: Instant,
     /// Monotonic creation order for stable flush ordering.
     order: u64,
 }
@@ -1055,7 +1050,7 @@ fn tcp_options_compatible(a: &[u8], b: &[u8]) -> Option<Option<usize>> {
 }
 
 impl GroGroup {
-    fn new(seg: &TcpSegmentView<'_>, now: Instant, order: u64) -> Self {
+    fn new(seg: &TcpSegmentView<'_>, order: u64) -> Self {
         Self {
             buf: seg.packet.to_vec(),
             ip_header_len: seg.ip_header_len,
@@ -1064,7 +1059,6 @@ impl GroGroup {
             gso_size: seg.payload_len,
             segment_count: 1,
             next_seq: seg.seq.wrapping_add(seg.payload_len as u32),
-            created_at: now,
             order,
         }
     }
@@ -1227,8 +1221,8 @@ pub struct GroPush {
 /// Bounded accumulator that coalesces in-order same-flow TCP segments.
 ///
 /// `push` returns any outputs that must be emitted immediately; groups left
-/// pending must be drained via `flush_expired`/`flush_all` so they never
-/// linger beyond the caller's flush window.
+/// pending must be drained via `flush_all` so they never linger beyond the
+/// caller's drain point (the moment the packet source goes empty).
 pub struct TcpGroTable {
     groups: HashMap<TcpFlowKey, GroGroup>,
     next_order: u64,
@@ -1253,16 +1247,6 @@ impl TcpGroTable {
         self.groups.is_empty()
     }
 
-    /// Deadline by which the oldest pending group must be flushed, if any.
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub fn next_deadline(&self, window: Duration) -> Option<Instant> {
-        self.groups
-            .values()
-            .map(|g| g.created_at)
-            .min()
-            .map(|created| created + window)
-    }
-
     /// Push an IP packet into the table.
     ///
     /// Finalized groups (older data) are returned in `outputs` and always
@@ -1270,7 +1254,7 @@ impl TcpGroTable {
     /// ordering. Pass-through packets (non-TCP, pure ACKs, FIN/PSH starters)
     /// are signaled via `pass_through` instead of being copied, so the common
     /// non-coalescable case allocates nothing.
-    pub fn push(&mut self, ip_packet: &[u8], now: Instant) -> GroPush {
+    pub fn push(&mut self, ip_packet: &[u8]) -> GroPush {
         let mut out = Vec::new();
         let pass_through = match gro_classify(ip_packet) {
             GroClass::PassThrough => true,
@@ -1300,11 +1284,11 @@ impl TcpGroTable {
                                 .remove(&seg.key)
                                 .expect("group present on incompatible append");
                             Self::emit(group, &mut out);
-                            self.start_group(&seg, now, &mut out)
+                            self.start_group(&seg, &mut out)
                         }
                     }
                 } else {
-                    self.start_group(&seg, now, &mut out)
+                    self.start_group(&seg, &mut out)
                 }
             }
         };
@@ -1325,33 +1309,10 @@ impl TcpGroTable {
         out
     }
 
-    /// Drain groups that have been pending for at least `window` (oldest first).
-    pub fn flush_expired(&mut self, now: Instant, window: Duration) -> Vec<CoalescedOutput> {
-        let mut expired: Vec<(TcpFlowKey, Instant, u64)> = self
-            .groups
-            .iter()
-            .filter(|(_, g)| now.saturating_duration_since(g.created_at) >= window)
-            .map(|(k, g)| (*k, g.created_at, g.order))
-            .collect();
-        expired.sort_by_key(|(_, created_at, order)| (*created_at, *order));
-        let mut out = Vec::with_capacity(expired.len());
-        for (key, _, _) in expired {
-            if let Some(group) = self.groups.remove(&key) {
-                Self::emit(group, &mut out);
-            }
-        }
-        out
-    }
-
     /// Start a new group for `seg`, evicting the oldest group into `out` if
     /// the table is full. Returns true if the segment must instead pass
     /// through unmodified (FIN/PSH segments can never be extended).
-    fn start_group(
-        &mut self,
-        seg: &TcpSegmentView<'_>,
-        now: Instant,
-        out: &mut Vec<CoalescedOutput>,
-    ) -> bool {
+    fn start_group(&mut self, seg: &TcpSegmentView<'_>, out: &mut Vec<CoalescedOutput>) -> bool {
         // FIN/PSH must end a group, so a segment carrying one can never be
         // extended; emit it directly without holding it back.
         if seg.tcp_flags & (TCP_FLAG_FIN | TCP_FLAG_PSH) != 0 {
@@ -1372,7 +1333,7 @@ impl TcpGroTable {
 
         let order = self.next_order;
         self.next_order += 1;
-        self.groups.insert(seg.key, GroGroup::new(seg, now, order));
+        self.groups.insert(seg.key, GroGroup::new(seg, order));
         false
     }
 
@@ -1725,8 +1686,8 @@ mod tests {
     /// Test shim over [`TcpGroTable::push`] mirroring the old copying API:
     /// converts a pass-through signal back into an owned `Single` output so
     /// assertions can treat all results uniformly.
-    fn push_owned(table: &mut TcpGroTable, packet: &[u8], now: Instant) -> Vec<CoalescedOutput> {
-        let result = table.push(packet, now);
+    fn push_owned(table: &mut TcpGroTable, packet: &[u8]) -> Vec<CoalescedOutput> {
+        let result = table.push(packet);
         let mut out = result.outputs;
         if result.pass_through {
             out.push(CoalescedOutput::Single(packet.to_vec()));
@@ -1735,10 +1696,9 @@ mod tests {
     }
 
     fn push_all(table: &mut TcpGroTable, segments: &[Vec<u8>]) -> Vec<CoalescedOutput> {
-        let now = Instant::now();
         let mut out = Vec::new();
         for seg in segments {
-            out.extend(push_owned(table, seg, now));
+            out.extend(push_owned(table, seg));
         }
         out
     }
@@ -2139,50 +2099,26 @@ mod tests {
     }
 
     #[test]
-    fn test_gro_flush_expired_respects_window() {
-        let window = GRO_FLUSH_WINDOW;
-        let now = Instant::now();
-        let segment = build_gro_segment_v4(10_000, &[0xaa; 1200], false, false);
-
-        let mut table = TcpGroTable::new();
-        assert!(push_owned(&mut table, &segment, now).is_empty());
-        assert_eq!(table.next_deadline(window), Some(now + window));
-
-        assert!(table
-            .flush_expired(now + Duration::from_micros(400), window)
-            .is_empty());
-        let flushed = table.flush_expired(now + window, window);
-        assert_eq!(flushed.len(), 1);
-        assert!(table.is_empty());
-        assert_eq!(table.next_deadline(window), None);
-    }
-
-    #[test]
-    fn test_gro_flush_expired_multiple_groups_by_deadline_order() {
-        let window = GRO_FLUSH_WINDOW;
-        let now = Instant::now();
+    fn test_gro_flush_all_drains_groups_in_insertion_order() {
         let mut table = TcpGroTable::new();
 
-        let mut middle_deadline = build_gro_segment_v4(10_000, &[0x11; 100], false, false);
-        set_gro_segment_source_port_v4(&mut middle_deadline, 40_000);
-        let mut earliest_deadline = build_gro_segment_v4(20_000, &[0x22; 100], false, false);
-        set_gro_segment_source_port_v4(&mut earliest_deadline, 40_001);
-        let mut latest_deadline = build_gro_segment_v4(30_000, &[0x33; 100], false, false);
-        set_gro_segment_source_port_v4(&mut latest_deadline, 40_002);
+        // Three distinct flows pushed in a known order; flush_all must emit them
+        // oldest-first (by creation/insertion order).
+        let mut first = build_gro_segment_v4(10_000, &[0x11; 100], false, false);
+        set_gro_segment_source_port_v4(&mut first, 40_000);
+        let mut second = build_gro_segment_v4(20_000, &[0x22; 100], false, false);
+        set_gro_segment_source_port_v4(&mut second, 40_001);
+        let mut third = build_gro_segment_v4(30_000, &[0x33; 100], false, false);
+        set_gro_segment_source_port_v4(&mut third, 40_002);
 
-        assert!(
-            push_owned(&mut table, &middle_deadline, now + Duration::from_micros(100)).is_empty()
-        );
-        assert!(push_owned(&mut table, &earliest_deadline, now).is_empty());
-        assert!(
-            push_owned(&mut table, &latest_deadline, now + Duration::from_micros(200)).is_empty()
-        );
-        assert_eq!(table.next_deadline(window), Some(now + window));
+        assert!(push_owned(&mut table, &first).is_empty());
+        assert!(push_owned(&mut table, &second).is_empty());
+        assert!(push_owned(&mut table, &third).is_empty());
 
-        let flushed = table.flush_expired(now + Duration::from_micros(700), window);
+        let flushed = table.flush_all();
         assert_eq!(flushed.len(), 3);
-        assert_eq!(gro_output_source_port_v4(&flushed[0]), 40_001);
-        assert_eq!(gro_output_source_port_v4(&flushed[1]), 40_000);
+        assert_eq!(gro_output_source_port_v4(&flushed[0]), 40_000);
+        assert_eq!(gro_output_source_port_v4(&flushed[1]), 40_001);
         assert_eq!(gro_output_source_port_v4(&flushed[2]), 40_002);
         assert!(table.is_empty());
     }
@@ -2191,8 +2127,7 @@ mod tests {
     fn test_gro_single_segment_group_emits_plain_packet() {
         let segment = build_gro_segment_v4(10_000, &[0xaa; 1200], false, false);
         let mut table = TcpGroTable::new();
-        let now = Instant::now();
-        assert!(push_owned(&mut table, &segment, now).is_empty());
+        assert!(push_owned(&mut table, &segment).is_empty());
 
         let flushed = table.flush_all();
         assert_eq!(flushed.len(), 1);
@@ -2209,9 +2144,8 @@ mod tests {
         let seg2 = build_gro_segment_v4(11_300, &[0x22; 1200], false, false);
 
         let mut table = TcpGroTable::new();
-        let now = Instant::now();
-        assert!(push_owned(&mut table, &seg1, now).is_empty());
-        let outputs = push_owned(&mut table, &seg2, now);
+        assert!(push_owned(&mut table, &seg1).is_empty());
+        let outputs = push_owned(&mut table, &seg2);
         // The out-of-order segment finalizes the old group (emitted as a
         // plain single packet) and starts a new group.
         assert_eq!(outputs.len(), 1);
@@ -2230,13 +2164,12 @@ mod tests {
         let seg3 = build_gro_segment_v4(11_800, &[0x33; 1200], false, false);
 
         let mut table = TcpGroTable::new();
-        let now = Instant::now();
-        assert!(push_owned(&mut table, &seg1, now).is_empty());
-        let outputs = push_owned(&mut table, &seg2, now);
+        assert!(push_owned(&mut table, &seg1).is_empty());
+        let outputs = push_owned(&mut table, &seg2);
         assert_eq!(outputs.len(), 1);
         assert!(matches!(outputs[0], CoalescedOutput::Coalesced(_, _)));
 
-        assert!(push_owned(&mut table, &seg3, now).is_empty());
+        assert!(push_owned(&mut table, &seg3).is_empty());
         let flushed = table.flush_all();
         assert_eq!(flushed.len(), 1);
         assert!(matches!(flushed[0], CoalescedOutput::Single(_)));
@@ -2249,9 +2182,8 @@ mod tests {
         let seg3 = build_gro_segment_v4(12_400, &[0x33; 1200], false, false);
 
         let mut table = TcpGroTable::new();
-        let now = Instant::now();
-        assert!(push_owned(&mut table, &seg1, now).is_empty());
-        let outputs = push_owned(&mut table, &seg2, now);
+        assert!(push_owned(&mut table, &seg1).is_empty());
+        let outputs = push_owned(&mut table, &seg2);
         assert_eq!(outputs.len(), 1);
         match &outputs[0] {
             CoalescedOutput::Coalesced(hdr, packet) => {
@@ -2262,19 +2194,18 @@ mod tests {
             other => panic!("expected coalesced output, got {:?}", other),
         }
         // The next segment starts a fresh group; nothing coalesces after PSH.
-        assert!(push_owned(&mut table, &seg3, now).is_empty());
+        assert!(push_owned(&mut table, &seg3).is_empty());
         assert_eq!(table.flush_all().len(), 1);
     }
 
     #[test]
     fn test_gro_syn_rst_urg_pass_through() {
         let mut table = TcpGroTable::new();
-        let now = Instant::now();
 
         for set_flag in [TCP_FLAG_SYN, TCP_FLAG_RST, TCP_FLAG_URG] {
             let mut segment = build_gro_segment_v4(10_000, &[0x11; 100], false, false);
             segment[20 + 13] |= set_flag;
-            let outputs = push_owned(&mut table, &segment, now);
+            let outputs = push_owned(&mut table, &segment);
             assert_eq!(outputs.len(), 1, "flag 0x{:02x}", set_flag);
             assert!(
                 matches!(&outputs[0], CoalescedOutput::Single(p) if p == &segment),
@@ -2291,9 +2222,8 @@ mod tests {
         let ack = build_gro_segment_v4(11_200, &[], false, false);
 
         let mut table = TcpGroTable::new();
-        let now = Instant::now();
-        assert!(push_owned(&mut table, &seg1, now).is_empty());
-        let outputs = push_owned(&mut table, &ack, now);
+        assert!(push_owned(&mut table, &seg1).is_empty());
+        let outputs = push_owned(&mut table, &ack);
         // Pending same-flow data must be emitted before the pure ACK.
         assert_eq!(outputs.len(), 2);
         assert!(matches!(&outputs[0], CoalescedOutput::Single(p) if p == &seg1));
@@ -2311,7 +2241,7 @@ mod tests {
         packet[9] = 17;
 
         let mut table = TcpGroTable::new();
-        let outputs = push_owned(&mut table, &packet, Instant::now());
+        let outputs = push_owned(&mut table, &packet);
         assert_eq!(outputs.len(), 1);
         assert!(matches!(&outputs[0], CoalescedOutput::Single(p) if p == &packet));
         assert!(table.is_empty());
@@ -2324,7 +2254,7 @@ mod tests {
         segment[6] |= 0x20;
 
         let mut table = TcpGroTable::new();
-        let outputs = push_owned(&mut table, &segment, Instant::now());
+        let outputs = push_owned(&mut table, &segment);
         assert_eq!(outputs.len(), 1);
         assert!(matches!(&outputs[0], CoalescedOutput::Single(p) if p == &segment));
         assert!(table.is_empty());
@@ -2344,11 +2274,10 @@ mod tests {
         };
 
         let mut table = TcpGroTable::new();
-        let now = Instant::now();
-        assert!(push_owned(&mut table, &build_gro_segment_v4(10_000, &[0x11; 1000], false, false), now).is_empty());
-        assert!(push_owned(&mut table, &make_b(20_000, &[0x22; 800]), now).is_empty());
-        assert!(push_owned(&mut table, &build_gro_segment_v4(11_000, &[0x11; 1000], false, false), now).is_empty());
-        assert!(push_owned(&mut table, &make_b(20_800, &[0x22; 800]), now).is_empty());
+        assert!(push_owned(&mut table, &build_gro_segment_v4(10_000, &[0x11; 1000], false, false)).is_empty());
+        assert!(push_owned(&mut table, &make_b(20_000, &[0x22; 800])).is_empty());
+        assert!(push_owned(&mut table, &build_gro_segment_v4(11_000, &[0x11; 1000], false, false)).is_empty());
+        assert!(push_owned(&mut table, &make_b(20_800, &[0x22; 800])).is_empty());
 
         let flushed = table.flush_all();
         assert_eq!(flushed.len(), 2);
@@ -2367,12 +2296,11 @@ mod tests {
     #[test]
     fn test_gro_segment_count_cap_finalizes() {
         let mut table = TcpGroTable::new();
-        let now = Instant::now();
         let mut outputs = Vec::new();
         for i in 0..(MAX_GRO_SEGMENTS + 1) {
             let seq = 10_000u32.wrapping_add((i * 100) as u32);
             let segment = build_gro_segment_v4(seq, &[0x11; 100], false, false);
-            outputs.extend(push_owned(&mut table, &segment, now));
+            outputs.extend(push_owned(&mut table, &segment));
         }
         // Segment MAX+1 exceeded the count cap: the full group was emitted
         // and a new group started.
@@ -2394,11 +2322,10 @@ mod tests {
         // 9000-byte payloads: 7 segments fit (40 + 63000 <= 65535), the 8th
         // would exceed the 64KB cap and must finalize the group.
         let mut table = TcpGroTable::new();
-        let now = Instant::now();
         let mut outputs = Vec::new();
         for i in 0..8u32 {
             let segment = build_gro_segment_v4(10_000 + i * 9000, &[0x11; 9000], false, false);
-            outputs.extend(push_owned(&mut table, &segment, now));
+            outputs.extend(push_owned(&mut table, &segment));
         }
         assert_eq!(outputs.len(), 1);
         match &outputs[0] {
@@ -2414,17 +2341,16 @@ mod tests {
     #[test]
     fn test_gro_flow_cap_evicts_oldest() {
         let mut table = TcpGroTable::new();
-        let now = Instant::now();
         for i in 0..MAX_GRO_FLOWS {
             let mut segment = build_gro_segment_v4(10_000, &[0x11; 100], false, false);
             segment[20..22].copy_from_slice(&(40_000 + i as u16).to_be_bytes());
-            assert!(push_owned(&mut table, &segment, now).is_empty());
+            assert!(push_owned(&mut table, &segment).is_empty());
         }
 
         // One more flow evicts the oldest group.
         let mut segment = build_gro_segment_v4(10_000, &[0x11; 100], false, false);
         segment[20..22].copy_from_slice(&60_000u16.to_be_bytes());
-        let outputs = push_owned(&mut table, &segment, now);
+        let outputs = push_owned(&mut table, &segment);
         assert_eq!(outputs.len(), 1);
         match &outputs[0] {
             CoalescedOutput::Single(packet) => {
@@ -2473,9 +2399,8 @@ mod tests {
         let seg2 = build(11_000, &[0x22; 1000], 1_001);
 
         let mut table = TcpGroTable::new();
-        let now = Instant::now();
-        assert!(push_owned(&mut table, &seg1, now).is_empty());
-        assert!(push_owned(&mut table, &seg2, now).is_empty());
+        assert!(push_owned(&mut table, &seg1).is_empty());
+        assert!(push_owned(&mut table, &seg2).is_empty());
 
         let flushed = table.flush_all();
         assert_eq!(flushed.len(), 1);
@@ -2505,9 +2430,8 @@ mod tests {
         seg2[20 + 16..20 + 18].copy_from_slice(&checksum.to_be_bytes());
 
         let mut table = TcpGroTable::new();
-        let now = Instant::now();
-        assert!(push_owned(&mut table, &seg1, now).is_empty());
-        let outputs = push_owned(&mut table, &seg2, now);
+        assert!(push_owned(&mut table, &seg1).is_empty());
+        let outputs = push_owned(&mut table, &seg2);
         assert_eq!(outputs.len(), 1);
         assert!(matches!(&outputs[0], CoalescedOutput::Single(p) if p == &seg1));
         assert!(!table.is_empty());

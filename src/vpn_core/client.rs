@@ -16,7 +16,7 @@ use crate::vpn_core::error::{VpnError, VpnResult};
 use crate::vpn_core::frame_reader::{FrameEvent, FrameReader};
 use crate::vpn_core::lock::VpnLock;
 use crate::vpn_core::offload::{
-    materialize_offload_into, CoalescedOutput, TcpGroTable, VirtioNetHdr, GRO_FLUSH_WINDOW,
+    materialize_offload_into, CoalescedOutput, TcpGroTable, VirtioNetHdr,
 };
 use crate::vpn_core::paths::{format_connection_paths, watch_connection_paths};
 use crate::vpn_core::signaling::{
@@ -710,8 +710,7 @@ where
                 let software_gro = !tun_reader.vnet_hdr_enabled();
                 if software_gro {
                     log::info!(
-                        "Software GRO enabled for outbound TCP (local TUN has no offload support; flush_window_us={})",
-                        GRO_FLUSH_WINDOW.as_micros()
+                        "Software GRO enabled for outbound TCP (local TUN has no offload support; event-driven drain-then-flush)"
                     );
                 }
                 let mut gro_table = TcpGroTable::new();
@@ -721,29 +720,24 @@ where
                 let mut packet_buf = ReadBuf::uninit(&mut read_storage);
                 loop {
                     packet_buf.clear();
+                    // Event-driven GRO: keep pulling segments that are already
+                    // queued on the TUN; the instant it drains, emit every
+                    // pending coalesced group and block for the next packet.
                     let read_result = if software_gro && !gro_table.is_empty() {
-                        // Flush groups whose bounded wait has elapsed before
-                        // arming the next deadline.
-                        let expired = gro_table.flush_expired(Instant::now(), GRO_FLUSH_WINDOW);
-                        if !send_gro_outputs(&expired, &mut arena, &outbound_tx).await {
-                            return None;
-                        }
-
-                        if let Some(deadline) = gro_table.next_deadline(GRO_FLUSH_WINDOW) {
-                            match tun_reader.read_buf_until(&mut packet_buf, deadline).await {
-                                Some(read_result) => read_result,
-                                None => {
-                                    let expired =
-                                        gro_table.flush_expired(Instant::now(), GRO_FLUSH_WINDOW);
-                                    if !send_gro_outputs(&expired, &mut arena, &outbound_tx).await
-                                    {
-                                        return None;
-                                    }
-                                    continue;
+                        match tun_reader.try_read_buf(&mut packet_buf) {
+                            Some(read_result) => read_result,
+                            None => {
+                                if !send_gro_outputs(
+                                    &gro_table.flush_all(),
+                                    &mut arena,
+                                    &outbound_tx,
+                                )
+                                .await
+                                {
+                                    return None;
                                 }
+                                tun_reader.read_buf(&mut packet_buf).await
                             }
-                        } else {
-                            tun_reader.read_buf(&mut packet_buf).await
                         }
                     } else {
                         tun_reader.read_buf(&mut packet_buf).await
@@ -771,7 +765,7 @@ where
                             if software_gro {
                                 // Non-GSO TUN frames never carry offload metadata;
                                 // push the plain IP packet through the GRO table.
-                                let result = gro_table.push(packet, Instant::now());
+                                let result = gro_table.push(packet);
                                 if !send_gro_outputs(&result.outputs, &mut arena, &outbound_tx)
                                     .await
                                 {
