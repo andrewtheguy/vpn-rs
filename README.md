@@ -148,7 +148,8 @@ ping 10.0.0.1     # the server's VPN gateway IP
 To test the VPN by itself without an external tunnel, run the server and client
 in the same network namespace so they share loopback. If you isolate them in
 separate network namespaces, each namespace has its own loopback device, so you
-still need a UDP forwarder/tunnel between namespaces.
+still need a UDP forwarder/tunnel between namespaces — or use [test mode](#test-mode),
+which lets the two ends talk directly over a non-loopback address.
 
 ## CLI Reference
 
@@ -158,6 +159,7 @@ still need a UDP forwarder/tunnel between namespaces.
 
 - `-c, --config <FILE>`
 - `--default-config` (uses `~/.config/vpn-rs/vpn_server.toml`)
+- `--test-mode` (allow a non-loopback `listen`; see [Test mode](#test-mode))
 
 All server tunables live in the config file — see `vpn_server.toml.example`.
 
@@ -172,6 +174,8 @@ All server tunables live in the config file — see `vpn_server.toml.example`.
 | `--route6 <CIDR>` | Additional IPv6 routes through the VPN (repeatable) |
 | `--auto-reconnect` / `--no-auto-reconnect` | Force-enable / disable reconnect |
 | `--max-reconnect-attempts <N>` | Limit reconnect attempts |
+| `--test-mode` | Allow a non-loopback `server_addr`; see [Test mode](#test-mode) |
+| `--test-token <TOKEN>` | Token printed by the test server (required with `--test-mode`) |
 
 MTU (server-side, dictated to clients) accepts `576-9216` (default `1440`). A
 jumbo MTU raises throughput on clients whose TUN does one packet per syscall
@@ -187,6 +191,42 @@ rejected at startup. This guarantees the VPN is only reachable through the local
 tunnel. Multiple clients are distinguished by their UDP source address, so the
 tunnel must present each client from a distinct local port (the usual behavior
 of per-flow UDP forwarders).
+
+The **only** exception is [test mode](#test-mode), an explicit opt-in for
+testing the VPN directly between hosts without a tunnel.
+
+## Test mode
+
+> [!WARNING]
+> Test mode runs the VPN **directly on the network with no encryption or
+> authentication on the wire** (the tunnel normally provides those). Use it only
+> for testing on trusted networks (such as benchmarking), never for production
+> traffic.
+
+Test mode lets the server bind — and the client connect to — a **non-loopback**
+address, so you can run the VPN host-to-host without an external tunnel. It is
+gated several ways so it can never be entered by accident:
+
+- **`--test-mode` flag is required** on both server and client.
+- **A dedicated config role is required** and must match the flag: the server
+  needs `role = "testvpnserver"`, the client `role = "testvpnclient"`. Running
+  `--test-mode` against a normal role (or a test role without `--test-mode`) is a
+  startup error. See `vpn_server_test.toml.example` / `vpn_client_test.toml.example`.
+- **A per-run token is required.** The server generates a **random token** at
+  startup and logs it; each client must pass it with `--test-token <TOKEN>`. A
+  handshake with the wrong, missing, or unexpected token is rejected. Because a
+  non-test server has no token and a test server always has one, **test and
+  non-test instances cannot connect to each other** in either direction.
+- **Auto-stop.** A test-mode server or client stops itself automatically after
+  **30 minutes**, so a forgotten test instance does not linger on the network.
+
+```bash
+# Server (binds a non-loopback address; prints a random --test-token to use)
+sudo vpn-rs server --test-mode -c vpn_server_test.toml
+
+# Client (supply the token the server logged)
+sudo vpn-rs client --test-mode --test-token <TOKEN> -s <server-ip>:5555
+```
 
 ## Single Instance Lock
 

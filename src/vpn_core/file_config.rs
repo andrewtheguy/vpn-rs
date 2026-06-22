@@ -21,6 +21,12 @@ pub enum Role {
     VpnServer,
     #[serde(rename = "vpnclient")]
     VpnClient,
+    /// Test-mode server role; only valid together with `--test-mode`.
+    #[serde(rename = "testvpnserver")]
+    TestVpnServer,
+    /// Test-mode client role; only valid together with `--test-mode`.
+    #[serde(rename = "testvpnclient")]
+    TestVpnClient,
 }
 
 #[derive(Deserialize, Default, Clone)]
@@ -145,15 +151,24 @@ fn route6_context(route: &str, section: Option<&str>) -> String {
     }
 }
 
-/// Parse a loopback UDP address string (default applied by the caller).
-fn parse_loopback_addr(addr: &str, section: &str, field: &str) -> Result<SocketAddr> {
+/// Parse a UDP address string (default applied by the caller).
+///
+/// Enforces a loopback address unless `allow_non_loopback` is set (test mode).
+fn parse_loopback_addr(
+    addr: &str,
+    section: &str,
+    field: &str,
+    allow_non_loopback: bool,
+) -> Result<SocketAddr> {
     let parsed: SocketAddr = addr.parse().with_context(|| {
         format!(
             "[{}] Invalid {} '{}'. Expected host:port, e.g. {}",
             section, field, addr, DEFAULT_LISTEN_ADDR
         )
     })?;
-    ensure_loopback(parsed).map_err(|e| anyhow::anyhow!("[{}] {}", section, e))?;
+    if !allow_non_loopback {
+        ensure_loopback(parsed).map_err(|e| anyhow::anyhow!("[{}] {}", section, e))?;
+    }
     Ok(parsed)
 }
 
@@ -219,17 +234,30 @@ impl VpnServerConfig {
         self.server.as_ref()
     }
 
-    pub fn validate(&self) -> Result<()> {
+    pub fn validate(&self, test_mode: bool) -> Result<()> {
         let role = self
             .role
             .context("Config file missing required 'role' field. Add: role = \"vpnserver\"")?;
-        if role != Role::VpnServer {
-            anyhow::bail!("Config file has wrong role for server. Expected role = \"vpnserver\"");
+        let expected = if test_mode {
+            Role::TestVpnServer
+        } else {
+            Role::VpnServer
+        };
+        if role != expected {
+            if test_mode {
+                anyhow::bail!(
+                    "Config file has wrong role for a test-mode server. Expected role = \"testvpnserver\" (running with --test-mode)"
+                );
+            } else {
+                anyhow::bail!(
+                    "Config file has wrong role for server. Expected role = \"vpnserver\" (use --test-mode for role = \"testvpnserver\")"
+                );
+            }
         }
 
         if let Some(ref s) = self.server {
             if let Some(ref listen) = s.listen {
-                parse_loopback_addr(listen, "server", "listen")?;
+                parse_loopback_addr(listen, "server", "listen", test_mode)?;
             }
             validate_vpn_networks(
                 s.network.as_deref(),
@@ -252,17 +280,30 @@ impl VpnClientConfig {
         self.client.as_ref()
     }
 
-    pub fn validate(&self) -> Result<()> {
+    pub fn validate(&self, test_mode: bool) -> Result<()> {
         let role = self
             .role
             .context("Config file missing required 'role' field. Add: role = \"vpnclient\"")?;
-        if role != Role::VpnClient {
-            anyhow::bail!("Config file has wrong role for client. Expected role = \"vpnclient\"");
+        let expected = if test_mode {
+            Role::TestVpnClient
+        } else {
+            Role::VpnClient
+        };
+        if role != expected {
+            if test_mode {
+                anyhow::bail!(
+                    "Config file has wrong role for a test-mode client. Expected role = \"testvpnclient\" (running with --test-mode)"
+                );
+            } else {
+                anyhow::bail!(
+                    "Config file has wrong role for client. Expected role = \"vpnclient\" (use --test-mode for role = \"testvpnclient\")"
+                );
+            }
         }
 
         if let Some(ref c) = self.client {
             if let Some(ref server_addr) = c.server_addr {
-                parse_loopback_addr(server_addr, "client", "server_addr")?;
+                parse_loopback_addr(server_addr, "client", "server_addr", test_mode)?;
             }
             if let Some(ref routes) = c.routes {
                 for route in routes {
@@ -350,14 +391,17 @@ pub struct ResolvedVpnServerConfig {
     pub client_channel_size: usize,
     pub tun_writer_channel_size: usize,
     pub disable_spoofing_check: bool,
+    /// Test mode: non-loopback `listen` allowed (set via `--test-mode`).
+    pub test_mode: bool,
 }
 
 impl ResolvedVpnServerConfig {
-    pub fn from_config(cfg: &VpnServerSettings) -> Result<Self> {
+    pub fn from_config(cfg: &VpnServerSettings, test_mode: bool) -> Result<Self> {
         let listen = parse_loopback_addr(
             cfg.listen.as_deref().unwrap_or(DEFAULT_LISTEN_ADDR),
             "server",
             "listen",
+            test_mode,
         )?;
 
         validate_vpn_networks(
@@ -422,6 +466,7 @@ impl ResolvedVpnServerConfig {
             client_channel_size,
             tun_writer_channel_size,
             disable_spoofing_check: cfg.disable_spoofing_check,
+            test_mode,
         })
     }
 }
@@ -433,6 +478,10 @@ pub struct ResolvedVpnClientConfig {
     pub routes6: Vec<String>,
     pub auto_reconnect: bool,
     pub max_reconnect_attempts: Option<NonZeroU32>,
+    /// Test mode: non-loopback `server_addr` allowed (set via `--test-mode`).
+    pub test_mode: bool,
+    /// Test-mode token sent in the handshake (set via `--test-token`).
+    pub test_token: Option<String>,
 }
 
 #[derive(Default)]
@@ -442,6 +491,8 @@ pub struct VpnClientConfigBuilder {
     routes6: Option<Vec<String>>,
     auto_reconnect: Option<bool>,
     max_reconnect_attempts: Option<NonZeroU32>,
+    test_mode: bool,
+    test_token: Option<String>,
 }
 
 impl VpnClientConfigBuilder {
@@ -502,11 +553,19 @@ impl VpnClientConfigBuilder {
         self
     }
 
+    /// Apply test-mode settings (only set via `--test-mode` / `--test-token`).
+    pub fn apply_test_mode(mut self, test_mode: bool, test_token: Option<String>) -> Self {
+        self.test_mode = test_mode;
+        self.test_token = test_token;
+        self
+    }
+
     pub fn build(self) -> Result<ResolvedVpnClientConfig> {
         let server_addr = parse_loopback_addr(
             self.server_addr.as_deref().unwrap_or(DEFAULT_LISTEN_ADDR),
             "client",
             "server_addr",
+            self.test_mode,
         )?;
 
         let routes = self.routes.unwrap_or_default();
@@ -526,6 +585,8 @@ impl VpnClientConfigBuilder {
             routes6,
             auto_reconnect: self.auto_reconnect.unwrap_or(true),
             max_reconnect_attempts: self.max_reconnect_attempts,
+            test_mode: self.test_mode,
+            test_token: self.test_token,
         })
     }
 }
@@ -549,8 +610,9 @@ network6 = "fd00::/64"
     #[test]
     fn test_server_config_defaults_listen_to_loopback() {
         let config: VpnServerConfig = toml::from_str(&server_toml("")).unwrap();
-        assert!(config.validate().is_ok());
-        let resolved = ResolvedVpnServerConfig::from_config(config.settings().unwrap()).unwrap();
+        assert!(config.validate(false).is_ok());
+        let resolved =
+            ResolvedVpnServerConfig::from_config(config.settings().unwrap(), false).unwrap();
         assert_eq!(resolved.listen.to_string(), DEFAULT_LISTEN_ADDR);
         assert_eq!(resolved.max_datagram_size, MAX_DATAGRAM_PAYLOAD);
         assert_eq!(resolved.client_timeout, DEFAULT_CLIENT_TIMEOUT);
@@ -560,7 +622,7 @@ network6 = "fd00::/64"
     fn test_server_config_rejects_non_loopback_listen() {
         let config: VpnServerConfig =
             toml::from_str(&server_toml(r#"listen = "0.0.0.0:5555""#)).unwrap();
-        let err = config.validate().unwrap_err().to_string();
+        let err = config.validate(false).unwrap_err().to_string();
         assert!(err.contains("not loopback"), "unexpected error: {err}");
     }
 
@@ -570,7 +632,8 @@ network6 = "fd00::/64"
             "listen = \"127.0.0.1:6000\"\nmtu = 1400\nmax_datagram_size = 1400",
         ))
         .unwrap();
-        let resolved = ResolvedVpnServerConfig::from_config(config.settings().unwrap()).unwrap();
+        let resolved =
+            ResolvedVpnServerConfig::from_config(config.settings().unwrap(), false).unwrap();
         assert_eq!(resolved.mtu, 1400);
         assert_eq!(resolved.listen.port(), 6000);
         assert_eq!(resolved.max_datagram_size, 1400);
@@ -580,7 +643,7 @@ network6 = "fd00::/64"
     fn test_server_config_rejects_short_client_timeout() {
         let config: VpnServerConfig =
             toml::from_str(&server_toml("client_timeout_secs = 5")).unwrap();
-        let err = ResolvedVpnServerConfig::from_config(config.settings().unwrap())
+        let err = ResolvedVpnServerConfig::from_config(config.settings().unwrap(), false)
             .unwrap_err()
             .to_string();
         assert!(err.contains("client_timeout_secs"));
@@ -600,7 +663,7 @@ auto_reconnect = false
 "#,
         )
         .unwrap();
-        config.validate().unwrap();
+        config.validate(false).unwrap();
         let settings = config.settings().unwrap();
         let resolved = VpnClientConfigBuilder::new()
             .apply_defaults()
@@ -624,7 +687,7 @@ server_addr = "192.0.2.1:5555"
 "#,
         )
         .unwrap();
-        let err = config.validate().unwrap_err().to_string();
+        let err = config.validate(false).unwrap_err().to_string();
         assert!(err.contains("not loopback"), "unexpected error: {err}");
     }
 
@@ -644,5 +707,92 @@ server_addr = "192.0.2.1:5555"
         assert_eq!(resolved.server_addr.port(), 7000);
         assert_eq!(resolved.routes, ["10.0.0.0/8"]);
         assert!(!resolved.auto_reconnect);
+    }
+
+    #[test]
+    fn test_server_test_mode_requires_test_role() {
+        // Normal role with --test-mode is rejected.
+        let config: VpnServerConfig = toml::from_str(&server_toml("")).unwrap();
+        let err = config.validate(true).unwrap_err().to_string();
+        assert!(err.contains("testvpnserver"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn test_server_test_role_requires_test_mode() {
+        // Test role without --test-mode is rejected.
+        let toml_str = r#"
+role = "testvpnserver"
+
+[server]
+network6 = "fd00::/64"
+"#;
+        let config: VpnServerConfig = toml::from_str(toml_str).unwrap();
+        let err = config.validate(false).unwrap_err().to_string();
+        assert!(err.contains("vpnserver"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn test_server_test_mode_allows_non_loopback_listen() {
+        let toml_str = r#"
+role = "testvpnserver"
+
+[server]
+network6 = "fd00::/64"
+listen = "0.0.0.0:5555"
+"#;
+        let config: VpnServerConfig = toml::from_str(toml_str).unwrap();
+        config.validate(true).expect("test-mode server should validate");
+        let resolved =
+            ResolvedVpnServerConfig::from_config(config.settings().unwrap(), true).unwrap();
+        assert!(resolved.test_mode);
+        assert_eq!(resolved.listen.to_string(), "0.0.0.0:5555");
+    }
+
+    #[test]
+    fn test_client_test_mode_requires_test_role() {
+        let toml_str = r#"
+role = "vpnclient"
+
+[client]
+server_addr = "127.0.0.1:6000"
+"#;
+        let config: VpnClientConfig = toml::from_str(toml_str).unwrap();
+        let err = config.validate(true).unwrap_err().to_string();
+        assert!(err.contains("testvpnclient"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn test_client_test_role_requires_test_mode() {
+        // Test role without --test-mode is rejected.
+        let toml_str = r#"
+role = "testvpnclient"
+
+[client]
+server_addr = "127.0.0.1:6000"
+"#;
+        let config: VpnClientConfig = toml::from_str(toml_str).unwrap();
+        let err = config.validate(false).unwrap_err().to_string();
+        assert!(err.contains("vpnclient"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn test_client_test_mode_allows_non_loopback_and_carries_token() {
+        let toml_str = r#"
+role = "testvpnclient"
+
+[client]
+server_addr = "192.0.2.1:5555"
+"#;
+        let config: VpnClientConfig = toml::from_str(toml_str).unwrap();
+        config.validate(true).expect("test-mode client should validate");
+        let resolved = VpnClientConfigBuilder::new()
+            .apply_defaults()
+            .apply_config(config.settings())
+            .apply_test_mode(true, Some("the-token".to_string()))
+            .build()
+            .unwrap();
+        assert!(resolved.test_mode);
+        assert_eq!(resolved.server_addr.to_string(), "192.0.2.1:5555");
+        assert_eq!(resolved.test_token.as_deref(), Some("the-token"));
     }
 }

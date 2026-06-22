@@ -31,7 +31,8 @@ it relies on (a) never being on the network, and (b) the tunnel isolating peers.
   unsupported (SSH cannot forward UDP).
 - **Loopback-locked.** The server `listen` and client `server_addr` are hard-locked
   to loopback addresses (`127.0.0.0/8`, `::1`, or IPv4-mapped loopback) with no
-  override (`ensure_loopback`, [`udp.rs`](../src/vpn_core/udp.rs)).
+  override (`ensure_loopback`, [`udp.rs`](../src/vpn_core/udp.rs)). The lone
+  exception is [test mode](#test-mode), an explicit opt-in for tunnel-less testing.
 - **No backward compatibility** while in `0.0.x`. The wire protocol is **v4**; peers
   on any other version are rejected.
 
@@ -67,7 +68,7 @@ Two datagram kinds share the single UDP socket. They are disambiguated by the
 ### Handshake (JSON over UDP)
 
 ```
-client → server : VpnHandshake          { version: 4, device_id: u64 }
+client → server : VpnHandshake          { version: 4, device_id: u64, test_token? }
 server → client : VpnHandshakeResponse   { version, accepted, server_gso_enabled,
                                            mtu, assigned_ip[/6], network[/6],
                                            server_ip[/6], reject_reason? }
@@ -76,6 +77,13 @@ server → client : VpnHandshakeResponse   { version, accepted, server_gso_enabl
 `device_id` is a random `u64` per client session. The server keys IP-pool
 allocation by `device_id` (not by socket address), so a client that reconnects
 from a new ephemeral UDP port keeps its previously-assigned VPN IP.
+
+`test_token` is omitted (`skip_serializing_if`) outside [test mode](#test-mode),
+so normal handshakes are unchanged on the wire. In test mode the server checks
+`config.test_token == handshake.test_token` **before any allocation** and rejects
+on mismatch. Since a non-test server holds `None` and a test server holds
+`Some(token)`, this equality also makes test and non-test peers mutually
+incompatible in both directions.
 
 ### Data channel
 
@@ -147,8 +155,9 @@ protection at the VPN layer.
 
 `VpnClient::connect()`:
 
-1. `connect_client_socket(server_addr)` — bind ephemeral loopback, `connect()` to the
-   target so `send`/`recv` are pinned to the server.
+1. `connect_client_socket(server_addr, allow_non_loopback)` — bind an ephemeral
+   local socket (loopback, or the unspecified address in test mode), `connect()`
+   to the target so `send`/`recv` are pinned to the server.
 2. `perform_handshake` — send `VpnHandshake`, await a response with a 2s timeout,
    retransmit up to `HANDSHAKE_RETRIES` (5) times. Handles datagram loss.
 3. Build the TUN device + routes from the accepted response; send a capabilities
@@ -198,8 +207,31 @@ section ([`file_config.rs`](../src/vpn_core/file_config.rs)):
 - **Client:** `server_addr` (loopback), `routes` / `routes6`, `auto_reconnect`,
   `max_reconnect_attempts`.
 
-Both `validate()` paths call `ensure_loopback`, so a non-loopback address is
-rejected at startup before any socket is bound.
+Both `validate()` paths call `ensure_loopback` (unless test mode is active), so a
+non-loopback address is rejected at startup before any socket is bound.
+
+`validate()` takes a `test_mode` flag threaded from the `--test-mode` CLI flag.
+The `role` guard accepts `vpnserver`/`vpnclient` in normal mode and
+`testvpnserver`/`testvpnclient` in test mode, and a flag/role mismatch is a
+startup error.
+
+## Test mode
+
+An explicit, multiply-gated escape hatch for testing the VPN directly between
+hosts **without a tunnel** — and therefore with no wire encryption or
+authentication. Entered only when all gates agree:
+
+- `--test-mode` on the CLI **and** the matching test `role` in the config
+  (`testvpnserver` / `testvpnclient`); a mismatch aborts at startup.
+- `allow_non_loopback` is threaded into `bind_server_socket` /
+  `connect_client_socket` and the config validators, skipping `ensure_loopback`.
+  The client binds the unspecified local address (`0.0.0.0` / `::`) instead of
+  loopback so it can reach a remote server.
+- The server generates a random token (`main.rs`), logs it, and stores it in
+  `VpnServerConfig.test_token`; clients pass it via `--test-token`. The handshake
+  equality check (above) enforces the token and the test/non-test split.
+- Both ends self-terminate after `TEST_MODE_MAX_RUNTIME` (30 min) via a
+  `tokio::select!` timeout in `main.rs`.
 
 ## Demux assumption
 
@@ -214,6 +246,10 @@ connection-id header would be required — intentionally out of scope.
 - No NAT traversal or relays — the tunnel owns transport.
 - Reachability is constrained by the loopback bind, not by firewall rules.
 - Inter-client isolation rests on the anti-spoofing check (and/or tunnel isolation).
+- [Test mode](#test-mode) deliberately lifts the loopback bind, putting plaintext
+  VPN traffic on the network; its random token is an accident-prevention gate, not
+  a security boundary. Use it only for testing on trusted networks (such as
+  benchmarking).
 
 ## See also
 
