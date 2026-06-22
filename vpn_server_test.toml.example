@@ -5,7 +5,8 @@
 # TEST MODE ONLY. Unlike the normal server, a test-mode server may bind a
 # NON-loopback address so you can run the VPN directly between two hosts (or two
 # interfaces) without an external tunnel. There is no transport encryption or
-# authentication in this path — use it only for testing on trusted networks.
+# authentication in this path — use it only for testing on trusted networks
+# (such as benchmarking).
 #
 # A test-mode server requires BOTH:
 #   1. the --test-mode CLI flag, and

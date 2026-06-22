@@ -6,7 +6,8 @@
 # TEST MODE ONLY. Unlike the normal client, a test-mode client may connect to a
 # NON-loopback server address, so it can reach a test-mode server running on
 # another host directly (no external tunnel). There is no transport encryption
-# or authentication in this path — use it only for testing on trusted networks.
+# or authentication in this path — use it only for testing on trusted networks
+# (such as benchmarking).
 #
 # A test-mode client requires BOTH:
 #   1. the --test-mode CLI flag together with --test-token <TOKEN>, and
