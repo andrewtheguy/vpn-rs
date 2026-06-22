@@ -1,232 +1,74 @@
 # vpn-rs server configuration example
 #
 # Usage: vpn-rs server -c vpn_server.toml
-#        vpn-rs server --default-config
+#        vpn-rs server --default-config   (~/.config/vpn-rs/vpn_server.toml)
 #
-# CLI arguments take precedence over config file values.
+# vpn-rs is responsible for VPN tunneling ONLY. It binds a loopback-only UDP
+# socket; a separate tunnel process (tunnel-rs / duopipe / any UDP forwarder)
+# must run on this host, forward this loopback port across the network, and
+# provide the encryption + authentication. The VPN server is never reachable
+# directly — only through the local tunnel.
 
-# Required: validates config matches CLI command
+# Required: validates the config matches the CLI command.
 role = "vpnserver"
-mode = "iroh"
 
-[iroh]
+[server]
+# ============================================================================
+# Loopback UDP listen address (the local tunnel forwards to it)
+# ============================================================================
+# MUST be loopback: 127.0.0.1 (IPv4) or ::1 (IPv6). Any other address is
+# rejected at startup. Default: 127.0.0.1:5555
+listen = "127.0.0.1:5555"
+
 # ============================================================================
 # VPN Network Configuration
 # ============================================================================
 # At least one of 'network' (IPv4) or 'network6' (IPv6) is REQUIRED.
-# You can configure:
-#   - IPv4-only:   Set 'network' only
-#   - IPv6-only:   Set 'network6' only
-#   - Dual-stack:  Set both 'network' and 'network6'
+#   - IPv4-only:   set 'network' only
+#   - IPv6-only:   set 'network6' only
+#   - Dual-stack:  set both
+#
+# These are the *inner* VPN addresses handed to clients; they are independent of
+# the loopback transport above.
 
-# IPv4 VPN network CIDR (optional if network6 is set)
-# Clients will be assigned IPs from this network
+# IPv4 VPN network CIDR. Clients are assigned IPs from this network.
 network = "10.0.0.0/24"
 
-# Server's VPN IP address (optional, defaults to first IP in network)
-# This becomes the gateway for connected clients
+# Server's VPN IP (optional, defaults to the first host, e.g. 10.0.0.1).
 # server_ip = "10.0.0.1"
 
-# ============================================================================
-# IPv6 Configuration (Optional for Dual-Stack or IPv6-only)
-# ============================================================================
-# Enable IPv6 alongside IPv4 (dual-stack) or as the only address family (IPv6-only).
-# When both network and network6 are set, clients receive addresses from both.
-
-# IPv6 VPN network CIDR (required for dual-stack or IPv6-only)
-# Clients will be assigned IPs from this network (one /128 per client)
+# IPv6 VPN network CIDR (optional, for dual-stack or IPv6-only).
+# One /128 is assigned per client, sequentially (server gets ::1).
 # network6 = "fd00::/64"
-
-# IPv6 address-assignment strategy (optional, default: "sequential")
-#
-# "sequential" (default): Server gets the first IP (e.g., fd00::1), clients
-#                         get fd00::2, fd00::3, ... in connection order.
-#
-# "node-id":              Stateless deterministic addressing. Each client's
-#                         64-bit host suffix is derived (SHA-256) from its
-#                         iroh node id, so a client always gets the same
-#                         address across reconnects and server restarts —
-#                         no allocation state is kept. The server's address
-#                         is likewise derived from the server's node id.
-#                         Requires 'network6' of /64 or wider (prefix <= 64)
-#                         and cannot be combined with 'server_ip6' (the
-#                         server address is derived, not configured).
-# ip6_strategy = "node-id"
-
-# Server's IPv6 VPN address (optional, defaults to first IP in network6)
-# This becomes the IPv6 gateway for connected clients
-# NOTE: Only valid with the default "sequential" strategy; with "node-id"
-# the server address is derived from the server's node id.
 # server_ip6 = "fd00::1"
 
 # ============================================================================
-# IPv6-only Example Configuration
-# ============================================================================
-# For an IPv6-only VPN server, comment out 'network' above and enable:
-#
-# # network = "10.0.0.0/24"  # Comment out or remove for IPv6-only
-# network6 = "fd00::/64"
-# ip6_strategy = "node-id"   # or omit for sequential (server_ip6 allowed then)
-#
-# To allow IPv6 clients to reach IPv4 destinations, use external TAYGA setup:
-#   docs/TAYGA_NAT64.md
-
-# ============================================================================
-# Performance Tuning
+# Tunables (all optional)
 # ============================================================================
 
-# Linux GSO offload is automatic (no config toggle).
-# On startup, server logs local TUN GSO status.
-# Per-client, server logs: `server_local`, `client_reported`, and `active` GSO status.
+# TUN MTU (576-9216, default 1440).
+# mtu = 1440
 
-# MTU for VPN packets (576-9216, default: 1440)
-# Lower values may help with fragmentation issues.
-# NOTE: The MTU is dictated to clients during the handshake; clients do not
-# configure it themselves. All clients share this one value.
-#
-# IPv6: keep mtu >= 1280. IPv6 mandates a 1280-byte minimum link MTU, so for
-# IPv6-only or dual-stack (network6) deployments a lower value causes
-# fragmentation / packet loss on the IPv6 path.
-#
-# Jumbo MTU (e.g. 9000) for high-throughput LANs / site-to-site:
-#   Throughput on clients whose TUN does one packet per syscall (notably macOS
-#   utun, which has no GSO) is bound by the per-packet cost, so it scales with
-#   MTU. Raising the MTU to 9000 roughly tripled macOS sender throughput in
-#   testing (~1 -> ~3 Gbit/s). The encrypted transport re-segments to the path
-#   MTU, so no jumbo physical frames are required for tunnel traffic itself.
-#
-#   CAUTION - only safe when tunneled traffic stays VPN-to-VPN (split tunnel,
-#   site-to-site, LAN). In FULL-TUNNEL mode, a 9000-byte inner packet routed to
-#   the internet is forwarded out the server's real NIC (MTU ~1500), forcing
-#   fragmentation or a PMTUD blackhole (ICMP "frag needed" is often dropped),
-#   which silently stalls connections. Keep the default 1440 for full-tunnel /
-#   internet egress; only raise it when you control the end-to-end path.
-# mtu = 1440   # default; set to 9000 for a controlled jumbo LAN (see above)
+# Maximum number of connected clients (default 254).
+# max_clients = 254
 
-# ============================================================================
-# Channel Buffer Sizes
-# ============================================================================
-# These control packet buffering between tasks. Valid range: 1-65536.
+# Seconds without any datagram from a client before it is reaped and its IP
+# released (UDP has no connection teardown). Must be >= 15. Default 60.
+# client_timeout_secs = 60
 
-# Per-client outbound packet buffer (default: 1024)
-# Controls how many packets can be queued for each client before backpressure/drops.
-# Memory impact: client_channel_size * ~1500 bytes * connected_clients
-# - 1024 (default): ~1.5 MB per client worst case
-# client_channel_size = 1024
+# Maximum UDP datagram payload to emit (576..=65507, default 65507). Offload
+# (GSO) super-frames larger than this are segmented before sending. Lower this
+# only if your tunnel cannot carry large UDP datagrams.
+# max_datagram_size = 65507
 
-# TUN writer aggregate buffer (default: 512)
-# Shared buffer for all client -> TUN traffic. Lower values bound memory usage.
-# Memory impact: tun_writer_channel_size * ~1500 bytes
-# - 512 (default): ~750 KB worst case (safe for memory-constrained hosts)
-# - 2048-4096: Better burst tolerance for high-bandwidth servers
-# tun_writer_channel_size = 512
-
-# ============================================================================
-# Backpressure Behavior
-# ============================================================================
-
-# What to do when a client's send buffer is full (default: false = apply backpressure)
-#
-# false (default): Apply backpressure by blocking the TUN reader until the slow
-#                  client's buffer has space. This guarantees no packet loss.
-#                  Best for development/homelab use where reliability matters.
-#
-# true:            Drop packets for slow clients. Prevents one slow client from
-#                  blocking packet delivery to all other clients (head-of-line
-#                  blocking). Best for real-time traffic like VoIP, gaming, or
-#                  interactive sessions at scale where latency matters more than
-#                  guaranteed delivery.
-#
+# Drop packets for a slow client instead of applying backpressure (default false).
 # drop_on_full = false
 
-# ============================================================================
-# Server Identity (Required)
-# ============================================================================
+# Per-client outbound buffer / aggregate TUN-writer buffer (defaults 1024 / 512).
+# client_channel_size = 1024
+# tun_writer_channel_size = 512
 
-# Path to secret key file for persistent iroh identity (REQUIRED)
-# Generates same EndpointId across restarts
-# Create with: vpn-rs generate-server-key -o ./vpn-server.key
-secret_file = "./vpn-server.key"
-
-# ============================================================================
-# Authentication (REQUIRED)
-# ============================================================================
-# At least one authentication method is required.
-# Clients must provide one of these tokens to connect.
-#
-# Token format: exactly 47 characters (`v` + 46 Base64URL chars, no padding)
-# Generate with: vpn-rs generate-token
-
-# Inline tokens (for testing; prefer auth_tokens_file in production)
-# NOTE: Use either auth_tokens OR auth_tokens_file, not both.
-auth_tokens = ["<YOUR_AUTH_TOKEN>"]  # Replace with real token from generate-token
-
-# Or use a file containing tokens (one per line, # comments allowed)
-# NOTE: Use either auth_tokens OR auth_tokens_file, not both.
-# auth_tokens_file = "./vpn-tokens.txt"
-
-# ============================================================================
-# Security Settings
-# ============================================================================
-
-# Disable source IP spoofing checks (default: false)
-#
-# When false (default): Packets are rejected if their source IP matches another
-# client's assigned VPN IP (assigned client IP). This prevents inter-client
-# spoofing while still allowing clients to use their own public IP addresses
-# (useful for dual-stack scenarios where clients have native IPv6).
-#
-# When true: All source IP validation is disabled. Use with caution as this
-# allows clients to send packets with arbitrary source addresses.
-#
+# Disable inter-client source-IP spoofing checks (default false). With no
+# transport-level auth here, leave this on unless the tunnel already isolates
+# clients from each other.
 # disable_spoofing_check = false
-
-# ============================================================================
-# Relay and Discovery (Optional)
-# ============================================================================
-
-# Custom relay server URL(s) for failover
-# Must match client's relay configuration for discovery
-# relay_urls = [
-#     "https://relay1.example.com",
-#     "https://relay2.example.com",
-# ]
-
-# Custom DNS server URL for iroh endpoint discovery (pkarr), or "none" to disable DNS discovery.
-# This is NOT VPN DNS and does not affect client DNS resolution.
-# Must match client's dns_server configuration.
-# NOTE: URL must include the /pkarr path
-# dns_server = "https://dns.example.com/pkarr"
-#
-# Set to "none" to disable DNS-based peer discovery entirely.
-# When disabled, clients and server must use one of these methods to connect:
-#   1. Common relay server - both specify the same relay_urls
-#   2. mDNS - automatic discovery on the same local network
-# dns_server = "none"
-
-# ============================================================================
-# Transport Tuning (Optional)
-# ============================================================================
-# Fine-tune QUIC transport layer for performance optimization.
-# All values have sensible defaults - only configure if needed.
-#
-# NOTE: These settings are dictated to clients during the handshake. Clients
-# always connect with defaults and reconnect once to apply non-default values,
-# so the server is the single source of truth for transport tuning.
-
-[iroh.transport]
-# Congestion controller algorithm (default: cubic)
-# - cubic: Loss-based, widely deployed, best for general internet
-# - bbr: Model-based, may perform better on high-bandwidth/high-latency links
-# - newreno: Classic TCP-like, most conservative
-# congestion_controller = "cubic"
-
-# QUIC receive window in bytes (default: 8388608 = 8MB)
-# Controls flow control - larger values allow more in-flight data
-# Valid range: 1024 (1KB) to 16777216 (16MB)
-# receive_window = 8388608
-
-# QUIC send window in bytes (default: 8388608 = 8MB)
-# Controls how much data can be sent before acknowledgment
-# Valid range: 1024 (1KB) to 16777216 (16MB)
-# send_window = 8388608

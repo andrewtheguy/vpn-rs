@@ -98,7 +98,10 @@ On clients, route NAT64 prefix through VPN:
 
 ```toml
 # vpn_client.toml
-[iroh]
+role = "vpnclient"
+
+[client]
+server_addr = "127.0.0.1:5555"
 routes6 = ["64:ff9b::/96"]
 ```
 

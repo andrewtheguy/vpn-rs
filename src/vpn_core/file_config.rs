@@ -1,10 +1,18 @@
 //! TOML config-file support: file-level structs, loading, and resolution
 //! into the runtime configuration ([`super::config`]).
 
+use crate::vpn_core::config::{DEFAULT_CLIENT_TIMEOUT, MIN_DATAGRAM_SIZE};
+use crate::vpn_core::datagram::MAX_DATAGRAM_PAYLOAD;
+use crate::vpn_core::udp::ensure_loopback;
 use anyhow::{Context, Result};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
+use std::net::SocketAddr;
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+/// Default loopback listen/connect address as a string.
+pub const DEFAULT_LISTEN_ADDR: &str = "127.0.0.1:5555";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -15,120 +23,48 @@ pub enum Role {
     VpnClient,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Mode {
-    Iroh,
-}
-
-impl Mode {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Mode::Iroh => "iroh",
-        }
-    }
-}
-
-/// Congestion controller algorithm selection.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum CongestionController {
-    /// CUBIC - default loss-based controller.
-    #[default]
-    Cubic,
-    /// BBR model-based controller.
-    Bbr,
-    /// NewReno classic TCP-like controller.
-    #[serde(alias = "new_reno")]
-    NewReno,
-}
-
-pub use super::config::Ip6Strategy;
-
-/// Default QUIC receive window size (8 MB).
-pub const DEFAULT_RECEIVE_WINDOW: u32 = 8 * 1024 * 1024;
-
-/// Transport tuning for QUIC connections.
-///
-/// Server-only configuration: the server applies it to its own endpoint and
-/// dictates the resolved values to clients during the handshake.
-#[derive(Deserialize, Default, Clone, Debug, PartialEq)]
-pub struct TransportTuning {
-    #[serde(default)]
-    pub congestion_controller: CongestionController,
-    pub receive_window: Option<u32>,
-    pub send_window: Option<u32>,
-}
-
-impl TransportTuning {
-    /// Resolve the effective (receive, send) window sizes in bytes.
-    ///
-    /// Receive defaults to [`DEFAULT_RECEIVE_WINDOW`]; send defaults to the
-    /// effective receive window. Shared by endpoint setup and the handshake
-    /// wire values so they cannot drift.
-    pub fn effective_windows(&self) -> (u32, u32) {
-        let receive_window = self.receive_window.unwrap_or(DEFAULT_RECEIVE_WINDOW);
-        let send_window = self.send_window.unwrap_or(receive_window);
-        (receive_window, send_window)
-    }
-}
-
-/// Shared VPN iroh configuration fields (used by both server and client).
 #[derive(Deserialize, Default, Clone)]
-pub struct VpnIrohSharedConfig {
-    pub relay_urls: Option<Vec<String>>,
-    pub dns_server: Option<String>,
-}
-
-#[derive(Deserialize, Default, Clone)]
-pub struct VpnServerIrohConfig {
+pub struct VpnServerSettings {
+    /// Loopback UDP address to bind (default `127.0.0.1:5555`).
+    pub listen: Option<String>,
     pub network: Option<String>,
     pub server_ip: Option<String>,
     pub network6: Option<String>,
     pub server_ip6: Option<String>,
-    #[serde(default)]
-    pub ip6_strategy: Ip6Strategy,
     pub mtu: Option<u16>,
-    pub secret_file: Option<PathBuf>,
-    pub auth_tokens: Option<Vec<String>>,
-    pub auth_tokens_file: Option<PathBuf>,
-    #[serde(default = "default_drop_on_full")]
+    pub max_clients: Option<usize>,
+    /// Seconds without any datagram before a client is reaped.
+    pub client_timeout_secs: Option<u64>,
+    /// Max UDP datagram payload to emit (offload super-frames above this are segmented).
+    pub max_datagram_size: Option<usize>,
+    #[serde(default)]
     pub drop_on_full: bool,
     pub client_channel_size: Option<usize>,
     pub tun_writer_channel_size: Option<usize>,
     #[serde(default)]
     pub disable_spoofing_check: bool,
-    #[serde(default)]
-    pub transport: TransportTuning,
-    #[serde(flatten)]
-    pub shared: VpnIrohSharedConfig,
 }
 
 #[derive(Deserialize, Default, Clone)]
-pub struct VpnClientIrohConfig {
-    pub server_node_id: Option<String>,
-    pub auth_token: Option<String>,
-    pub auth_token_file: Option<PathBuf>,
+pub struct VpnClientSettings {
+    /// Loopback UDP address of the local tunnel endpoint (default `127.0.0.1:5555`).
+    pub server_addr: Option<String>,
     pub routes: Option<Vec<String>>,
     pub routes6: Option<Vec<String>>,
     pub auto_reconnect: Option<bool>,
     pub max_reconnect_attempts: Option<NonZeroU32>,
-    #[serde(flatten)]
-    pub shared: VpnIrohSharedConfig,
 }
 
 #[derive(Deserialize, Default, Clone)]
 pub struct VpnServerConfig {
     pub role: Option<Role>,
-    pub mode: Option<Mode>,
-    pub iroh: Option<VpnServerIrohConfig>,
+    pub server: Option<VpnServerSettings>,
 }
 
 #[derive(Deserialize, Default, Clone)]
 pub struct VpnClientConfig {
     pub role: Option<Role>,
-    pub mode: Option<Mode>,
-    pub iroh: Option<VpnClientIrohConfig>,
+    pub client: Option<VpnClientSettings>,
 }
 
 /// Default MTU for VPN packets (1500 - ~60 bytes overhead).
@@ -140,43 +76,8 @@ pub const DEFAULT_CLIENT_CHANNEL_SIZE: usize = 1024;
 /// Default channel buffer size for TUN writer task.
 pub const DEFAULT_TUN_WRITER_CHANNEL_SIZE: usize = 512;
 
-/// Minimum QUIC window size (1 KB).
-const MIN_WINDOW_SIZE: u32 = 1024;
-
-/// Maximum QUIC window size (16 MB).
-const MAX_WINDOW_SIZE: u32 = 16 * 1024 * 1024;
-
-fn validate_window_size(size: u32, field_name: &str, section: &str) -> Result<()> {
-    if size < MIN_WINDOW_SIZE {
-        anyhow::bail!(
-            "[{}] {} value {} is below minimum of {} bytes (1KB)",
-            section,
-            field_name,
-            size,
-            MIN_WINDOW_SIZE
-        );
-    }
-    if size > MAX_WINDOW_SIZE {
-        anyhow::bail!(
-            "[{}] {} value {} exceeds maximum of {} bytes (16MB)",
-            section,
-            field_name,
-            size,
-            MAX_WINDOW_SIZE
-        );
-    }
-    Ok(())
-}
-
-pub fn validate_transport_tuning(tuning: &TransportTuning, section: &str) -> Result<()> {
-    if let Some(recv) = tuning.receive_window {
-        validate_window_size(recv, "receive_window", section)?;
-    }
-    if let Some(send) = tuning.send_window {
-        validate_window_size(send, "send_window", section)?;
-    }
-    Ok(())
-}
+/// Default maximum number of connected clients.
+pub const DEFAULT_MAX_CLIENTS: usize = 254;
 
 /// Minimum VPN tunnel MTU.
 const MIN_VPN_MTU: u16 = 576;
@@ -184,8 +85,8 @@ const MIN_VPN_MTU: u16 = 576;
 /// Maximum VPN tunnel MTU. Jumbo frames are allowed because throughput on
 /// per-packet-syscall-bound platforms (notably macOS `utun`, which has no GSO
 /// and reads one packet per syscall) scales ~linearly with MTU. The transport
-/// re-segments to the path MTU (TCP MSS for the dummy, QUIC datagrams for iroh),
-/// so a large *inner* MTU needs no jumbo physical frames.
+/// re-segments oversized offload frames to fit a UDP datagram, so a large
+/// *inner* MTU needs no jumbo physical frames.
 const MAX_VPN_MTU: u16 = 9216;
 
 pub(crate) fn validate_mtu(mtu: u16, section: &str) -> Result<()> {
@@ -244,12 +145,23 @@ fn route6_context(route: &str, section: Option<&str>) -> String {
     }
 }
 
+/// Parse a loopback UDP address string (default applied by the caller).
+fn parse_loopback_addr(addr: &str, section: &str, field: &str) -> Result<SocketAddr> {
+    let parsed: SocketAddr = addr.parse().with_context(|| {
+        format!(
+            "[{}] Invalid {} '{}'. Expected host:port, e.g. {}",
+            section, field, addr, DEFAULT_LISTEN_ADDR
+        )
+    })?;
+    ensure_loopback(parsed).map_err(|e| anyhow::anyhow!("[{}] {}", section, e))?;
+    Ok(parsed)
+}
+
 fn validate_vpn_networks(
     network: Option<&str>,
     server_ip: Option<&str>,
     network6: Option<&str>,
     server_ip6: Option<&str>,
-    ip6_strategy: Ip6Strategy,
     section: &str,
 ) -> Result<()> {
     // Parse the raw strings, then delegate the semantic rules to the shared
@@ -298,17 +210,13 @@ fn validate_vpn_networks(
         })
         .transpose()?;
 
-    super::config::validate_vpn_networks(network, server_ip, network6, server_ip6, ip6_strategy)
+    super::config::validate_vpn_networks(network, server_ip, network6, server_ip6)
         .map_err(|e| anyhow::anyhow!("[{}] {}", section, e))
 }
 
-fn default_drop_on_full() -> bool {
-    false
-}
-
 impl VpnServerConfig {
-    pub fn iroh(&self) -> Option<&VpnServerIrohConfig> {
-        self.iroh.as_ref()
+    pub fn settings(&self) -> Option<&VpnServerSettings> {
+        self.server.as_ref()
     }
 
     pub fn validate(&self) -> Result<()> {
@@ -319,39 +227,19 @@ impl VpnServerConfig {
             anyhow::bail!("Config file has wrong role for server. Expected role = \"vpnserver\"");
         }
 
-        let mode = self
-            .mode
-            .context("Config file missing required 'mode' field. Add: mode = \"iroh\"")?;
-        if mode != Mode::Iroh {
-            anyhow::bail!(
-                "Config file has mode = '{}' but this binary only supports iroh mode",
-                mode.as_str()
-            );
-        }
-
-        if let Some(ref iroh) = self.iroh {
-            if iroh.secret_file.is_none() {
-                anyhow::bail!(
-                    "[iroh] 'secret_file' is required for server identity. Generate with: vpn-rs generate-server-key -o ./vpn-server.key"
-                );
+        if let Some(ref s) = self.server {
+            if let Some(ref listen) = s.listen {
+                parse_loopback_addr(listen, "server", "listen")?;
             }
-
-            let has_inline_tokens = iroh.auth_tokens.as_ref().is_some_and(|t| !t.is_empty());
-            if has_inline_tokens && iroh.auth_tokens_file.is_some() {
-                anyhow::bail!("[iroh] Use only one of 'auth_tokens' or 'auth_tokens_file'.");
-            }
-
             validate_vpn_networks(
-                iroh.network.as_deref(),
-                iroh.server_ip.as_deref(),
-                iroh.network6.as_deref(),
-                iroh.server_ip6.as_deref(),
-                iroh.ip6_strategy,
-                "iroh",
+                s.network.as_deref(),
+                s.server_ip.as_deref(),
+                s.network6.as_deref(),
+                s.server_ip6.as_deref(),
+                "server",
             )?;
-
-            if let Some(mtu) = iroh.mtu {
-                validate_mtu(mtu, "iroh")?;
+            if let Some(mtu) = s.mtu {
+                validate_mtu(mtu, "server")?;
             }
         }
 
@@ -360,8 +248,8 @@ impl VpnServerConfig {
 }
 
 impl VpnClientConfig {
-    pub fn iroh(&self) -> Option<&VpnClientIrohConfig> {
-        self.iroh.as_ref()
+    pub fn settings(&self) -> Option<&VpnClientSettings> {
+        self.client.as_ref()
     }
 
     pub fn validate(&self) -> Result<()> {
@@ -372,36 +260,20 @@ impl VpnClientConfig {
             anyhow::bail!("Config file has wrong role for client. Expected role = \"vpnclient\"");
         }
 
-        let mode = self
-            .mode
-            .context("Config file missing required 'mode' field. Add: mode = \"iroh\"")?;
-        if mode != Mode::Iroh {
-            anyhow::bail!(
-                "Config file has mode = '{}' but this binary only supports iroh mode",
-                mode.as_str()
-            );
-        }
-
-        if let Some(ref iroh) = self.iroh {
-            if iroh.server_node_id.is_none() {
-                anyhow::bail!("[iroh] 'server_node_id' is required for client config.");
+        if let Some(ref c) = self.client {
+            if let Some(ref server_addr) = c.server_addr {
+                parse_loopback_addr(server_addr, "client", "server_addr")?;
             }
-
-            if iroh.auth_token.is_some() && iroh.auth_token_file.is_some() {
-                anyhow::bail!("[iroh] Use only one of 'auth_token' or 'auth_token_file'.");
-            }
-
-            if let Some(ref routes) = iroh.routes {
+            if let Some(ref routes) = c.routes {
                 for route in routes {
                     validate_cidr(route)
-                        .with_context(|| format!("[iroh] Invalid route CIDR '{}'", route))?;
+                        .with_context(|| format!("[client] Invalid route CIDR '{}'", route))?;
                 }
             }
-
-            if let Some(ref routes6) = iroh.routes6 {
+            if let Some(ref routes6) = c.routes6 {
                 for route6 in routes6 {
                     validate_ipv6_cidr(route6)
-                        .with_context(|| route6_context(route6, Some("iroh")))?;
+                        .with_context(|| route6_context(route6, Some("client")))?;
                 }
             }
         }
@@ -417,9 +289,10 @@ pub fn expand_tilde(path: &Path) -> PathBuf {
             return home.join(stripped);
         }
     } else if path_str == "~"
-        && let Some(home) = dirs::home_dir() {
-            return home;
-        }
+        && let Some(home) = dirs::home_dir()
+    {
+        return home;
+    }
     path.to_path_buf()
 }
 
@@ -464,79 +337,90 @@ pub fn load_vpn_client_config(path: Option<&Path>) -> Result<VpnClientConfig> {
 
 #[derive(Debug, Clone)]
 pub struct ResolvedVpnServerConfig {
+    pub listen: SocketAddr,
     pub network: Option<String>,
     pub server_ip: Option<String>,
     pub network6: Option<String>,
     pub server_ip6: Option<String>,
-    pub ip6_strategy: Ip6Strategy,
     pub mtu: u16,
-    pub secret_file: Option<PathBuf>,
-    pub relay_urls: Vec<String>,
-    pub dns_server: Option<String>,
-    pub auth_tokens: Vec<String>,
-    pub auth_tokens_file: Option<PathBuf>,
+    pub max_clients: usize,
+    pub client_timeout: Duration,
+    pub max_datagram_size: usize,
     pub drop_on_full: bool,
     pub client_channel_size: usize,
     pub tun_writer_channel_size: usize,
-    pub transport: TransportTuning,
     pub disable_spoofing_check: bool,
 }
 
 impl ResolvedVpnServerConfig {
-    pub fn from_config(cfg: &VpnServerIrohConfig) -> Result<Self> {
-        if cfg.secret_file.is_none() {
-            anyhow::bail!(
-                "[config] 'secret_file' is required for server identity. Generate with: vpn-rs generate-server-key -o ./vpn-server.key"
-            );
-        }
+    pub fn from_config(cfg: &VpnServerSettings) -> Result<Self> {
+        let listen = parse_loopback_addr(
+            cfg.listen.as_deref().unwrap_or(DEFAULT_LISTEN_ADDR),
+            "server",
+            "listen",
+        )?;
 
         validate_vpn_networks(
             cfg.network.as_deref(),
             cfg.server_ip.as_deref(),
             cfg.network6.as_deref(),
             cfg.server_ip6.as_deref(),
-            cfg.ip6_strategy,
-            "config",
+            "server",
         )?;
 
         let mtu = cfg.mtu.unwrap_or(DEFAULT_VPN_MTU);
-        validate_mtu(mtu, "config")?;
+        validate_mtu(mtu, "server")?;
 
-        let has_tokens = cfg.auth_tokens.as_ref().is_some_and(|t| !t.is_empty());
-        if has_tokens && cfg.auth_tokens_file.is_some() {
-            anyhow::bail!(
-                "Cannot specify both auth_tokens and auth_tokens_file. Use exactly one source."
-            );
+        let max_clients = cfg.max_clients.unwrap_or(DEFAULT_MAX_CLIENTS);
+        if max_clients == 0 {
+            anyhow::bail!("[server] max_clients must be at least 1");
         }
 
         let client_channel_size = cfg
             .client_channel_size
             .unwrap_or(DEFAULT_CLIENT_CHANNEL_SIZE);
-        validate_channel_size(client_channel_size, "client_channel_size", "config")?;
+        validate_channel_size(client_channel_size, "client_channel_size", "server")?;
 
         let tun_writer_channel_size = cfg
             .tun_writer_channel_size
             .unwrap_or(DEFAULT_TUN_WRITER_CHANNEL_SIZE);
-        validate_channel_size(tun_writer_channel_size, "tun_writer_channel_size", "config")?;
+        validate_channel_size(tun_writer_channel_size, "tun_writer_channel_size", "server")?;
 
-        validate_transport_tuning(&cfg.transport, "iroh.transport")?;
+        let client_timeout = match cfg.client_timeout_secs {
+            Some(secs) => {
+                if secs < 15 {
+                    anyhow::bail!(
+                        "[server] client_timeout_secs must be at least 15 (clients heartbeat every 10s)"
+                    );
+                }
+                Duration::from_secs(secs)
+            }
+            None => DEFAULT_CLIENT_TIMEOUT,
+        };
+
+        let max_datagram_size = cfg.max_datagram_size.unwrap_or(MAX_DATAGRAM_PAYLOAD);
+        if !(MIN_DATAGRAM_SIZE..=MAX_DATAGRAM_PAYLOAD).contains(&max_datagram_size) {
+            anyhow::bail!(
+                "[server] max_datagram_size {} is out of range ({}..={})",
+                max_datagram_size,
+                MIN_DATAGRAM_SIZE,
+                MAX_DATAGRAM_PAYLOAD
+            );
+        }
 
         Ok(Self {
+            listen,
             network: cfg.network.clone(),
             server_ip: cfg.server_ip.clone(),
             network6: cfg.network6.clone(),
             server_ip6: cfg.server_ip6.clone(),
-            ip6_strategy: cfg.ip6_strategy,
             mtu,
-            secret_file: cfg.secret_file.clone(),
-            relay_urls: cfg.shared.relay_urls.clone().unwrap_or_default(),
-            dns_server: cfg.shared.dns_server.clone(),
-            auth_tokens: cfg.auth_tokens.clone().unwrap_or_default(),
-            auth_tokens_file: cfg.auth_tokens_file.clone(),
+            max_clients,
+            client_timeout,
+            max_datagram_size,
             drop_on_full: cfg.drop_on_full,
             client_channel_size,
             tun_writer_channel_size,
-            transport: cfg.transport.clone(),
             disable_spoofing_check: cfg.disable_spoofing_check,
         })
     }
@@ -544,26 +428,18 @@ impl ResolvedVpnServerConfig {
 
 #[derive(Debug, Clone)]
 pub struct ResolvedVpnClientConfig {
-    pub server_node_id: String,
-    pub auth_token: Option<String>,
-    pub auth_token_file: Option<PathBuf>,
+    pub server_addr: SocketAddr,
     pub routes: Vec<String>,
     pub routes6: Vec<String>,
-    pub relay_urls: Vec<String>,
-    pub dns_server: Option<String>,
     pub auto_reconnect: bool,
     pub max_reconnect_attempts: Option<NonZeroU32>,
 }
 
 #[derive(Default)]
 pub struct VpnClientConfigBuilder {
-    server_node_id: Option<String>,
-    auth_token: Option<String>,
-    auth_token_file: Option<PathBuf>,
+    server_addr: Option<String>,
     routes: Option<Vec<String>>,
     routes6: Option<Vec<String>>,
-    relay_urls: Option<Vec<String>>,
-    dns_server: Option<String>,
     auto_reconnect: Option<bool>,
     max_reconnect_attempts: Option<NonZeroU32>,
 }
@@ -576,32 +452,19 @@ impl VpnClientConfigBuilder {
     pub fn apply_defaults(mut self) -> Self {
         self.routes = Some(vec![]);
         self.routes6 = Some(vec![]);
-        self.relay_urls = Some(vec![]);
         self
     }
 
-    pub fn apply_config(mut self, config: Option<&VpnClientIrohConfig>) -> Self {
+    pub fn apply_config(mut self, config: Option<&VpnClientSettings>) -> Self {
         if let Some(cfg) = config {
-            if cfg.server_node_id.is_some() {
-                self.server_node_id = cfg.server_node_id.clone();
-            }
-            if cfg.auth_token.is_some() {
-                self.auth_token = cfg.auth_token.clone();
-            }
-            if cfg.auth_token_file.is_some() {
-                self.auth_token_file = cfg.auth_token_file.clone();
+            if cfg.server_addr.is_some() {
+                self.server_addr = cfg.server_addr.clone();
             }
             if cfg.routes.is_some() {
                 self.routes = cfg.routes.clone();
             }
             if cfg.routes6.is_some() {
                 self.routes6 = cfg.routes6.clone();
-            }
-            if cfg.shared.relay_urls.is_some() {
-                self.relay_urls = cfg.shared.relay_urls.clone();
-            }
-            if cfg.shared.dns_server.is_some() {
-                self.dns_server = cfg.shared.dns_server.clone();
             }
             if cfg.auto_reconnect.is_some() {
                 self.auto_reconnect = cfg.auto_reconnect;
@@ -613,39 +476,22 @@ impl VpnClientConfigBuilder {
         self
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub fn apply_cli(
         mut self,
-        server_node_id: Option<String>,
-        auth_token: Option<String>,
-        auth_token_file: Option<PathBuf>,
+        server_addr: Option<String>,
         routes: Vec<String>,
         routes6: Vec<String>,
-        relay_urls: Vec<String>,
-        dns_server: Option<String>,
         auto_reconnect: Option<bool>,
         max_reconnect_attempts: Option<NonZeroU32>,
     ) -> Self {
-        if server_node_id.is_some() {
-            self.server_node_id = server_node_id;
-        }
-        if auth_token.is_some() {
-            self.auth_token = auth_token;
-        }
-        if auth_token_file.is_some() {
-            self.auth_token_file = auth_token_file;
+        if server_addr.is_some() {
+            self.server_addr = server_addr;
         }
         if !routes.is_empty() {
             self.routes = Some(routes);
         }
         if !routes6.is_empty() {
             self.routes6 = Some(routes6);
-        }
-        if !relay_urls.is_empty() {
-            self.relay_urls = Some(relay_urls);
-        }
-        if dns_server.is_some() {
-            self.dns_server = dns_server;
         }
         if auto_reconnect.is_some() {
             self.auto_reconnect = auto_reconnect;
@@ -657,11 +503,11 @@ impl VpnClientConfigBuilder {
     }
 
     pub fn build(self) -> Result<ResolvedVpnClientConfig> {
-        let server_node_id = self.server_node_id.ok_or_else(|| {
-            anyhow::anyhow!(
-                "Server node ID is required. Provide --server-node-id or set server_node_id in config."
-            )
-        })?;
+        let server_addr = parse_loopback_addr(
+            self.server_addr.as_deref().unwrap_or(DEFAULT_LISTEN_ADDR),
+            "client",
+            "server_addr",
+        )?;
 
         let routes = self.routes.unwrap_or_default();
         for route in &routes {
@@ -674,20 +520,10 @@ impl VpnClientConfigBuilder {
             validate_ipv6_cidr(route6).with_context(|| route6_context(route6, Some("config")))?;
         }
 
-        if self.auth_token.is_some() && self.auth_token_file.is_some() {
-            anyhow::bail!(
-                "Cannot specify both auth_token and auth_token_file. Use one source for auth."
-            );
-        }
-
         Ok(ResolvedVpnClientConfig {
-            server_node_id,
-            auth_token: self.auth_token,
-            auth_token_file: self.auth_token_file,
+            server_addr,
             routes,
             routes6,
-            relay_urls: self.relay_urls.unwrap_or_default(),
-            dns_server: self.dns_server,
             auto_reconnect: self.auto_reconnect.unwrap_or(true),
             max_reconnect_attempts: self.max_reconnect_attempts,
         })
@@ -698,129 +534,115 @@ impl VpnClientConfigBuilder {
 mod tests {
     use super::*;
 
-    fn server_toml(iroh_extra: &str) -> String {
+    fn server_toml(extra: &str) -> String {
         format!(
             r#"
 role = "vpnserver"
-mode = "iroh"
 
-[iroh]
+[server]
 network6 = "fd00::/64"
-secret_file = "./vpn-server.key"
-auth_tokens = ["token"]
-{iroh_extra}
+{extra}
 "#
         )
     }
 
     #[test]
-    fn test_ip6_strategy_parses_node_id() {
-        let config: VpnServerConfig =
-            toml::from_str(&server_toml(r#"ip6_strategy = "node-id""#)).unwrap();
-        assert_eq!(
-            config.iroh.as_ref().unwrap().ip6_strategy,
-            Ip6Strategy::NodeId
-        );
-        assert!(config.validate().is_ok());
-    }
-
-    #[test]
-    fn test_ip6_strategy_defaults_to_sequential() {
+    fn test_server_config_defaults_listen_to_loopback() {
         let config: VpnServerConfig = toml::from_str(&server_toml("")).unwrap();
-        assert_eq!(
-            config.iroh.as_ref().unwrap().ip6_strategy,
-            Ip6Strategy::Sequential
-        );
         assert!(config.validate().is_ok());
+        let resolved = ResolvedVpnServerConfig::from_config(config.settings().unwrap()).unwrap();
+        assert_eq!(resolved.listen.to_string(), DEFAULT_LISTEN_ADDR);
+        assert_eq!(resolved.max_datagram_size, MAX_DATAGRAM_PAYLOAD);
+        assert_eq!(resolved.client_timeout, DEFAULT_CLIENT_TIMEOUT);
     }
 
     #[test]
-    fn test_ip6_strategy_node_id_rejects_narrow_subnet() {
-        let toml_str = server_toml(r#"ip6_strategy = "node-id""#)
-            .replace("fd00::/64", "fd00::/65");
-        let config: VpnServerConfig = toml::from_str(&toml_str).unwrap();
+    fn test_server_config_rejects_non_loopback_listen() {
+        let config: VpnServerConfig =
+            toml::from_str(&server_toml(r#"listen = "0.0.0.0:5555""#)).unwrap();
         let err = config.validate().unwrap_err().to_string();
-        assert!(err.contains("/64 or wider"), "unexpected error: {err}");
+        assert!(err.contains("not loopback"), "unexpected error: {err}");
     }
 
     #[test]
-    fn test_ip6_strategy_node_id_rejects_server_ip6() {
+    fn test_server_config_reads_mtu_and_listen() {
         let config: VpnServerConfig = toml::from_str(&server_toml(
-            "ip6_strategy = \"node-id\"\nserver_ip6 = \"fd00::1\"",
+            "listen = \"127.0.0.1:6000\"\nmtu = 1400\nmax_datagram_size = 1400",
         ))
         .unwrap();
-        let err = config.validate().unwrap_err().to_string();
-        assert!(err.contains("server_ip6"), "unexpected error: {err}");
-    }
-
-    #[test]
-    fn test_ip6_strategy_node_id_requires_network6() {
-        let toml_str = server_toml(r#"ip6_strategy = "node-id""#)
-            .replace("network6 = \"fd00::/64\"", "network = \"10.0.0.0/24\"");
-        let config: VpnServerConfig = toml::from_str(&toml_str).unwrap();
-        let err = config.validate().unwrap_err().to_string();
-        assert!(err.contains("requires 'network6'"), "unexpected error: {err}");
-    }
-
-    #[test]
-    fn test_server_config_reads_mtu_and_transport() {
-        let config: VpnServerConfig = toml::from_str(&server_toml(
-            "mtu = 1400\n\n[iroh.transport]\ncongestion_controller = \"bbr\"\nreceive_window = 4194304",
-        ))
-        .unwrap();
-        let resolved = ResolvedVpnServerConfig::from_config(config.iroh.as_ref().unwrap()).unwrap();
+        let resolved = ResolvedVpnServerConfig::from_config(config.settings().unwrap()).unwrap();
         assert_eq!(resolved.mtu, 1400);
-        assert_eq!(
-            resolved.transport.congestion_controller,
-            CongestionController::Bbr
-        );
-        assert_eq!(resolved.transport.receive_window, Some(4194304));
-        assert_eq!(resolved.transport.send_window, None);
-        assert_eq!(resolved.transport.effective_windows(), (4194304, 4194304));
+        assert_eq!(resolved.listen.port(), 6000);
+        assert_eq!(resolved.max_datagram_size, 1400);
     }
 
     #[test]
-    fn test_effective_windows_defaults() {
-        assert_eq!(
-            TransportTuning::default().effective_windows(),
-            (DEFAULT_RECEIVE_WINDOW, DEFAULT_RECEIVE_WINDOW)
-        );
-        let tuning = TransportTuning {
-            congestion_controller: CongestionController::Cubic,
-            receive_window: Some(1024),
-            send_window: Some(2048),
-        };
-        assert_eq!(tuning.effective_windows(), (1024, 2048));
+    fn test_server_config_rejects_short_client_timeout() {
+        let config: VpnServerConfig =
+            toml::from_str(&server_toml("client_timeout_secs = 5")).unwrap();
+        let err = ResolvedVpnServerConfig::from_config(config.settings().unwrap())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("client_timeout_secs"));
     }
 
     #[test]
-    fn test_client_config_parses_shared_fields() {
+    fn test_client_config_parses_and_resolves() {
         let config: VpnClientConfig = toml::from_str(
             r#"
 role = "vpnclient"
-mode = "iroh"
 
-[iroh]
-server_node_id = "2xnbkpbc7izsilvewd7c62w7wnwziacmpfwvhcrya5nt76dqkpga"
-auth_token = "token"
-relay_urls = ["https://relay.example.com"]
-dns_server = "none"
+[client]
+server_addr = "127.0.0.1:6000"
+routes = ["0.0.0.0/0"]
+routes6 = ["::/0"]
+auto_reconnect = false
 "#,
         )
         .unwrap();
-        let iroh = config.iroh.as_ref().unwrap();
-        assert_eq!(
-            iroh.shared.relay_urls.as_deref(),
-            Some(&["https://relay.example.com".to_string()][..])
-        );
-        assert_eq!(iroh.shared.dns_server.as_deref(), Some("none"));
-
+        config.validate().unwrap();
+        let settings = config.settings().unwrap();
         let resolved = VpnClientConfigBuilder::new()
             .apply_defaults()
-            .apply_config(Some(iroh))
+            .apply_config(Some(settings))
             .build()
             .unwrap();
-        assert_eq!(resolved.relay_urls, ["https://relay.example.com"]);
-        assert_eq!(resolved.dns_server.as_deref(), Some("none"));
+        assert_eq!(resolved.server_addr.port(), 6000);
+        assert_eq!(resolved.routes, ["0.0.0.0/0"]);
+        assert_eq!(resolved.routes6, ["::/0"]);
+        assert!(!resolved.auto_reconnect);
+    }
+
+    #[test]
+    fn test_client_config_rejects_non_loopback_server_addr() {
+        let config: VpnClientConfig = toml::from_str(
+            r#"
+role = "vpnclient"
+
+[client]
+server_addr = "192.0.2.1:5555"
+"#,
+        )
+        .unwrap();
+        let err = config.validate().unwrap_err().to_string();
+        assert!(err.contains("not loopback"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn test_client_builder_cli_overrides_config() {
+        let resolved = VpnClientConfigBuilder::new()
+            .apply_defaults()
+            .apply_cli(
+                Some("127.0.0.1:7000".to_string()),
+                vec!["10.0.0.0/8".to_string()],
+                vec![],
+                Some(false),
+                None,
+            )
+            .build()
+            .unwrap();
+        assert_eq!(resolved.server_addr.port(), 7000);
+        assert_eq!(resolved.routes, ["10.0.0.0/8"]);
+        assert!(!resolved.auto_reconnect);
     }
 }
