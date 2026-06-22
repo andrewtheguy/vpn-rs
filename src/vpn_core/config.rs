@@ -119,12 +119,27 @@ pub struct VpnServerConfig {
     /// this check is the only inter-client protection, so keep it on unless the
     /// tunnel already isolates clients.
     pub disable_spoofing_check: bool,
+
+    /// Test mode: allow binding a non-loopback `listen` address (default: false).
+    ///
+    /// Only set via `--test-mode`. Relaxes the loopback security boundary for
+    /// direct host-to-host testing without an external tunnel.
+    pub test_mode: bool,
+
+    /// Test-mode token a client must present in its handshake (test mode only).
+    ///
+    /// Randomly generated at startup and printed. A handshake whose token does
+    /// not match is rejected; this also makes test and non-test instances
+    /// mutually incompatible (a non-test server has `None` here).
+    pub test_token: Option<String>,
 }
 
 impl VpnServerConfig {
     /// Validate the VPN server configuration.
     pub fn validate(&self) -> VpnResult<()> {
-        ensure_loopback(self.listen)?;
+        if !self.test_mode {
+            ensure_loopback(self.listen)?;
+        }
         validate_vpn_networks(self.network, self.server_ip, self.network6, self.server_ip6)
             .map_err(VpnError::config)?;
         if !(MIN_DATAGRAM_SIZE..=MAX_DATAGRAM_PAYLOAD).contains(&self.max_datagram_size) {
@@ -148,12 +163,26 @@ pub struct VpnClientConfig {
 
     /// IPv6 routes to send through the VPN (CIDRs). Optional for dual-stack.
     pub routes6: Vec<Ipv6Net>,
+
+    /// Test mode: allow connecting to a non-loopback `server_addr` (default: false).
+    ///
+    /// Only set via `--test-mode`. Relaxes the loopback security boundary for
+    /// direct host-to-host testing without an external tunnel.
+    pub test_mode: bool,
+
+    /// Test-mode token sent in the handshake (test mode only).
+    ///
+    /// Supplied via `--test-token` and must match the server's randomly
+    /// generated token. A non-test client leaves this `None`.
+    pub test_token: Option<String>,
 }
 
 impl VpnClientConfig {
     /// Validate the VPN client configuration.
     pub fn validate(&self) -> VpnResult<()> {
-        ensure_loopback(self.server_addr)?;
+        if !self.test_mode {
+            ensure_loopback(self.server_addr)?;
+        }
         Ok(())
     }
 }
@@ -177,6 +206,8 @@ mod tests {
             client_channel_size: 1024,
             tun_writer_channel_size: 512,
             disable_spoofing_check: false,
+            test_mode: false,
+            test_token: None,
         }
     }
 
@@ -215,6 +246,14 @@ mod tests {
         config.listen = "0.0.0.0:5555".parse().unwrap();
         let err = config.validate().unwrap_err().to_string();
         assert!(err.contains("not loopback"));
+    }
+
+    #[test]
+    fn test_validate_test_mode_allows_non_loopback_listen() {
+        let mut config = minimal_server_config();
+        config.listen = "0.0.0.0:5555".parse().unwrap();
+        config.test_mode = true;
+        assert!(config.validate().is_ok());
     }
 
     #[test]
@@ -274,6 +313,8 @@ mod tests {
             server_addr: "127.0.0.1:5555".parse().unwrap(),
             routes: vec!["0.0.0.0/0".parse().unwrap()],
             routes6: vec![],
+            test_mode: false,
+            test_token: None,
         };
         assert!(config.validate().is_ok());
     }
@@ -284,8 +325,22 @@ mod tests {
             server_addr: "192.0.2.1:5555".parse().unwrap(),
             routes: vec![],
             routes6: vec![],
+            test_mode: false,
+            test_token: None,
         };
         let err = config.validate().unwrap_err().to_string();
         assert!(err.contains("not loopback"));
+    }
+
+    #[test]
+    fn test_validate_client_test_mode_allows_non_loopback_target() {
+        let config = VpnClientConfig {
+            server_addr: "192.0.2.1:5555".parse().unwrap(),
+            routes: vec![],
+            routes6: vec![],
+            test_mode: true,
+            test_token: Some("token".to_string()),
+        };
+        assert!(config.validate().is_ok());
     }
 }

@@ -13,6 +13,7 @@ mod vpn_core;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use ipnet::{Ipv4Net, Ipv6Net};
+use rand::Rng;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::num::NonZeroU32;
 use std::path::PathBuf;
@@ -49,6 +50,12 @@ enum Command {
         /// Use default config path (~/.config/vpn-rs/vpn_server.toml)
         #[arg(long)]
         default_config: bool,
+
+        /// Test mode: allow binding a non-loopback listen address (requires
+        /// role = "testvpnserver"). Generates and prints a random test token
+        /// that clients must supply with --test-token.
+        #[arg(long)]
+        test_mode: bool,
     },
     /// Run as VPN client (connects a loopback UDP socket to the local tunnel).
     Client {
@@ -84,6 +91,16 @@ enum Command {
         /// Maximum reconnect attempts (unlimited if not specified)
         #[arg(long, conflicts_with = "no_auto_reconnect")]
         max_reconnect_attempts: Option<NonZeroU32>,
+
+        /// Test mode: allow connecting to a non-loopback server address
+        /// (requires role = "testvpnclient" if a config file is used and
+        /// --test-token).
+        #[arg(long)]
+        test_mode: bool,
+
+        /// Test-mode token printed by the server. Required with --test-mode.
+        #[arg(long)]
+        test_token: Option<String>,
     },
 }
 
@@ -125,6 +142,7 @@ async fn main() -> Result<()> {
         Command::Server {
             config,
             default_config,
+            test_mode,
         } => {
             if config.is_none() && !default_config {
                 anyhow::bail!(
@@ -136,14 +154,27 @@ async fn main() -> Result<()> {
 
             let cfg = resolve_server_config(config, default_config)?
                 .expect("resolve_server_config returns Some when config or default_config is set");
-            cfg.validate()?;
+            cfg.validate(test_mode)?;
 
             let settings = cfg
                 .settings()
                 .ok_or_else(|| anyhow::anyhow!("Missing [server] section in config file"))?;
-            let resolved = ResolvedVpnServerConfig::from_config(settings)?;
+            let resolved = ResolvedVpnServerConfig::from_config(settings, test_mode)?;
 
-            run_vpn_server(resolved).await
+            // In test mode, generate a random token clients must echo back, and
+            // print it prominently so the operator can hand it to test clients.
+            let test_token = if test_mode {
+                let token = format!("{:032x}", rand::rng().random::<u128>());
+                log::warn!(
+                    "TEST MODE ENABLED (non-loopback binding allowed). \
+                     Clients must connect with: --test-mode --test-token {token}"
+                );
+                Some(token)
+            } else {
+                None
+            };
+
+            run_vpn_server(resolved, test_token).await
         }
         Command::Client {
             config,
@@ -154,12 +185,23 @@ async fn main() -> Result<()> {
             auto_reconnect,
             no_auto_reconnect,
             max_reconnect_attempts,
+            test_mode,
+            test_token,
         } => {
+            if test_mode && test_token.is_none() {
+                anyhow::bail!(
+                    "--test-mode requires --test-token <TOKEN> (the token printed by the test server)"
+                );
+            }
+            if !test_mode && test_token.is_some() {
+                anyhow::bail!("--test-token is only valid with --test-mode");
+            }
+
             let (cfg, from_file) = resolve_client_config(config, default_config)?;
             if from_file
                 && let Some(ref c) = cfg
             {
-                c.validate()?;
+                c.validate(test_mode)?;
             }
 
             assert!(
@@ -183,6 +225,7 @@ async fn main() -> Result<()> {
                     auto_reconnect_opt,
                     max_reconnect_attempts,
                 )
+                .apply_test_mode(test_mode, test_token)
                 .build()?;
 
             run_vpn_client(resolved).await
@@ -191,7 +234,10 @@ async fn main() -> Result<()> {
 }
 
 /// Run VPN server.
-async fn run_vpn_server(resolved: ResolvedVpnServerConfig) -> Result<()> {
+async fn run_vpn_server(
+    resolved: ResolvedVpnServerConfig,
+    test_token: Option<String>,
+) -> Result<()> {
     let network: Option<Ipv4Net> = resolved
         .network
         .as_ref()
@@ -231,15 +277,24 @@ async fn run_vpn_server(resolved: ResolvedVpnServerConfig) -> Result<()> {
         client_channel_size: resolved.client_channel_size,
         tun_writer_channel_size: resolved.tun_writer_channel_size,
         disable_spoofing_check: resolved.disable_spoofing_check,
+        test_mode: resolved.test_mode,
+        test_token,
     };
 
-    let socket = bind_server_socket(resolved.listen)
+    let socket = bind_server_socket(resolved.listen, resolved.test_mode)
         .await
-        .with_context(|| format!("Failed to bind loopback UDP socket {}", resolved.listen))?;
-    log::info!(
-        "VPN server listening on loopback UDP {} (reachable only via the local tunnel)",
-        resolved.listen
-    );
+        .with_context(|| format!("Failed to bind UDP socket {}", resolved.listen))?;
+    if resolved.test_mode {
+        log::info!(
+            "VPN server listening on UDP {} (TEST MODE: non-loopback binding allowed)",
+            resolved.listen
+        );
+    } else {
+        log::info!(
+            "VPN server listening on loopback UDP {} (reachable only via the local tunnel)",
+            resolved.listen
+        );
+    }
 
     let server = VpnServer::new(config)
         .await
@@ -283,6 +338,8 @@ async fn run_vpn_client(resolved: ResolvedVpnClientConfig) -> Result<()> {
         server_addr: resolved.server_addr,
         routes: parsed_routes,
         routes6: parsed_routes6,
+        test_mode: resolved.test_mode,
+        test_token: resolved.test_token,
     };
 
     let client = VpnClient::new(config)

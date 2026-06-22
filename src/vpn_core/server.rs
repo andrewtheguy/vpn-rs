@@ -549,6 +549,28 @@ impl VpnServer {
                 return;
             }
         };
+
+        // Test-mode token gate (before any resource allocation). The equality
+        // check also enforces test/non-test mutual exclusion: a test server has
+        // `Some(token)` while a non-test client sends `None` (and vice versa),
+        // so cross-mode handshakes never match.
+        if self.config.test_token != handshake.test_token {
+            log::warn!(
+                "Rejecting handshake from {}: test token mismatch (test/non-test mismatch or wrong token)",
+                peer
+            );
+            self.send_response(
+                socket,
+                peer,
+                VpnHandshakeResponse::rejected(
+                    "test token mismatch",
+                    self.tun_offload_status.enabled,
+                ),
+            )
+            .await;
+            return;
+        }
+
         let device_id = handshake.device_id;
 
         let existing_addr = self.device_to_addr.get(&device_id).map(|r| *r);

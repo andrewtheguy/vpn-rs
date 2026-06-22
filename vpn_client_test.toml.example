@@ -1,0 +1,31 @@
+# vpn-rs TEST-MODE client configuration example
+#
+# Usage: vpn-rs client --test-mode --test-token <TOKEN> -c vpn_client_test.toml
+#        vpn-rs client --test-mode --test-token <TOKEN> -s 203.0.113.10:5555
+#
+# TEST MODE ONLY. Unlike the normal client, a test-mode client may connect to a
+# NON-loopback server address, so it can reach a test-mode server running on
+# another host directly (no external tunnel). There is no transport encryption
+# or authentication in this path — use it only for testing on trusted networks.
+#
+# A test-mode client requires BOTH:
+#   1. the --test-mode CLI flag together with --test-token <TOKEN>, and
+#   2. role = "testvpnclient" below if a config file is used (a normal
+#      "vpnclient" role is rejected under --test-mode).
+# The token is the random value the test server prints at startup; supply it on
+# the command line (it is NOT read from this file). Test and non-test instances
+# cannot interoperate.
+
+# Required (when a config file is used): must be "testvpnclient" in test mode.
+role = "testvpnclient"
+
+[client]
+# Server address. In test mode this MAY be a non-loopback address (the remote
+# test server). Default: 127.0.0.1:5555
+server_addr = "203.0.113.10:5555"
+
+# Routing and reconnect options behave exactly as in vpn_client.toml.example.
+# routes = ["0.0.0.0/0"]
+# routes6 = ["::/0"]
+# auto_reconnect = true
+# max_reconnect_attempts = 5

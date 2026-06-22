@@ -33,14 +33,23 @@ pub struct VpnHandshake {
     /// The server keys IP-pool allocation by this id, so a reconnecting client
     /// (which may arrive from a new UDP source port) keeps its assigned IP.
     pub device_id: u64,
+    /// Test-mode token (only present in test mode).
+    ///
+    /// A test client sends the server's randomly generated token; the server
+    /// rejects the handshake unless this matches its expected token. A non-test
+    /// client omits it (`None`), which keeps the encoded handshake unchanged and
+    /// makes test/non-test instances mutually incompatible.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub test_token: Option<String>,
 }
 
 impl VpnHandshake {
     /// Create a new handshake request.
-    pub fn new(device_id: u64) -> Self {
+    pub fn new(device_id: u64, test_token: Option<String>) -> Self {
         Self {
             version: VPN_PROTOCOL_VERSION,
             device_id,
+            test_token,
         }
     }
 
@@ -414,11 +423,32 @@ mod tests {
 
     #[test]
     fn test_handshake_roundtrip() {
-        let handshake = VpnHandshake::new(12345);
+        let handshake = VpnHandshake::new(12345, None);
         let encoded = handshake.encode().expect("encode handshake");
         let decoded = VpnHandshake::decode(&encoded).expect("decode handshake");
         assert_eq!(decoded.version, VPN_PROTOCOL_VERSION);
         assert_eq!(decoded.device_id, 12345);
+        assert_eq!(decoded.test_token, None);
+    }
+
+    #[test]
+    fn test_handshake_without_token_encoding_is_stable() {
+        // An omitted token must not change the wire format: the encoded
+        // handshake carries no `test_token` key.
+        let encoded = VpnHandshake::new(42, None)
+            .encode()
+            .expect("encode handshake");
+        let json = String::from_utf8(encoded).expect("utf8");
+        assert!(!json.contains("test_token"), "got: {json}");
+    }
+
+    #[test]
+    fn test_handshake_with_token_roundtrip() {
+        let handshake = VpnHandshake::new(99, Some("secret-token".to_string()));
+        let encoded = handshake.encode().expect("encode handshake");
+        let decoded = VpnHandshake::decode(&encoded).expect("decode handshake");
+        assert_eq!(decoded.device_id, 99);
+        assert_eq!(decoded.test_token.as_deref(), Some("secret-token"));
     }
 
     #[test]
@@ -426,6 +456,7 @@ mod tests {
         let raw = serde_json::to_vec(&VpnHandshake {
             version: 1,
             device_id: 7,
+            test_token: None,
         })
         .expect("serialize handshake");
 

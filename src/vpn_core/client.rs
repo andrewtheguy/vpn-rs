@@ -114,7 +114,8 @@ impl VpnClient {
 
     /// Connect to the VPN server (via the local tunnel) and run the tunnel.
     pub async fn connect(&self) -> VpnResult<()> {
-        let socket = connect_client_socket(self.config.server_addr).await?;
+        let socket =
+            connect_client_socket(self.config.server_addr, self.config.test_mode).await?;
         log::info!(
             "Connecting to VPN server via local tunnel at {}",
             self.config.server_addr
@@ -210,7 +211,8 @@ impl VpnClient {
     /// Perform the VPN handshake, retransmitting the request until a response
     /// arrives (datagrams may be lost).
     async fn perform_handshake(&self, socket: &UdpSocket) -> VpnResult<ServerInfo> {
-        let request = VpnHandshake::new(self.device_id).encode()?;
+        let request =
+            VpnHandshake::new(self.device_id, self.config.test_token.clone()).encode()?;
         let mut buf = vec![0u8; RECV_BUFFER_SIZE];
 
         for attempt in 1..=HANDSHAKE_RETRIES {
