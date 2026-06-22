@@ -26,6 +26,35 @@ use crate::vpn_core::file_config::{
 };
 use crate::vpn_core::udp::bind_server_socket;
 use crate::vpn_core::{VpnClient, VpnServer};
+use std::future::Future;
+use std::time::Duration;
+
+/// Maximum wall-clock runtime in test mode before the process stops itself.
+///
+/// Test mode relaxes the loopback security boundary, so a forgotten test
+/// instance is a liability; cap it at 30 minutes.
+const TEST_MODE_MAX_RUNTIME: Duration = Duration::from_secs(30 * 60);
+
+/// Run `fut`, but in test mode stop automatically after [`TEST_MODE_MAX_RUNTIME`].
+async fn run_with_test_mode_limit<F>(test_mode: bool, fut: F) -> Result<()>
+where
+    F: Future<Output = Result<()>>,
+{
+    if test_mode {
+        tokio::select! {
+            res = fut => res,
+            _ = tokio::time::sleep(TEST_MODE_MAX_RUNTIME) => {
+                log::warn!(
+                    "Test mode runtime limit ({} minutes) reached; shutting down.",
+                    TEST_MODE_MAX_RUNTIME.as_secs() / 60
+                );
+                Ok(())
+            }
+        }
+    } else {
+        fut.await
+    }
+}
 
 #[derive(Parser)]
 #[command(name = "vpn-rs")]
@@ -174,7 +203,7 @@ async fn main() -> Result<()> {
                 None
             };
 
-            run_vpn_server(resolved, test_token).await
+            run_with_test_mode_limit(test_mode, run_vpn_server(resolved, test_token)).await
         }
         Command::Client {
             config,
@@ -228,7 +257,7 @@ async fn main() -> Result<()> {
                 .apply_test_mode(test_mode, test_token)
                 .build()?;
 
-            run_vpn_client(resolved).await
+            run_with_test_mode_limit(resolved.test_mode, run_vpn_client(resolved)).await
         }
     }
 }
