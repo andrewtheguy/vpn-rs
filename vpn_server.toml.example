@@ -16,8 +16,8 @@ role = "vpnserver"
 # ============================================================================
 # Loopback UDP listen address (the local tunnel forwards to it)
 # ============================================================================
-# MUST be loopback: 127.0.0.1 (IPv4) or ::1 (IPv6). Any other address is
-# rejected at startup. Default: 127.0.0.1:5555
+# MUST be loopback: 127.0.0.0/8 (IPv4), ::1 (IPv6), or IPv4-mapped loopback.
+# Any other address is rejected at startup. Default: 127.0.0.1:5555
 listen = "127.0.0.1:5555"
 
 # ============================================================================

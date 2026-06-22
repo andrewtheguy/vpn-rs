@@ -15,10 +15,10 @@ role = "vpnclient"
 
 [client]
 # ============================================================================
-# Local tunnel endpoint (REQUIRED, loopback only)
+# Local tunnel endpoint (optional, loopback only)
 # ============================================================================
-# Loopback UDP address the local tunnel listens on. MUST be 127.0.0.1 or ::1.
-# Default: 127.0.0.1:5555
+# Loopback UDP address the local tunnel listens on. MUST be 127.0.0.0/8 (IPv4),
+# ::1 (IPv6), or IPv4-mapped loopback. Default: 127.0.0.1:5555
 server_addr = "127.0.0.1:5555"
 
 # ============================================================================

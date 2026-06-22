@@ -16,10 +16,10 @@ UDP forwarder) running on the same host.
  └───────────────────────┘     (tunnel-rs/etc)     └───────────────────────┘
 ```
 
-The VPN server binds **only** `127.0.0.1` / `::1` and is unreachable directly; the
-tunnel on each host carries the loopback datagrams across the network. This is the
-security boundary — the VPN itself has no transport-level auth or crypto, so it
-relies on (a) never being on the network, and (b) the tunnel isolating peers.
+The VPN server binds **only loopback addresses** and is unreachable directly; the
+tunnel on each host carries the loopback datagrams across the network. This is
+the security boundary — the VPN itself has no transport-level auth or crypto, so
+it relies on (a) never being on the network, and (b) the tunnel isolating peers.
 
 ## Design principles
 
@@ -30,7 +30,8 @@ relies on (a) never being on the network, and (b) the tunnel isolating peers.
   riding a UDP tunnel avoids TCP-over-TCP meltdown. SSH port-forwarding is
   unsupported (SSH cannot forward UDP).
 - **Loopback-locked.** The server `listen` and client `server_addr` are hard-locked
-  to loopback with no override (`ensure_loopback`, [`udp.rs`](../src/vpn_core/udp.rs)).
+  to loopback addresses (`127.0.0.0/8`, `::1`, or IPv4-mapped loopback) with no
+  override (`ensure_loopback`, [`udp.rs`](../src/vpn_core/udp.rs)).
 - **No backward compatibility** while in `0.0.x`. The wire protocol is **v4**; peers
   on any other version are rejected.
 
@@ -161,7 +162,7 @@ protection at the VPN layer.
 | **outbound** | TUN read → frame (`build_datagrams`, GSO cap applied) → `socket.send` |
 | **inbound** | `socket.recv` → `classify` → IP to TUN-writer, ping → pong |
 | **tun_writer** | batched writes to the TUN device (tolerates a bounded failure count) |
-| **heartbeat** | every 10s send a ping; if no datagram for 30s, declare the connection lost |
+| **heartbeat** | every 10s send a ping; if no pong arrives for 30s, declare the connection lost |
 
 `run_with_reconnect(max_attempts)` wraps `connect()` with exponential backoff
 (1s → 2s → … capped at 60s, plus jitter), retrying only on recoverable errors
@@ -217,6 +218,3 @@ connection-id header would be required — intentionally out of scope.
 ## See also
 
 - [`README.md`](../README.md) — quick start and CLI reference.
-- [`docs/TAYGA_NAT64.md`](TAYGA_NAT64.md) — external NAT64 for IPv6-only clients.
-</content>
-</invoke>

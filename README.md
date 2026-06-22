@@ -19,7 +19,7 @@ running on the same host.
  └───────────────────────┘     (tunnel-rs/etc)     └───────────────────────┘
 ```
 
-The VPN server binds **only** `127.0.0.1`/`::1` and is unreachable directly; the
+The VPN server binds **only loopback addresses** and is unreachable directly; the
 tunnel on each host carries the loopback datagrams across the network.
 
 > [!IMPORTANT]
@@ -145,9 +145,10 @@ sudo vpn-rs client -c vpn_client.toml
 ping 10.0.0.1     # the server's VPN gateway IP
 ```
 
-To test the VPN by itself (no external tunnel), run the server and client on one
-host in separate network namespaces — the client connects straight to the
-server's loopback port.
+To test the VPN by itself without an external tunnel, run the server and client
+in the same network namespace so they share loopback. If you isolate them in
+separate network namespaces, each namespace has its own loopback device, so you
+still need a UDP forwarder/tunnel between namespaces.
 
 ## CLI Reference
 
@@ -181,17 +182,11 @@ keep MTU ≥ `1280`.**
 ## Loopback enforcement
 
 The server's `listen` and the client's `server_addr` are **hard-locked to
-loopback** (`127.0.0.1`/`::1`); any other address is rejected at startup. This
-guarantees the VPN is only reachable through the local tunnel. Multiple clients
-are distinguished by their UDP source address, so the tunnel must present each
-client from a distinct local port (the usual behavior of per-flow UDP
-forwarders).
-
-## External NAT64 (Linux + TAYGA)
-
-`vpn-rs` does not implement NAT64. For IPv6-only clients that need IPv4
-reachability, run TAYGA as external infrastructure and route `64:ff9b::/96`
-through the VPN. See [`docs/TAYGA_NAT64.md`](docs/TAYGA_NAT64.md).
+loopback** (`127.0.0.0/8`, `::1`, or IPv4-mapped loopback); any other address is
+rejected at startup. This guarantees the VPN is only reachable through the local
+tunnel. Multiple clients are distinguished by their UDP source address, so the
+tunnel must present each client from a distinct local port (the usual behavior
+of per-flow UDP forwarders).
 
 ## Single Instance Lock
 
