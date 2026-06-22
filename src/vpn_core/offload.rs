@@ -498,6 +498,7 @@ pub fn segment_tcp_gso_into<F>(
     offload: &VirtioNetHdr,
     ip_packet: &[u8],
     scratch: &mut Vec<u8>,
+    max_ip_len: usize,
     mut emit: F,
 ) -> Result<(), String>
 where
@@ -558,8 +559,15 @@ where
     }
 
     let payload = &ip_packet[header_len..];
-    let gso_size = usize::from(offload.gso_size);
-    if payload.len() <= gso_size {
+    // Emit segments no larger than `gso_size` (the sender's MSS) and no larger
+    // than the outbound datagram cap allows. `max_ip_len` is the maximum emitted
+    // IP-packet size (`usize::MAX` on the inbound/reconstruction path, which
+    // leaves segmentation at the original `gso_size`). Never below one payload
+    // byte, so the `step_by` is non-zero.
+    let seg_size = usize::from(offload.gso_size)
+        .min(max_ip_len.saturating_sub(header_len))
+        .max(1);
+    if payload.len() <= seg_size {
         // Single segment: no resegmentation needed, but a NEEDS_CSUM packet
         // still carries only the partial pseudo-header checksum, which must
         // be completed before emitting as a plain packet.
@@ -581,8 +589,8 @@ where
     ]);
     let original_tcp_flags = ip_packet[tcp_offset + 13];
 
-    for chunk_offset in (0..payload.len()).step_by(gso_size) {
-        let chunk_end = (chunk_offset + gso_size).min(payload.len());
+    for chunk_offset in (0..payload.len()).step_by(seg_size) {
+        let chunk_end = (chunk_offset + seg_size).min(payload.len());
         let chunk = &payload[chunk_offset..chunk_end];
 
         scratch.clear();
@@ -639,7 +647,7 @@ pub fn segment_tcp_gso_packet(
 ) -> Result<Vec<Vec<u8>>, String> {
     let mut out = Vec::new();
     let mut scratch = Vec::new();
-    segment_tcp_gso_into(offload, ip_packet, &mut scratch, |seg| {
+    segment_tcp_gso_into(offload, ip_packet, &mut scratch, usize::MAX, |seg| {
         out.push(seg.to_vec());
         Ok(())
     })?;
@@ -656,13 +664,14 @@ pub fn materialize_offload_into<F>(
     offload: &VirtioNetHdr,
     ip_packet: &[u8],
     scratch: &mut Vec<u8>,
+    max_ip_len: usize,
     mut emit: F,
 ) -> Result<(), String>
 where
     F: FnMut(&[u8]) -> Result<(), String>,
 {
     if offload.is_tcp_gso() {
-        return segment_tcp_gso_into(offload, ip_packet, scratch, emit);
+        return segment_tcp_gso_into(offload, ip_packet, scratch, max_ip_len, emit);
     }
 
     if offload.gso_type != VIRTIO_NET_HDR_GSO_NONE {
@@ -694,7 +703,7 @@ pub fn materialize_offload_packet(
 ) -> Result<Vec<Vec<u8>>, String> {
     let mut out = Vec::new();
     let mut scratch = Vec::new();
-    materialize_offload_into(offload, ip_packet, &mut scratch, |packet| {
+    materialize_offload_into(offload, ip_packet, &mut scratch, usize::MAX, |packet| {
         out.push(packet.to_vec());
         Ok(())
     })?;
@@ -1930,7 +1939,7 @@ mod tests {
             let expected = segment_tcp_gso_packet(&offload, &packet).expect("segment");
 
             let mut streamed = Vec::new();
-            segment_tcp_gso_into(&offload, &packet, &mut scratch, |seg| {
+            segment_tcp_gso_into(&offload, &packet, &mut scratch, usize::MAX, |seg| {
                 streamed.push(seg.to_vec());
                 Ok(())
             })
@@ -1955,7 +1964,7 @@ mod tests {
 
         let mut scratch = Vec::new();
         let mut emitted = 0usize;
-        let err = segment_tcp_gso_into(&offload, &packet, &mut scratch, |_| {
+        let err = segment_tcp_gso_into(&offload, &packet, &mut scratch, usize::MAX, |_| {
             emitted += 1;
             if emitted == 2 {
                 Err("stop".to_string())
@@ -1986,7 +1995,7 @@ mod tests {
 
         let mut scratch = Vec::new();
         let mut streamed = Vec::new();
-        materialize_offload_into(&offload, &partial, &mut scratch, |pkt| {
+        materialize_offload_into(&offload, &partial, &mut scratch, usize::MAX, |pkt| {
             streamed.push(pkt.to_vec());
             Ok(())
         })
@@ -2014,7 +2023,7 @@ mod tests {
 
         let mut scratch = Vec::new();
         let mut streamed = Vec::new();
-        materialize_offload_into(&offload, &packet, &mut scratch, |pkt| {
+        materialize_offload_into(&offload, &packet, &mut scratch, usize::MAX, |pkt| {
             streamed.push(pkt.to_vec());
             Ok(())
         })

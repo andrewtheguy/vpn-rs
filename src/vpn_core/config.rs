@@ -2,6 +2,7 @@
 
 use crate::vpn_core::datagram::MAX_DATAGRAM_PAYLOAD;
 use crate::vpn_core::error::{VpnError, VpnResult};
+use crate::vpn_core::file_config::{MAX_VPN_MTU, MIN_VPN_MTU};
 use crate::vpn_core::udp::ensure_loopback;
 use ipnet::{Ipv4Net, Ipv6Net};
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -96,8 +97,12 @@ pub struct VpnServerConfig {
     /// Time without any datagram from a client before the server reaps it.
     pub client_timeout: Duration,
 
-    /// Maximum UDP datagram payload to emit. Offload super-frames larger than
-    /// this are segmented before sending (kept ≤ [`MAX_DATAGRAM_PAYLOAD`]).
+    /// Upper bound on the UDP datagram payload to emit. The *effective* cap is
+    /// `min(max_datagram_size, datagram_cap_for_mtu(mtu))`: it can only lower the
+    /// MTU-derived no-fragment cap (for a tunnel that cannot carry MTU-sized
+    /// datagrams), never raise it. Super-frames larger than the effective cap are
+    /// segmented before sending so they never IP-fragment on the wire. Raise the
+    /// MTU (e.g. a jumbo path) to allow larger datagrams.
     pub max_datagram_size: usize,
 
     /// Whether to drop packets when a client's send buffer is full.
@@ -142,6 +147,12 @@ impl VpnServerConfig {
         }
         validate_vpn_networks(self.network, self.server_ip, self.network6, self.server_ip6)
             .map_err(VpnError::config)?;
+        if !(MIN_VPN_MTU..=MAX_VPN_MTU).contains(&self.mtu) {
+            return Err(VpnError::config(format!(
+                "mtu {} is out of range ({}..={})",
+                self.mtu, MIN_VPN_MTU, MAX_VPN_MTU
+            )));
+        }
         if !(MIN_DATAGRAM_SIZE..=MAX_DATAGRAM_PAYLOAD).contains(&self.max_datagram_size) {
             return Err(VpnError::config(format!(
                 "max_datagram_size {} is out of range ({}..={})",

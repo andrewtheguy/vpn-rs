@@ -82,6 +82,24 @@ pub fn ip_datagram_len(has_offload: bool, ip_len: usize) -> usize {
     1 + 1 + if has_offload { VIRTIO_NET_HDR_LEN } else { 0 } + ip_len
 }
 
+/// Outbound UDP-datagram size cap derived from the TUN `mtu`.
+///
+/// Returns the framed size of a single **plain** (no-offload) MTU-sized IP
+/// packet — `ip_datagram_len(false, mtu)`. Capping every emitted datagram at
+/// this value guarantees each UDP datagram fits in one link-layer frame on a
+/// path sized for `mtu`, so a GSO super-frame is **segmented** by
+/// [`build_datagrams`] instead of being handed to the kernel as one oversized
+/// datagram that then IP-fragments. With fragmentation, losing a single wire
+/// fragment discards an entire ~64 KB super-frame (dozens of TCP segments);
+/// capping to the MTU makes a lost wire packet cost just one TCP segment.
+///
+/// A single non-GSO packet (always ≤ `mtu`) still rides whole; only multi-
+/// segment super-frames are split.
+#[inline]
+pub fn datagram_cap_for_mtu(mtu: u16) -> usize {
+    ip_datagram_len(false, mtu as usize)
+}
+
 /// Append a datagram to the arena and split it off as a refcounted `Bytes`.
 #[inline]
 pub fn frame_datagram(
@@ -121,8 +139,11 @@ pub fn build_datagrams(
             pending.push(frame_datagram(arena, Some(meta), packet)?);
         }
         Some(meta) => {
-            // Segment the super-frame so each emitted datagram fits.
-            materialize_offload_into(meta, packet, seg_scratch, |seg| {
+            // Segment the super-frame so each emitted *plain* datagram fits the
+            // cap. The plain framing adds `ip_datagram_len(false, 0)` bytes, so the
+            // per-segment IP-packet budget is the cap minus that overhead.
+            let max_ip_len = max_datagram_size.saturating_sub(ip_datagram_len(false, 0));
+            materialize_offload_into(meta, packet, seg_scratch, max_ip_len, |seg| {
                 let frame = frame_datagram(arena, None, seg).map_err(|e| e.to_string())?;
                 pending.push(frame);
                 Ok(())
@@ -355,6 +376,94 @@ mod tests {
         assert_eq!(pending.len(), 1, "should forward as one offload datagram");
         assert_eq!(pending[0][0], DataMessageType::IpPacket.as_byte());
         assert_eq!(pending[0][1], VIRTIO_NET_HDR_LEN as u8, "offload metadata present");
+    }
+
+    #[test]
+    fn test_datagram_cap_for_mtu() {
+        // The cap is the framed size of a plain MTU-sized IP packet (mtu + 2).
+        assert_eq!(datagram_cap_for_mtu(1440), 1442);
+        assert_eq!(datagram_cap_for_mtu(576), 578);
+        assert_eq!(datagram_cap_for_mtu(9000), 9002);
+        // A single MTU-sized plain packet fits exactly at the cap; one byte more
+        // (an offload-tagged frame) does not, so it would be segmented.
+        let mtu = 1440usize;
+        assert!(ip_datagram_len(false, mtu) <= datagram_cap_for_mtu(1440));
+        assert!(ip_datagram_len(true, mtu) > datagram_cap_for_mtu(1440));
+    }
+
+    #[test]
+    fn test_gso_superframe_segmented_at_mtu_cap() {
+        // With the cap derived from the MTU, a multi-segment super-frame is split
+        // into plain ≤MTU datagrams instead of being forwarded whole (which would
+        // IP-fragment on the wire). A single sub-MTU packet still rides whole.
+        let mtu = 1440u16;
+        let cap = datagram_cap_for_mtu(mtu);
+
+        let superframe = build_ipv4_tcp_packet(8000); // ~7 segments at gso_size 1200
+        let offload = tcp_gso_header();
+        let (mut arena, mut scratch, mut pending) = (BytesMut::new(), Vec::new(), Vec::new());
+        build_datagrams(
+            &mut arena,
+            &mut scratch,
+            &mut pending,
+            Some(&offload),
+            &superframe,
+            true,
+            cap,
+        )
+        .expect("frame super-frame");
+        assert!(pending.len() > 1, "super-frame must be segmented at the MTU cap");
+        for d in &pending {
+            assert!(d.len() <= cap, "segment {} exceeds cap {}", d.len(), cap);
+            assert_eq!(d[1], 0, "segments carry no offload metadata");
+        }
+
+        // A single small (sub-MTU) packet rides whole as one datagram.
+        let small = build_ipv4_tcp_packet(200);
+        let (mut arena, mut scratch, mut pending) = (BytesMut::new(), Vec::new(), Vec::new());
+        build_datagrams(
+            &mut arena,
+            &mut scratch,
+            &mut pending,
+            None,
+            &small,
+            true,
+            cap,
+        )
+        .expect("frame small packet");
+        assert_eq!(pending.len(), 1, "a sub-MTU packet must not be segmented");
+    }
+
+    #[test]
+    fn test_gso_superframe_respects_cap_below_gso_size() {
+        // Restrictive-tunnel case: a cap *below* gso_size + headers must still
+        // yield datagrams ≤ cap (the segmenter falls back to a smaller MSS),
+        // not gso_size-sized datagrams that overshoot the cap.
+        let packet = build_ipv4_tcp_packet(3500);
+        let offload = tcp_gso_header(); // gso_size 1200
+        let (mut arena, mut scratch, mut pending) = (BytesMut::new(), Vec::new(), Vec::new());
+        let cap = 600;
+
+        build_datagrams(
+            &mut arena,
+            &mut scratch,
+            &mut pending,
+            Some(&offload),
+            &packet,
+            true,
+            cap,
+        )
+        .expect("frame");
+
+        assert!(
+            pending.len() > 3,
+            "a cap below gso_size must force more, smaller segments (got {})",
+            pending.len()
+        );
+        for d in &pending {
+            assert!(d.len() <= cap, "datagram {} exceeds cap {}", d.len(), cap);
+            assert_eq!(d[1], 0, "segmented datagrams carry no offload metadata");
+        }
     }
 
     #[test]

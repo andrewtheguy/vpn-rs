@@ -86,14 +86,14 @@ pub const DEFAULT_TUN_WRITER_CHANNEL_SIZE: usize = 512;
 pub const DEFAULT_MAX_CLIENTS: usize = 254;
 
 /// Minimum VPN tunnel MTU.
-const MIN_VPN_MTU: u16 = 576;
+pub(crate) const MIN_VPN_MTU: u16 = 576;
 
 /// Maximum VPN tunnel MTU. Jumbo frames are allowed because throughput on
 /// per-packet-syscall-bound platforms (notably macOS `utun`, which has no GSO
 /// and reads one packet per syscall) scales ~linearly with MTU. The transport
 /// re-segments oversized offload frames to fit a UDP datagram, so a large
 /// *inner* MTU needs no jumbo physical frames.
-const MAX_VPN_MTU: u16 = 9216;
+pub(crate) const MAX_VPN_MTU: u16 = 9216;
 
 pub(crate) fn validate_mtu(mtu: u16, section: &str) -> Result<()> {
     if !(MIN_VPN_MTU..=MAX_VPN_MTU).contains(&mtu) {

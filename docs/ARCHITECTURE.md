@@ -44,7 +44,8 @@ is the CLI shell (`server` / `client` subcommands only).
 | Module | Responsibility |
 |--------|----------------|
 | [`udp.rs`](../src/vpn_core/udp.rs) | Loopback enforcement (`ensure_loopback`), server bind, client connect |
-| [`datagram.rs`](../src/vpn_core/datagram.rs) | One-message-per-datagram framing; GSO datagram-size capping |
+| [`udp_offload.rs`](../src/vpn_core/udp_offload.rs) | Kernel UDP GSO (`UDP_SEGMENT`) / GRO (`UDP_GRO`) batched send/recv, with plain fallback |
+| [`datagram.rs`](../src/vpn_core/datagram.rs) | One-message-per-datagram framing; MTU-derived datagram-size cap |
 | [`signaling.rs`](../src/vpn_core/signaling.rs) | Handshake JSON, `DataMessageType`, capabilities, IP-body parse |
 | [`server.rs`](../src/vpn_core/server.rs) | `recv_from` demux, IP pools, reaper, TUN reader, routing |
 | [`client.rs`](../src/vpn_core/client.rs) | Connect, handshake-with-retransmit, the 4 tunnel tasks, reconnect |
@@ -181,19 +182,49 @@ protection at the VPN layer.
 ## GSO/GRO offload and the datagram cap
 
 On Linux the kernel can hand the server ~64 KB TCP-GSO "super-frames" over the TUN
-device (and coalesce inbound packets via software GRO). Forwarding a super-frame
-whole is cheap over loopback, but the **external tunnel** may cap datagram size.
+device (and coalesce inbound packets via software GRO). A super-frame bundles
+dozens of MSS-sized TCP segments into one IP packet.
 
-`build_datagrams` therefore segments on the **outbound network path**: if an offload
-frame's framed size would exceed `max_datagram_size`, it is split with
-`materialize_offload_into` into ≤cap plain datagrams (no offload metadata). The
-default cap is `MAX_DATAGRAM_PAYLOAD = 65507` (the IPv4 UDP payload ceiling); lower
-it in config if your tunnel cannot carry large datagrams. The receive side
-(`parse_ip_packet_v2` + `materialize_offload_into`) is already per-datagram and
-needs no cap logic.
+### The no-fragment cap
 
-`max_datagram_size` is range-validated to `576..=65507` in both
-`VpnServerConfig::validate` and the TOML resolver (`MIN_DATAGRAM_SIZE`).
+Emitting a super-frame as a single UDP datagram is fine over loopback (MTU 65536),
+but the moment it rides a real network (e.g. [test mode](#test-mode), MTU 1500) the
+kernel IP-fragments it into ~45 fragments. IPv4 reassembly is all-or-nothing, so a
+single lost fragment discards the **whole** super-frame — dozens of TCP segments
+retransmitted from one tiny loss. That amplification turns a near-clean link into a
+retransmit storm.
+
+To prevent it, the outbound path caps every emitted datagram at
+[`datagram_cap_for_mtu(mtu)`](../src/vpn_core/datagram.rs) — the framed size of a
+single plain MTU-sized IP packet (`mtu + 2`). `build_datagrams` segments any larger
+offload frame with `materialize_offload_into` into ≤cap plain datagrams, so a
+super-frame becomes a run of ≤MTU datagrams that **never IP-fragment**; a lost wire
+packet now costs exactly one TCP segment. A single sub-MTU packet still rides whole.
+
+- The **client** derives the cap from the server-dictated `mtu` (it has no separate
+  knob).
+- The **server** uses `min(max_datagram_size, datagram_cap_for_mtu(mtu))`:
+  `max_datagram_size` can only *lower* the no-fragment cap further (for a tunnel
+  that cannot carry MTU-sized datagrams), never raise it. Raise the **MTU** (e.g. a
+  jumbo-frame path) to allow larger datagrams. `max_datagram_size` is
+  range-validated to `576..=65507` (`MIN_DATAGRAM_SIZE`).
+
+The receive side (`parse_ip_packet_v2` + `materialize_offload_into`) is already
+per-datagram and needs no cap logic.
+
+### Kernel UDP GSO/GRO ([`udp_offload.rs`](../src/vpn_core/udp_offload.rs))
+
+Capping to the MTU turns one super-frame into many small datagrams, which would
+otherwise be one `send`/`recv` syscall each. The transport therefore uses kernel
+**UDP GSO** on send — a run of equal-sized datagrams goes out in one `sendmsg`
+carrying a `UDP_SEGMENT` control message, and the kernel/NIC emits each as an
+independent path-MTU wire packet — and **UDP GRO** on receive (`UDP_GRO` sockopt),
+where a single `recvmsg` returns several coalesced packets and the caller splits
+the buffer back into datagrams by the segment size reported in a control message.
+Each wire packet is still one independent ≤MTU UDP datagram, so the
+no-fragmentation guarantee holds; GSO/GRO only cut syscall count. Everything
+degrades safely to one plain `send`/`recv` per datagram on non-Linux or if the
+kernel/NIC rejects GSO.
 
 ## Configuration
 

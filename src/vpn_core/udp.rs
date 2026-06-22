@@ -11,6 +11,7 @@
 //! interfaces for direct host-to-host testing without a tunnel.
 
 use crate::vpn_core::error::{VpnError, VpnResult};
+use crate::vpn_core::udp_offload::enable_udp_gro;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use tokio::net::UdpSocket;
@@ -52,6 +53,8 @@ pub async fn bind_server_socket(
         ensure_loopback(listen)?;
     }
     let socket = UdpSocket::bind(listen).await?;
+    // Coalesce inbound packets into fewer recvmsg calls (best-effort, Linux).
+    enable_udp_gro(&socket);
     Ok(Arc::new(socket))
 }
 
@@ -78,6 +81,8 @@ pub async fn connect_client_socket(
     };
     let socket = UdpSocket::bind(bind).await?;
     socket.connect(server).await?;
+    // Coalesce inbound packets into fewer recvmsg calls (best-effort, Linux).
+    enable_udp_gro(&socket);
     Ok(socket)
 }
 
