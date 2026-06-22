@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use std::net::{Ipv4Addr, Ipv6Addr};
 
 /// VPN protocol version.
-pub const VPN_PROTOCOL_VERSION: u16 = 4;
+pub const VPN_PROTOCOL_VERSION: u16 = 5;
 
 /// Bit flag indicating support for GSO metadata on data-channel packets.
 const CAPABILITIES_GSO_BIT: u8 = 1 << 0;
@@ -86,6 +86,8 @@ pub struct VpnHandshakeResponse {
     pub server_gso_enabled: bool,
     /// MTU the client must use for its TUN device.
     pub mtu: u16,
+    /// Maximum UDP datagram payload the client should emit.
+    pub max_datagram_size: usize,
     /// Assigned VPN IP address for the client (IPv4).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assigned_ip: Option<Ipv4Addr>,
@@ -124,12 +126,14 @@ impl VpnHandshakeResponse {
         server_ip: Ipv4Addr,
         server_gso_enabled: bool,
         mtu: u16,
+        max_datagram_size: usize,
     ) -> Self {
         Self {
             version: VPN_PROTOCOL_VERSION,
             accepted: true,
             server_gso_enabled,
             mtu,
+            max_datagram_size,
             assigned_ip: Some(assigned_ip),
             network: Some(network),
             server_ip: Some(server_ip),
@@ -151,12 +155,14 @@ impl VpnHandshakeResponse {
         server_ip6: Ipv6Addr,
         server_gso_enabled: bool,
         mtu: u16,
+        max_datagram_size: usize,
     ) -> Self {
         Self {
             version: VPN_PROTOCOL_VERSION,
             accepted: true,
             server_gso_enabled,
             mtu,
+            max_datagram_size,
             assigned_ip: Some(assigned_ip),
             network: Some(network),
             server_ip: Some(server_ip),
@@ -176,12 +182,14 @@ impl VpnHandshakeResponse {
         server_ip6: Ipv6Addr,
         server_gso_enabled: bool,
         mtu: u16,
+        max_datagram_size: usize,
     ) -> Self {
         Self {
             version: VPN_PROTOCOL_VERSION,
             accepted: true,
             server_gso_enabled,
             mtu,
+            max_datagram_size,
             assigned_ip: None,
             network: None,
             server_ip: None,
@@ -201,6 +209,7 @@ impl VpnHandshakeResponse {
             accepted: false,
             server_gso_enabled,
             mtu: crate::vpn_core::file_config::DEFAULT_VPN_MTU,
+            max_datagram_size: crate::vpn_core::config::DEFAULT_MAX_DATAGRAM_SIZE,
             assigned_ip: None,
             network: None,
             server_ip: None,
@@ -474,12 +483,14 @@ mod tests {
             "10.0.0.1".parse().expect("parse server ip"),
             true,
             1420,
+            8192,
         );
         let encoded = response.encode().expect("encode response");
         let decoded = VpnHandshakeResponse::decode(&encoded).expect("decode response");
         assert!(decoded.accepted);
         assert!(decoded.server_gso_enabled);
         assert_eq!(decoded.mtu, 1420);
+        assert_eq!(decoded.max_datagram_size, 8192);
         assert_eq!(
             decoded.assigned_ip,
             Some("10.0.0.2".parse().expect("parse IPv4"))
@@ -504,6 +515,7 @@ mod tests {
             server_ip6,
             false,
             1440,
+            4096,
         );
 
         let encoded = response.encode().expect("encode response");
@@ -512,6 +524,7 @@ mod tests {
         assert!(decoded.accepted);
         assert!(!decoded.server_gso_enabled);
         assert_eq!(decoded.mtu, 1440);
+        assert_eq!(decoded.max_datagram_size, 4096);
         assert_eq!(decoded.assigned_ip, Some(assigned_ip));
         assert_eq!(decoded.network, Some(network));
         assert_eq!(decoded.server_ip, Some(server_ip));
@@ -543,6 +556,7 @@ mod tests {
             server_ip6,
             true,
             1440,
+            16384,
         );
 
         let encoded = response.encode().expect("encode response");
@@ -550,6 +564,7 @@ mod tests {
 
         assert!(decoded.accepted);
         assert!(decoded.server_gso_enabled);
+        assert_eq!(decoded.max_datagram_size, 16384);
         assert_eq!(decoded.assigned_ip, None);
         assert_eq!(decoded.network, None);
         assert_eq!(decoded.server_ip, None);
@@ -566,6 +581,7 @@ mod tests {
             accepted: true,
             server_gso_enabled: false,
             mtu: 1440,
+            max_datagram_size: 8192,
             assigned_ip: None,
             network: None,
             server_ip: None,

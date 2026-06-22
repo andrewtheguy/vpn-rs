@@ -8,9 +8,12 @@ use ipnet::{Ipv4Net, Ipv6Net};
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::Duration;
 
-/// Minimum permitted `max_datagram_size`. Matches the minimum VPN MTU so a
-/// segmented datagram can always carry at least one minimum-size IP packet.
+/// Minimum permitted `max_datagram_size`.
 pub const MIN_DATAGRAM_SIZE: usize = 576;
+
+/// Default UDP datagram cap. This keeps GSO super-frame fragmentation bounded
+/// while avoiding the syscall and tunnel-process overhead of MTU-sized datagrams.
+pub const DEFAULT_MAX_DATAGRAM_SIZE: usize = 8192;
 
 /// Default time without any datagram from a client before it is reaped.
 ///
@@ -97,12 +100,9 @@ pub struct VpnServerConfig {
     /// Time without any datagram from a client before the server reaps it.
     pub client_timeout: Duration,
 
-    /// Upper bound on the UDP datagram payload to emit. The *effective* cap is
-    /// `min(max_datagram_size, datagram_cap_for_mtu(mtu))`: it can only lower the
-    /// MTU-derived no-fragment cap (for a tunnel that cannot carry MTU-sized
-    /// datagrams), never raise it. Super-frames larger than the effective cap are
-    /// segmented before sending so they never IP-fragment on the wire. Raise the
-    /// MTU (e.g. a jumbo path) to allow larger datagrams.
+    /// Upper bound on the UDP datagram payload to emit and advertise to clients.
+    /// Lower values reduce IP-fragmentation loss amplification; higher values
+    /// reduce packet count and improve throughput through local UDP tunnels.
     pub max_datagram_size: usize,
 
     /// Whether to drop packets when a client's send buffer is full.
@@ -212,7 +212,7 @@ mod tests {
             mtu: 1440,
             max_clients: 254,
             client_timeout: DEFAULT_CLIENT_TIMEOUT,
-            max_datagram_size: MAX_DATAGRAM_PAYLOAD,
+            max_datagram_size: DEFAULT_MAX_DATAGRAM_SIZE,
             drop_on_full: false,
             client_channel_size: 1024,
             tun_writer_channel_size: 512,

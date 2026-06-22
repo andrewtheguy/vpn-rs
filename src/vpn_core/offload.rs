@@ -644,6 +644,163 @@ where
     Ok(())
 }
 
+/// Split a TCP GSO packet into bounded IP packets, preserving GSO metadata for
+/// chunks that still contain multiple TCP segments.
+///
+/// This is the throughput-oriented middle ground between forwarding one huge
+/// GSO super-frame and materializing it all the way down to MTU-sized plain
+/// packets. Each emitted packet is at most `max_ip_len` bytes. Chunks with more
+/// than one TCP segment keep virtio GSO metadata; a final single segment is
+/// emitted plain with a completed TCP checksum.
+pub fn split_tcp_gso_preserving_offload_into<F>(
+    offload: &VirtioNetHdr,
+    ip_packet: &[u8],
+    scratch: &mut Vec<u8>,
+    max_ip_len: usize,
+    mut emit: F,
+) -> Result<(), String>
+where
+    F: FnMut(Option<VirtioNetHdr>, &[u8]) -> Result<(), String>,
+{
+    if !offload.is_tcp_gso() {
+        return Err("offload header is not TCP GSO".to_string());
+    }
+
+    if ip_packet.is_empty() {
+        return Err("empty IP packet".to_string());
+    }
+
+    let version = ip_packet[0] >> 4;
+    let normalized_type = offload.normalized_gso_type();
+    match (version, normalized_type) {
+        (4, VIRTIO_NET_HDR_GSO_TCPV4) | (6, VIRTIO_NET_HDR_GSO_TCPV6) => {}
+        (4, other) | (6, other) => {
+            return Err(format!(
+                "IP version/GSO mismatch (ip v{}, gso type 0x{:02x})",
+                version, other
+            ))
+        }
+        _ => return Err(format!("unsupported IP version {}", version)),
+    }
+
+    let header_len = usize::from(offload.hdr_len);
+    if header_len == 0 || header_len > ip_packet.len() {
+        return Err(format!(
+            "invalid offload hdr_len {} for packet length {}",
+            header_len,
+            ip_packet.len()
+        ));
+    }
+
+    let tcp_offset = usize::from(offload.csum_start);
+    if tcp_offset + 20 > header_len {
+        return Err(format!(
+            "invalid csum_start {} for header_len {}",
+            tcp_offset, header_len
+        ));
+    }
+
+    let tcp_header_len = usize::from(ip_packet[tcp_offset + 12] >> 4) * 4;
+    if tcp_header_len < 20 || tcp_offset + tcp_header_len > header_len {
+        return Err(format!(
+            "invalid TCP header length {} (offset {}, header_len {})",
+            tcp_header_len, tcp_offset, header_len
+        ));
+    }
+
+    let checksum_index = tcp_offset + usize::from(offload.csum_offset);
+    if checksum_index + 2 > header_len {
+        return Err(format!(
+            "invalid csum_offset {} (checksum index {} beyond header_len {})",
+            offload.csum_offset, checksum_index, header_len
+        ));
+    }
+
+    let payload = &ip_packet[header_len..];
+    if payload.is_empty() {
+        return Err("TCP GSO packet has empty payload".to_string());
+    }
+    let gso_size = usize::from(offload.gso_size);
+    let payload_budget = max_ip_len.saturating_sub(header_len);
+    if payload_budget < gso_size.saturating_mul(2) {
+        return Err(format!(
+            "offload cap (max_ip_len {}) too small for two GSO segments (header_len {}, gso_size {})",
+            max_ip_len, header_len, gso_size
+        ));
+    }
+
+    let base_seq = u32::from_be_bytes([
+        ip_packet[tcp_offset + 4],
+        ip_packet[tcp_offset + 5],
+        ip_packet[tcp_offset + 6],
+        ip_packet[tcp_offset + 7],
+    ]);
+    let original_tcp_flags = ip_packet[tcp_offset + 13];
+    let gso_chunk_payload = (payload_budget / gso_size) * gso_size;
+    let mut chunk_offset = 0usize;
+
+    while chunk_offset < payload.len() {
+        let remaining = payload.len() - chunk_offset;
+        let chunk_len = if remaining <= payload_budget {
+            remaining
+        } else {
+            gso_chunk_payload
+        };
+        let chunk_end = chunk_offset + chunk_len;
+        let chunk = &payload[chunk_offset..chunk_end];
+        let is_final_chunk = chunk_end == payload.len();
+
+        scratch.clear();
+        scratch.reserve(header_len + chunk.len());
+        scratch.extend_from_slice(&ip_packet[..header_len]);
+        scratch.extend_from_slice(chunk);
+
+        let chunk_offset_u32 = u32::try_from(chunk_offset).map_err(|_| {
+            format!(
+                "TCP GSO payload offset {} exceeds u32 range for sequence number",
+                chunk_offset
+            )
+        })?;
+        let seq = base_seq.wrapping_add(chunk_offset_u32);
+        scratch[tcp_offset + 4..tcp_offset + 8].copy_from_slice(&seq.to_be_bytes());
+
+        if !is_final_chunk {
+            scratch[tcp_offset + 13] = original_tcp_flags & !(0x01 | 0x08);
+        }
+
+        match version {
+            4 => update_ipv4_lengths_and_checksum(scratch, header_len + chunk.len())?,
+            6 => update_ipv6_payload_length(scratch, header_len + chunk.len())?,
+            _ => unreachable!(),
+        }
+
+        if chunk.len() > gso_size {
+            let mut chunk_offload = *offload;
+            chunk_offload.flags =
+                (chunk_offload.flags | VIRTIO_NET_HDR_F_NEEDS_CSUM) & !VIRTIO_NET_HDR_F_DATA_VALID;
+            chunk_offload.num_buffers = 0;
+            let tcp_len = tcp_header_len + chunk.len();
+            let partial = tcp_pseudo_header_partial(scratch, version == 6, tcp_len);
+            scratch[checksum_index..checksum_index + 2].copy_from_slice(&partial.to_be_bytes());
+            emit(Some(chunk_offload), scratch)?;
+        } else {
+            scratch[checksum_index] = 0;
+            scratch[checksum_index + 1] = 0;
+            let checksum = match version {
+                4 => tcp_checksum_ipv4(scratch, tcp_offset)?,
+                6 => tcp_checksum_ipv6(scratch, tcp_offset)?,
+                _ => unreachable!(),
+            };
+            scratch[checksum_index..checksum_index + 2].copy_from_slice(&checksum.to_be_bytes());
+            emit(None, scratch)?;
+        }
+
+        chunk_offset = chunk_end;
+    }
+
+    Ok(())
+}
+
 /// Software fallback: segment a TCP GSO packet into plain TCP packets.
 ///
 /// Allocating wrapper around [`segment_tcp_gso_into`]; production paths use
@@ -1880,6 +2037,61 @@ mod tests {
                 assert!(tcp.psh, "PSH should remain set in last segment");
             }
         }
+    }
+
+    #[test]
+    fn test_split_tcp_gso_preserving_offload_roundtrips_to_plain_segments() {
+        let packet = build_ipv4_tcp_packet(8000);
+        let offload = VirtioNetHdr {
+            flags: 0,
+            gso_type: VIRTIO_NET_HDR_GSO_TCPV4,
+            hdr_len: 40,
+            gso_size: 1200,
+            csum_start: 20,
+            csum_offset: 16,
+            num_buffers: 0,
+        };
+
+        let expected = segment_tcp_gso_packet(&offload, &packet).expect("segment original");
+        let mut scratch = Vec::new();
+        let mut chunks: Vec<(Option<VirtioNetHdr>, Vec<u8>)> = Vec::new();
+        split_tcp_gso_preserving_offload_into(&offload, &packet, &mut scratch, 4084, |meta, pkt| {
+            chunks.push((meta, pkt.to_vec()));
+            Ok(())
+        })
+        .expect("split preserving offload");
+
+        assert!(chunks.len() > 1, "packet should be split into bounded chunks");
+        assert!(
+            chunks.iter().any(|(meta, _)| meta.is_some()),
+            "multi-segment chunks should retain GSO metadata"
+        );
+        for (_, chunk) in &chunks {
+            assert!(chunk.len() <= 4084, "chunk {} exceeds cap", chunk.len());
+        }
+
+        let mut actual = Vec::new();
+        let mut materialize_scratch = Vec::new();
+        for (meta, chunk) in chunks {
+            if let Some(meta) = meta {
+                materialize_offload_into(
+                    &meta,
+                    &chunk,
+                    &mut materialize_scratch,
+                    usize::MAX,
+                    |seg| {
+                        actual.push(seg.to_vec());
+                        Ok(())
+                    },
+                )
+                .expect("materialize chunk");
+            } else {
+                assert_tcp_checksum_valid(&chunk);
+                actual.push(chunk);
+            }
+        }
+
+        assert_eq!(actual, expected);
     }
 
     #[test]

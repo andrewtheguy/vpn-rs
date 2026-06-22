@@ -6,7 +6,8 @@
 
 use crate::vpn_core::error::{VpnError, VpnResult};
 use crate::vpn_core::offload::{
-    materialize_offload_into, CoalescedOutput, VirtioNetHdr, VIRTIO_NET_HDR_LEN,
+    materialize_offload_into, split_tcp_gso_preserving_offload_into, CoalescedOutput,
+    VirtioNetHdr, VIRTIO_NET_HDR_LEN,
 };
 use crate::vpn_core::signaling::DataMessageType;
 use bytes::{BufMut, Bytes, BytesMut};
@@ -82,7 +83,7 @@ pub fn ip_datagram_len(has_offload: bool, ip_len: usize) -> usize {
     1 + 1 + if has_offload { VIRTIO_NET_HDR_LEN } else { 0 } + ip_len
 }
 
-/// Outbound UDP-datagram size cap derived from the TUN `mtu`.
+/// Strict no-fragment UDP-datagram size cap derived from the TUN `mtu`.
 ///
 /// Returns the framed size of a single **plain** (no-offload) MTU-sized IP
 /// packet — `ip_datagram_len(false, mtu)`. Capping every emitted datagram at
@@ -93,9 +94,10 @@ pub fn ip_datagram_len(has_offload: bool, ip_len: usize) -> usize {
 /// fragment discards an entire ~64 KB super-frame (dozens of TCP segments);
 /// capping to the MTU makes a lost wire packet cost just one TCP segment.
 ///
-/// A single non-GSO packet (always ≤ `mtu`) still rides whole; only multi-
-/// segment super-frames are split.
+/// This is the lowest-loss cap. The configured transport cap may be higher to
+/// trade bounded IP fragmentation for higher throughput.
 #[inline]
+#[allow(dead_code)]
 pub fn datagram_cap_for_mtu(mtu: u16) -> usize {
     ip_datagram_len(false, mtu as usize)
 }
@@ -139,16 +141,37 @@ pub fn build_datagrams(
             pending.push(frame_datagram(arena, Some(meta), packet)?);
         }
         Some(meta) => {
-            // Segment the super-frame so each emitted *plain* datagram fits the
-            // cap. The plain framing adds `ip_datagram_len(false, 0)` bytes, so the
-            // per-segment IP-packet budget is the cap minus that overhead.
-            let max_ip_len = max_datagram_size.saturating_sub(ip_datagram_len(false, 0));
-            materialize_offload_into(meta, packet, seg_scratch, max_ip_len, |seg| {
-                let frame = frame_datagram(arena, None, seg).map_err(|e| e.to_string())?;
-                pending.push(frame);
-                Ok(())
-            })
-            .map_err(VpnError::Signaling)?;
+            let max_gso_ip_len = max_datagram_size.saturating_sub(ip_datagram_len(true, 0));
+            let min_gso_chunk_len =
+                usize::from(meta.hdr_len).saturating_add(usize::from(meta.gso_size) * 2);
+
+            if emit_offload && meta.is_tcp_gso() && max_gso_ip_len >= min_gso_chunk_len {
+                split_tcp_gso_preserving_offload_into(
+                    meta,
+                    packet,
+                    seg_scratch,
+                    max_gso_ip_len,
+                    |chunk_offload, chunk| {
+                        let frame = frame_datagram(arena, chunk_offload.as_ref(), chunk)
+                            .map_err(|e| e.to_string())?;
+                        pending.push(frame);
+                        Ok(())
+                    },
+                )
+                .map_err(VpnError::Signaling)?;
+            } else {
+                // Segment the super-frame so each emitted *plain* datagram fits
+                // the cap. The plain framing adds `ip_datagram_len(false, 0)`
+                // bytes, so the per-segment IP-packet budget is the cap minus
+                // that overhead.
+                let max_ip_len = max_datagram_size.saturating_sub(ip_datagram_len(false, 0));
+                materialize_offload_into(meta, packet, seg_scratch, max_ip_len, |seg| {
+                    let frame = frame_datagram(arena, None, seg).map_err(|e| e.to_string())?;
+                    pending.push(frame);
+                    Ok(())
+                })
+                .map_err(VpnError::Signaling)?;
+            }
         }
         None => {
             pending.push(frame_datagram(arena, None, packet)?);
@@ -432,6 +455,38 @@ mod tests {
         )
         .expect("frame small packet");
         assert_eq!(pending.len(), 1, "a sub-MTU packet must not be segmented");
+    }
+
+    #[test]
+    fn test_gso_superframe_split_into_bounded_gso_chunks() {
+        let cap = 4096;
+        let superframe = build_ipv4_tcp_packet(8000);
+        let offload = tcp_gso_header();
+        let (mut arena, mut scratch, mut pending) = (BytesMut::new(), Vec::new(), Vec::new());
+
+        build_datagrams(
+            &mut arena,
+            &mut scratch,
+            &mut pending,
+            Some(&offload),
+            &superframe,
+            true,
+            cap,
+        )
+        .expect("frame super-frame");
+
+        assert!(pending.len() > 1, "super-frame must be split");
+        assert!(
+            pending.iter().any(|d| d[1] == VIRTIO_NET_HDR_LEN as u8),
+            "bounded chunks should preserve GSO metadata"
+        );
+        for d in &pending {
+            assert!(d.len() <= cap, "datagram {} exceeds cap {}", d.len(), cap);
+            let (meta, packet) = parse_ip_packet_v2(&d[1..]).expect("parse IP datagram");
+            if meta.is_some() {
+                assert!(packet.len() > usize::from(offload.gso_size));
+            }
+        }
     }
 
     #[test]

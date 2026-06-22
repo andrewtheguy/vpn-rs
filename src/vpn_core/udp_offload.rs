@@ -1,19 +1,19 @@
 //! Kernel UDP GSO (`UDP_SEGMENT`) / GRO (`UDP_GRO`) offload for the transport.
 //!
-//! [`crate::vpn_core::datagram::datagram_cap_for_mtu`] segments GSO super-frames
-//! into ≤MTU datagrams so they never IP-fragment on the wire. That correctness
-//! win turns one ~64 KB super-frame into many small datagrams, which naively
-//! means one `send`/`recv` syscall each. This module restores batching:
+//! The transport datagram cap can split one ~64 KB GSO super-frame into several
+//! bounded datagrams. That reduces loss amplification, but naively means one
+//! `send`/`recv` syscall per emitted datagram. This module restores batching:
 //!
 //! - **Send:** a run of equal-sized datagrams is handed to the kernel in a single
 //!   `sendmsg` carrying a `UDP_SEGMENT` control message; the kernel (or NIC)
-//!   emits each as an independent path-MTU UDP packet.
+//!   emits each as an independent capped UDP packet.
 //! - **Recv:** `UDP_GRO` lets a single `recvmsg` return several coalesced packets
 //!   at once; the segment size comes back in a control message and the caller
 //!   splits the buffer back into individual datagrams.
 //!
-//! Each wire packet is still one independent ≤MTU UDP datagram, so a single lost
-//! packet costs exactly one TCP segment — the no-fragmentation guarantee holds.
+//! Each emitted UDP datagram remains independent. The configured cap controls
+//! the throughput-versus-fragment-loss tradeoff; GSO/GRO only reduce syscall
+//! count.
 //!
 //! Everything degrades safely. On non-Linux, or if the kernel/NIC rejects GSO,
 //! the code falls back to one plain `send`/`recv` per datagram (identical wire

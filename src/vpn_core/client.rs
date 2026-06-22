@@ -7,10 +7,9 @@
 //! network and provides encryption + authentication.
 
 use crate::vpn_core::buffer::uninitialized_vec;
-use crate::vpn_core::config::VpnClientConfig;
+use crate::vpn_core::config::{VpnClientConfig, MIN_DATAGRAM_SIZE};
 use crate::vpn_core::datagram::{
-    build_datagrams, build_gro_datagrams, classify, datagram_cap_for_mtu, ip_datagram_len,
-    Datagram, FRAME_ARENA_CHUNK,
+    build_datagrams, build_gro_datagrams, classify, Datagram, FRAME_ARENA_CHUNK,
 };
 use crate::vpn_core::device::{
     add_routes, add_routes6_with_src, Route6Guard, RouteGuard, TunConfig, TunDevice,
@@ -90,6 +89,8 @@ pub struct ServerInfo {
     pub server_gso_enabled: bool,
     /// MTU dictated by the server for the client TUN device.
     pub mtu: u16,
+    /// UDP datagram cap dictated by the server for outbound data.
+    pub max_datagram_size: usize,
 }
 
 impl VpnClient {
@@ -153,6 +154,10 @@ impl VpnClient {
         }
         log::info!("  Server GSO enabled: {}", server_info.server_gso_enabled);
         log::info!("  MTU (server-dictated): {}", server_info.mtu);
+        log::info!(
+            "  Max datagram size (server-dictated): {}",
+            server_info.max_datagram_size
+        );
 
         // Create TUN device
         let tun_device = self.create_tun_device(&server_info)?;
@@ -207,17 +212,12 @@ impl VpnClient {
         log::info!("VPN tunnel established!");
         log::info!("  TUN device: {}", tun_device.name());
 
-        // Cap outbound datagrams to the MTU-derived size so GSO super-frames are
-        // segmented before sending instead of being IP-fragmented on the wire (a
-        // single lost fragment would otherwise discard a whole multi-segment
-        // super-frame). The MTU is server-dictated.
-        let max_datagram_size = datagram_cap_for_mtu(server_info.mtu);
-
         run_udp_tunnel(
             tun_device,
             socket,
             server_info.server_gso_enabled,
-            max_datagram_size,
+            server_info.mtu,
+            server_info.max_datagram_size,
         )
         .await
     }
@@ -319,6 +319,16 @@ impl VpnClient {
                 response.mtu, MIN_VPN_MTU, MAX_VPN_MTU
             )));
         }
+        if !(MIN_DATAGRAM_SIZE..=crate::vpn_core::datagram::MAX_DATAGRAM_PAYLOAD)
+            .contains(&response.max_datagram_size)
+        {
+            return Err(VpnError::Signaling(format!(
+                "Server advertised out-of-range max_datagram_size {} (valid {}..={})",
+                response.max_datagram_size,
+                MIN_DATAGRAM_SIZE,
+                crate::vpn_core::datagram::MAX_DATAGRAM_PAYLOAD
+            )));
+        }
 
         Ok(ServerInfo {
             assigned_ip,
@@ -329,6 +339,7 @@ impl VpnClient {
             server_ip6,
             server_gso_enabled: response.server_gso_enabled,
             mtu: response.mtu,
+            max_datagram_size: response.max_datagram_size,
         })
     }
 
@@ -433,6 +444,7 @@ pub(crate) async fn run_udp_tunnel(
     tun_device: TunDevice,
     socket: Arc<UdpSocket>,
     server_gso_enabled: bool,
+    mtu: u16,
     max_datagram_size: usize,
 ) -> VpnResult<()> {
     let (mut tun_reader, mut tun_writer) = tun_device.split()?;
@@ -440,12 +452,10 @@ pub(crate) async fn run_udp_tunnel(
     debug_assert_eq!(local_gso_enabled, tun_writer.offload_status().enabled);
     let negotiated_gso = local_gso_enabled && server_gso_enabled;
     let buffer_size = tun_reader.buffer_size();
-    // Inbound reconstruction cap: the largest IP packet one wire datagram can
-    // carry equals the TUN MTU (here `max_datagram_size == datagram_cap_for_mtu(mtu)`,
-    // so this subtracts the framing overhead back off). Bounds segments rebuilt
-    // from a peer's offload metadata so a hostile server advertising a huge
-    // gso_size can't make us write oversized IP packets to the TUN.
-    let max_inbound_ip_len = max_datagram_size.saturating_sub(ip_datagram_len(false, 0));
+    // Inbound reconstruction cap: bounded by the local TUN MTU, independent of
+    // the larger transport datagram cap. A hostile server advertising a huge
+    // gso_size cannot make us write oversized plain IP packets to the TUN.
+    let max_inbound_ip_len = usize::from(mtu);
 
     // Track last heartbeat pong received (millis since start for atomic access).
     let start_time = Instant::now();

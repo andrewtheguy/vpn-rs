@@ -9,8 +9,7 @@
 use crate::vpn_core::buffer::uninitialized_vec;
 use crate::vpn_core::config::VpnServerConfig;
 use crate::vpn_core::datagram::{
-    build_datagrams, build_gro_datagrams, classify, datagram_cap_for_mtu, Datagram,
-    FRAME_ARENA_CHUNK,
+    build_datagrams, build_gro_datagrams, classify, Datagram, FRAME_ARENA_CHUNK,
 };
 use crate::vpn_core::device::{TunConfig, TunDevice, TunOffloadStatus, TunReader};
 use crate::vpn_core::error::{VpnError, VpnResult};
@@ -653,6 +652,7 @@ impl VpnServer {
                     ip6_pool.server_ip(),
                     self.tun_offload_status.enabled,
                     self.config.mtu,
+                    self.config.max_datagram_size,
                 )
             }
             (Some(ip4), None) => {
@@ -663,6 +663,7 @@ impl VpnServer {
                     ip_pool.server_ip(),
                     self.tun_offload_status.enabled,
                     self.config.mtu,
+                    self.config.max_datagram_size,
                 )
             }
             (None, Some(ip6)) => {
@@ -673,6 +674,7 @@ impl VpnServer {
                     ip6_pool.server_ip(),
                     self.tun_offload_status.enabled,
                     self.config.mtu,
+                    self.config.max_datagram_size,
                 )
             }
             (None, None) => unreachable!(),
@@ -969,15 +971,7 @@ impl VpnServer {
     ) -> VpnResult<()> {
         log::info!("TUN reader started");
 
-        // Cap the emitted datagram size to the MTU-derived size so super-frames
-        // are segmented rather than IP-fragmented on the wire. `max_datagram_size`
-        // only ever lowers this further (a restrictive tunnel); it can never raise
-        // it above the no-fragment cap. The MTU is the lever to allow larger
-        // datagrams (e.g. a jumbo-frame path).
-        let max_dgram = self
-            .config
-            .max_datagram_size
-            .min(datagram_cap_for_mtu(self.config.mtu));
+        let max_dgram = self.config.max_datagram_size;
         let drop_on_full = self.config.drop_on_full;
         let buffer_size = tun_reader.buffer_size();
         let mut read_storage = uninitialized_vec(buffer_size);

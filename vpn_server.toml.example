@@ -56,10 +56,10 @@ network = "10.0.0.0/24"
 # released (UDP has no connection teardown). Must be >= 15. Default 60.
 # client_timeout_secs = 60
 
-# Maximum UDP datagram payload to emit (576..=65507, default 65507). Offload
-# (GSO) super-frames larger than this are segmented before sending. Lower this
-# only if your tunnel cannot carry large UDP datagrams.
-# max_datagram_size = 65507
+# Maximum UDP datagram payload to emit and advertise to clients (576..=65507,
+# default 8192). Lower this toward mtu+2 to reduce IP-fragment loss
+# amplification, or raise it toward 65507 to favor throughput.
+# max_datagram_size = 8192
 
 # Drop packets for a slow client instead of applying backpressure (default false).
 # drop_on_full = false
