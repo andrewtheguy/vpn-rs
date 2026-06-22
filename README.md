@@ -31,6 +31,10 @@ tunnel on each host carries the loopback datagrams across the network.
 > [!NOTE]
 > Running `vpn-rs` requires root/Administrator privileges to create TUN devices and routes.
 
+> [!NOTE]
+> For a design overview — wire protocol, server/client task graph, GSO capping, and
+> the threat model — see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+
 ## Why a separate tunnel?
 
 Encrypted/authenticated transport and NAT traversal are already solved well by
