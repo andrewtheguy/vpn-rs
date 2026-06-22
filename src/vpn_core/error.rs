@@ -53,17 +53,13 @@ pub enum VpnError {
     #[error("Configuration error: {0}")]
     Config(#[source] ErrorContext),
 
-    /// Signaling/iroh error (transient, e.g., connection failed).
+    /// Signaling/handshake error (transient, e.g., handshake failed).
     #[error("Signaling error: {0}")]
     Signaling(String),
 
     /// Authentication failed (permanent, e.g., invalid token, server rejected).
     #[error("Authentication failed: {0}")]
     AuthenticationFailed(String),
-
-    /// IP address assignment error.
-    #[error("IP assignment error: {0}")]
-    IpAssignment(String),
 
     /// Connection lost during VPN session (recoverable via reconnect).
     #[error("Connection lost: {0}")]
@@ -106,13 +102,12 @@ impl VpnError {
     /// **Recoverable (transient):**
     /// - `ConnectionLost` - VPN session ended (server restart, network blip)
     /// - `Network` - I/O errors (connection reset, timeout)
-    /// - `Signaling` - iroh connection issues (peer unreachable, relay failure)
+    /// - `Signaling` - handshake issues (server not yet up, handshake timeout)
     ///
     /// **Non-recoverable (permanent):**
-    /// - `AuthenticationFailed` - invalid token, server rejected credentials
+    /// - `AuthenticationFailed` - server rejected the client (e.g. server full)
     /// - `Config` - invalid configuration (won't change without user action)
     /// - `TunDevice` - permission denied, device creation failed
-    /// - `IpAssignment` - IP pool exhausted (unlikely to recover quickly)
     /// - `MaxReconnectAttemptsExceeded` - retry limit hit
     pub fn is_recoverable(&self) -> bool {
         matches!(

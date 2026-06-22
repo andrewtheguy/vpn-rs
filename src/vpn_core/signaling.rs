@@ -1,40 +1,38 @@
-//! VPN signaling protocol for tunnel establishment over iroh.
+//! VPN signaling protocol for tunnel establishment over plain UDP.
 //!
-//! This module defines the handshake messages exchanged between VPN
-//! client and server to establish IP-over-QUIC tunnels. Clients identify
-//! via a random `device_id` (allowing multiple sessions per iroh endpoint),
-//! and the server responds with assigned IP addresses, route metadata, and
-//! connection capabilities.
+//! This module defines the handshake messages exchanged between VPN client and
+//! server to establish IP-over-UDP tunnels, plus the data-channel message
+//! framing. Clients identify via a random `device_id` (so a client keeps its
+//! assigned VPN IP across reconnects / source-port changes), and the server
+//! responds with assigned IP addresses, route metadata, and capabilities.
+//!
+//! Each UDP datagram carries exactly one message; there is no transport-level
+//! authentication or encryption here (the external tunnel owns that).
 
 use crate::vpn_core::error::{VpnError, VpnResult};
-use crate::vpn_core::file_config::{CongestionController, TransportTuning};
 use crate::vpn_core::offload::{VirtioNetHdr, VIRTIO_NET_HDR_LEN};
-use bytes::{BufMut, BytesMut};
 use ipnet::{Ipv4Net, Ipv6Net};
 use serde::{Deserialize, Serialize};
 use std::net::{Ipv4Addr, Ipv6Addr};
 
 /// VPN protocol version.
-pub const VPN_PROTOCOL_VERSION: u16 = 3;
+pub const VPN_PROTOCOL_VERSION: u16 = 4;
 
-/// ALPN identifier for VPN mode.
-pub const VPN_ALPN: &[u8] = b"vpn-rs/3";
-
-/// Bit flag indicating support for GSO metadata on data-stream packets.
+/// Bit flag indicating support for GSO metadata on data-channel packets.
 const CAPABILITIES_GSO_BIT: u8 = 1 << 0;
 
 /// VPN handshake request from client to server.
 ///
-/// Sent over the iroh QUIC connection to initiate VPN setup.
+/// Sent as a single UDP datagram to initiate VPN setup.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VpnHandshake {
     /// Protocol version.
     pub version: u16,
     /// Client's unique device ID (randomly generated per session).
+    ///
+    /// The server keys IP-pool allocation by this id, so a reconnecting client
+    /// (which may arrive from a new UDP source port) keeps its assigned IP.
     pub device_id: u64,
-    /// Authentication token (optional, for token-based auth).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub auth_token: Option<String>,
 }
 
 impl VpnHandshake {
@@ -43,14 +41,7 @@ impl VpnHandshake {
         Self {
             version: VPN_PROTOCOL_VERSION,
             device_id,
-            auth_token: None,
         }
-    }
-
-    /// Set the authentication token.
-    pub fn with_auth_token(mut self, token: impl Into<String>) -> Self {
-        self.auth_token = Some(token.into());
-        self
     }
 
     /// Encode to bytes for transmission.
@@ -75,50 +66,6 @@ impl VpnHandshake {
     }
 }
 
-/// Concrete QUIC transport settings dictated by the server.
-///
-/// Unlike [`TransportTuning`] (config-shaped, with optional pre-default
-/// values), this carries fully resolved values so the client never has to
-/// replicate the server's defaulting logic.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WireTransport {
-    /// Congestion controller algorithm both sides should use.
-    pub congestion_controller: CongestionController,
-    /// QUIC connection/stream receive window in bytes (post-default).
-    pub receive_window: u32,
-    /// QUIC send window in bytes (post-default).
-    pub send_window: u32,
-}
-
-impl WireTransport {
-    /// Resolve a config-shaped [`TransportTuning`] into concrete wire values.
-    pub fn from_tuning(tuning: &TransportTuning) -> Self {
-        let (receive_window, send_window) = tuning.effective_windows();
-        Self {
-            congestion_controller: tuning.congestion_controller,
-            receive_window,
-            send_window,
-        }
-    }
-
-    /// Convert back into a [`TransportTuning`] for transport-config building.
-    pub fn to_tuning(self) -> TransportTuning {
-        TransportTuning {
-            congestion_controller: self.congestion_controller,
-            receive_window: Some(self.receive_window),
-            send_window: Some(self.send_window),
-        }
-    }
-}
-
-impl Default for WireTransport {
-    /// The baseline every client connects with before learning the
-    /// server-dictated settings (must match the client endpoint defaults).
-    fn default() -> Self {
-        Self::from_tuning(&TransportTuning::default())
-    }
-}
-
 /// VPN handshake response from server to client.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VpnHandshakeResponse {
@@ -128,8 +75,6 @@ pub struct VpnHandshakeResponse {
     pub accepted: bool,
     /// Server-local TUN GSO/offload status.
     pub server_gso_enabled: bool,
-    /// QUIC transport settings the client must adopt.
-    pub transport: WireTransport,
     /// MTU the client must use for its TUN device.
     pub mtu: u16,
     /// Assigned VPN IP address for the client (IPv4).
@@ -169,14 +114,12 @@ impl VpnHandshakeResponse {
         network: Ipv4Net,
         server_ip: Ipv4Addr,
         server_gso_enabled: bool,
-        transport: WireTransport,
         mtu: u16,
     ) -> Self {
         Self {
             version: VPN_PROTOCOL_VERSION,
             accepted: true,
             server_gso_enabled,
-            transport,
             mtu,
             assigned_ip: Some(assigned_ip),
             network: Some(network),
@@ -198,14 +141,12 @@ impl VpnHandshakeResponse {
         network6: Ipv6Net,
         server_ip6: Ipv6Addr,
         server_gso_enabled: bool,
-        transport: WireTransport,
         mtu: u16,
     ) -> Self {
         Self {
             version: VPN_PROTOCOL_VERSION,
             accepted: true,
             server_gso_enabled,
-            transport,
             mtu,
             assigned_ip: Some(assigned_ip),
             network: Some(network),
@@ -225,14 +166,12 @@ impl VpnHandshakeResponse {
         network6: Ipv6Net,
         server_ip6: Ipv6Addr,
         server_gso_enabled: bool,
-        transport: WireTransport,
         mtu: u16,
     ) -> Self {
         Self {
             version: VPN_PROTOCOL_VERSION,
             accepted: true,
             server_gso_enabled,
-            transport,
             mtu,
             assigned_ip: None,
             network: None,
@@ -246,14 +185,12 @@ impl VpnHandshakeResponse {
 
     /// Create a rejected response.
     ///
-    /// Transport/MTU values are placeholders; clients ignore them when
-    /// `accepted == false`.
+    /// MTU is a placeholder; clients ignore it when `accepted == false`.
     pub fn rejected(reason: impl Into<String>, server_gso_enabled: bool) -> Self {
         Self {
             version: VPN_PROTOCOL_VERSION,
             accepted: false,
             server_gso_enabled,
-            transport: WireTransport::default(),
             mtu: crate::vpn_core::file_config::DEFAULT_VPN_MTU,
             assigned_ip: None,
             network: None,
@@ -326,56 +263,16 @@ impl CapabilitiesMessage {
     }
 }
 
-/// Helper to write a length-prefixed message.
-pub async fn write_message<W: tokio::io::AsyncWriteExt + Unpin>(
-    writer: &mut W,
-    data: &[u8],
-) -> VpnResult<()> {
-    let len = u32::try_from(data.len())
-        .map_err(|_| VpnError::Signaling(format!("Message too large: {} bytes", data.len())))?;
-    writer.write_all(&len.to_be_bytes()).await?;
-    writer.write_all(data).await?;
-    Ok(())
-}
-
-/// Helper to read a length-prefixed message.
-pub async fn read_message<R: tokio::io::AsyncReadExt + Unpin>(
-    reader: &mut R,
-    max_size: usize,
-) -> VpnResult<Vec<u8>> {
-    let mut len_buf = [0u8; 4];
-    reader.read_exact(&mut len_buf).await?;
-    let len = u32::from_be_bytes(len_buf) as usize;
-
-    if len > max_size {
-        return Err(VpnError::Signaling(format!(
-            "Message too large: {} > {}",
-            len, max_size
-        )));
-    }
-
-    let mut data = vec![0u8; len];
-    reader.read_exact(&mut data).await?;
-    Ok(data)
-}
-
-/// Maximum handshake message size (16 KB).
-pub const MAX_HANDSHAKE_SIZE: usize = 16 * 1024;
-
-/// Maximum capabilities payload size (prevents unbounded allocation).
-pub const MAX_CAPABILITIES_PAYLOAD: usize = 255;
-
-/// Message types for the VPN data channel.
+/// Message types for the VPN data channel (one message per UDP datagram).
 ///
-/// The data channel uses a simple framing protocol:
-/// - First byte: message type
-/// - For IP packets: 4-byte big-endian frame length + frame payload
-/// - For capabilities: 1-byte payload length + variable payload
-/// - For heartbeat: no additional payload
+/// Datagram layout by type:
+/// - IP packets: `[0x00] [offload_len: 1] [offload: 0|10] [ip_packet]`
+/// - heartbeat ping/pong: `[0x01]` / `[0x02]` (no payload)
+/// - capabilities: `[0x03] [payload_len: 1] [payload]`
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum DataMessageType {
-    /// IP packet v2 frame.
+    /// IP packet datagram.
     IpPacket = 0x00,
     /// Heartbeat ping (client -> server).
     HeartbeatPing = 0x01,
@@ -403,7 +300,7 @@ impl DataMessageType {
     }
 }
 
-/// Static byte slices for heartbeat messages (avoids per-send allocation).
+/// Static byte slices for heartbeat datagrams (avoids per-send allocation).
 pub const HEARTBEAT_PING_BYTE: &[u8] = &[DataMessageType::HeartbeatPing.as_byte()];
 pub const HEARTBEAT_PONG_BYTE: &[u8] = &[DataMessageType::HeartbeatPong.as_byte()];
 
@@ -433,105 +330,30 @@ impl From<DataMessageType> for u8 {
     }
 }
 
-/// Frame a capabilities message for transmission on the data channel.
+/// Build a capabilities datagram.
 ///
 /// Wire format: `[type: 0x03] [payload_len: 1 byte] [payload: payload_len bytes]`
 #[inline]
-pub fn frame_capabilities_message(buf: &mut BytesMut, caps: CapabilitiesMessage) {
-    let payload = caps.encode_payload();
-    buf.clear();
-    buf.reserve(3);
-    buf.put_u8(DataMessageType::Capabilities.as_byte());
-    buf.put_u8(1); // payload length
-    buf.put_u8(payload);
+pub fn encode_capabilities_datagram(caps: CapabilitiesMessage) -> [u8; 3] {
+    [
+        DataMessageType::Capabilities.as_byte(),
+        1, // payload length
+        caps.encode_payload(),
+    ]
 }
 
-/// Append a framed IP packet to `buf` without clearing it, returning the
-/// number of bytes written.
+/// Parse a v2 IP packet datagram body (everything after the leading type byte).
 ///
-/// v2 layout:
-/// `[type: 0x00] [frame_len: 4 bytes BE] [offload_len: 1 byte] [offload: N bytes] [ip_packet]`
-///
-/// `offload_len` is either:
-/// - `0` (no offload metadata)
-/// - `10` (`virtio_net_hdr` metadata)
-///
-/// This enables arena-style framing: callers keep one long-lived `BytesMut`,
-/// append a frame, then `split_to(written).freeze()` to hand out a `Bytes`
-/// view that shares the arena's allocation.
+/// Body layout: `[offload_len: 1] [offload: 0|10] [ip_packet]`. Returns the
+/// optional offload metadata and a slice referencing the IP packet within
+/// `body`.
 #[inline]
-pub fn append_ip_packet_v2(
-    buf: &mut BytesMut,
-    offload: Option<&VirtioNetHdr>,
-    ip_packet: &[u8],
-) -> VpnResult<usize> {
-    if ip_packet.is_empty() {
-        return Err(VpnError::Signaling(
-            "Cannot frame empty IP packet".to_string(),
-        ));
+pub fn parse_ip_packet_v2(body: &[u8]) -> VpnResult<(Option<VirtioNetHdr>, &[u8])> {
+    if body.is_empty() {
+        return Err(VpnError::Signaling("Empty IP datagram body".to_string()));
     }
 
-    const _: () = assert!(
-        VIRTIO_NET_HDR_LEN <= u8::MAX as usize,
-        "VIRTIO_NET_HDR_LEN must fit in u8"
-    );
-    let offload_len: u8 = if offload.is_some() {
-        VIRTIO_NET_HDR_LEN as u8
-    } else {
-        0
-    };
-    let frame_len = 1 + usize::from(offload_len) + ip_packet.len();
-    let frame_len_u32 = u32::try_from(frame_len)
-        .map_err(|_| VpnError::Signaling(format!("Packet frame too large: {}", frame_len)))?;
-
-    buf.reserve(1 + 4 + frame_len);
-    buf.put_u8(DataMessageType::IpPacket.as_byte());
-    buf.put_slice(&frame_len_u32.to_be_bytes());
-    buf.put_u8(offload_len);
-    if let Some(hdr) = offload {
-        buf.put_slice(&hdr.to_bytes());
-    }
-    buf.put_slice(ip_packet);
-    Ok(1 + 4 + frame_len)
-}
-
-/// Parse a full v2 IP packet message including type and frame length fields.
-#[inline]
-#[cfg(test)]
-pub fn parse_ip_packet_message_v2(message: &[u8]) -> VpnResult<(Option<VirtioNetHdr>, &[u8])> {
-    if message.len() < 5 {
-        return Err(VpnError::Signaling(format!(
-            "IP message too short: {} bytes",
-            message.len()
-        )));
-    }
-    if message[0] != DataMessageType::IpPacket.as_byte() {
-        return Err(VpnError::Signaling(format!(
-            "Unexpected message type 0x{:02x} for IP packet",
-            message[0]
-        )));
-    }
-
-    let frame_len = u32::from_be_bytes([message[1], message[2], message[3], message[4]]) as usize;
-    if message.len() != 5 + frame_len {
-        return Err(VpnError::Signaling(format!(
-            "Malformed IP frame length: header={}, actual={}",
-            frame_len,
-            message.len().saturating_sub(5)
-        )));
-    }
-
-    parse_ip_packet_v2(&message[5..])
-}
-
-/// Parse a v2 IP packet frame payload (without leading type and frame_len fields).
-#[inline]
-pub fn parse_ip_packet_v2(frame_payload: &[u8]) -> VpnResult<(Option<VirtioNetHdr>, &[u8])> {
-    if frame_payload.is_empty() {
-        return Err(VpnError::Signaling("Empty IP frame payload".to_string()));
-    }
-
-    let offload_len = usize::from(frame_payload[0]);
+    let offload_len = usize::from(body[0]);
     if offload_len != 0 && offload_len != VIRTIO_NET_HDR_LEN {
         return Err(VpnError::Signaling(format!(
             "Invalid offload metadata length {} (expected 0 or {})",
@@ -540,15 +362,15 @@ pub fn parse_ip_packet_v2(frame_payload: &[u8]) -> VpnResult<(Option<VirtioNetHd
     }
 
     let offload_end = 1 + offload_len;
-    if frame_payload.len() <= offload_end {
+    if body.len() <= offload_end {
         return Err(VpnError::Signaling(format!(
-            "IP frame payload too short: {} bytes",
-            frame_payload.len()
+            "IP datagram body too short: {} bytes",
+            body.len()
         )));
     }
 
-    let ip_version = frame_payload[offload_end] >> 4;
-    let ip_payload_len = frame_payload.len() - offload_end;
+    let ip_version = body[offload_end] >> 4;
+    let ip_payload_len = body.len() - offload_end;
     match ip_version {
         4 => {
             if ip_payload_len < 20 {
@@ -578,12 +400,12 @@ pub fn parse_ip_packet_v2(frame_payload: &[u8]) -> VpnResult<(Option<VirtioNetHd
         None
     } else {
         Some(
-            VirtioNetHdr::from_bytes(&frame_payload[1..offload_end])
+            VirtioNetHdr::from_bytes(&body[1..offload_end])
                 .map_err(|e| VpnError::Signaling(format!("Invalid offload metadata: {}", e)))?,
         )
     };
 
-    Ok((offload, &frame_payload[offload_end..]))
+    Ok((offload, &body[offload_end..]))
 }
 
 #[cfg(test)]
@@ -592,12 +414,11 @@ mod tests {
 
     #[test]
     fn test_handshake_roundtrip() {
-        let handshake = VpnHandshake::new(12345).with_auth_token("test-token");
+        let handshake = VpnHandshake::new(12345);
         let encoded = handshake.encode().expect("encode handshake");
         let decoded = VpnHandshake::decode(&encoded).expect("decode handshake");
         assert_eq!(decoded.version, VPN_PROTOCOL_VERSION);
         assert_eq!(decoded.device_id, 12345);
-        assert_eq!(decoded.auth_token, Some("test-token".to_string()));
     }
 
     #[test]
@@ -605,7 +426,6 @@ mod tests {
         let raw = serde_json::to_vec(&VpnHandshake {
             version: 1,
             device_id: 7,
-            auth_token: None,
         })
         .expect("serialize handshake");
 
@@ -617,24 +437,17 @@ mod tests {
 
     #[test]
     fn test_response_accepted_roundtrip() {
-        let transport = WireTransport {
-            congestion_controller: CongestionController::Bbr,
-            receive_window: 4 * 1024 * 1024,
-            send_window: 2 * 1024 * 1024,
-        };
         let response = VpnHandshakeResponse::accepted(
             "10.0.0.2".parse().expect("parse IPv4"),
             "10.0.0.0/24".parse().expect("parse network"),
             "10.0.0.1".parse().expect("parse server ip"),
             true,
-            transport,
             1420,
         );
         let encoded = response.encode().expect("encode response");
         let decoded = VpnHandshakeResponse::decode(&encoded).expect("decode response");
         assert!(decoded.accepted);
         assert!(decoded.server_gso_enabled);
-        assert_eq!(decoded.transport, transport);
         assert_eq!(decoded.mtu, 1420);
         assert_eq!(
             decoded.assigned_ip,
@@ -659,7 +472,6 @@ mod tests {
             network6,
             server_ip6,
             false,
-            WireTransport::default(),
             1440,
         );
 
@@ -668,7 +480,6 @@ mod tests {
 
         assert!(decoded.accepted);
         assert!(!decoded.server_gso_enabled);
-        assert_eq!(decoded.transport, WireTransport::default());
         assert_eq!(decoded.mtu, 1440);
         assert_eq!(decoded.assigned_ip, Some(assigned_ip));
         assert_eq!(decoded.network, Some(network));
@@ -700,7 +511,6 @@ mod tests {
             network6,
             server_ip6,
             true,
-            WireTransport::default(),
             1440,
         );
 
@@ -724,7 +534,6 @@ mod tests {
             version: VPN_PROTOCOL_VERSION,
             accepted: true,
             server_gso_enabled: false,
-            transport: WireTransport::default(),
             mtu: 1440,
             assigned_ip: None,
             network: None,
@@ -741,34 +550,6 @@ mod tests {
         let raw = serde_json::to_vec(&response).expect("serialize response");
         let decoded = VpnHandshakeResponse::decode(&raw);
         assert!(decoded.is_err());
-    }
-
-    #[test]
-    fn test_wire_transport_from_tuning_resolves_defaults() {
-        use crate::vpn_core::file_config::DEFAULT_RECEIVE_WINDOW;
-
-        // No windows configured: both fall back to the default receive window.
-        let wire = WireTransport::from_tuning(&TransportTuning::default());
-        assert_eq!(wire.congestion_controller, CongestionController::Cubic);
-        assert_eq!(wire.receive_window, DEFAULT_RECEIVE_WINDOW);
-        assert_eq!(wire.send_window, DEFAULT_RECEIVE_WINDOW);
-
-        // Send window defaults to the configured receive window.
-        let wire = WireTransport::from_tuning(&TransportTuning {
-            congestion_controller: CongestionController::Bbr,
-            receive_window: Some(1024),
-            send_window: None,
-        });
-        assert_eq!(wire.congestion_controller, CongestionController::Bbr);
-        assert_eq!(wire.receive_window, 1024);
-        assert_eq!(wire.send_window, 1024);
-
-        // Round-trip back into a fully-specified tuning.
-        let tuning = wire.to_tuning();
-        assert_eq!(tuning.congestion_controller, CongestionController::Bbr);
-        assert_eq!(tuning.receive_window, Some(1024));
-        assert_eq!(tuning.send_window, Some(1024));
-        assert_eq!(WireTransport::from_tuning(&tuning), wire);
     }
 
     #[test]
@@ -825,17 +606,13 @@ mod tests {
     }
 
     #[test]
-    fn test_frame_capabilities_message() {
-        let mut buf = BytesMut::new();
-        frame_capabilities_message(&mut buf, CapabilitiesMessage { gso_enabled: true });
+    fn test_encode_capabilities_datagram() {
+        let dgram = encode_capabilities_datagram(CapabilitiesMessage { gso_enabled: true });
+        assert_eq!(dgram[0], DataMessageType::Capabilities.as_byte());
+        assert_eq!(dgram[1], 1); // payload length
+        assert_eq!(dgram[2], CAPABILITIES_GSO_BIT);
 
-        assert_eq!(buf.len(), 3);
-        assert_eq!(buf[0], DataMessageType::Capabilities.as_byte());
-        assert_eq!(buf[1], 1); // payload length
-        assert_eq!(buf[2], CAPABILITIES_GSO_BIT);
-
-        let payload_len = buf[1] as usize;
-        let caps = CapabilitiesMessage::decode_payload(&buf[2..2 + payload_len]);
+        let caps = CapabilitiesMessage::decode_payload(&dgram[2..]);
         assert!(caps.gso_enabled);
     }
 
@@ -852,117 +629,6 @@ mod tests {
     }
 
     #[test]
-    fn test_append_ip_packet_v2_without_offload() {
-        let payload = b"hello ip packet";
-        let mut buf = BytesMut::new();
-        append_ip_packet_v2(&mut buf, None, payload).expect("frame packet");
-
-        assert_eq!(buf[0], DataMessageType::IpPacket.as_byte());
-
-        let frame_len = u32::from_be_bytes([buf[1], buf[2], buf[3], buf[4]]) as usize;
-        assert_eq!(frame_len, 1 + payload.len());
-        assert_eq!(buf[5], 0);
-        assert_eq!(&buf[6..], payload);
-    }
-
-    #[test]
-    fn test_parse_ip_packet_message_v2_roundtrip_without_offload() {
-        // Minimal valid IPv4 header (20 bytes, version=4, IHL=5)
-        let mut payload = [0u8; 20];
-        payload[0] = 0x45; // version 4, IHL 5
-        let mut buf = BytesMut::new();
-        append_ip_packet_v2(&mut buf, None, &payload).expect("frame packet");
-
-        let (offload, parsed_payload) =
-            parse_ip_packet_message_v2(&buf).expect("parse full message");
-        assert!(offload.is_none());
-        assert_eq!(parsed_payload, &payload[..]);
-    }
-
-    #[test]
-    fn test_append_and_parse_ip_packet_v2_with_offload() {
-        // Minimal valid IPv4 header (20 bytes, version=4, IHL=5) + 4 bytes payload
-        let mut payload = [0u8; 24];
-        payload[0] = 0x45; // version 4, IHL 5
-        let offload = VirtioNetHdr {
-            flags: 1,
-            gso_type: 1,
-            hdr_len: 40,
-            gso_size: 1200,
-            csum_start: 20,
-            csum_offset: 16,
-            num_buffers: 0,
-        };
-
-        let mut buf = BytesMut::new();
-        append_ip_packet_v2(&mut buf, Some(&offload), &payload).expect("frame packet");
-
-        let frame_len = u32::from_be_bytes([buf[1], buf[2], buf[3], buf[4]]) as usize;
-        let frame_payload = &buf[5..5 + frame_len];
-
-        let (parsed_offload, parsed_payload) =
-            parse_ip_packet_v2(frame_payload).expect("parse v2 frame payload");
-        assert_eq!(parsed_offload, Some(offload));
-        assert_eq!(parsed_payload, &payload[..]);
-    }
-
-    #[test]
-    fn test_append_ip_packet_v2_arena_roundtrip() {
-        // Two frames appended to one arena, split off as independent Bytes views.
-        let mut packet_a = [0u8; 20];
-        packet_a[0] = 0x45; // version 4, IHL 5
-        let mut packet_b = [0u8; 40];
-        packet_b[0] = 0x60; // version 6
-        let offload = VirtioNetHdr {
-            flags: 1,
-            gso_type: 4,
-            hdr_len: 60,
-            gso_size: 1400,
-            csum_start: 40,
-            csum_offset: 16,
-            num_buffers: 0,
-        };
-
-        let mut arena = BytesMut::with_capacity(256);
-
-        let written_a = append_ip_packet_v2(&mut arena, None, &packet_a).expect("append packet a");
-        assert_eq!(written_a, 1 + 4 + 1 + packet_a.len());
-        assert_eq!(arena.len(), written_a);
-        let frame_a = arena.split_to(written_a).freeze();
-
-        let written_b =
-            append_ip_packet_v2(&mut arena, Some(&offload), &packet_b).expect("append packet b");
-        assert_eq!(written_b, 1 + 4 + 1 + VIRTIO_NET_HDR_LEN + packet_b.len());
-        let frame_b = arena.split_to(written_b).freeze();
-        assert!(arena.is_empty());
-
-        let (offload_a, payload_a) =
-            parse_ip_packet_message_v2(&frame_a).expect("parse frame a");
-        assert!(offload_a.is_none());
-        assert_eq!(payload_a, &packet_a[..]);
-
-        let (offload_b, payload_b) =
-            parse_ip_packet_message_v2(&frame_b).expect("parse frame b");
-        assert_eq!(offload_b, Some(offload));
-        assert_eq!(payload_b, &packet_b[..]);
-    }
-
-    #[test]
-    fn test_parse_ip_packet_message_v2_rejects_malformed_frame_len() {
-        let payload = b"malformed length payload";
-        let mut buf = BytesMut::new();
-        append_ip_packet_v2(&mut buf, None, payload).expect("frame packet");
-
-        // Corrupt the declared frame length to be larger than actual payload.
-        let bad_len = (payload.len() as u32) + 9;
-        buf[1..5].copy_from_slice(&bad_len.to_be_bytes());
-
-        let err =
-            parse_ip_packet_message_v2(&buf).expect_err("mismatched frame length should fail");
-        assert!(err.to_string().contains("Malformed IP frame length"));
-    }
-
-    #[test]
     fn test_parse_ip_packet_v2_rejects_invalid_offload_len() {
         let payload = [7u8, 1, 2, 3, 4, 5];
         let err = parse_ip_packet_v2(&payload).expect_err("invalid offload length must fail");
@@ -974,6 +640,6 @@ mod tests {
         let mut payload = vec![VIRTIO_NET_HDR_LEN as u8];
         payload.extend_from_slice(&[0u8; VIRTIO_NET_HDR_LEN]);
         let err = parse_ip_packet_v2(&payload).expect_err("empty payload must fail");
-        assert!(err.to_string().contains("IP frame payload too short"));
+        assert!(err.to_string().contains("IP datagram body too short"));
     }
 }

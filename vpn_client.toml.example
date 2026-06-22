@@ -1,117 +1,40 @@
 # vpn-rs client configuration example
 #
 # Usage: vpn-rs client -c vpn_client.toml
-#        vpn-rs client --default-config
+#        vpn-rs client --default-config   (~/.config/vpn-rs/vpn_client.toml)
 #
 # CLI arguments take precedence over config file values.
-
-# Required: validates config matches CLI command
-role = "vpnclient"
-mode = "iroh"
-
-[iroh]
-# ============================================================================
-# Server Connection (REQUIRED)
-# ============================================================================
-
-# Server's EndpointId to connect to (REQUIRED)
-# Get this from the server operator (shown when server starts, or via show-server-id)
-server_node_id = "2xnbkpbc7izsilvewd7c62w7wnwziacmpfwvhcrya5nt76dqkpga"
-
-# ============================================================================
-# Authentication (REQUIRED)
-# ============================================================================
-# Token provided by the server admin for authentication
-# Token format: exactly 47 characters (`v` + 46 Base64URL chars, no padding)
-# Generate with: vpn-rs generate-token
-
-# NOTE: Use either auth_token OR auth_token_file, not both.
-auth_token = "<YOUR_AUTH_TOKEN>"  # Replace with real token from generate-token
-
-# Or use a file containing the token (one token, no comments)
-# NOTE: Use either auth_token OR auth_token_file, not both.
-# auth_token_file = "~/.config/vpn-rs/vpn-token.txt"
-
-# ============================================================================
-# Performance Tuning
-# ============================================================================
-
-# Linux GSO offload is automatic (no config toggle).
-# Client connection logs report local, server, and negotiated GSO status.
-
-# MTU and QUIC transport tuning (congestion controller, receive/send windows)
-# are dictated by the server during the handshake and cannot be configured
-# on the client.
-
-# ============================================================================
-# Routing (Optional)
-# ============================================================================
-
-# CIDRs to route through the VPN (like WireGuard AllowedIPs)
-# If omitted, no routes are added and you must configure routing manually.
-# Examples:
-#   - Full tunnel (all traffic): ["0.0.0.0/0"]
-#   - Split tunnel (specific networks): ["192.168.1.0/24", "10.0.0.0/8"]
-# routes = [
-#     "0.0.0.0/0",  # Full tunnel - route all traffic through VPN
-# ]
-
-# ============================================================================
-# IPv6 Routing (Optional)
-# ============================================================================
-# IPv6 routes are only used if the server provides IPv6 configuration.
-# If the server has network6 configured, you can route IPv6 traffic through
-# the VPN tunnel.
-
-# IPv6 CIDRs to route through the VPN
-# Examples:
-#   - Full tunnel (all IPv6): ["::/0"]
-#   - Split tunnel (specific networks): ["2001:db8::/32", "fd00::/8"]
-# NAT64 client (IPv6-only) example:
-#   - Set your system DNS to a DNS64 resolver (Google Public DNS64):
-#       2001:4860:4860::6464
-#       2001:4860:4860::64
-#   - Route the NAT64 prefix through the VPN:
-# routes6 = [
-#     "64:ff9b::/96",  # NAT64
-# ]
-# routes6 = [
-#     "::/0",  # Full tunnel - route all IPv6 traffic through VPN
-# ]
-
-# ============================================================================
-# Reconnection Behavior (Optional)
-# ============================================================================
-
-# Enable auto-reconnect on connection loss (default: true)
-# When true, client will automatically reconnect if the server restarts
-# or the connection is lost. When false, client exits on first disconnection.
-# auto_reconnect = true
-
-# Maximum reconnect attempts (omit or comment out for unlimited)
-# Only applies when auto_reconnect = true
-# Must be a positive integer (1 or greater)
-# max_reconnect_attempts = 5
-
-# ============================================================================
-# Relay and Discovery (Optional)
-# ============================================================================
-
-# Custom relay server URL(s) for failover
-# Must match server's relay configuration for discovery
-# relay_urls = [
-#     "https://relay1.example.com",
-#     "https://relay2.example.com",
-# ]
-
-# Custom DNS server URL for iroh endpoint discovery (pkarr), or "none" to disable DNS discovery.
-# This is NOT VPN DNS and does not affect client DNS resolution.
-# Must match server's dns_server configuration.
-# NOTE: URL must include the /pkarr path
-# dns_server = "https://dns.example.com/pkarr"
 #
-# Set to "none" to disable DNS-based peer discovery entirely.
-# When disabled, clients and server must use one of these methods to connect:
-#   1. Common relay server - both specify the same relay_urls
-#   2. mDNS - automatic discovery on the same local network
-# dns_server = "none"
+# The client connects a loopback UDP socket to the LOCAL tunnel endpoint. A
+# tunnel process (tunnel-rs / duopipe / any UDP forwarder) must run on this host,
+# listen on the loopback address below, and carry the traffic (encrypted) to the
+# server host's tunnel. The connect target MUST be loopback.
+
+# Required: validates the config matches the CLI command.
+role = "vpnclient"
+
+[client]
+# ============================================================================
+# Local tunnel endpoint (REQUIRED, loopback only)
+# ============================================================================
+# Loopback UDP address the local tunnel listens on. MUST be 127.0.0.1 or ::1.
+# Default: 127.0.0.1:5555
+server_addr = "127.0.0.1:5555"
+
+# ============================================================================
+# Routing (optional)
+# ============================================================================
+# Extra CIDRs to route through the VPN. The assigned VPN addresses are always
+# reachable; add routes for split- or full-tunnel.
+#   Full tunnel (IPv4): routes = ["0.0.0.0/0"]
+#   Split tunnel:       routes = ["192.168.1.0/24", "10.0.0.0/8"]
+# routes = ["0.0.0.0/0"]
+# routes6 = ["::/0"]
+
+# ============================================================================
+# Reconnect (optional)
+# ============================================================================
+# Auto-reconnect with exponential backoff (default true).
+# auto_reconnect = true
+# Maximum reconnect attempts (unlimited if omitted).
+# max_reconnect_attempts = 5

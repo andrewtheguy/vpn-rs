@@ -1,25 +1,29 @@
-//! IP-over-QUIC VPN mode for vpn-rs.
+//! Single-purpose IP-over-UDP VPN core for vpn-rs.
 //!
-//! This crate provides full VPN functionality using:
+//! This module provides VPN functionality using:
 //! - **tun**: Cross-platform TUN device creation and async I/O
-//! - **iroh**: Peer discovery, signaling, NAT traversal, and TLS 1.3/QUIC encryption
+//! - plain **UDP datagrams to a localhost endpoint**: the VPN talks to a local
+//!   tunnel process which provides the encrypted cross-network transport and
+//!   authentication. The VPN itself only moves framed IP packets between the
+//!   TUN device and a loopback UDP socket.
 //!
-//! # Direct IP over QUIC
+//! # Direct IP over UDP
 //!
-//! This crate implements a direct VPN where raw IP packets from the TUN device
-//! are framed and sent directly over iroh's encrypted QUIC streams (TLS 1.3).
+//! Raw IP packets from the TUN device are framed (one datagram per message) and
+//! sent over a plain UDP socket bound to loopback. The server is hard-locked to
+//! `127.0.0.1`/`::1`; an external tunnel forwards traffic to it.
 //!
 //! # Platform Support
 //!
-//! This crate supports Linux, macOS, and Windows.
+//! This module supports Linux, macOS, and Windows.
 //!
 //! # Architecture
 //!
 //! ```text
 //! ┌─────────────────────────────────────────────────────────────┐
-//! │                        vpn-core                           │
+//! │                        vpn-core                             │
 //! ├─────────────────────────────────────────────────────────────┤
-//! │  TUN Device ◄──► QUIC Stream (iroh) ◄──► Peer              │
+//! │  TUN Device ◄──► UDP datagrams (loopback) ◄──► local tunnel │
 //! └─────────────────────────────────────────────────────────────┘
 //! ```
 
@@ -27,19 +31,17 @@
 compile_error!("vpn-core only supports Linux, macOS, and Windows");
 
 pub mod buffer;
-pub mod chunked_write;
 pub mod client;
 pub mod config;
+pub mod datagram;
 pub mod device;
 pub mod error;
 pub mod file_config;
-pub mod frame_reader;
 pub mod lock;
 pub mod offload;
-pub mod paths;
 pub mod server;
 pub mod signaling;
-pub mod transport;
+pub mod udp;
 
 // Re-exports for convenience
 pub use client::VpnClient;

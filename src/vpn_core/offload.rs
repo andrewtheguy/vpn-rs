@@ -859,25 +859,6 @@ pub enum CoalescedOutput {
     Coalesced(VirtioNetHdr, Vec<u8>),
 }
 
-impl CoalescedOutput {
-    /// Number of original IP packets carried by this output.
-    pub fn source_segment_count(&self) -> u64 {
-        match self {
-            Self::Single(_) => 1,
-            Self::Coalesced(hdr, packet) => {
-                let payload_len = packet.len().saturating_sub(usize::from(hdr.hdr_len));
-                let gso_size = usize::from(hdr.gso_size).max(1);
-                payload_len.div_ceil(gso_size).max(1) as u64
-            }
-        }
-    }
-
-    /// Return true if this output carries software-coalesced TCP data.
-    pub fn is_coalesced(&self) -> bool {
-        matches!(self, Self::Coalesced(_, _))
-    }
-}
-
 /// In-progress coalesced group for one TCP flow.
 struct GroGroup {
     /// `[IP header][TCP header][concatenated payloads]`, headers from the
