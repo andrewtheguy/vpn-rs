@@ -762,6 +762,20 @@ server_addr = "127.0.0.1:6000"
     }
 
     #[test]
+    fn test_client_test_role_requires_test_mode() {
+        // Test role without --test-mode is rejected.
+        let toml_str = r#"
+role = "testvpnclient"
+
+[client]
+server_addr = "127.0.0.1:6000"
+"#;
+        let config: VpnClientConfig = toml::from_str(toml_str).unwrap();
+        let err = config.validate(false).unwrap_err().to_string();
+        assert!(err.contains("vpnclient"), "unexpected error: {err}");
+    }
+
+    #[test]
     fn test_client_test_mode_allows_non_loopback_and_carries_token() {
         let toml_str = r#"
 role = "testvpnclient"
