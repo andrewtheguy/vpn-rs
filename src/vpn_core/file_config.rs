@@ -1,7 +1,7 @@
 //! TOML config-file support: file-level structs, loading, and resolution
 //! into the runtime configuration ([`super::config`]).
 
-use crate::vpn_core::config::DEFAULT_CLIENT_TIMEOUT;
+use crate::vpn_core::config::{DEFAULT_CLIENT_TIMEOUT, MIN_DATAGRAM_SIZE};
 use crate::vpn_core::datagram::MAX_DATAGRAM_PAYLOAD;
 use crate::vpn_core::udp::ensure_loopback;
 use anyhow::{Context, Result};
@@ -399,10 +399,11 @@ impl ResolvedVpnServerConfig {
         };
 
         let max_datagram_size = cfg.max_datagram_size.unwrap_or(MAX_DATAGRAM_PAYLOAD);
-        if !(576..=MAX_DATAGRAM_PAYLOAD).contains(&max_datagram_size) {
+        if !(MIN_DATAGRAM_SIZE..=MAX_DATAGRAM_PAYLOAD).contains(&max_datagram_size) {
             anyhow::bail!(
-                "[server] max_datagram_size {} is out of range (576..={})",
+                "[server] max_datagram_size {} is out of range ({}..={})",
                 max_datagram_size,
+                MIN_DATAGRAM_SIZE,
                 MAX_DATAGRAM_PAYLOAD
             );
         }

@@ -7,6 +7,10 @@ use ipnet::{Ipv4Net, Ipv6Net};
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::Duration;
 
+/// Minimum permitted `max_datagram_size`. Matches the minimum VPN MTU so a
+/// segmented datagram can always carry at least one minimum-size IP packet.
+pub const MIN_DATAGRAM_SIZE: usize = 576;
+
 /// Default time without any datagram from a client before it is reaped.
 ///
 /// Must comfortably exceed the client heartbeat interval (10s) so a briefly
@@ -123,10 +127,10 @@ impl VpnServerConfig {
         ensure_loopback(self.listen)?;
         validate_vpn_networks(self.network, self.server_ip, self.network6, self.server_ip6)
             .map_err(VpnError::config)?;
-        if self.max_datagram_size > MAX_DATAGRAM_PAYLOAD {
+        if !(MIN_DATAGRAM_SIZE..=MAX_DATAGRAM_PAYLOAD).contains(&self.max_datagram_size) {
             return Err(VpnError::config(format!(
-                "max_datagram_size {} exceeds the UDP payload limit of {}",
-                self.max_datagram_size, MAX_DATAGRAM_PAYLOAD
+                "max_datagram_size {} is out of range ({}..={})",
+                self.max_datagram_size, MIN_DATAGRAM_SIZE, MAX_DATAGRAM_PAYLOAD
             )));
         }
         Ok(())
@@ -253,7 +257,15 @@ mod tests {
         let mut config = minimal_server_config();
         config.max_datagram_size = MAX_DATAGRAM_PAYLOAD + 1;
         let err = config.validate().unwrap_err().to_string();
-        assert!(err.contains("exceeds the UDP payload limit"));
+        assert!(err.contains("out of range"));
+    }
+
+    #[test]
+    fn test_validate_rejects_undersized_datagram_cap() {
+        let mut config = minimal_server_config();
+        config.max_datagram_size = MIN_DATAGRAM_SIZE - 1;
+        let err = config.validate().unwrap_err().to_string();
+        assert!(err.contains("out of range"));
     }
 
     #[test]
