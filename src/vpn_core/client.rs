@@ -9,8 +9,8 @@
 use crate::vpn_core::buffer::uninitialized_vec;
 use crate::vpn_core::config::VpnClientConfig;
 use crate::vpn_core::datagram::{
-    build_datagrams, build_gro_datagrams, classify, datagram_cap_for_mtu, Datagram,
-    FRAME_ARENA_CHUNK,
+    build_datagrams, build_gro_datagrams, classify, datagram_cap_for_mtu, ip_datagram_len,
+    Datagram, FRAME_ARENA_CHUNK,
 };
 use crate::vpn_core::device::{
     add_routes, add_routes6_with_src, Route6Guard, RouteGuard, TunConfig, TunDevice,
@@ -440,6 +440,12 @@ pub(crate) async fn run_udp_tunnel(
     debug_assert_eq!(local_gso_enabled, tun_writer.offload_status().enabled);
     let negotiated_gso = local_gso_enabled && server_gso_enabled;
     let buffer_size = tun_reader.buffer_size();
+    // Inbound reconstruction cap: the largest IP packet one wire datagram can
+    // carry equals the TUN MTU (here `max_datagram_size == datagram_cap_for_mtu(mtu)`,
+    // so this subtracts the framing overhead back off). Bounds segments rebuilt
+    // from a peer's offload metadata so a hostile server advertising a huge
+    // gso_size can't make us write oversized IP packets to the TUN.
+    let max_inbound_ip_len = max_datagram_size.saturating_sub(ip_datagram_len(false, 0));
 
     // Track last heartbeat pong received (millis since start for atomic access).
     let start_time = Instant::now();
@@ -675,9 +681,10 @@ pub(crate) async fn run_udp_tunnel(
                 if let Some(meta) = offload {
                     if !local_gso_enabled {
                         let materialized =
-                            // Inbound reconstruction: keep the sender's segments
-                            // (no extra cap; the local TUN MTU already bounds them).
-                            materialize_offload_into(&meta, packet, &mut seg_scratch, usize::MAX, |seg| {
+                            // Inbound reconstruction: cap each rebuilt segment at
+                            // the TUN MTU (see `max_inbound_ip_len`) so a hostile
+                            // server can't make us write oversized IP packets.
+                            materialize_offload_into(&meta, packet, &mut seg_scratch, max_inbound_ip_len, |seg| {
                                 seg_arena.extend_from_slice(seg);
                                 pending_segments.push(seg_arena.split_to(seg.len()).freeze());
                                 Ok(())

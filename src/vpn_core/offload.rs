@@ -560,13 +560,21 @@ where
 
     let payload = &ip_packet[header_len..];
     // Emit segments no larger than `gso_size` (the sender's MSS) and no larger
-    // than the outbound datagram cap allows. `max_ip_len` is the maximum emitted
-    // IP-packet size (`usize::MAX` on the inbound/reconstruction path, which
-    // leaves segmentation at the original `gso_size`). Never below one payload
-    // byte, so the `step_by` is non-zero.
-    let seg_size = usize::from(offload.gso_size)
-        .min(max_ip_len.saturating_sub(header_len))
-        .max(1);
+    // than `max_ip_len` (the maximum emitted IP-packet size) allows. The cap must
+    // leave at least one payload byte after the headers; if it can't, no
+    // conforming segment exists (a hostile peer can advertise `hdr_len` larger
+    // than the cap), so reject rather than silently fall back to 1-byte
+    // segmentation that overshoots the cap. `gso_size` is guaranteed non-zero by
+    // the `is_tcp_gso()` check above, so `seg_size >= 1` and the `step_by` below
+    // is non-zero.
+    let payload_budget = max_ip_len.saturating_sub(header_len);
+    if payload_budget == 0 {
+        return Err(format!(
+            "offload cap (max_ip_len {}) too small for header_len {}",
+            max_ip_len, header_len
+        ));
+    }
+    let seg_size = usize::from(offload.gso_size).min(payload_budget);
     if payload.len() <= seg_size {
         // Single segment: no resegmentation needed, but a NEEDS_CSUM packet
         // still carries only the partial pseudo-header checksum, which must
@@ -1975,6 +1983,38 @@ mod tests {
         .expect_err("emit error propagates");
         assert_eq!(err, "stop");
         assert_eq!(emitted, 2, "segmentation stops after emit error");
+    }
+
+    #[test]
+    fn test_segment_tcp_gso_rejects_cap_below_header() {
+        // A cap too small to fit the headers must be rejected, not silently
+        // turned into 1-byte segmentation that overshoots the cap.
+        let packet = build_ipv4_tcp_packet(3500);
+        let offload = VirtioNetHdr {
+            flags: 0,
+            gso_type: VIRTIO_NET_HDR_GSO_TCPV4,
+            hdr_len: 40,
+            gso_size: 1200,
+            csum_start: 20,
+            csum_offset: 16,
+            num_buffers: 0,
+        };
+        let mut scratch = Vec::new();
+        // header_len is 40; a cap of 39 leaves no room for even the headers.
+        let err = segment_tcp_gso_into(&offload, &packet, &mut scratch, 39, |_| Ok(()))
+            .expect_err("cap below header_len must be rejected");
+        assert!(err.contains("too small"), "unexpected error: {err}");
+
+        // A cap that fits headers + at least one payload byte still segments,
+        // and every emitted IP packet stays within the cap.
+        let mut emitted = 0usize;
+        segment_tcp_gso_into(&offload, &packet, &mut scratch, 100, |seg| {
+            emitted += 1;
+            assert!(seg.len() <= 100, "segment {} exceeds cap 100", seg.len());
+            Ok(())
+        })
+        .expect("cap above header_len segments");
+        assert!(emitted > 1, "tiny cap must force many small segments");
     }
 
     #[test]

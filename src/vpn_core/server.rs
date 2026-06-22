@@ -804,14 +804,21 @@ impl VpnServer {
         if let Some(meta) = offload {
             if !connection_gso_active || !self.tun_offload_status.enabled {
                 pending.clear();
-                // Inbound reconstruction: keep the sender's segments (the local
-                // TUN MTU already bounds them; no extra cap).
-                let materialized =
-                    materialize_offload_into(&meta, packet, seg_scratch, usize::MAX, |seg| {
-                    seg_arena.extend_from_slice(seg);
-                    pending.push(seg_arena.split_to(seg.len()).freeze());
-                    Ok(())
-                });
+                // Inbound reconstruction: cap each rebuilt segment at the local
+                // TUN MTU. Honest peers already segment at/below it, so this is a
+                // no-op for them; a hostile peer advertising a huge gso_size is
+                // prevented from making us write oversized IP packets to the TUN.
+                let materialized = materialize_offload_into(
+                    &meta,
+                    packet,
+                    seg_scratch,
+                    self.config.mtu as usize,
+                    |seg| {
+                        seg_arena.extend_from_slice(seg);
+                        pending.push(seg_arena.split_to(seg.len()).freeze());
+                        Ok(())
+                    },
+                );
                 if let Err(e) = materialized {
                     pending.clear();
                     log::warn!("Dropping packet with unsupported offload from {}: {}", peer, e);

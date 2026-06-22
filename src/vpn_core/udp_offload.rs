@@ -78,6 +78,16 @@ pub(crate) fn plan_gso_batches(sizes: &[usize], max_bytes: usize, max_segs: usiz
     let mut i = 0;
     while i < sizes.len() {
         let s = sizes[i];
+        // A datagram too large for the byte budget, or with no segment budget at
+        // all, can't anchor a GSO run: emit it on its own. Without this guard the
+        // inner loop below can't advance `j`, so `end == i` yields a zero-count
+        // Gso plan and `i = end` spins forever. (Unreachable via current callers,
+        // where `s <= max_bytes` and `max_segs == 64`, but keeps the planner total.)
+        if s > max_bytes || max_segs == 0 {
+            plans.push(SendPlan::Plain(i));
+            i += 1;
+            continue;
+        }
         // Grow a run of equal-size `s`, capped by segment count and byte budget.
         let mut j = i;
         let mut bytes = 0;
@@ -486,6 +496,27 @@ mod tests {
     #[test]
     fn test_plan_empty() {
         assert!(plan_gso_batches(&[], 65535, 64).is_empty());
+    }
+
+    #[test]
+    fn test_plan_oversized_or_zero_segs_terminates() {
+        // A datagram larger than the byte budget can't anchor a GSO run; it goes
+        // out plain. (Termination: this test completing at all proves the planner
+        // doesn't spin on a zero-count run.)
+        assert_eq!(
+            plan_gso_batches(&[100_000], 65535, 64),
+            vec![SendPlan::Plain(0)]
+        );
+        // A zero segment budget forces every datagram out on its own.
+        assert_eq!(
+            plan_gso_batches(&[100, 100], 65535, 0),
+            vec![SendPlan::Plain(0), SendPlan::Plain(1)]
+        );
+        // A too-large datagram between normal ones doesn't desync the plan.
+        assert_eq!(
+            kinds(&plan_gso_batches(&[100, 100, 100_000, 200, 200], 65535, 64)),
+            vec![(1, 0, 2), (0, 2, 0), (1, 3, 2)]
+        );
     }
 
     /// Exercise the real `sendmsg(UDP_SEGMENT)` / `recvmsg(UDP_GRO)` path over
