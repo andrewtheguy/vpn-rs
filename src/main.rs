@@ -141,8 +141,9 @@ enum Command {
     /// a real TCP interface and carries traffic itself — a self-contained TCP
     /// tunnel, like an SSH tunnel, used as a throughput baseline. IPv4-only,
     /// single client, static IP assignment, and **no encryption or
-    /// authentication**: for benchmarking / testing only.
-    DummyServer {
+    /// authentication**: for benchmarking / testing only. Like test mode, it
+    /// stops itself after 30 minutes so a forgotten instance is not a liability.
+    DummyTestServer {
         /// Address to listen on (e.g. 0.0.0.0:5599)
         #[arg(short, long)]
         listen: SocketAddr,
@@ -158,10 +159,11 @@ enum Command {
         #[arg(long, default_value_t = DEFAULT_VPN_MTU)]
         mtu: u16,
     },
-    /// Run a dummy plain-TCP VPN client for benchmarking (connects to `dummy-server`).
+    /// Run a dummy plain-TCP VPN client for benchmarking (connects to `dummy-test-server`).
     ///
-    /// See `dummy-server` for the benchmarking rationale. Unencrypted; testing only.
-    DummyClient {
+    /// See `dummy-test-server` for the benchmarking rationale. Unencrypted;
+    /// testing only. Like test mode, it stops itself after 30 minutes.
+    DummyTestClient {
         /// Dummy server address to connect to (e.g. 192.0.2.1:5599)
         #[arg(short, long)]
         server: SocketAddr,
@@ -300,23 +302,37 @@ async fn main() -> Result<()> {
 
             run_with_test_mode_limit(resolved.test_mode, run_vpn_client(resolved)).await
         }
-        Command::DummyServer {
+        Command::DummyTestServer {
             listen,
             network,
             mtu,
         } => {
-            validate_mtu(mtu, "dummy-server")?;
-            vpn_dummy::run_dummy_server(listen, network, mtu)
-                .await
-                .map_err(|e| anyhow::anyhow!("Dummy server error: {}", e))
+            validate_mtu(mtu, "dummy-test-server")?;
+            // Dummy mode is for testing/benchmarking only; cap the runtime like
+            // test mode so a forgotten instance stops itself.
+            run_with_test_mode_limit(
+                true,
+                async move {
+                    vpn_dummy::run_dummy_server(listen, network, mtu)
+                        .await
+                        .map_err(|e| anyhow::anyhow!("Dummy server error: {}", e))
+                },
+            )
+            .await
         }
-        Command::DummyClient { server, mtu } => {
+        Command::DummyTestClient { server, mtu } => {
             if let Some(mtu) = mtu {
-                validate_mtu(mtu, "dummy-client")?;
+                validate_mtu(mtu, "dummy-test-client")?;
             }
-            vpn_dummy::run_dummy_client(server, mtu)
-                .await
-                .map_err(|e| anyhow::anyhow!("Dummy client error: {}", e))
+            run_with_test_mode_limit(
+                true,
+                async move {
+                    vpn_dummy::run_dummy_client(server, mtu)
+                        .await
+                        .map_err(|e| anyhow::anyhow!("Dummy client error: {}", e))
+                },
+            )
+            .await
         }
     }
 }
