@@ -135,13 +135,16 @@ pub struct VpnServerConfig {
 
     /// Kernel UDP socket receive buffer (`SO_RCVBUF`) in bytes (default 4 MiB).
     ///
-    /// Sized to absorb bursts that briefly outpace the userspace receiver. The
-    /// kernel caps the request at `net.core.rmem_max`.
+    /// Sized to absorb bursts that briefly outpace the userspace receiver; this
+    /// is the buffer that prevents dropped datagrams under load. The kernel caps
+    /// the request at `net.core.rmem_max`, so raise that sysctl first when tuning.
     pub recv_buffer_size: usize,
 
     /// Kernel UDP socket send buffer (`SO_SNDBUF`) in bytes (default 4 MiB).
     ///
-    /// The kernel caps the request at `net.core.wmem_max`.
+    /// The kernel caps the request at `net.core.wmem_max`. The send buffer
+    /// rarely bottlenecks a tunnel, so `net.core.rmem_max` is the more impactful
+    /// knob.
     pub send_buffer_size: usize,
 
     /// Disable inter-client IP spoofing checks (default: false).
@@ -199,11 +202,14 @@ pub struct VpnClientConfig {
     pub routes6: Vec<Ipv6Net>,
 
     /// Kernel UDP socket receive buffer (`SO_RCVBUF`) in bytes (default 4 MiB).
-    /// The kernel caps the request at `net.core.rmem_max`.
+    /// Prevents dropped datagrams under bursty load; the kernel caps the request
+    /// at `net.core.rmem_max`, so raise that sysctl first when tuning.
     pub recv_buffer_size: usize,
 
     /// Kernel UDP socket send buffer (`SO_SNDBUF`) in bytes (default 4 MiB).
-    /// The kernel caps the request at `net.core.wmem_max`.
+    /// The kernel caps the request at `net.core.wmem_max`; the send buffer
+    /// rarely bottlenecks a tunnel, so `net.core.rmem_max` is the more impactful
+    /// knob.
     pub send_buffer_size: usize,
 
     /// Test mode: allow connecting to a non-loopback `server_addr` (default: false).
