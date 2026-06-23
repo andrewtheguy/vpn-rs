@@ -185,6 +185,16 @@ jumbo MTU raises throughput on clients whose TUN does one packet per syscall
 VPN-to-VPN (split tunnel / site-to-site / LAN).** **For IPv6-only or dual-stack,
 keep MTU ≥ `1280`.**
 
+Both the server and client enlarge their kernel UDP socket buffers (`SO_RCVBUF` /
+`SO_SNDBUF`) to **4 MiB each by default** so the kernel can absorb bursty
+multi-Gbit traffic instead of silently dropping datagrams (dropped datagrams show
+up as inner-TCP retransmits in `iperf3`). Tune with `recv_buffer_size` /
+`send_buffer_size` (bytes, `65536-1073741824`) in the `[server]` / `[client]`
+TOML section. **Linux caps the request at `net.core.rmem_max` /
+`net.core.wmem_max`**, so raise those sysctls (e.g. `sysctl -w
+net.core.rmem_max=16777216`) to actually use a larger buffer — a startup log
+reports the requested-vs-applied size and warns when the kernel capped it.
+
 ## Loopback enforcement
 
 The server's `listen` and the client's `server_addr` are **hard-locked to

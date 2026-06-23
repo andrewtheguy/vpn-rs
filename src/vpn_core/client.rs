@@ -118,8 +118,13 @@ impl VpnClient {
 
     /// Connect to the VPN server (via the local tunnel) and run the tunnel.
     pub async fn connect(&self) -> VpnResult<()> {
-        let socket =
-            connect_client_socket(self.config.server_addr, self.config.test_mode).await?;
+        let socket = connect_client_socket(
+            self.config.server_addr,
+            self.config.test_mode,
+            self.config.recv_buffer_size,
+            self.config.send_buffer_size,
+        )
+        .await?;
         log::info!(
             "Connecting to VPN server via local tunnel at {}",
             self.config.server_addr

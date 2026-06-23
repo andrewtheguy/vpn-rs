@@ -2,7 +2,9 @@
 
 use crate::vpn_core::datagram::MAX_DATAGRAM_PAYLOAD;
 use crate::vpn_core::error::{VpnError, VpnResult};
-use crate::vpn_core::file_config::{MAX_VPN_MTU, MIN_VPN_MTU};
+use crate::vpn_core::file_config::{
+    MAX_SOCKET_BUFFER_SIZE, MAX_VPN_MTU, MIN_SOCKET_BUFFER_SIZE, MIN_VPN_MTU,
+};
 use crate::vpn_core::udp::ensure_loopback;
 use ipnet::{Ipv4Net, Ipv6Net};
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -70,6 +72,16 @@ pub fn validate_vpn_networks(
     Ok(())
 }
 
+/// Range-check a kernel socket buffer size (`SO_RCVBUF` / `SO_SNDBUF`).
+fn validate_socket_buffer(size: usize, field: &str) -> VpnResult<()> {
+    if !(MIN_SOCKET_BUFFER_SIZE..=MAX_SOCKET_BUFFER_SIZE).contains(&size) {
+        return Err(VpnError::config(format!(
+            "{field} {size} is out of range ({MIN_SOCKET_BUFFER_SIZE}..={MAX_SOCKET_BUFFER_SIZE})"
+        )));
+    }
+    Ok(())
+}
+
 /// VPN server configuration.
 #[derive(Debug, Clone)]
 pub struct VpnServerConfig {
@@ -117,6 +129,17 @@ pub struct VpnServerConfig {
     /// Channel buffer size for the TUN writer task (default: 512).
     pub tun_writer_channel_size: usize,
 
+    /// Kernel UDP socket receive buffer (`SO_RCVBUF`) in bytes (default 4 MiB).
+    ///
+    /// Sized to absorb bursts that briefly outpace the userspace receiver. The
+    /// kernel caps the request at `net.core.rmem_max`.
+    pub recv_buffer_size: usize,
+
+    /// Kernel UDP socket send buffer (`SO_SNDBUF`) in bytes (default 4 MiB).
+    ///
+    /// The kernel caps the request at `net.core.wmem_max`.
+    pub send_buffer_size: usize,
+
     /// Disable inter-client IP spoofing checks (default: false).
     ///
     /// When `false` (default): the server rejects packets whose source IP
@@ -159,6 +182,8 @@ impl VpnServerConfig {
                 self.max_datagram_size, MIN_DATAGRAM_SIZE, MAX_DATAGRAM_PAYLOAD
             )));
         }
+        validate_socket_buffer(self.recv_buffer_size, "recv_buffer_size")?;
+        validate_socket_buffer(self.send_buffer_size, "send_buffer_size")?;
         Ok(())
     }
 }
@@ -174,6 +199,14 @@ pub struct VpnClientConfig {
 
     /// IPv6 routes to send through the VPN (CIDRs). Optional for dual-stack.
     pub routes6: Vec<Ipv6Net>,
+
+    /// Kernel UDP socket receive buffer (`SO_RCVBUF`) in bytes (default 4 MiB).
+    /// The kernel caps the request at `net.core.rmem_max`.
+    pub recv_buffer_size: usize,
+
+    /// Kernel UDP socket send buffer (`SO_SNDBUF`) in bytes (default 4 MiB).
+    /// The kernel caps the request at `net.core.wmem_max`.
+    pub send_buffer_size: usize,
 
     /// Test mode: allow connecting to a non-loopback `server_addr` (default: false).
     ///
@@ -194,6 +227,8 @@ impl VpnClientConfig {
         if !self.test_mode {
             ensure_loopback(self.server_addr)?;
         }
+        validate_socket_buffer(self.recv_buffer_size, "recv_buffer_size")?;
+        validate_socket_buffer(self.send_buffer_size, "send_buffer_size")?;
         Ok(())
     }
 }
@@ -216,7 +251,21 @@ mod tests {
             drop_on_full: false,
             client_channel_size: 1024,
             tun_writer_channel_size: 512,
+            recv_buffer_size: crate::vpn_core::udp::DEFAULT_SOCKET_RECV_BUFFER_SIZE,
+            send_buffer_size: crate::vpn_core::udp::DEFAULT_SOCKET_SEND_BUFFER_SIZE,
             disable_spoofing_check: false,
+            test_mode: false,
+            test_token: None,
+        }
+    }
+
+    fn minimal_client_config() -> VpnClientConfig {
+        VpnClientConfig {
+            server_addr: "127.0.0.1:5555".parse().unwrap(),
+            routes: vec![],
+            routes6: vec![],
+            recv_buffer_size: crate::vpn_core::udp::DEFAULT_SOCKET_RECV_BUFFER_SIZE,
+            send_buffer_size: crate::vpn_core::udp::DEFAULT_SOCKET_SEND_BUFFER_SIZE,
             test_mode: false,
             test_token: None,
         }
@@ -319,39 +368,53 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_rejects_undersized_recv_buffer() {
+        let mut config = minimal_server_config();
+        config.recv_buffer_size = MIN_SOCKET_BUFFER_SIZE - 1;
+        let err = config.validate().unwrap_err().to_string();
+        assert!(err.contains("recv_buffer_size"));
+        assert!(err.contains("out of range"));
+    }
+
+    #[test]
+    fn test_validate_rejects_oversized_send_buffer() {
+        let mut config = minimal_server_config();
+        config.send_buffer_size = MAX_SOCKET_BUFFER_SIZE + 1;
+        let err = config.validate().unwrap_err().to_string();
+        assert!(err.contains("send_buffer_size"));
+        assert!(err.contains("out of range"));
+    }
+
+    #[test]
     fn test_validate_client_ok() {
-        let config = VpnClientConfig {
-            server_addr: "127.0.0.1:5555".parse().unwrap(),
-            routes: vec!["0.0.0.0/0".parse().unwrap()],
-            routes6: vec![],
-            test_mode: false,
-            test_token: None,
-        };
+        let mut config = minimal_client_config();
+        config.routes = vec!["0.0.0.0/0".parse().unwrap()];
         assert!(config.validate().is_ok());
     }
 
     #[test]
     fn test_validate_client_rejects_non_loopback_target() {
-        let config = VpnClientConfig {
-            server_addr: "192.0.2.1:5555".parse().unwrap(),
-            routes: vec![],
-            routes6: vec![],
-            test_mode: false,
-            test_token: None,
-        };
+        let mut config = minimal_client_config();
+        config.server_addr = "192.0.2.1:5555".parse().unwrap();
         let err = config.validate().unwrap_err().to_string();
         assert!(err.contains("not loopback"));
     }
 
     #[test]
     fn test_validate_client_test_mode_allows_non_loopback_target() {
-        let config = VpnClientConfig {
-            server_addr: "192.0.2.1:5555".parse().unwrap(),
-            routes: vec![],
-            routes6: vec![],
-            test_mode: true,
-            test_token: Some("token".to_string()),
-        };
+        let mut config = minimal_client_config();
+        config.server_addr = "192.0.2.1:5555".parse().unwrap();
+        config.test_mode = true;
+        config.test_token = Some("token".to_string());
         assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_client_rejects_oversized_recv_buffer() {
+        let mut config = minimal_client_config();
+        config.recv_buffer_size = MAX_SOCKET_BUFFER_SIZE + 1;
+        let err = config.validate().unwrap_err().to_string();
+        assert!(err.contains("recv_buffer_size"));
+        assert!(err.contains("out of range"));
     }
 }

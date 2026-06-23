@@ -70,6 +70,15 @@ network = "10.0.0.0/24"
 # client_channel_size = 1024
 # tun_writer_channel_size = 512
 
+# Kernel UDP socket buffers (SO_RCVBUF / SO_SNDBUF) in bytes (65536..=1073741824,
+# defaults 4 MiB each). Large buffers let the kernel absorb multi-Gbit bursts
+# instead of silently dropping datagrams (which surface as inner-TCP retransmits).
+# NOTE: Linux caps the request at net.core.rmem_max / net.core.wmem_max; raise
+# those sysctls to actually use a larger buffer. A startup log reports the
+# requested-vs-applied size and warns if the kernel capped it.
+# recv_buffer_size = 4194304
+# send_buffer_size = 4194304
+
 # Disable inter-client source-IP spoofing checks (default false). With no
 # transport-level auth here, leave this on unless the tunnel already isolates
 # clients from each other.
