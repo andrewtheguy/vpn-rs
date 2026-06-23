@@ -178,10 +178,22 @@ impl VpnClient {
         let (mut read_half, mut write_half) = stream.into_split();
 
         // Handshake: TCP is reliable, so a single request/response (no
-        // retransmit loop) suffices. The token gates test-mode pairing.
+        // retransmit loop) suffices. The token gates test-mode pairing. The
+        // whole exchange is bounded by HANDSHAKE_TIMEOUT so a server that
+        // accepts the connection but never replies fails fast (and is retried by
+        // the reconnect loop) instead of hanging forever.
         let request = VpnHandshake::new(self.device_id, self.config.test_token.clone()).encode()?;
-        write_message(&mut write_half, &request).await?;
-        let resp_data = read_message(&mut read_half, MAX_HANDSHAKE_SIZE).await?;
+        let resp_data = tokio::time::timeout(HANDSHAKE_TIMEOUT, async {
+            write_message(&mut write_half, &request).await?;
+            read_message(&mut read_half, MAX_HANDSHAKE_SIZE).await
+        })
+        .await
+        .map_err(|_| {
+            VpnError::ConnectionLost(format!(
+                "no handshake response within {:.0}s",
+                HANDSHAKE_TIMEOUT.as_secs_f64()
+            ))
+        })??;
         let response = VpnHandshakeResponse::decode(&resp_data)?;
         if !response.accepted {
             let reason = response
