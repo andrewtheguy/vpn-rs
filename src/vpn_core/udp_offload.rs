@@ -63,6 +63,14 @@ static UDP_GSO_AVAILABLE: AtomicBool = AtomicBool::new(true);
 /// straight to plain sends. Only ever lowered, so it converges to the path
 /// limit. Unlike [`UDP_GSO_AVAILABLE`] this never disables GSO outright — smaller
 /// (≤MTU) runs still batch normally.
+///
+/// Like [`UDP_GSO_AVAILABLE`], this ceiling is host-wide (shared across every
+/// socket and destination) and never resets. A transient `EMSGSIZE` from any one
+/// destination therefore caps the segment size for all sends until the process
+/// restarts. That is a deliberate simplification, not a hidden limitation: this
+/// VPN runs a single underlay datapath where every datagram egresses the same
+/// path, so the path's no-fragment limit is genuinely a host property, and the
+/// only cost of an over-eager cap is reverting to plain (still-correct) sends.
 #[cfg(target_os = "linux")]
 static UDP_GSO_MAX_SEG_SIZE: AtomicUsize = AtomicUsize::new(usize::MAX);
 
