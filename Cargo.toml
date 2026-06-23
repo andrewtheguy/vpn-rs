@@ -1,6 +1,6 @@
 [package]
 name = "vpn-rs"
-version = "0.0.29"
+version = "0.0.30-alpha1"
 edition = "2024"
 description = "Single-purpose IP-over-TCP/UDP VPN tunnel (loopback-only; an external tunnel provides the encrypted transport)"
 readme = "README.md"
