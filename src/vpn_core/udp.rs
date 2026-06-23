@@ -247,22 +247,30 @@ mod tests {
 
     #[tokio::test]
     async fn test_set_socket_buffers_applies_over_loopback() {
-        // Request a modest size that should fit under typical rmem_max/wmem_max
-        // ceilings, then read the value back to confirm it took effect.
         let socket = UdpSocket::bind("127.0.0.1:0").await.expect("bind");
-        let requested = 256 * 1024; // 256 KiB
+        let sock = socket2::SockRef::from(&socket);
+
+        // Capture the kernel defaults before applying our larger request, so the
+        // assertions detect a no-op set rather than just the read-back path.
+        let default_recv = sock.recv_buffer_size().expect("read default SO_RCVBUF");
+        let default_send = sock.send_buffer_size().expect("read default SO_SNDBUF");
+
+        // 256 KiB exceeds the default buffer (so a no-op would be caught) yet is
+        // small enough that the applied value — `2 * min(request, rmem_max)` on
+        // Linux — stays >= the request on any host with rmem_max >= 128 KiB (the
+        // Linux default is ~208 KiB).
+        let requested = 256 * 1024;
         set_socket_buffers(&socket, requested, requested);
 
-        let sock = socket2::SockRef::from(&socket);
-        // Linux doubles the request internally; a positive read-back proves the
-        // option path works even if a low sysctl cap shrinks the applied value.
+        let applied_recv = sock.recv_buffer_size().expect("read SO_RCVBUF");
+        let applied_send = sock.send_buffer_size().expect("read SO_SNDBUF");
         assert!(
-            sock.recv_buffer_size().expect("read SO_RCVBUF") > 0,
-            "SO_RCVBUF should be set"
+            applied_recv >= requested,
+            "SO_RCVBUF should grow to >= {requested} (default {default_recv}, got {applied_recv})"
         );
         assert!(
-            sock.send_buffer_size().expect("read SO_SNDBUF") > 0,
-            "SO_SNDBUF should be set"
+            applied_send >= requested,
+            "SO_SNDBUF should grow to >= {requested} (default {default_send}, got {applied_send})"
         );
     }
 }
