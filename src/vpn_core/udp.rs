@@ -44,6 +44,11 @@ pub const DEFAULT_SOCKET_SEND_BUFFER_SIZE: usize = 4 * 1024 * 1024; // 4 MiB
 /// size internally and caps it at `net.core.rmem_max` / `net.core.wmem_max`, so
 /// we read the value back and warn when the applied size lands well below the
 /// request — the fix is to raise those sysctls (out of scope here).
+///
+/// The receive buffer is the one that matters: it absorbs bursty inbound
+/// traffic, and a too-small `SO_RCVBUF` shows up as dropped datagrams. The send
+/// buffer rarely bottlenecks a tunnel, so `net.core.rmem_max` is the knob to
+/// raise first.
 fn set_socket_buffers(socket: &UdpSocket, recv_buffer_size: usize, send_buffer_size: usize) {
     let sock = socket2::SockRef::from(socket);
 
@@ -56,7 +61,8 @@ fn set_socket_buffers(socket: &UdpSocket, recv_buffer_size: usize, send_buffer_s
                 if applied < recv_buffer_size {
                     log::warn!(
                         "SO_RCVBUF applied {applied} far below requested {recv_buffer_size}; \
-                         raise net.core.rmem_max to allow larger receive buffers"
+                         raise net.core.rmem_max to allow larger receive buffers — this is \
+                         the buffer that prevents dropped datagrams under bursty load"
                     );
                 }
             }
@@ -71,8 +77,9 @@ fn set_socket_buffers(socket: &UdpSocket, recv_buffer_size: usize, send_buffer_s
                 log::info!("SO_SNDBUF requested {send_buffer_size}, applied {applied}");
                 if applied < send_buffer_size {
                     log::warn!(
-                        "SO_SNDBUF applied {applied} far below requested {send_buffer_size}; \
-                         raise net.core.wmem_max to allow larger send buffers"
+                        "SO_SNDBUF applied {applied} below requested {send_buffer_size} \
+                         (capped by net.core.wmem_max); the send buffer rarely bottlenecks a \
+                         tunnel, so raise net.core.rmem_max first if you see drops"
                     );
                 }
             }

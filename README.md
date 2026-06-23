@@ -196,10 +196,13 @@ Both the server and client enlarge their kernel UDP socket buffers (`SO_RCVBUF` 
 multi-Gbit traffic instead of silently dropping datagrams (dropped datagrams show
 up as inner-TCP retransmits in `iperf3`). Tune with `recv_buffer_size` /
 `send_buffer_size` (bytes, `65536-1073741824`) in the `[server]` / `[client]`
-TOML section. **Linux caps the request at `net.core.rmem_max` /
-`net.core.wmem_max`**, so raise those sysctls (e.g. `sysctl -w
-net.core.rmem_max=16777216`) to actually use a larger buffer — a startup log
-reports the requested-vs-applied size and warns when the kernel capped it.
+TOML section. The **receive buffer is the one that matters** — it absorbs
+inbound bursts, and a too-small `SO_RCVBUF` is what shows up as drops; the send
+buffer rarely bottlenecks a tunnel. **Linux caps the request at
+`net.core.rmem_max` / `net.core.wmem_max`**, so raise `net.core.rmem_max` first
+(e.g. `sysctl -w net.core.rmem_max=16777216`) to actually use a larger buffer — a
+startup log reports the requested-vs-applied size and warns when the kernel
+capped it.
 
 ## Loopback enforcement
 

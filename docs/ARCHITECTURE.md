@@ -221,9 +221,12 @@ section ([`file_config.rs`](../src/vpn_core/file_config.rs)):
 `recv_buffer_size` / `send_buffer_size` set the kernel UDP socket buffers
 (`SO_RCVBUF` / `SO_SNDBUF`) in bytes (64 KiB–1 GiB, default 4 MiB each). They are
 applied unconditionally via `socket2` after the socket is bound, so a large queue
-absorbs multi-Gbit bursts instead of silently dropping datagrams. Linux caps the
-request at `net.core.rmem_max` / `net.core.wmem_max`; the applied size is read
-back and logged, with a warning when the kernel capped it well below the request.
+absorbs multi-Gbit bursts instead of silently dropping datagrams. The receive
+buffer is the impactful one (it absorbs inbound bursts; a too-small `SO_RCVBUF`
+is what surfaces as drops), while the send buffer rarely bottlenecks a tunnel.
+Linux caps the request at `net.core.rmem_max` / `net.core.wmem_max`; the applied
+size is read back and logged, with a warning when the kernel capped it well below
+the request — raise `net.core.rmem_max` first when tuning.
 
 Both `validate()` paths call `ensure_loopback` (unless test mode is active), so a
 non-loopback address is rejected at startup before any socket is bound.
