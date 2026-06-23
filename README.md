@@ -246,6 +246,49 @@ sudo vpn-rs server --test-mode -c vpn_server_test.toml
 sudo vpn-rs client --test-mode --test-token <TOKEN> -s <server-ip>:5555
 ```
 
+## Benchmark mode (`dummy-test`)
+
+> [!WARNING]
+> Like test mode, `dummy-test` carries traffic **directly on the network with no
+> encryption or authentication**. Use it only on trusted networks for
+> benchmarking, never for production traffic.
+
+The production `server`/`client` path is loopback-only UDP that delegates the
+network hop to an external tunnel. To benchmark **the VPN packet pipeline by
+itself** — without an external tunnel and without UDP datagram drops — `vpn-rs`
+ships a self-contained plain-**TCP** transport: a single direct connection
+between client and server that carries traffic itself, like an SSH tunnel. Inner
+TCP rides on outer TCP with end-to-end backpressure, so on a LAN there are no
+datagram drops and effectively zero inner-TCP retransmits — the baseline the
+production path is measured against.
+
+It is **IPv4-only, single client, unencrypted, and benchmarking-only**. Like test
+mode, each end **stops itself after 30 minutes**.
+
+```bash
+# Server: binds a real TCP interface; takes the first host of --network as its IP
+sudo vpn-rs dummy-test-server --listen 0.0.0.0:5599
+#   --network <CIDR>   default 10.9.0.0/24 (server 10.9.0.1, client 10.9.0.2)
+#   --mtu <N>          default 1440; range 576-9216
+
+# Client: connects directly to the server (no config file needed)
+sudo vpn-rs dummy-test-client --server <server-ip>:5599
+#   --mtu <N>          override the server-dictated MTU
+```
+
+Then drive traffic across the tunnel, e.g. with `iperf3`:
+
+```bash
+# on the server host
+iperf3 -s
+# on the client host
+iperf3 -c 10.9.0.1
+```
+
+Raise `--mtu` (e.g. `--mtu 9000`) on the server to benchmark past the
+single-packet-per-syscall ceiling; the TCP transport re-segments, so no jumbo
+physical frames are needed.
+
 ## Single Instance Lock
 
 Only one `vpn-rs client` instance runs at a time per machine to avoid route and
