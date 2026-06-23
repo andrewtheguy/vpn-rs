@@ -11,6 +11,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       release_tag: ${{ steps.tag.outputs.release_tag }}
+      release_title: ${{ steps.tag.outputs.release_title }}
       is_prerelease: ${{ steps.tag.outputs.is_prerelease }}
     steps:
       - uses: actions/checkout@v4
@@ -18,16 +19,20 @@ jobs:
       - name: Generate Tag
         id: tag
         run: |
+          # Tag and name are always derived from the Cargo.toml version so the flow is
+          # uniform across releases and prereleases. Whether it's a prerelease is decided
+          # purely by the branch this workflow runs against (anything other than main).
+          version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
+          if [ -z "$version" ] || [ "$version" = "null" ]; then
+            echo "::error::Could not parse version from Cargo.toml"
+            exit 1
+          fi
+          echo "release_tag=v$version" >> "$GITHUB_OUTPUT"
           if [ "${{ github.ref }}" != "refs/heads/main" ]; then
-            echo "release_tag=$(date +'%Y%m%d%H%M%S')-${GITHUB_SHA:0:7}" >> "$GITHUB_OUTPUT"
+            echo "release_title=Prerelease v$version" >> "$GITHUB_OUTPUT"
             echo "is_prerelease=true" >> "$GITHUB_OUTPUT"
           else
-            version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
-            if [ -z "$version" ] || [ "$version" = "null" ]; then
-              echo "::error::Could not parse version from Cargo.toml"
-              exit 1
-            fi
-            echo "release_tag=v$version" >> "$GITHUB_OUTPUT"
+            echo "release_title=Release v$version" >> "$GITHUB_OUTPUT"
             echo "is_prerelease=false" >> "$GITHUB_OUTPUT"
           fi
 
@@ -63,7 +68,7 @@ jobs:
           gh release create "${{ steps.tag.outputs.release_tag }}" \
             --draft \
             --target "${{ github.sha }}" \
-            --title "Release ${{ steps.tag.outputs.release_tag }}" \
+            --title "${{ steps.tag.outputs.release_title }}" \
             --generate-notes \
             "${args[@]}"
 
