@@ -6,9 +6,11 @@
 # CLI arguments take precedence over config file values.
 #
 # The client connects a loopback UDP socket to the LOCAL tunnel endpoint. A
-# tunnel process (tunnel-rs / duopipe / any UDP forwarder) must run on this host,
-# listen on the loopback address below, and carry the traffic (encrypted) to the
-# server host's tunnel. The connect target MUST be loopback.
+# tunnel process must run on this host, listen on the loopback address below,
+# and carry the traffic (encrypted) to the server host's tunnel. Examples:
+# tunnel-rs (https://github.com/andrewtheguy/tunnel-rs),
+# duopipe (https://github.com/andrewtheguy/duopipe), or any UDP forwarder.
+# The connect target MUST be loopback.
 
 # Required: validates the config matches the CLI command.
 role = "vpnclient"

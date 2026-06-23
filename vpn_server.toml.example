@@ -4,10 +4,11 @@
 #        vpn-rs server --default-config   (~/.config/vpn-rs/vpn_server.toml)
 #
 # vpn-rs is responsible for VPN tunneling ONLY. It binds a loopback-only UDP
-# socket; a separate tunnel process (tunnel-rs / duopipe / any UDP forwarder)
-# must run on this host, forward this loopback port across the network, and
-# provide the encryption + authentication. The VPN server is never reachable
-# directly — only through the local tunnel.
+# socket; a separate tunnel process must run on this host, forward this
+# loopback port across the network, and provide the encryption + authentication.
+# Examples: tunnel-rs (https://github.com/andrewtheguy/tunnel-rs),
+# duopipe (https://github.com/andrewtheguy/duopipe), or any UDP forwarder.
+# The VPN server is never reachable directly — only through the local tunnel.
 
 # Required: validates the config matches the CLI command.
 role = "vpnserver"

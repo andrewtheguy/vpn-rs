@@ -1,10 +1,13 @@
 //! Loopback-only UDP transport setup for the VPN.
 //!
 //! The VPN never talks to the network directly: an external tunnel process
-//! (e.g. tunnel-rs / duopipe) runs on the same host and forwards loopback UDP
+//! (e.g. [tunnel-rs] / [duopipe]) runs on the same host and forwards loopback UDP
 //! across the network, providing encryption and authentication. Accordingly the
 //! server bind address and the client's connect target are **hard-locked to
 //! loopback** (`127.0.0.0/8`, `::1`, or IPv4-mapped loopback) in normal mode.
+//!
+//! [tunnel-rs]: https://github.com/andrewtheguy/tunnel-rs
+//! [duopipe]: https://github.com/andrewtheguy/duopipe
 //!
 //! The sole exception is test mode (`--test-mode`), which threads an
 //! `allow_non_loopback` flag through these functions to bind/connect arbitrary

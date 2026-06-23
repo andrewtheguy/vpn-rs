@@ -3,8 +3,10 @@
 `vpn-rs` is a **single-purpose IP-over-UDP VPN**. It creates a TUN device and
 moves IP packets between it and a **plain UDP socket bound to loopback**. It does
 *not* do encryption, authentication, NAT traversal, or cross-network transport —
-those belong to a separate **tunnel** process (e.g. `tunnel-rs`, `duopipe`, or any
-UDP forwarder) running on the same host.
+those belong to a separate **tunnel** process (e.g.
+[`tunnel-rs`](https://github.com/andrewtheguy/tunnel-rs),
+[`duopipe`](https://github.com/andrewtheguy/duopipe), or any UDP forwarder)
+running on the same host.
 
 ```text
       host A (client)                                   host B (server)

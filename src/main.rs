@@ -1,9 +1,12 @@
 //! vpn-rs
 //!
 //! Single-purpose IP-over-UDP VPN tunnel. The VPN binds a loopback-only UDP
-//! socket; a separate tunnel process (tunnel-rs / duopipe / any UDP tunnel)
+//! socket; a separate tunnel process ([tunnel-rs] / [duopipe] / any UDP tunnel)
 //! forwards that loopback traffic across the network and provides encryption
 //! and authentication. This binary is responsible for VPN tunneling only.
+//!
+//! [tunnel-rs]: https://github.com/andrewtheguy/tunnel-rs
+//! [duopipe]: https://github.com/andrewtheguy/duopipe
 
 #[cfg(not(any(unix, target_os = "windows")))]
 compile_error!("vpn-rs only supports Unix-like systems (Linux, macOS, BSD) and Windows");

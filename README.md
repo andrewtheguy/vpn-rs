@@ -6,7 +6,8 @@
 packets between it and a **plain UDP socket bound to loopback**. It does *not*
 do encryption, authentication, NAT traversal, or transport across the network —
 that is the job of a separate **tunnel** process (e.g.
-[`tunnel-rs`](https://github.com/andrewtheguy), `duopipe`, or any UDP forwarder)
+[`tunnel-rs`](https://github.com/andrewtheguy/tunnel-rs),
+[`duopipe`](https://github.com/andrewtheguy/duopipe), or any UDP forwarder)
 running on the same host.
 
 ```text
@@ -41,7 +42,8 @@ Encrypted/authenticated transport and NAT traversal are already solved well by
 dedicated projects. Coupling them into the VPN duplicated that effort, so it was
 removed. `vpn-rs` now speaks **plain UDP datagrams to localhost**:
 
-- It rides any **UDP tunnel** (`tunnel-rs`, `duopipe`, …). Because the VPN is
+- It rides any **UDP tunnel** ([`tunnel-rs`](https://github.com/andrewtheguy/tunnel-rs),
+  [`duopipe`](https://github.com/andrewtheguy/duopipe), …). Because the VPN is
   datagram-based, there is no TCP-over-TCP meltdown.
 - SSH port-forwarding is **not** supported, because SSH cannot forward UDP.
 - The tunnel owns encryption + authentication; the loopback bind keeps the VPN
@@ -96,7 +98,8 @@ cargo build --release   # or: cargo install --path .
 ## Quick Start
 
 The example below tunnels with a UDP forwarder; substitute your real encrypted
-tunnel (`tunnel-rs`, `duopipe`, …). The VPN config is identical regardless of
+tunnel ([`tunnel-rs`](https://github.com/andrewtheguy/tunnel-rs),
+[`duopipe`](https://github.com/andrewtheguy/duopipe), …). The VPN config is identical regardless of
 which tunnel you use.
 
 ### 1. Server host
