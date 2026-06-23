@@ -18,10 +18,14 @@ use crate::vpn_core::device::{
 use crate::vpn_core::error::{VpnError, VpnResult};
 use crate::vpn_core::lock::VpnLock;
 use crate::vpn_core::offload::{materialize_offload_into, TcpGroTable, VirtioNetHdr};
+use crate::vpn_core::file_config::Transport;
 use crate::vpn_core::signaling::{
-    encode_capabilities_datagram, parse_ip_packet_v2, CapabilitiesMessage, VpnHandshake,
-    VpnHandshakeResponse, HEARTBEAT_PING_BYTE, HEARTBEAT_PONG_BYTE,
+    encode_capabilities_datagram, frame_capabilities_message, parse_ip_packet_v2, read_message,
+    write_message, CapabilitiesMessage, VpnHandshake, VpnHandshakeResponse, HEARTBEAT_PING_BYTE,
+    HEARTBEAT_PONG_BYTE, MAX_HANDSHAKE_SIZE,
 };
+use crate::vpn_core::tcp::connect_tcp_stream;
+use crate::vpn_core::tunnel::run_tunnel;
 use crate::vpn_core::udp::{connect_client_socket, RECV_BUFFER_SIZE};
 use bytes::{Bytes, BytesMut};
 use ipnet::{Ipv4Net, Ipv6Net};
@@ -31,7 +35,7 @@ use std::num::NonZeroU32;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::io::ReadBuf;
+use tokio::io::{AsyncWriteExt, ReadBuf};
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 
@@ -41,11 +45,20 @@ const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
 /// Heartbeat timeout (max time to wait for pong before triggering reconnection).
 const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Per-attempt timeout while waiting for the handshake response datagram.
+/// Per-attempt timeout while waiting for the handshake response datagram (UDP).
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Maximum handshake datagram (re)transmissions before giving up this attempt.
 const HANDSHAKE_RETRIES: u32 = 5;
+
+/// One-shot timeout for the TCP handshake exchange.
+///
+/// TCP is reliable, so there is no retransmit loop; this is the whole budget for
+/// the request + response. It matches the UDP path's total budget
+/// (`HANDSHAKE_TIMEOUT * HANDSHAKE_RETRIES`) so a high-latency tunnel has the same
+/// time to answer before the reconnect loop retries.
+const TCP_HANDSHAKE_TIMEOUT: Duration =
+    Duration::from_secs(HANDSHAKE_TIMEOUT.as_secs() * HANDSHAKE_RETRIES as u64);
 
 /// Channel buffer size for inbound packets queued to the TUN writer task.
 const INBOUND_TUN_CHANNEL_SIZE: usize = 512;
@@ -112,8 +125,17 @@ impl VpnClient {
         })
     }
 
-    /// Connect to the VPN server (via the local tunnel) and run the tunnel.
+    /// Connect to the VPN server (via the local tunnel) and run the tunnel,
+    /// dispatching on the configured transport.
     pub async fn connect(&self) -> VpnResult<()> {
+        match self.config.transport {
+            Transport::Tcp => self.connect_tcp().await,
+            Transport::Udp => self.connect_udp().await,
+        }
+    }
+
+    /// Connect over a loopback UDP socket and run the UDP pipeline.
+    async fn connect_udp(&self) -> VpnResult<()> {
         let socket = connect_client_socket(
             self.config.server_addr,
             self.config.test_mode,
@@ -122,12 +144,97 @@ impl VpnClient {
         )
         .await?;
         log::info!(
-            "Connecting to VPN server via local tunnel at {}",
+            "Connecting to VPN server via local tunnel at {} (UDP)",
             self.config.server_addr
         );
 
         let server_info = self.perform_handshake(&socket).await?;
+        Self::log_server_info(&server_info);
 
+        let tun_device = self.create_tun_device(&server_info)?;
+        let (_route_guard, _route6_guard) = self.add_vpn_routes(&tun_device, &server_info).await?;
+        Self::log_gso(&server_info, &tun_device);
+
+        let socket = Arc::new(socket);
+
+        // Advertise our capabilities (a single datagram). UDP is unordered, so
+        // the server defaults to GSO-off until this arrives — always safe.
+        let caps = encode_capabilities_datagram(CapabilitiesMessage { gso_enabled: true });
+        socket
+            .send(&caps)
+            .await
+            .map_err(|e| VpnError::Signaling(format!("Failed to send capabilities: {}", e)))?;
+
+        log::info!("VPN tunnel established!");
+        log::info!("  TUN device: {}", tun_device.name());
+
+        run_udp_tunnel(tun_device, socket, server_info.server_gso_enabled).await
+    }
+
+    /// Connect over a single TCP stream and run the shared `run_tunnel` pipeline.
+    async fn connect_tcp(&self) -> VpnResult<()> {
+        let stream = connect_tcp_stream(
+            self.config.server_addr,
+            self.config.test_mode,
+            self.config.recv_buffer_size,
+            self.config.send_buffer_size,
+        )
+        .await?;
+        log::info!(
+            "Connecting to VPN server via local tunnel at {} (TCP)",
+            self.config.server_addr
+        );
+        let (mut read_half, mut write_half) = stream.into_split();
+
+        // Handshake: TCP is reliable, so a single request/response (no
+        // retransmit loop) suffices. The token gates test-mode pairing. The
+        // whole exchange is bounded by TCP_HANDSHAKE_TIMEOUT so a server that
+        // accepts the connection but never replies fails (and is retried by the
+        // reconnect loop) instead of hanging forever.
+        let request = VpnHandshake::new(self.device_id, self.config.test_token.clone()).encode()?;
+        let resp_data = tokio::time::timeout(TCP_HANDSHAKE_TIMEOUT, async {
+            write_message(&mut write_half, &request).await?;
+            read_message(&mut read_half, MAX_HANDSHAKE_SIZE).await
+        })
+        .await
+        .map_err(|_| {
+            VpnError::ConnectionLost(format!(
+                "no handshake response within {:.0}s",
+                TCP_HANDSHAKE_TIMEOUT.as_secs_f64()
+            ))
+        })??;
+        let response = VpnHandshakeResponse::decode(&resp_data)?;
+        if !response.accepted {
+            let reason = response
+                .reject_reason
+                .unwrap_or_else(|| "Unknown".to_string());
+            return Err(VpnError::AuthenticationFailed(reason));
+        }
+        let server_info = Self::server_info_from_response(response)?;
+        Self::log_server_info(&server_info);
+
+        let tun_device = self.create_tun_device(&server_info)?;
+        let (_route_guard, _route6_guard) = self.add_vpn_routes(&tun_device, &server_info).await?;
+        Self::log_gso(&server_info, &tun_device);
+
+        // Capabilities is the first data-stream message. Advertise GSO: inbound
+        // offload metadata can be materialized in software even without local
+        // TUN offload.
+        let mut caps_buf = BytesMut::with_capacity(3);
+        frame_capabilities_message(&mut caps_buf, CapabilitiesMessage { gso_enabled: true });
+        write_half
+            .write_all(&caps_buf)
+            .await
+            .map_err(|e| VpnError::Signaling(format!("Failed to send capabilities: {}", e)))?;
+
+        log::info!("VPN tunnel established!");
+        log::info!("  TUN device: {}", tun_device.name());
+
+        run_tunnel(tun_device, write_half, read_half, server_info.server_gso_enabled).await
+    }
+
+    /// Log the accepted handshake's assigned addresses, mode, GSO, and MTU.
+    fn log_server_info(server_info: &ServerInfo) {
         log::info!("Handshake successful:");
         if let Some(ip) = server_info.assigned_ip {
             log::info!("  Assigned IP: {}", ip);
@@ -156,27 +263,36 @@ impl VpnClient {
         }
         log::info!("  Server GSO enabled: {}", server_info.server_gso_enabled);
         log::info!("  MTU (server-dictated): {}", server_info.mtu);
+    }
 
-        // Create TUN device
-        let tun_device = self.create_tun_device(&server_info)?;
-
-        // Add custom IPv4 routes through the VPN (guard ensures cleanup on drop).
-        let _route_guard: Option<RouteGuard> =
+    /// Add the configured IPv4/IPv6 routes through the VPN, returning guards that
+    /// remove the routes on drop. Routes are only added for an assigned family.
+    async fn add_vpn_routes(
+        &self,
+        tun_device: &TunDevice,
+        server_info: &ServerInfo,
+    ) -> VpnResult<(Option<RouteGuard>, Option<Route6Guard>)> {
+        let route_guard: Option<RouteGuard> =
             if server_info.assigned_ip.is_some() && !self.config.routes.is_empty() {
                 Some(add_routes(tun_device.name(), &self.config.routes).await?)
             } else {
                 None
             };
 
-        // Add custom IPv6 routes through the VPN. Use the assigned IPv6 as source
-        // so source-address selection prefers the VPN address.
-        let _route6_guard: Option<Route6Guard> = match server_info.assigned_ip6 {
+        // Use the assigned IPv6 as source so source-address selection prefers
+        // the VPN address.
+        let route6_guard: Option<Route6Guard> = match server_info.assigned_ip6 {
             Some(assigned_ip6) if !self.config.routes6.is_empty() => Some(
                 add_routes6_with_src(tun_device.name(), &self.config.routes6, assigned_ip6).await?,
             ),
             _ => None,
         };
 
+        Ok((route_guard, route6_guard))
+    }
+
+    /// Log local/server/negotiated GSO status for the established TUN device.
+    fn log_gso(server_info: &ServerInfo, tun_device: &TunDevice) {
         let offload_status = tun_device.offload_status();
         let local_gso_enabled = offload_status.enabled;
         let negotiated_gso = local_gso_enabled && server_info.server_gso_enabled;
@@ -194,23 +310,6 @@ impl VpnClient {
             let reason = offload_status.reason.as_deref().unwrap_or("unknown reason");
             log::info!("Local TUN GSO disabled: {}", reason);
         }
-
-        let socket = Arc::new(socket);
-
-        // Advertise our capabilities (a single datagram). UDP is unordered, so
-        // the server defaults to GSO-off until this arrives — always safe.
-        let caps = encode_capabilities_datagram(CapabilitiesMessage {
-            gso_enabled: advertised_gso,
-        });
-        socket
-            .send(&caps)
-            .await
-            .map_err(|e| VpnError::Signaling(format!("Failed to send capabilities: {}", e)))?;
-
-        log::info!("VPN tunnel established!");
-        log::info!("  TUN device: {}", tun_device.name());
-
-        run_udp_tunnel(tun_device, socket, server_info.server_gso_enabled).await
     }
 
     /// Perform the VPN handshake, retransmitting the request until a response

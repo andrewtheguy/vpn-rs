@@ -16,6 +16,23 @@ use std::time::Duration;
 /// Default loopback listen/connect address as a string.
 pub const DEFAULT_LISTEN_ADDR: &str = "127.0.0.1:5555";
 
+/// Network transport carrying the VPN's framed IP packets.
+///
+/// `Tcp` (the default) carries traffic over a single TCP connection per client
+/// using the shared [`run_tunnel`](crate::vpn_core::tunnel::run_tunnel)
+/// pipeline. `Udp` frames each packet into a datagram for an external tunnel to
+/// forward. In production both are loopback-only; an external tunnel provides
+/// the cross-network transport, encryption, and authentication.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, clap::ValueEnum)]
+#[serde(rename_all = "lowercase")]
+pub enum Transport {
+    /// TCP transport (default).
+    #[default]
+    Tcp,
+    /// UDP datagram transport.
+    Udp,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Role {
@@ -33,7 +50,9 @@ pub enum Role {
 
 #[derive(Deserialize, Default, Clone)]
 pub struct VpnServerSettings {
-    /// Loopback UDP address to bind (default `127.0.0.1:5555`).
+    /// Transport carrying VPN traffic: `"tcp"` (default) or `"udp"`.
+    pub transport: Option<Transport>,
+    /// Loopback address to bind (default `127.0.0.1:5555`).
     pub listen: Option<String>,
     pub network: Option<String>,
     pub server_ip: Option<String>,
@@ -61,7 +80,9 @@ pub struct VpnServerSettings {
 
 #[derive(Deserialize, Default, Clone)]
 pub struct VpnClientSettings {
-    /// Loopback UDP address of the local tunnel endpoint (default `127.0.0.1:5555`).
+    /// Transport carrying VPN traffic: `"tcp"` (default) or `"udp"`.
+    pub transport: Option<Transport>,
+    /// Loopback address of the local tunnel endpoint (default `127.0.0.1:5555`).
     pub server_addr: Option<String>,
     pub routes: Option<Vec<String>>,
     pub routes6: Option<Vec<String>>,
@@ -418,6 +439,8 @@ pub fn load_vpn_client_config(path: Option<&Path>) -> Result<VpnClientConfig> {
 
 #[derive(Debug, Clone)]
 pub struct ResolvedVpnServerConfig {
+    /// Transport resolved from config (CLI overrides this in `main`).
+    pub transport: Transport,
     pub listen: SocketAddr,
     pub network: Option<String>,
     pub server_ip: Option<String>,
@@ -515,6 +538,7 @@ impl ResolvedVpnServerConfig {
         }
 
         Ok(Self {
+            transport: cfg.transport.unwrap_or_default(),
             listen,
             network: cfg.network.clone(),
             server_ip: cfg.server_ip.clone(),
@@ -538,6 +562,8 @@ impl ResolvedVpnServerConfig {
 
 #[derive(Debug, Clone)]
 pub struct ResolvedVpnClientConfig {
+    /// Transport carrying VPN traffic (CLI overrides config; default `Tcp`).
+    pub transport: Transport,
     pub server_addr: SocketAddr,
     pub routes: Vec<String>,
     pub routes6: Vec<String>,
@@ -553,6 +579,7 @@ pub struct ResolvedVpnClientConfig {
 
 #[derive(Default)]
 pub struct VpnClientConfigBuilder {
+    transport: Option<Transport>,
     server_addr: Option<String>,
     routes: Option<Vec<String>>,
     routes6: Option<Vec<String>>,
@@ -577,6 +604,9 @@ impl VpnClientConfigBuilder {
 
     pub fn apply_config(mut self, config: Option<&VpnClientSettings>) -> Self {
         if let Some(cfg) = config {
+            if cfg.transport.is_some() {
+                self.transport = cfg.transport;
+            }
             if cfg.server_addr.is_some() {
                 self.server_addr = cfg.server_addr.clone();
             }
@@ -628,6 +658,14 @@ impl VpnClientConfigBuilder {
         self
     }
 
+    /// Apply a CLI `--transport` override (takes precedence over config when set).
+    pub fn apply_transport(mut self, transport: Option<Transport>) -> Self {
+        if transport.is_some() {
+            self.transport = transport;
+        }
+        self
+    }
+
     /// Apply test-mode settings (only set via `--test-mode` / `--test-token`).
     pub fn apply_test_mode(mut self, test_mode: bool, test_token: Option<String>) -> Self {
         self.test_mode = test_mode;
@@ -665,6 +703,7 @@ impl VpnClientConfigBuilder {
         validate_socket_buffer_size(send_buffer_size, "send_buffer_size", "client")?;
 
         Ok(ResolvedVpnClientConfig {
+            transport: self.transport.unwrap_or_default(),
             server_addr,
             routes,
             routes6,
@@ -711,6 +750,61 @@ network6 = "fd00::/64"
             toml::from_str(&server_toml(r#"listen = "0.0.0.0:5555""#)).unwrap();
         let err = config.validate(false).unwrap_err().to_string();
         assert!(err.contains("not loopback"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn test_server_config_defaults_transport_to_tcp() {
+        let config: VpnServerConfig = toml::from_str(&server_toml("")).unwrap();
+        let resolved =
+            ResolvedVpnServerConfig::from_config(config.settings().unwrap(), false).unwrap();
+        assert_eq!(resolved.transport, Transport::Tcp);
+    }
+
+    #[test]
+    fn test_server_config_reads_transport_udp() {
+        let config: VpnServerConfig =
+            toml::from_str(&server_toml(r#"transport = "udp""#)).unwrap();
+        let resolved =
+            ResolvedVpnServerConfig::from_config(config.settings().unwrap(), false).unwrap();
+        assert_eq!(resolved.transport, Transport::Udp);
+    }
+
+    #[test]
+    fn test_client_transport_defaults_to_tcp() {
+        let resolved = VpnClientConfigBuilder::new()
+            .apply_defaults()
+            .build()
+            .unwrap();
+        assert_eq!(resolved.transport, Transport::Tcp);
+    }
+
+    #[test]
+    fn test_client_transport_from_config_and_cli_override() {
+        let config: VpnClientConfig = toml::from_str(
+            r#"
+role = "vpnclient"
+
+[client]
+transport = "udp"
+"#,
+        )
+        .unwrap();
+        // Config alone selects UDP.
+        let resolved = VpnClientConfigBuilder::new()
+            .apply_defaults()
+            .apply_config(Some(config.settings().unwrap()))
+            .build()
+            .unwrap();
+        assert_eq!(resolved.transport, Transport::Udp);
+
+        // CLI --transport tcp overrides the config's udp.
+        let resolved = VpnClientConfigBuilder::new()
+            .apply_defaults()
+            .apply_config(Some(config.settings().unwrap()))
+            .apply_transport(Some(Transport::Tcp))
+            .build()
+            .unwrap();
+        assert_eq!(resolved.transport, Transport::Tcp);
     }
 
     #[test]

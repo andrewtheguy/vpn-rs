@@ -2,7 +2,7 @@
 
 use crate::vpn_core::datagram::MAX_DATAGRAM_PAYLOAD;
 use crate::vpn_core::error::{VpnError, VpnResult};
-use crate::vpn_core::file_config::{MAX_SOCKET_BUFFER_SIZE, MIN_SOCKET_BUFFER_SIZE};
+use crate::vpn_core::file_config::{Transport, MAX_SOCKET_BUFFER_SIZE, MIN_SOCKET_BUFFER_SIZE};
 use crate::vpn_core::udp::ensure_loopback;
 use ipnet::{Ipv4Net, Ipv6Net};
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -83,7 +83,10 @@ fn validate_socket_buffer(size: usize, field: &str) -> VpnResult<()> {
 /// VPN server configuration.
 #[derive(Debug, Clone)]
 pub struct VpnServerConfig {
-    /// Loopback UDP address the server binds to (the local tunnel forwards to it).
+    /// Transport carrying VPN traffic (`Tcp` default, or `Udp`).
+    pub transport: Transport,
+
+    /// Loopback address the server binds to (the local tunnel forwards to it).
     pub listen: SocketAddr,
 
     /// IPv4 VPN network CIDR (e.g., "10.0.0.0/24").
@@ -192,7 +195,10 @@ impl VpnServerConfig {
 /// VPN client configuration.
 #[derive(Debug, Clone)]
 pub struct VpnClientConfig {
-    /// Loopback UDP address of the local tunnel endpoint to connect to.
+    /// Transport carrying VPN traffic (`Tcp` default, or `Udp`).
+    pub transport: Transport,
+
+    /// Loopback address of the local tunnel endpoint to connect to.
     pub server_addr: SocketAddr,
 
     /// IPv4 routes to send through the VPN (CIDRs), e.g., 0.0.0.0/0 for full tunnel.
@@ -243,6 +249,7 @@ mod tests {
 
     fn minimal_server_config() -> VpnServerConfig {
         VpnServerConfig {
+            transport: Transport::Tcp,
             listen: "127.0.0.1:5555".parse().unwrap(),
             network: Some("10.0.0.0/24".parse().unwrap()),
             network6: None,
@@ -266,6 +273,7 @@ mod tests {
 
     fn minimal_client_config() -> VpnClientConfig {
         VpnClientConfig {
+            transport: Transport::Tcp,
             server_addr: "127.0.0.1:5555".parse().unwrap(),
             routes: vec![],
             routes6: vec![],

@@ -5,11 +5,11 @@
 #
 # CLI arguments take precedence over config file values.
 #
-# The client connects a loopback UDP socket to the LOCAL tunnel endpoint. A
+# The client connects a loopback socket to the LOCAL tunnel endpoint. A
 # tunnel process must run on this host, listen on the loopback address below,
 # and carry the traffic (encrypted) to the server host's tunnel. Examples:
 # tunnel-rs (https://github.com/andrewtheguy/tunnel-rs),
-# duopipe (https://github.com/andrewtheguy/duopipe), or any UDP forwarder.
+# duopipe (https://github.com/andrewtheguy/duopipe), or any loopback forwarder.
 # The connect target MUST be loopback.
 
 # Required: validates the config matches the CLI command.
@@ -17,9 +17,17 @@ role = "vpnclient"
 
 [client]
 # ============================================================================
+# Transport (optional)
+# ============================================================================
+# Transport carrying VPN traffic: "tcp" (default) or "udp". Must match the
+# server's transport (and the local tunnel must forward that protocol). The CLI
+# --transport flag overrides this when set.
+# transport = "tcp"
+
+# ============================================================================
 # Local tunnel endpoint (optional, loopback only)
 # ============================================================================
-# Loopback UDP address the local tunnel listens on. MUST be 127.0.0.0/8 (IPv4),
+# Loopback address the local tunnel listens on. MUST be 127.0.0.0/8 (IPv4),
 # ::1 (IPv6), or IPv4-mapped loopback. Default: 127.0.0.1:5555
 server_addr = "127.0.0.1:5555"
 
