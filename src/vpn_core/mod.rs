@@ -33,16 +33,19 @@
 compile_error!("vpn-core only supports Linux, macOS, and Windows");
 
 pub mod buffer;
+pub mod chunked_write;
 pub mod client;
 pub mod config;
 pub mod datagram;
 pub mod device;
 pub mod error;
 pub mod file_config;
+pub mod frame_reader;
 pub mod lock;
 pub mod offload;
 pub mod server;
 pub mod signaling;
+pub mod tunnel;
 pub mod udp;
 
 // Re-exports for convenience
