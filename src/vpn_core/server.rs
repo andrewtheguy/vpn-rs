@@ -8,7 +8,10 @@
 
 use crate::vpn_core::buffer::uninitialized_vec;
 use crate::vpn_core::config::VpnServerConfig;
-use crate::vpn_core::datagram::{build_datagrams, build_gro_datagrams, classify, Datagram, FRAME_ARENA_CHUNK};
+use crate::vpn_core::datagram::{
+    build_datagrams, build_gro_datagrams, classify, datagram_cap_for_mtu, Datagram,
+    FRAME_ARENA_CHUNK,
+};
 use crate::vpn_core::device::{TunConfig, TunDevice, TunOffloadStatus, TunReader};
 use crate::vpn_core::error::{VpnError, VpnResult};
 use crate::vpn_core::offload::{materialize_offload_into, TcpGroTable, VirtioNetHdr};
@@ -17,6 +20,7 @@ use crate::vpn_core::signaling::{
     HEARTBEAT_PONG_BYTE,
 };
 use crate::vpn_core::udp::RECV_BUFFER_SIZE;
+use crate::vpn_core::udp_offload::{recv_split, send_datagrams};
 use bytes::{Bytes, BytesMut};
 use dashmap::DashMap;
 use ipnet::{Ipv4Net, Ipv6Net};
@@ -480,11 +484,25 @@ impl VpnServer {
                 if count == 0 {
                     break;
                 }
-                for (addr, bytes) in batch.drain(..) {
-                    if let Err(e) = outbound_socket.send_to(&bytes, addr).await {
-                        log::warn!("UDP send_to {} failed: {}", addr, e);
+                // Group consecutive datagrams for the same client and hand each
+                // run to send_datagrams, which UDP-GSO batches equal-sized runs
+                // (one sendmsg) where the kernel supports it. Per-flow order is
+                // preserved within each run.
+                let mut start = 0;
+                while start < batch.len() {
+                    let addr = batch[start].0;
+                    let mut end = start + 1;
+                    while end < batch.len() && batch[end].0 == addr {
+                        end += 1;
                     }
+                    let run: Vec<Bytes> =
+                        batch[start..end].iter().map(|(_, b)| b.clone()).collect();
+                    if let Err(e) = send_datagrams(&outbound_socket, Some(addr), &run).await {
+                        log::warn!("UDP send to {} failed: {}", addr, e);
+                    }
+                    start = end;
                 }
+                batch.clear();
             }
         });
 
@@ -508,22 +526,27 @@ impl VpnServer {
         let mut buf = vec![0u8; RECV_BUFFER_SIZE];
         let mut scratch = RecvScratch::default();
         let run_result = loop {
-            let (n, peer) = match socket.recv_from(&mut buf).await {
+            let (n, seg, peer) = match recv_split(&socket, &mut buf).await {
                 Ok(v) => v,
                 Err(e) => {
-                    log::error!("UDP recv_from error: {}", e);
+                    log::error!("UDP recv error: {}", e);
                     break Err(VpnError::Network(e));
                 }
             };
-            let dgram = &buf[..n];
-            // Handshake datagrams are raw JSON ('{'); data datagrams start with a
-            // message-type byte (0x00..=0x03). This cleanly handles retransmits.
-            if dgram.first() == Some(&b'{') {
-                server.handle_handshake(peer, dgram, &socket).await;
-            } else {
-                server
-                    .handle_client_datagram(peer, dgram, &socket, &tun_write_tx, &mut scratch)
-                    .await;
+            let Some(peer) = peer else {
+                continue; // no source address; cannot route or reply
+            };
+            // A GRO-coalesced recv may carry several datagrams from the same peer.
+            for dgram in buf[..n].chunks(seg) {
+                // Handshake datagrams are raw JSON ('{'); data datagrams start with
+                // a message-type byte (0x00..=0x03). This cleanly handles retransmits.
+                if dgram.first() == Some(&b'{') {
+                    server.handle_handshake(peer, dgram, &socket).await;
+                } else {
+                    server
+                        .handle_client_datagram(peer, dgram, &socket, &tun_write_tx, &mut scratch)
+                        .await;
+                }
             }
         };
 
@@ -630,6 +653,7 @@ impl VpnServer {
                     ip6_pool.server_ip(),
                     self.tun_offload_status.enabled,
                     self.config.mtu,
+                    self.config.max_datagram_size,
                 )
             }
             (Some(ip4), None) => {
@@ -640,6 +664,7 @@ impl VpnServer {
                     ip_pool.server_ip(),
                     self.tun_offload_status.enabled,
                     self.config.mtu,
+                    self.config.max_datagram_size,
                 )
             }
             (None, Some(ip6)) => {
@@ -650,6 +675,7 @@ impl VpnServer {
                     ip6_pool.server_ip(),
                     self.tun_offload_status.enabled,
                     self.config.mtu,
+                    self.config.max_datagram_size,
                 )
             }
             (None, None) => unreachable!(),
@@ -781,11 +807,21 @@ impl VpnServer {
         if let Some(meta) = offload {
             if !connection_gso_active || !self.tun_offload_status.enabled {
                 pending.clear();
-                let materialized = materialize_offload_into(&meta, packet, seg_scratch, |seg| {
-                    seg_arena.extend_from_slice(seg);
-                    pending.push(seg_arena.split_to(seg.len()).freeze());
-                    Ok(())
-                });
+                // Inbound reconstruction: cap each rebuilt segment at the local
+                // TUN MTU. Honest peers already segment at/below it, so this is a
+                // no-op for them; a hostile peer advertising a huge gso_size is
+                // prevented from making us write oversized IP packets to the TUN.
+                let materialized = materialize_offload_into(
+                    &meta,
+                    packet,
+                    seg_scratch,
+                    self.config.mtu as usize,
+                    |seg| {
+                        seg_arena.extend_from_slice(seg);
+                        pending.push(seg_arena.split_to(seg.len()).freeze());
+                        Ok(())
+                    },
+                );
                 if let Err(e) = materialized {
                     pending.clear();
                     log::warn!("Dropping packet with unsupported offload from {}: {}", peer, e);
@@ -936,7 +972,15 @@ impl VpnServer {
     ) -> VpnResult<()> {
         log::info!("TUN reader started");
 
-        let max_dgram = self.config.max_datagram_size;
+        // Effective cap: the configured upper bound can only *lower* the
+        // MTU-derived no-fragment cap, never raise it. Capping at the MTU keeps
+        // every emitted UDP datagram ≤ one link-layer frame, so super-frames are
+        // segmented (not IP-fragmented) and the kernel UDP GSO path can batch the
+        // equal-sized run (UDP_SEGMENT requires seg_size ≤ MTU).
+        let max_dgram = self
+            .config
+            .max_datagram_size
+            .min(datagram_cap_for_mtu(self.config.mtu));
         let drop_on_full = self.config.drop_on_full;
         let buffer_size = tun_reader.buffer_size();
         let mut read_storage = uninitialized_vec(buffer_size);

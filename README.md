@@ -26,7 +26,7 @@ tunnel on each host carries the loopback datagrams across the network.
 > **Project Goal:** `vpn-rs` is built for development and homelab use. It is not intended for production at scale.
 
 > [!WARNING]
-> **No Backward Compatibility in 0.0.x:** while `vpn-rs` remains in `0.0.x`, there is no compatibility between versions — refresh configs on every upgrade. The current wire protocol is **v4** and older peers are rejected.
+> **No Backward Compatibility in 0.0.x:** while `vpn-rs` remains in `0.0.x`, there is no compatibility between versions — refresh configs on every upgrade. The current wire protocol is **v5** and older peers are rejected.
 
 > [!NOTE]
 > Running `vpn-rs` requires root/Administrator privileges to create TUN devices and routes.
@@ -60,13 +60,15 @@ removed. `vpn-rs` now speaks **plain UDP datagrams to localhost**:
 
 ## Protocol and Linux GSO
 
-- Wire protocol **v4** is required on both peers. Mixed-version pairs are rejected.
+- Wire protocol **v5** is required on both peers. Mixed-version pairs are rejected.
 - Each UDP datagram carries exactly one VPN message (no length prefix).
 - On Linux, TUN offload is attempted automatically at startup (`vnet_hdr` + TCP
   GSO flags). If it fails, traffic continues in non-GSO mode and logs a warning.
-- Outbound offload super-frames are segmented when they would exceed
-  `max_datagram_size` (default 65507, the UDP payload ceiling). Lower it if your
-  tunnel cannot carry large datagrams.
+- Outbound offload super-frames are segmented when they would exceed the
+  effective cap `min(max_datagram_size, mtu + 2)`, so every emitted datagram
+  stays ≤ MTU and never IP-fragments on the wire. `max_datagram_size` (default
+  65507, the UDP payload ceiling) can only *lower* the MTU-derived cap; lower it
+  if your tunnel cannot carry MTU-sized datagrams.
 
 ## Installation
 

@@ -42,6 +42,7 @@ pub mod offload;
 pub mod server;
 pub mod signaling;
 pub mod udp;
+pub mod udp_offload;
 
 // Re-exports for convenience
 pub use client::VpnClient;

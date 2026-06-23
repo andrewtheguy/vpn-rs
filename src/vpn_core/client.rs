@@ -7,15 +7,16 @@
 //! network and provides encryption + authentication.
 
 use crate::vpn_core::buffer::uninitialized_vec;
-use crate::vpn_core::config::VpnClientConfig;
+use crate::vpn_core::config::{VpnClientConfig, MIN_DATAGRAM_SIZE};
 use crate::vpn_core::datagram::{
-    build_datagrams, build_gro_datagrams, classify, Datagram, FRAME_ARENA_CHUNK,
-    MAX_DATAGRAM_PAYLOAD,
+    build_datagrams, build_gro_datagrams, classify, datagram_cap_for_mtu, Datagram,
+    FRAME_ARENA_CHUNK,
 };
 use crate::vpn_core::device::{
     add_routes, add_routes6_with_src, Route6Guard, RouteGuard, TunConfig, TunDevice,
 };
 use crate::vpn_core::error::{VpnError, VpnResult};
+use crate::vpn_core::file_config::{MAX_VPN_MTU, MIN_VPN_MTU};
 use crate::vpn_core::lock::VpnLock;
 use crate::vpn_core::offload::{materialize_offload_into, TcpGroTable, VirtioNetHdr};
 use crate::vpn_core::signaling::{
@@ -23,6 +24,7 @@ use crate::vpn_core::signaling::{
     VpnHandshakeResponse, HEARTBEAT_PING_BYTE, HEARTBEAT_PONG_BYTE,
 };
 use crate::vpn_core::udp::{connect_client_socket, RECV_BUFFER_SIZE};
+use crate::vpn_core::udp_offload::{recv_split, send_datagrams};
 use bytes::{Bytes, BytesMut};
 use ipnet::{Ipv4Net, Ipv6Net};
 use rand::Rng;
@@ -88,6 +90,8 @@ pub struct ServerInfo {
     pub server_gso_enabled: bool,
     /// MTU dictated by the server for the client TUN device.
     pub mtu: u16,
+    /// UDP datagram cap dictated by the server for outbound data.
+    pub max_datagram_size: usize,
 }
 
 impl VpnClient {
@@ -151,6 +155,10 @@ impl VpnClient {
         }
         log::info!("  Server GSO enabled: {}", server_info.server_gso_enabled);
         log::info!("  MTU (server-dictated): {}", server_info.mtu);
+        log::info!(
+            "  Max datagram size (server-dictated): {}",
+            server_info.max_datagram_size
+        );
 
         // Create TUN device
         let tun_device = self.create_tun_device(&server_info)?;
@@ -205,7 +213,14 @@ impl VpnClient {
         log::info!("VPN tunnel established!");
         log::info!("  TUN device: {}", tun_device.name());
 
-        run_udp_tunnel(tun_device, socket, server_info.server_gso_enabled).await
+        run_udp_tunnel(
+            tun_device,
+            socket,
+            server_info.server_gso_enabled,
+            server_info.mtu,
+            server_info.max_datagram_size,
+        )
+        .await
     }
 
     /// Perform the VPN handshake, retransmitting the request until a response
@@ -221,12 +236,15 @@ impl VpnClient {
                 .await
                 .map_err(|e| VpnError::Signaling(format!("Failed to send handshake: {}", e)))?;
 
-            match tokio::time::timeout(HANDSHAKE_TIMEOUT, socket.recv(&mut buf)).await {
-                Ok(Ok(n)) => {
-                    // The handshake response is a raw JSON datagram. Anything
-                    // else this early (e.g. an early data datagram, type byte
-                    // 0x00..=0x03) is ignored and we retransmit.
-                    match VpnHandshakeResponse::decode(&buf[..n]) {
+            match tokio::time::timeout(HANDSHAKE_TIMEOUT, recv_split(socket, &mut buf)).await {
+                Ok(Ok((n, seg, _peer))) => {
+                    // The handshake response is a raw JSON datagram. Read it
+                    // GRO-aware (the socket has UDP_GRO on): take the first
+                    // coalesced datagram. Anything else this early (e.g. an early
+                    // data datagram, type byte 0x00..=0x03) is ignored and we
+                    // retransmit.
+                    let first = buf[..n].chunks(seg).next().unwrap_or(&[]);
+                    match VpnHandshakeResponse::decode(first) {
                         Ok(response) => {
                             if !response.accepted {
                                 let reason = response
@@ -293,6 +311,26 @@ impl VpnClient {
             ));
         }
 
+        // The MTU is server-dictated and drives both the local TUN device and the
+        // outbound datagram cap, so reject an out-of-range value rather than hand
+        // a garbage MTU to the kernel.
+        if !(MIN_VPN_MTU..=MAX_VPN_MTU).contains(&response.mtu) {
+            return Err(VpnError::Signaling(format!(
+                "Server advertised out-of-range MTU {} (valid {}..={})",
+                response.mtu, MIN_VPN_MTU, MAX_VPN_MTU
+            )));
+        }
+        if !(MIN_DATAGRAM_SIZE..=crate::vpn_core::datagram::MAX_DATAGRAM_PAYLOAD)
+            .contains(&response.max_datagram_size)
+        {
+            return Err(VpnError::Signaling(format!(
+                "Server advertised out-of-range max_datagram_size {} (valid {}..={})",
+                response.max_datagram_size,
+                MIN_DATAGRAM_SIZE,
+                crate::vpn_core::datagram::MAX_DATAGRAM_PAYLOAD
+            )));
+        }
+
         Ok(ServerInfo {
             assigned_ip,
             network,
@@ -302,6 +340,7 @@ impl VpnClient {
             server_ip6,
             server_gso_enabled: response.server_gso_enabled,
             mtu: response.mtu,
+            max_datagram_size: response.max_datagram_size,
         })
     }
 
@@ -406,12 +445,23 @@ pub(crate) async fn run_udp_tunnel(
     tun_device: TunDevice,
     socket: Arc<UdpSocket>,
     server_gso_enabled: bool,
+    mtu: u16,
+    max_datagram_size: usize,
 ) -> VpnResult<()> {
     let (mut tun_reader, mut tun_writer) = tun_device.split()?;
     let local_gso_enabled = tun_reader.offload_status().enabled;
     debug_assert_eq!(local_gso_enabled, tun_writer.offload_status().enabled);
     let negotiated_gso = local_gso_enabled && server_gso_enabled;
     let buffer_size = tun_reader.buffer_size();
+    // Inbound reconstruction cap: bounded by the local TUN MTU, independent of
+    // the larger transport datagram cap. A hostile server advertising a huge
+    // gso_size cannot make us write oversized plain IP packets to the TUN.
+    let max_inbound_ip_len = usize::from(mtu);
+    // Effective outbound cap: the server-advertised upper bound can only *lower*
+    // the MTU-derived no-fragment cap, never raise it. Keeping every emitted UDP
+    // datagram ≤ MTU avoids IP fragmentation and lets the kernel UDP GSO path
+    // batch equal-sized runs (UDP_SEGMENT requires seg_size ≤ MTU).
+    let max_dgram = max_datagram_size.min(datagram_cap_for_mtu(mtu));
 
     // Track last heartbeat pong received (millis since start for atomic access).
     let start_time = Instant::now();
@@ -446,7 +496,7 @@ pub(crate) async fn run_udp_tunnel(
                             &mut seg_scratch,
                             &mut pending,
                             &gro_table.flush_all(),
-                            MAX_DATAGRAM_PAYLOAD,
+                            max_dgram,
                         )
                         .is_err()
                         {
@@ -480,7 +530,7 @@ pub(crate) async fn run_udp_tunnel(
                             &mut seg_scratch,
                             &mut pending,
                             &result.outputs,
-                            MAX_DATAGRAM_PAYLOAD,
+                            max_dgram,
                         )
                         .is_err()
                         {
@@ -502,7 +552,7 @@ pub(crate) async fn run_udp_tunnel(
                         offload.as_ref(),
                         packet,
                         negotiated_gso,
-                        MAX_DATAGRAM_PAYLOAD,
+                        max_dgram,
                     ) {
                         log::warn!("Failed to frame packet: {}", e);
                         continue;
@@ -519,7 +569,7 @@ pub(crate) async fn run_udp_tunnel(
                         &mut seg_scratch,
                         &mut pending,
                         &gro_table.flush_all(),
-                        MAX_DATAGRAM_PAYLOAD,
+                        max_dgram,
                     );
                     let _ = flush_pending(&outbound_socket, &mut pending).await;
                     return Some(format!("TUN read error: {}", e));
@@ -607,58 +657,72 @@ pub(crate) async fn run_udp_tunnel(
         let mut seg_arena = BytesMut::new();
         let mut pending_segments: Vec<Bytes> = Vec::new();
         loop {
-            let n = match inbound_socket.recv(&mut buf).await {
-                Ok(n) => n,
+            let (n, seg, _peer) = match recv_split(&inbound_socket, &mut buf).await {
+                Ok(v) => v,
                 Err(e) => {
                     log::error!("UDP recv error: {}", e);
                     return Some(format!("UDP recv error: {}", e));
                 }
             };
-            let body = match classify(&buf[..n]) {
-                Ok(Datagram::Ip(body)) => body,
-                Ok(Datagram::Pong) => {
-                    let now = inbound_start_time.elapsed().as_millis() as u64;
-                    last_pong_inbound.store(now, Ordering::Relaxed);
-                    continue;
-                }
-                Ok(Datagram::Ping) => {
-                    if inbound_socket.send(HEARTBEAT_PONG_BYTE).await.is_err() {
-                        return Some("UDP send error (pong)".to_string());
-                    }
-                    continue;
-                }
-                Ok(Datagram::Capabilities(_)) => continue,
-                Err(e) => {
-                    log::trace!("Ignoring undecodable datagram: {}", e);
-                    continue;
-                }
-            };
-
-            let (offload, packet) = match parse_ip_packet_v2(body) {
-                Ok(parts) => parts,
-                Err(e) => {
-                    log::warn!("Invalid IP datagram from server: {}", e);
-                    continue;
-                }
-            };
-
-            if let Some(meta) = offload {
-                if !local_gso_enabled {
-                    let materialized =
-                        materialize_offload_into(&meta, packet, &mut seg_scratch, |seg| {
-                            seg_arena.extend_from_slice(seg);
-                            pending_segments.push(seg_arena.split_to(seg.len()).freeze());
-                            Ok(())
-                        });
-                    if let Err(e) = materialized {
-                        pending_segments.clear();
-                        log::warn!("Dropping packet with unsupported offload metadata: {}", e);
+            // A GRO-coalesced recv may carry several datagrams back-to-back.
+            for dgram in buf[..n].chunks(seg) {
+                let body = match classify(dgram) {
+                    Ok(Datagram::Ip(body)) => body,
+                    Ok(Datagram::Pong) => {
+                        let now = inbound_start_time.elapsed().as_millis() as u64;
+                        last_pong_inbound.store(now, Ordering::Relaxed);
                         continue;
                     }
-                    for packet in pending_segments.drain(..) {
+                    Ok(Datagram::Ping) => {
+                        if inbound_socket.send(HEARTBEAT_PONG_BYTE).await.is_err() {
+                            return Some("UDP send error (pong)".to_string());
+                        }
+                        continue;
+                    }
+                    Ok(Datagram::Capabilities(_)) => continue,
+                    Err(e) => {
+                        log::trace!("Ignoring undecodable datagram: {}", e);
+                        continue;
+                    }
+                };
+
+                let (offload, packet) = match parse_ip_packet_v2(body) {
+                    Ok(parts) => parts,
+                    Err(e) => {
+                        log::warn!("Invalid IP datagram from server: {}", e);
+                        continue;
+                    }
+                };
+
+                if let Some(meta) = offload {
+                    if !local_gso_enabled {
+                        let materialized =
+                            // Inbound reconstruction: cap each rebuilt segment at
+                            // the TUN MTU (see `max_inbound_ip_len`) so a hostile
+                            // server can't make us write oversized IP packets.
+                            materialize_offload_into(&meta, packet, &mut seg_scratch, max_inbound_ip_len, |seg| {
+                                seg_arena.extend_from_slice(seg);
+                                pending_segments.push(seg_arena.split_to(seg.len()).freeze());
+                                Ok(())
+                            });
+                        if let Err(e) = materialized {
+                            pending_segments.clear();
+                            log::warn!("Dropping packet with unsupported offload metadata: {}", e);
+                            continue;
+                        }
+                        for packet in pending_segments.drain(..) {
+                            let req = InboundTunWrite {
+                                packet,
+                                offload: None,
+                            };
+                            if tun_write_tx.send(req).await.is_err() {
+                                return None;
+                            }
+                        }
+                    } else {
                         let req = InboundTunWrite {
-                            packet,
-                            offload: None,
+                            packet: Bytes::copy_from_slice(packet),
+                            offload: Some(meta),
                         };
                         if tun_write_tx.send(req).await.is_err() {
                             return None;
@@ -667,19 +731,11 @@ pub(crate) async fn run_udp_tunnel(
                 } else {
                     let req = InboundTunWrite {
                         packet: Bytes::copy_from_slice(packet),
-                        offload: Some(meta),
+                        offload: None,
                     };
                     if tun_write_tx.send(req).await.is_err() {
                         return None;
                     }
-                }
-            } else {
-                let req = InboundTunWrite {
-                    packet: Bytes::copy_from_slice(packet),
-                    offload: None,
-                };
-                if tun_write_tx.send(req).await.is_err() {
-                    return None;
                 }
             }
         }
@@ -762,15 +818,21 @@ pub(crate) async fn run_udp_tunnel(
     Err(VpnError::ConnectionLost(reason))
 }
 
-/// Send and clear all pending datagrams. Returns false if the socket errored.
+/// Send and clear all pending datagrams (UDP-GSO batched where supported, on the
+/// connected socket). Returns false if the socket errored.
 async fn flush_pending(socket: &UdpSocket, pending: &mut Vec<Bytes>) -> bool {
-    for datagram in pending.drain(..) {
-        if let Err(e) = socket.send(&datagram).await {
-            log::warn!("UDP send error: {}", e);
-            return false;
-        }
+    if pending.is_empty() {
+        return true;
     }
-    true
+    let ok = match send_datagrams(socket, None, pending).await {
+        Ok(()) => true,
+        Err(e) => {
+            log::warn!("UDP send error: {}", e);
+            false
+        }
+    };
+    pending.clear();
+    ok
 }
 
 /// Backoff constants for reconnection delay calculation.

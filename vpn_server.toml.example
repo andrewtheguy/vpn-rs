@@ -57,8 +57,10 @@ network = "10.0.0.0/24"
 # client_timeout_secs = 60
 
 # Maximum UDP datagram payload to emit (576..=65507, default 65507). Offload
-# (GSO) super-frames larger than this are segmented before sending. Lower this
-# only if your tunnel cannot carry large UDP datagrams.
+# (GSO) super-frames larger than this are segmented before sending. The
+# effective cap is min(this, MTU-derived no-fragment cap): it can only lower the
+# MTU cap, never raise it. Lower this only if your tunnel cannot carry MTU-sized
+# UDP datagrams.
 # max_datagram_size = 65507
 
 # Drop packets for a slow client instead of applying backpressure (default false).
