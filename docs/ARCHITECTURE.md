@@ -202,10 +202,18 @@ section ([`file_config.rs`](../src/vpn_core/file_config.rs)):
 
 - **Server:** `listen` (default `127.0.0.1:5555`), `network` / `network6`,
   `server_ip` / `server_ip6`, `mtu` (576–9216, default 1440), `max_clients`,
-  `client_timeout_secs` (≥15), `max_datagram_size`, channel sizes, `drop_on_full`,
+  `client_timeout_secs` (≥15), `max_datagram_size`, channel sizes,
+  `recv_buffer_size` / `send_buffer_size`, `drop_on_full`,
   `disable_spoofing_check`.
 - **Client:** `server_addr` (loopback), `routes` / `routes6`, `auto_reconnect`,
-  `max_reconnect_attempts`.
+  `max_reconnect_attempts`, `recv_buffer_size` / `send_buffer_size`.
+
+`recv_buffer_size` / `send_buffer_size` set the kernel UDP socket buffers
+(`SO_RCVBUF` / `SO_SNDBUF`) in bytes (64 KiB–1 GiB, default 4 MiB each). They are
+applied unconditionally via `socket2` after the socket is bound, so a large queue
+absorbs multi-Gbit bursts instead of silently dropping datagrams. Linux caps the
+request at `net.core.rmem_max` / `net.core.wmem_max`; the applied size is read
+back and logged, with a warning when the kernel capped it well below the request.
 
 Both `validate()` paths call `ensure_loopback` (unless test mode is active), so a
 non-loopback address is rejected at startup before any socket is bound.
