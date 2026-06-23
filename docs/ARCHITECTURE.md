@@ -207,10 +207,12 @@ TOML with a top-level `role` guard and a single `[server]` **or** `[client]`
 section ([`file_config.rs`](../src/vpn_core/file_config.rs)):
 
 - **Server:** `listen` (default `127.0.0.1:5555`), `network` / `network6`
-  (`network6` must be `/126` or wider), `server_ip` / `server_ip6`, `mtu`
-  (576–9216, default 1440), `max_clients`, `client_timeout_secs` (≥15),
-  `max_datagram_size`, channel sizes, `recv_buffer_size` / `send_buffer_size`,
-  `drop_on_full`, `disable_spoofing_check`.
+  address-family selection (`network` only = IPv4-only, `network6` only =
+  IPv6-only, both = dual-stack; `network6` must be `/126` or wider),
+  `server_ip` / `server_ip6`, `mtu` (576–9216, default 1440), `max_clients`,
+  `client_timeout_secs` (≥15), `max_datagram_size`, channel sizes,
+  `recv_buffer_size` / `send_buffer_size`, `drop_on_full`,
+  `disable_spoofing_check`.
 - **Client:** `server_addr` (loopback), `routes` / `routes6`, `auto_reconnect`,
   `max_reconnect_attempts`, `recv_buffer_size` / `send_buffer_size`.
 

@@ -23,10 +23,11 @@ listen = "127.0.0.1:5555"
 # ============================================================================
 # VPN Network Configuration
 # ============================================================================
-# At least one of 'network' (IPv4) or 'network6' (IPv6) is REQUIRED.
-#   - IPv4-only:   set 'network' only
-#   - IPv6-only:   set 'network6' only
-#   - Dual-stack:  set both
+# Choose the VPN address family. At least one of 'network' (IPv4) or
+# 'network6' (IPv6) is REQUIRED:
+#   - IPv4-only:  set 'network' only
+#   - IPv6-only:  set 'network6' only
+#   - Dual-stack: set both 'network' and 'network6'
 #
 # These are the *inner* VPN addresses handed to clients; they are independent of
 # the loopback transport above.
@@ -37,8 +38,9 @@ network = "10.0.0.0/24"
 # Server's VPN IP (optional, defaults to the first host, e.g. 10.0.0.1).
 # server_ip = "10.0.0.1"
 
-# IPv6 VPN network CIDR (optional, for dual-stack or IPv6-only). Must be /126 or
-# wider. One /128 is assigned per client, sequentially (server gets ::1).
+# IPv6 VPN network CIDR. Set this (and omit 'network') for IPv6-only, or set it
+# with 'network' for dual-stack. Must be /126 or wider. One /128 is assigned per
+# client, sequentially (server gets ::1).
 # network6 = "fd00::/64"
 # server_ip6 = "fd00::1"
 

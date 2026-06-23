@@ -86,10 +86,16 @@ pub struct VpnServerConfig {
     /// Loopback UDP address the server binds to (the local tunnel forwards to it).
     pub listen: SocketAddr,
 
-    /// VPN network CIDR (e.g., "10.0.0.0/24"). Optional for IPv6-only mode.
+    /// IPv4 VPN network CIDR (e.g., "10.0.0.0/24").
+    ///
+    /// Set `network` only for IPv4-only mode, set `network6` only for IPv6-only
+    /// mode, or set both for dual-stack mode.
     pub network: Option<Ipv4Net>,
 
-    /// IPv6 VPN network CIDR (e.g., "fd00::/64"). Optional for dual-stack or IPv6-only.
+    /// IPv6 VPN network CIDR (e.g., "fd00::/64").
+    ///
+    /// Set `network6` only for IPv6-only mode, or set it with `network` for
+    /// dual-stack mode.
     pub network6: Option<Ipv6Net>,
 
     /// Server's VPN IP address (defaults to first host in network, e.g., .1).
@@ -189,7 +195,7 @@ pub struct VpnClientConfig {
     /// IPv4 routes to send through the VPN (CIDRs), e.g., 0.0.0.0/0 for full tunnel.
     pub routes: Vec<Ipv4Net>,
 
-    /// IPv6 routes to send through the VPN (CIDRs). Optional for dual-stack.
+    /// IPv6 routes to send through the VPN (CIDRs). Optional for IPv6-capable VPNs.
     pub routes6: Vec<Ipv6Net>,
 
     /// Kernel UDP socket receive buffer (`SO_RCVBUF`) in bytes (default 4 MiB).

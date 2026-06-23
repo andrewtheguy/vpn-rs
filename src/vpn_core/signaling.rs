@@ -95,7 +95,7 @@ pub struct VpnHandshakeResponse {
     /// Server's VPN IP (gateway).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server_ip: Option<Ipv4Addr>,
-    /// Assigned IPv6 VPN address for the client (optional, for dual-stack).
+    /// Assigned IPv6 VPN address for the client.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assigned_ip6: Option<Ipv6Addr>,
     /// IPv6 VPN network CIDR (e.g., fd00::/64).

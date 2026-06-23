@@ -51,7 +51,7 @@ removed. `vpn-rs` now speaks **plain UDP datagrams to localhost**:
 
 - Full subnet routing (not just single-port forwarding)
 - Multi-client server, keyed by UDP source address
-- Optional dual-stack VPN (IPv4 + IPv6)
+- VPN address family can be IPv4-only, IPv6-only, or dual-stack
 - Optional split tunneling (`--route` / `--route6`)
 - Auto-reconnect with heartbeat-based health checks; idle clients are reaped
 - Automatic Linux TUN GSO offload with software segmentation fallback for peers
@@ -108,8 +108,13 @@ role = "vpnserver"
 
 [server]
 listen  = "127.0.0.1:5555"
+
+# Choose the VPN address family:
+#   IPv4-only:  set network only
+#   IPv6-only:  set network6 only
+#   Dual-stack: set both network and network6
 network = "10.0.0.0/24"
-# network6 = "fd00::/64"   # optional dual-stack; use /126 or wider
+# network6 = "fd00::/64"   # IPv6 pool; use /126 or wider
 ```
 
 Start the VPN server (binds loopback only) and a tunnel that delivers remote

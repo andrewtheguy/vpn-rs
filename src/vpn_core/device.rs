@@ -49,9 +49,9 @@ pub struct TunConfig {
     pub netmask: Ipv4Addr,
     /// Destination/gateway IP (peer's VPN address).
     pub destination: Ipv4Addr,
-    /// IPv6 address (optional, for dual-stack).
+    /// IPv6 address for this end of the tunnel.
     pub address6: Option<Ipv6Addr>,
-    /// IPv6 prefix length (usually 128 for /128 per client).
+    /// IPv6 prefix length for the configured VPN network.
     pub prefix_len6: Option<u8>,
     /// MTU for the device (default: 1440, accounts for UDP + framing overhead).
     pub mtu: u16,
@@ -97,7 +97,7 @@ impl TunConfig {
         self
     }
 
-    /// Add IPv6 configuration for dual-stack.
+    /// Add IPv6 configuration to an existing TUN configuration.
     ///
     /// # Errors
     /// Returns an error if `prefix_len6` is greater than 128.
