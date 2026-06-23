@@ -109,7 +109,7 @@ role = "vpnserver"
 [server]
 listen  = "127.0.0.1:5555"
 network = "10.0.0.0/24"
-# network6 = "fd00::/64"   # optional dual-stack
+# network6 = "fd00::/64"   # optional dual-stack; use /126 or wider
 ```
 
 Start the VPN server (binds loopback only) and a tunnel that delivers remote

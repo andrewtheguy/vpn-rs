@@ -25,7 +25,8 @@ role = "testvpnclient"
 # test server). Default: 127.0.0.1:5555
 server_addr = "203.0.113.10:5555"
 
-# Routing and reconnect options behave exactly as in vpn_client.toml.example.
+# Routing, reconnect, and socket-buffer options behave exactly as in
+# vpn_client.toml.example.
 # routes = ["0.0.0.0/0"]
 # routes6 = ["::/0"]
 # auto_reconnect = true

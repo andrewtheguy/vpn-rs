@@ -26,11 +26,12 @@ listen = "0.0.0.0:5555"
 
 # VPN network configuration — identical rules to the normal server.
 # At least one of 'network' (IPv4) or 'network6' (IPv6) is REQUIRED.
+# If set, 'network6' must be /126 or wider.
 network = "10.0.0.0/24"
 # server_ip = "10.0.0.1"
 # network6 = "fd00::/64"
 # server_ip6 = "fd00::1"
 
 # All other tunables (mtu, max_clients, client_timeout_secs, max_datagram_size,
-# drop_on_full, channel sizes, disable_spoofing_check) behave exactly as in
-# vpn_server.toml.example.
+# drop_on_full, channel sizes, socket buffers, disable_spoofing_check) behave
+# exactly as in vpn_server.toml.example.
