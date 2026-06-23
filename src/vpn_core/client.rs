@@ -45,11 +45,20 @@ const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
 /// Heartbeat timeout (max time to wait for pong before triggering reconnection).
 const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Per-attempt timeout while waiting for the handshake response datagram.
+/// Per-attempt timeout while waiting for the handshake response datagram (UDP).
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Maximum handshake datagram (re)transmissions before giving up this attempt.
 const HANDSHAKE_RETRIES: u32 = 5;
+
+/// One-shot timeout for the TCP handshake exchange.
+///
+/// TCP is reliable, so there is no retransmit loop; this is the whole budget for
+/// the request + response. It matches the UDP path's total budget
+/// (`HANDSHAKE_TIMEOUT * HANDSHAKE_RETRIES`) so a high-latency tunnel has the same
+/// time to answer before the reconnect loop retries.
+const TCP_HANDSHAKE_TIMEOUT: Duration =
+    Duration::from_secs(HANDSHAKE_TIMEOUT.as_secs() * HANDSHAKE_RETRIES as u64);
 
 /// Channel buffer size for inbound packets queued to the TUN writer task.
 const INBOUND_TUN_CHANNEL_SIZE: usize = 512;
@@ -179,11 +188,11 @@ impl VpnClient {
 
         // Handshake: TCP is reliable, so a single request/response (no
         // retransmit loop) suffices. The token gates test-mode pairing. The
-        // whole exchange is bounded by HANDSHAKE_TIMEOUT so a server that
-        // accepts the connection but never replies fails fast (and is retried by
-        // the reconnect loop) instead of hanging forever.
+        // whole exchange is bounded by TCP_HANDSHAKE_TIMEOUT so a server that
+        // accepts the connection but never replies fails (and is retried by the
+        // reconnect loop) instead of hanging forever.
         let request = VpnHandshake::new(self.device_id, self.config.test_token.clone()).encode()?;
-        let resp_data = tokio::time::timeout(HANDSHAKE_TIMEOUT, async {
+        let resp_data = tokio::time::timeout(TCP_HANDSHAKE_TIMEOUT, async {
             write_message(&mut write_half, &request).await?;
             read_message(&mut read_half, MAX_HANDSHAKE_SIZE).await
         })
@@ -191,7 +200,7 @@ impl VpnClient {
         .map_err(|_| {
             VpnError::ConnectionLost(format!(
                 "no handshake response within {:.0}s",
-                HANDSHAKE_TIMEOUT.as_secs_f64()
+                TCP_HANDSHAKE_TIMEOUT.as_secs_f64()
             ))
         })??;
         let response = VpnHandshakeResponse::decode(&resp_data)?;
