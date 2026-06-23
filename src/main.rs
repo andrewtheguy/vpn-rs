@@ -260,14 +260,14 @@ async fn main() -> Result<()> {
             test_mode,
             test_token,
         } => {
-            if test_mode && test_token.is_none() {
-                anyhow::bail!(
-                    "--test-mode requires --test-token <TOKEN> (the token printed by the test server)"
-                );
-            }
             if !test_mode && test_token.is_some() {
                 anyhow::bail!("--test-token is only valid with --test-mode");
             }
+            let test_token = if test_mode && test_token.is_none() {
+                Some(prompt_for_test_token()?)
+            } else {
+                test_token
+            };
 
             let (cfg, from_file) = resolve_client_config(config, default_config)?;
             if from_file
@@ -335,6 +335,30 @@ async fn main() -> Result<()> {
             .await
         }
     }
+}
+
+/// Prompt the user to interactively enter the test-mode token.
+///
+/// Used when `--test-mode` is supplied without `--test-token`. Reads a single
+/// line from stdin and trims surrounding whitespace.
+fn prompt_for_test_token() -> Result<String> {
+    use std::io::Write;
+
+    print!("Enter the test token (printed by the test server): ");
+    std::io::stdout().flush().context("Failed to flush stdout")?;
+
+    let mut line = String::new();
+    let n = std::io::stdin()
+        .read_line(&mut line)
+        .context("Failed to read test token from stdin")?;
+    if n == 0 {
+        anyhow::bail!("No test token provided (reached end of input)");
+    }
+    let token = line.trim().to_string();
+    if token.is_empty() {
+        anyhow::bail!("No test token provided");
+    }
+    Ok(token)
 }
 
 /// Run VPN server.
