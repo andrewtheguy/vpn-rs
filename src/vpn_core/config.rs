@@ -123,6 +123,10 @@ pub struct VpnServerConfig {
     /// Channel buffer size for the TUN writer task (default: 512).
     pub tun_writer_channel_size: usize,
 
+    /// Channel buffer size for the inbound worker task that does per-datagram
+    /// parse / anti-spoof / segment / enqueue off the recv loop (default: 1024).
+    pub inbound_worker_channel_size: usize,
+
     /// Kernel UDP socket receive buffer (`SO_RCVBUF`) in bytes (default 4 MiB).
     ///
     /// Sized to absorb bursts that briefly outpace the userspace receiver. The
@@ -239,6 +243,7 @@ mod tests {
             drop_on_full: false,
             client_channel_size: 1024,
             tun_writer_channel_size: 512,
+            inbound_worker_channel_size: 1024,
             recv_buffer_size: crate::vpn_core::udp::DEFAULT_SOCKET_RECV_BUFFER_SIZE,
             send_buffer_size: crate::vpn_core::udp::DEFAULT_SOCKET_SEND_BUFFER_SIZE,
             disable_spoofing_check: false,

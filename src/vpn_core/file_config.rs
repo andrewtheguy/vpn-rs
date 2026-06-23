@@ -49,6 +49,8 @@ pub struct VpnServerSettings {
     pub drop_on_full: bool,
     pub client_channel_size: Option<usize>,
     pub tun_writer_channel_size: Option<usize>,
+    /// Channel buffer size for the inbound worker task (default 1024).
+    pub inbound_worker_channel_size: Option<usize>,
     /// Kernel UDP socket receive buffer (`SO_RCVBUF`) in bytes (default 4 MiB).
     pub recv_buffer_size: Option<usize>,
     /// Kernel UDP socket send buffer (`SO_SNDBUF`) in bytes (default 4 MiB).
@@ -91,6 +93,9 @@ pub const DEFAULT_CLIENT_CHANNEL_SIZE: usize = 1024;
 
 /// Default channel buffer size for TUN writer task.
 pub const DEFAULT_TUN_WRITER_CHANNEL_SIZE: usize = 512;
+
+/// Default channel buffer size for the inbound worker task.
+pub const DEFAULT_INBOUND_WORKER_CHANNEL_SIZE: usize = 1024;
 
 /// Default maximum number of connected clients.
 pub const DEFAULT_MAX_CLIENTS: usize = 254;
@@ -425,6 +430,7 @@ pub struct ResolvedVpnServerConfig {
     pub drop_on_full: bool,
     pub client_channel_size: usize,
     pub tun_writer_channel_size: usize,
+    pub inbound_worker_channel_size: usize,
     pub recv_buffer_size: usize,
     pub send_buffer_size: usize,
     pub disable_spoofing_check: bool,
@@ -466,6 +472,15 @@ impl ResolvedVpnServerConfig {
             .tun_writer_channel_size
             .unwrap_or(DEFAULT_TUN_WRITER_CHANNEL_SIZE);
         validate_channel_size(tun_writer_channel_size, "tun_writer_channel_size", "server")?;
+
+        let inbound_worker_channel_size = cfg
+            .inbound_worker_channel_size
+            .unwrap_or(DEFAULT_INBOUND_WORKER_CHANNEL_SIZE);
+        validate_channel_size(
+            inbound_worker_channel_size,
+            "inbound_worker_channel_size",
+            "server",
+        )?;
 
         let recv_buffer_size = cfg
             .recv_buffer_size
@@ -512,6 +527,7 @@ impl ResolvedVpnServerConfig {
             drop_on_full: cfg.drop_on_full,
             client_channel_size,
             tun_writer_channel_size,
+            inbound_worker_channel_size,
             recv_buffer_size,
             send_buffer_size,
             disable_spoofing_check: cfg.disable_spoofing_check,
@@ -727,6 +743,39 @@ network6 = "fd00::/64"
             ResolvedVpnServerConfig::from_config(config.settings().unwrap(), false).unwrap();
         assert_eq!(resolved.recv_buffer_size, DEFAULT_SOCKET_RECV_BUFFER_SIZE);
         assert_eq!(resolved.send_buffer_size, DEFAULT_SOCKET_SEND_BUFFER_SIZE);
+    }
+
+    #[test]
+    fn test_server_config_defaults_inbound_worker_channel() {
+        let config: VpnServerConfig = toml::from_str(&server_toml("")).unwrap();
+        let resolved =
+            ResolvedVpnServerConfig::from_config(config.settings().unwrap(), false).unwrap();
+        assert_eq!(
+            resolved.inbound_worker_channel_size,
+            DEFAULT_INBOUND_WORKER_CHANNEL_SIZE
+        );
+    }
+
+    #[test]
+    fn test_server_config_reads_inbound_worker_channel() {
+        let config: VpnServerConfig =
+            toml::from_str(&server_toml("inbound_worker_channel_size = 4096")).unwrap();
+        let resolved =
+            ResolvedVpnServerConfig::from_config(config.settings().unwrap(), false).unwrap();
+        assert_eq!(resolved.inbound_worker_channel_size, 4096);
+    }
+
+    #[test]
+    fn test_server_config_rejects_oversized_inbound_worker_channel() {
+        let config: VpnServerConfig =
+            toml::from_str(&server_toml("inbound_worker_channel_size = 70000")).unwrap();
+        let err = ResolvedVpnServerConfig::from_config(config.settings().unwrap(), false)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("inbound_worker_channel_size"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]

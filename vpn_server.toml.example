@@ -68,6 +68,11 @@ network = "10.0.0.0/24"
 # client_channel_size = 1024
 # tun_writer_channel_size = 512
 
+# Inbound worker queue: data datagrams the UDP recv loop hands off for parsing /
+# anti-spoof / TUN forwarding (default 1024). The recv loop drops (and counts) when
+# this is full instead of stalling, so it keeps draining the kernel socket buffer.
+# inbound_worker_channel_size = 1024
+
 # Kernel UDP socket buffers (SO_RCVBUF / SO_SNDBUF) in bytes (65536..=1073741824,
 # defaults 4 MiB each). Large buffers let the kernel absorb multi-Gbit bursts
 # instead of silently dropping datagrams (which surface as inner-TCP retransmits).

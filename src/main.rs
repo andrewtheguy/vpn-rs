@@ -305,6 +305,7 @@ async fn run_vpn_server(
         drop_on_full: resolved.drop_on_full,
         client_channel_size: resolved.client_channel_size,
         tun_writer_channel_size: resolved.tun_writer_channel_size,
+        inbound_worker_channel_size: resolved.inbound_worker_channel_size,
         recv_buffer_size: resolved.recv_buffer_size,
         send_buffer_size: resolved.send_buffer_size,
         disable_spoofing_check: resolved.disable_spoofing_check,
