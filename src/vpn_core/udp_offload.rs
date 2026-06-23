@@ -1,19 +1,23 @@
 //! Kernel UDP GSO (`UDP_SEGMENT`) / GRO (`UDP_GRO`) offload for the transport.
 //!
-//! The transport datagram cap can split one ~64 KB GSO super-frame into several
-//! bounded datagrams. That reduces loss amplification, but naively means one
-//! `send`/`recv` syscall per emitted datagram. This module restores batching:
+//! [`crate::vpn_core::datagram::datagram_cap_for_mtu`] segments GSO super-frames
+//! into ≤MTU datagrams so they never IP-fragment on the wire. That correctness
+//! win turns one ~64 KB super-frame into many small datagrams, which naively
+//! means one `send`/`recv` syscall each. This module restores batching:
 //!
 //! - **Send:** a run of equal-sized datagrams is handed to the kernel in a single
 //!   `sendmsg` carrying a `UDP_SEGMENT` control message; the kernel (or NIC)
-//!   emits each as an independent capped UDP packet.
+//!   emits each as an independent path-MTU UDP packet.
 //! - **Recv:** `UDP_GRO` lets a single `recvmsg` return several coalesced packets
 //!   at once; the segment size comes back in a control message and the caller
 //!   splits the buffer back into individual datagrams.
 //!
-//! Each emitted UDP datagram remains independent. The configured cap controls
-//! the throughput-versus-fragment-loss tradeoff; GSO/GRO only reduce syscall
-//! count.
+//! Each wire packet is still one independent ≤MTU UDP datagram, so a single lost
+//! packet costs exactly one TCP segment — the no-fragmentation guarantee holds.
+//! `UDP_SEGMENT` can only emit segments that fit the egress path, so a `seg_size`
+//! above that limit (a cap larger than the underlay MTU) is rejected with
+//! `EMSGSIZE`; the sender learns that ceiling once and routes oversized runs
+//! straight to plain sends instead of retrying the doomed syscall every batch.
 //!
 //! Everything degrades safely. On non-Linux, or if the kernel/NIC rejects GSO,
 //! the code falls back to one plain `send`/`recv` per datagram (identical wire
@@ -27,7 +31,7 @@ use tokio::net::UdpSocket;
 #[cfg(target_os = "linux")]
 use std::os::fd::{AsRawFd, RawFd};
 #[cfg(target_os = "linux")]
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 #[cfg(target_os = "linux")]
 use tokio::io::Interest;
 
@@ -50,6 +54,17 @@ const UDP_GRO: libc::c_int = 104;
 /// first hard failure so we stop trying (GSO support is a property of the host).
 #[cfg(target_os = "linux")]
 static UDP_GSO_AVAILABLE: AtomicBool = AtomicBool::new(true);
+
+/// Smallest `UDP_SEGMENT` size known to overflow the egress path (cleared to
+/// `usize::MAX` = "no known limit"). UDP GSO segments cannot IP-fragment, so a
+/// `seg_size` at or above the egress MTU's no-fragment limit fails with
+/// `EMSGSIZE`. The first such failure records the offending size here; later
+/// runs whose `seg_size` is at least this value skip the doomed `sendmsg` and go
+/// straight to plain sends. Only ever lowered, so it converges to the path
+/// limit. Unlike [`UDP_GSO_AVAILABLE`] this never disables GSO outright — smaller
+/// (≤MTU) runs still batch normally.
+#[cfg(target_os = "linux")]
+static UDP_GSO_MAX_SEG_SIZE: AtomicUsize = AtomicUsize::new(usize::MAX);
 
 /// 8-byte-aligned scratch for an ancillary-data (cmsg) buffer.
 #[cfg(target_os = "linux")]
@@ -195,22 +210,34 @@ async fn send_datagrams_gso(
                 seg_size,
             } => {
                 let batch = &datagrams[start..start + count];
+                // A `seg_size` already proven to overflow the egress path can
+                // only fail again (the MTU is fixed). Skip the doomed `sendmsg`
+                // and emit plain — no syscall wasted, no log line repeated.
+                if seg_size >= UDP_GSO_MAX_SEG_SIZE.load(Ordering::Relaxed) {
+                    send_plain(socket, dest, batch).await?;
+                    continue;
+                }
                 if let Err(e) = send_gso_run(socket, dest_sa.as_ref(), batch, seg_size).await {
-                    // Only a capability error means the kernel/NIC fundamentally
-                    // cannot segment — latch GSO off host-wide for that. Transient
-                    // or size-specific errors (e.g. EMSGSIZE from a momentary MTU
-                    // mismatch) fall back for just this batch without poisoning the
-                    // global flag, so one bad send can't permanently disable GSO.
+                    // Classify the failure:
+                    // - Capability errors mean the kernel/NIC fundamentally
+                    //   cannot segment: latch GSO off host-wide.
+                    // - EMSGSIZE means this `seg_size` won't fit the egress path
+                    //   without IP fragmentation: record the ceiling so equal-or-
+                    //   larger runs skip GSO, but keep it on for smaller datagrams.
+                    // - Anything else is transient: fall back for just this batch.
+                    let raw = e.raw_os_error();
                     let permanent = matches!(
-                        e.raw_os_error(),
+                        raw,
                         Some(libc::EINVAL) | Some(libc::ENOPROTOOPT) | Some(libc::EOPNOTSUPP)
                     );
                     if permanent {
                         UDP_GSO_AVAILABLE.store(false, Ordering::Relaxed);
+                    } else if raw == Some(libc::EMSGSIZE) {
+                        UDP_GSO_MAX_SEG_SIZE.fetch_min(seg_size, Ordering::Relaxed);
                     }
                     log::warn!(
                         "UDP GSO send failed ({e}); falling back to per-datagram sends \
-                         (gso_latched_off={permanent})"
+                         (gso_latched_off={permanent}, seg_size={seg_size})"
                     );
                     send_plain(socket, dest, batch).await?;
                 }

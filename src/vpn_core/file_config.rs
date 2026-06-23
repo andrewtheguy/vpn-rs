@@ -1,9 +1,7 @@
 //! TOML config-file support: file-level structs, loading, and resolution
 //! into the runtime configuration ([`super::config`]).
 
-use crate::vpn_core::config::{
-    DEFAULT_CLIENT_TIMEOUT, DEFAULT_MAX_DATAGRAM_SIZE, MIN_DATAGRAM_SIZE,
-};
+use crate::vpn_core::config::{DEFAULT_CLIENT_TIMEOUT, MIN_DATAGRAM_SIZE};
 use crate::vpn_core::datagram::MAX_DATAGRAM_PAYLOAD;
 use crate::vpn_core::udp::ensure_loopback;
 use anyhow::{Context, Result};
@@ -444,7 +442,7 @@ impl ResolvedVpnServerConfig {
             None => DEFAULT_CLIENT_TIMEOUT,
         };
 
-        let max_datagram_size = cfg.max_datagram_size.unwrap_or(DEFAULT_MAX_DATAGRAM_SIZE);
+        let max_datagram_size = cfg.max_datagram_size.unwrap_or(MAX_DATAGRAM_PAYLOAD);
         if !(MIN_DATAGRAM_SIZE..=MAX_DATAGRAM_PAYLOAD).contains(&max_datagram_size) {
             anyhow::bail!(
                 "[server] max_datagram_size {} is out of range ({}..={})",
@@ -616,7 +614,7 @@ network6 = "fd00::/64"
         let resolved =
             ResolvedVpnServerConfig::from_config(config.settings().unwrap(), false).unwrap();
         assert_eq!(resolved.listen.to_string(), DEFAULT_LISTEN_ADDR);
-        assert_eq!(resolved.max_datagram_size, DEFAULT_MAX_DATAGRAM_SIZE);
+        assert_eq!(resolved.max_datagram_size, MAX_DATAGRAM_PAYLOAD);
         assert_eq!(resolved.client_timeout, DEFAULT_CLIENT_TIMEOUT);
     }
 

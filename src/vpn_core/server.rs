@@ -9,7 +9,8 @@
 use crate::vpn_core::buffer::uninitialized_vec;
 use crate::vpn_core::config::VpnServerConfig;
 use crate::vpn_core::datagram::{
-    build_datagrams, build_gro_datagrams, classify, Datagram, FRAME_ARENA_CHUNK,
+    build_datagrams, build_gro_datagrams, classify, datagram_cap_for_mtu, Datagram,
+    FRAME_ARENA_CHUNK,
 };
 use crate::vpn_core::device::{TunConfig, TunDevice, TunOffloadStatus, TunReader};
 use crate::vpn_core::error::{VpnError, VpnResult};
@@ -971,7 +972,15 @@ impl VpnServer {
     ) -> VpnResult<()> {
         log::info!("TUN reader started");
 
-        let max_dgram = self.config.max_datagram_size;
+        // Effective cap: the configured upper bound can only *lower* the
+        // MTU-derived no-fragment cap, never raise it. Capping at the MTU keeps
+        // every emitted UDP datagram ≤ one link-layer frame, so super-frames are
+        // segmented (not IP-fragmented) and the kernel UDP GSO path can batch the
+        // equal-sized run (UDP_SEGMENT requires seg_size ≤ MTU).
+        let max_dgram = self
+            .config
+            .max_datagram_size
+            .min(datagram_cap_for_mtu(self.config.mtu));
         let drop_on_full = self.config.drop_on_full;
         let buffer_size = tun_reader.buffer_size();
         let mut read_storage = uninitialized_vec(buffer_size);

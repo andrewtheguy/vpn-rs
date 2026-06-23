@@ -9,7 +9,8 @@
 use crate::vpn_core::buffer::uninitialized_vec;
 use crate::vpn_core::config::{VpnClientConfig, MIN_DATAGRAM_SIZE};
 use crate::vpn_core::datagram::{
-    build_datagrams, build_gro_datagrams, classify, Datagram, FRAME_ARENA_CHUNK,
+    build_datagrams, build_gro_datagrams, classify, datagram_cap_for_mtu, Datagram,
+    FRAME_ARENA_CHUNK,
 };
 use crate::vpn_core::device::{
     add_routes, add_routes6_with_src, Route6Guard, RouteGuard, TunConfig, TunDevice,
@@ -456,6 +457,11 @@ pub(crate) async fn run_udp_tunnel(
     // the larger transport datagram cap. A hostile server advertising a huge
     // gso_size cannot make us write oversized plain IP packets to the TUN.
     let max_inbound_ip_len = usize::from(mtu);
+    // Effective outbound cap: the server-advertised upper bound can only *lower*
+    // the MTU-derived no-fragment cap, never raise it. Keeping every emitted UDP
+    // datagram ≤ MTU avoids IP fragmentation and lets the kernel UDP GSO path
+    // batch equal-sized runs (UDP_SEGMENT requires seg_size ≤ MTU).
+    let max_dgram = max_datagram_size.min(datagram_cap_for_mtu(mtu));
 
     // Track last heartbeat pong received (millis since start for atomic access).
     let start_time = Instant::now();
@@ -490,7 +496,7 @@ pub(crate) async fn run_udp_tunnel(
                             &mut seg_scratch,
                             &mut pending,
                             &gro_table.flush_all(),
-                            max_datagram_size,
+                            max_dgram,
                         )
                         .is_err()
                         {
@@ -524,7 +530,7 @@ pub(crate) async fn run_udp_tunnel(
                             &mut seg_scratch,
                             &mut pending,
                             &result.outputs,
-                            max_datagram_size,
+                            max_dgram,
                         )
                         .is_err()
                         {
@@ -546,7 +552,7 @@ pub(crate) async fn run_udp_tunnel(
                         offload.as_ref(),
                         packet,
                         negotiated_gso,
-                        max_datagram_size,
+                        max_dgram,
                     ) {
                         log::warn!("Failed to frame packet: {}", e);
                         continue;
@@ -563,7 +569,7 @@ pub(crate) async fn run_udp_tunnel(
                         &mut seg_scratch,
                         &mut pending,
                         &gro_table.flush_all(),
-                        max_datagram_size,
+                        max_dgram,
                     );
                     let _ = flush_pending(&outbound_socket, &mut pending).await;
                     return Some(format!("TUN read error: {}", e));

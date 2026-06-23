@@ -56,7 +56,7 @@ removed. `vpn-rs` now speaks **plain UDP datagrams to localhost**:
 - Auto-reconnect with heartbeat-based health checks; idle clients are reaped
 - Automatic Linux TUN GSO offload with software segmentation fallback for peers
   without GSO (e.g. mixed-OS), and datagram-size capping so super-frames fit a
-  bounded UDP datagram / your tunnel's limit
+  single UDP datagram / your tunnel's limit
 
 ## Protocol and Linux GSO
 
@@ -64,9 +64,11 @@ removed. `vpn-rs` now speaks **plain UDP datagrams to localhost**:
 - Each UDP datagram carries exactly one VPN message (no length prefix).
 - On Linux, TUN offload is attempted automatically at startup (`vnet_hdr` + TCP
   GSO flags). If it fails, traffic continues in non-GSO mode and logs a warning.
-- Outbound offload super-frames are segmented when they would exceed
-  `max_datagram_size` (default 8192). Lower it toward `mtu + 2` to minimize
-  IP-fragment loss amplification, or raise it toward 65507 to favor throughput.
+- Outbound offload super-frames are segmented when they would exceed the
+  effective cap `min(max_datagram_size, mtu + 2)`, so every emitted datagram
+  stays ≤ MTU and never IP-fragments on the wire. `max_datagram_size` (default
+  65507, the UDP payload ceiling) can only *lower* the MTU-derived cap; lower it
+  if your tunnel cannot carry MTU-sized datagrams.
 
 ## Installation
 

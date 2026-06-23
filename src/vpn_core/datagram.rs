@@ -83,7 +83,7 @@ pub fn ip_datagram_len(has_offload: bool, ip_len: usize) -> usize {
     1 + 1 + if has_offload { VIRTIO_NET_HDR_LEN } else { 0 } + ip_len
 }
 
-/// Strict no-fragment UDP-datagram size cap derived from the TUN `mtu`.
+/// Outbound UDP-datagram size cap derived from the TUN `mtu`.
 ///
 /// Returns the framed size of a single **plain** (no-offload) MTU-sized IP
 /// packet — `ip_datagram_len(false, mtu)`. Capping every emitted datagram at
@@ -94,10 +94,9 @@ pub fn ip_datagram_len(has_offload: bool, ip_len: usize) -> usize {
 /// fragment discards an entire ~64 KB super-frame (dozens of TCP segments);
 /// capping to the MTU makes a lost wire packet cost just one TCP segment.
 ///
-/// This is the lowest-loss cap. The configured transport cap may be higher to
-/// trade bounded IP fragmentation for higher throughput.
+/// A single non-GSO packet (always ≤ `mtu`) still rides whole; only multi-
+/// segment super-frames are split.
 #[inline]
-#[allow(dead_code)]
 pub fn datagram_cap_for_mtu(mtu: u16) -> usize {
     ip_datagram_len(false, mtu as usize)
 }

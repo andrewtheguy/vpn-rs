@@ -45,7 +45,7 @@ is the CLI shell (`server` / `client` subcommands only).
 |--------|----------------|
 | [`udp.rs`](../src/vpn_core/udp.rs) | Loopback enforcement (`ensure_loopback`), server bind, client connect |
 | [`udp_offload.rs`](../src/vpn_core/udp_offload.rs) | Kernel UDP GSO (`UDP_SEGMENT`) / GRO (`UDP_GRO`) batched send/recv, with plain fallback |
-| [`datagram.rs`](../src/vpn_core/datagram.rs) | One-message-per-datagram framing; configured datagram-size cap |
+| [`datagram.rs`](../src/vpn_core/datagram.rs) | One-message-per-datagram framing; MTU-derived datagram-size cap |
 | [`signaling.rs`](../src/vpn_core/signaling.rs) | Handshake JSON, `DataMessageType`, capabilities, IP-body parse |
 | [`server.rs`](../src/vpn_core/server.rs) | `recv_from` demux, IP pools, reaper, TUN reader, routing |
 | [`client.rs`](../src/vpn_core/client.rs) | Connect, handshake-with-retransmit, the 4 tunnel tasks, reconnect |
@@ -186,7 +186,7 @@ On Linux the kernel can hand the server ~64 KB TCP-GSO "super-frames" over the T
 device (and coalesce inbound packets via software GRO). A super-frame bundles
 dozens of MSS-sized TCP segments into one IP packet.
 
-### The transport cap
+### The no-fragment cap
 
 Emitting a super-frame as a single UDP datagram is fine over loopback (MTU 65536),
 but the moment it rides a real network (e.g. [test mode](#test-mode), MTU 1500) the
@@ -195,38 +195,41 @@ single lost fragment discards the **whole** super-frame — dozens of TCP segmen
 retransmitted from one tiny loss. That amplification turns a near-clean link into a
 retransmit storm.
 
-The outbound path therefore caps emitted datagrams at `max_datagram_size`
-(default `8192`, validated to `576..=65507`). The server uses this value for
-server-to-client traffic and advertises it in the handshake so clients use the
-same policy for client-to-server traffic.
+To prevent it, the outbound path caps every emitted datagram at
+[`datagram_cap_for_mtu(mtu)`](../src/vpn_core/datagram.rs) — the framed size of a
+single plain MTU-sized IP packet (`mtu + 2`). `build_datagrams` segments any larger
+offload frame with `materialize_offload_into` into ≤cap plain datagrams, so a
+super-frame becomes a run of ≤MTU datagrams that **never IP-fragment**; a lost wire
+packet now costs exactly one TCP segment. A single sub-MTU packet still rides whole.
 
-The strict no-fragment value is
-[`datagram_cap_for_mtu(mtu)`](../src/vpn_core/datagram.rs), the framed size of a
-single plain MTU-sized IP packet (`mtu + 2`). Setting `max_datagram_size` near
-that value minimizes loss amplification. Raising it allows bounded IP
-fragmentation, reducing packet count and improving tunnel throughput. The default
-8192 is a middle ground: much smaller than a full ~64 KB super-frame, but large
-enough to avoid forcing every GSO packet into MTU-sized datagrams.
+- The **client** derives the cap from the server-dictated `mtu`, never exceeding
+  the server-advertised `max_datagram_size`.
+- The **server** uses `min(max_datagram_size, datagram_cap_for_mtu(mtu))`:
+  `max_datagram_size` can only *lower* the no-fragment cap further (for a tunnel
+  that cannot carry MTU-sized datagrams), never raise it. Raise the **MTU** (e.g. a
+  jumbo-frame path) to allow larger datagrams. `max_datagram_size` is
+  range-validated to `576..=65507` (`MIN_DATAGRAM_SIZE`) and advertised in the
+  handshake so the client applies the same policy to client-to-server traffic.
 
-When a TCP GSO super-frame exceeds the cap, `build_datagrams` first tries to
-split it into smaller offload-tagged GSO chunks that fit the cap. If the cap is
-too small to hold a useful multi-segment GSO chunk, it falls back to
-`materialize_offload_into` and emits plain packets that fit the cap.
-
-The receive side still bounds materialized offload packets by the local TUN MTU
-before writing plain packets to the device.
+The receive side (`parse_ip_packet_v2` + `materialize_offload_into`) is already
+per-datagram and needs no cap logic.
 
 ### Kernel UDP GSO/GRO ([`udp_offload.rs`](../src/vpn_core/udp_offload.rs))
 
-Splitting one super-frame into multiple capped datagrams would otherwise mean
-one `send`/`recv` syscall each. The transport therefore uses kernel **UDP GSO**
-on send — a run of equal-sized datagrams goes out in one `sendmsg` carrying a
-`UDP_SEGMENT` control message, and the kernel/NIC emits each as an independent
-UDP packet — and **UDP GRO** on receive (`UDP_GRO` sockopt), where a single
-`recvmsg` returns several coalesced packets and the caller splits the buffer back
-into datagrams by the segment size reported in a control message. Everything
-degrades safely to one plain `send`/`recv` per datagram on non-Linux or if the
-kernel/NIC rejects GSO.
+Capping to the MTU turns one super-frame into many small datagrams, which would
+otherwise be one `send`/`recv` syscall each. The transport therefore uses kernel
+**UDP GSO** on send — a run of equal-sized datagrams goes out in one `sendmsg`
+carrying a `UDP_SEGMENT` control message, and the kernel/NIC emits each as an
+independent path-MTU wire packet — and **UDP GRO** on receive (`UDP_GRO` sockopt),
+where a single `recvmsg` returns several coalesced packets and the caller splits
+the buffer back into datagrams by the segment size reported in a control message.
+Each wire packet is still one independent ≤MTU UDP datagram, so the
+no-fragmentation guarantee holds; GSO/GRO only cut syscall count. `UDP_SEGMENT`
+cannot emit a segment larger than the egress MTU, so if a cap above the underlay
+MTU is ever configured the kernel rejects the batch with `EMSGSIZE`; the sender
+records that ceiling once and routes equal-or-larger runs to plain sends rather
+than retrying every batch. Everything degrades safely to one plain `send`/`recv`
+per datagram on non-Linux or if the kernel/NIC rejects GSO.
 
 ## Configuration
 

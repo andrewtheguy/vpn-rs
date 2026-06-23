@@ -209,7 +209,7 @@ impl VpnHandshakeResponse {
             accepted: false,
             server_gso_enabled,
             mtu: crate::vpn_core::file_config::DEFAULT_VPN_MTU,
-            max_datagram_size: crate::vpn_core::config::DEFAULT_MAX_DATAGRAM_SIZE,
+            max_datagram_size: crate::vpn_core::datagram::MAX_DATAGRAM_PAYLOAD,
             assigned_ip: None,
             network: None,
             server_ip: None,
