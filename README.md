@@ -1,14 +1,16 @@
 # vpn-rs
 
-**Single-purpose, cross-platform IP-over-TCP/UDP VPN. Loopback-only. Bring your own tunnel.**
+**A composable, cross-platform VPN layer you stack on any tunnel. Loopback-only, IP-over-TCP/UDP. Bring your own transport.**
 
-`vpn-rs` does one job: VPN tunneling. It creates a TUN interface and moves IP
-packets between it and a **plain socket bound to loopback** — TCP by default, or
-UDP (`--transport`). It does *not* do encryption, authentication, NAT traversal,
-or transport across the network — that is the job of a separate **tunnel**
-process (e.g. [`tunnel-rs`](https://github.com/andrewtheguy/tunnel-rs),
-[`duopipe`](https://github.com/andrewtheguy/duopipe), or any loopback forwarder)
-running on the same host.
+`vpn-rs` is a **composable VPN layer**: it does one job — IP tunneling — and
+leaves everything else to a transport you stack underneath it. It creates a TUN
+interface and moves IP packets between it and a **plain socket bound to loopback**
+(TCP by default, or UDP via `--transport`). It deliberately does *not* do
+encryption, authentication, NAT traversal, or cross-network transport — you
+supply those by running any **tunnel** process on the same host (e.g.
+[`tunnel-rs`](https://github.com/andrewtheguy/tunnel-rs),
+[`duopipe`](https://github.com/andrewtheguy/duopipe), an SSH tunnel, or any
+loopback forwarder). Swap the tunnel and the VPN is unchanged.
 
 ```text
       host A (client)                                   host B (server)
@@ -24,7 +26,12 @@ The VPN server binds **only loopback addresses** and is unreachable directly; th
 tunnel on each host carries the loopback traffic across the network.
 
 > [!IMPORTANT]
-> **Project Goal:** `vpn-rs` is built for development and homelab use. It is not intended for production at scale.
+> **Project Goal:** `vpn-rs` is a *modular* VPN — the IP-routing layer factored out
+> from transport and crypto so you can mix and match. That composability costs an
+> extra hop through a local socket and a second process, so it is generally **less
+> performant than an integrated VPN** (WireGuard, OpenVPN, …) that fuses tunneling
+> and encrypted transport into one datapath. It is built for development, homelab,
+> and experimentation — not production at scale.
 
 > [!WARNING]
 > **No Backward Compatibility in 0.0.x:** while `vpn-rs` remains in `0.0.x`, there is no compatibility between versions — refresh configs on every upgrade. The current wire protocol is **v4** and older peers are rejected.
@@ -36,21 +43,30 @@ tunnel on each host carries the loopback traffic across the network.
 > For a design overview — wire protocol, server/client task graph, GSO capping, and
 > the threat model — see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
-## Why a separate tunnel?
+## A composable VPN layer
 
-Encrypted/authenticated transport and NAT traversal are already solved well by
-dedicated projects. Coupling them into the VPN duplicated that effort, so it was
-removed. `vpn-rs` now speaks **plain TCP or UDP to localhost**:
+Most VPNs are *integrated*: a single binary fuses IP tunneling, encryption /
+authentication, and cross-network transport into one datapath. `vpn-rs` takes the
+opposite stance — it factors out **just the IP-tunneling layer** and lets you
+stack it on whatever transport you already trust:
 
-- It rides any loopback tunnel ([`tunnel-rs`](https://github.com/andrewtheguy/tunnel-rs),
-  [`duopipe`](https://github.com/andrewtheguy/duopipe), …). Pick the transport
-  that matches your tunnel with `--transport tcp` (default) or `--transport udp`.
-- With the **UDP** transport the VPN is datagram-based, so there is no
-  TCP-over-TCP meltdown when carried over a UDP tunnel. With the **TCP**
-  transport it can ride a stream tunnel (including SSH port-forwarding); avoid
-  stacking it on a second lossy TCP path to sidestep TCP-over-TCP.
-- The tunnel owns encryption + authentication; the loopback bind keeps the VPN
-  off the network entirely.
+- **Compose, don't reinvent.** Encrypted transport and NAT traversal are solved
+  well by dedicated projects, so `vpn-rs` speaks **plain TCP or UDP to localhost**
+  and rides any loopback tunnel ([`tunnel-rs`](https://github.com/andrewtheguy/tunnel-rs),
+  [`duopipe`](https://github.com/andrewtheguy/duopipe), an SSH tunnel, …). Pick
+  the transport that matches your tunnel with `--transport tcp` (default) or
+  `--transport udp`.
+- **The tunnel owns security.** Encryption + authentication live in the tunnel;
+  the loopback bind keeps the VPN off the network entirely, so it is only ever
+  reachable through that tunnel.
+- **Mind the stacking.** With **UDP** the VPN is datagram-based, so there is no
+  TCP-over-TCP meltdown when carried over a UDP tunnel. With **TCP** it can ride a
+  stream tunnel (including SSH port-forwarding); avoid stacking it on a second
+  lossy TCP path.
+- **The tradeoff.** The extra local-socket hop and the separate tunnel process
+  make this modular design **less performant than an integrated VPN**. You trade
+  peak throughput for the freedom to swap transports — or drop in a new one —
+  without touching the VPN.
 
 ## Features
 

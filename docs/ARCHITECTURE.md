@@ -1,12 +1,17 @@
 # vpn-rs Architecture
 
-`vpn-rs` is a **single-purpose IP-over-TCP/UDP VPN**. It creates a TUN device and
-moves IP packets between it and a **plain socket bound to loopback** — TCP by
-default, or UDP (`--transport`). It does *not* do encryption, authentication, NAT
-traversal, or cross-network transport — those belong to a separate **tunnel**
-process (e.g. [`tunnel-rs`](https://github.com/andrewtheguy/tunnel-rs),
-[`duopipe`](https://github.com/andrewtheguy/duopipe), or any loopback forwarder)
-running on the same host.
+`vpn-rs` is a **composable IP-over-TCP/UDP VPN layer**: it factors the IP-tunneling
+layer out from transport and crypto so it can be stacked on any tunnel. It creates
+a TUN device and moves IP packets between it and a **plain socket bound to
+loopback** — TCP by default, or UDP (`--transport`). It does *not* do encryption,
+authentication, NAT traversal, or cross-network transport — those belong to a
+separate **tunnel** process (e.g.
+[`tunnel-rs`](https://github.com/andrewtheguy/tunnel-rs),
+[`duopipe`](https://github.com/andrewtheguy/duopipe), an SSH tunnel, or any
+loopback forwarder) running on the same host. This modularity trades some
+throughput (an extra local-socket hop and a second process) for the freedom to
+swap transports without touching the VPN, so it is generally less performant than
+an integrated VPN such as WireGuard or OpenVPN.
 
 ```text
       host A (client)                                   host B (server)
@@ -25,8 +30,10 @@ relies on (a) never being on the network, and (b) the tunnel isolating peers.
 
 ## Design principles
 
-- **Do one thing.** VPN tunneling only. Transport/crypto/NAT-traversal are
-  explicitly *out of scope* and delegated to the external tunnel.
+- **Do one thing (composability).** VPN tunneling only. Transport/crypto/NAT-traversal
+  are explicitly *out of scope* and delegated to the external tunnel, so the layer
+  stacks on whatever transport you trust. The cost is performance: the extra hop
+  makes it slower than an integrated VPN.
 - **Two transports, one protocol.** The same handshake and data messages ride
   either **TCP** (default; a connection per client, length-prefixed frames) or
   **UDP** (one datagram per message). Pick with `--transport tcp|udp`; the local
