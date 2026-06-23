@@ -4,7 +4,7 @@
 //! (e.g. tunnel-rs / duopipe) runs on the same host and forwards loopback UDP
 //! across the network, providing encryption and authentication. Accordingly the
 //! server bind address and the client's connect target are **hard-locked to
-//! loopback** (`127.0.0.1` / `::1`) with no override.
+//! loopback** (`127.0.0.0/8`, `::1`, or IPv4-mapped loopback) in normal mode.
 //!
 //! The sole exception is test mode (`--test-mode`), which threads an
 //! `allow_non_loopback` flag through these functions to bind/connect arbitrary

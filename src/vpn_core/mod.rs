@@ -10,8 +10,10 @@
 //! # Direct IP over UDP
 //!
 //! Raw IP packets from the TUN device are framed (one datagram per message) and
-//! sent over a plain UDP socket bound to loopback. The server is hard-locked to
-//! `127.0.0.1`/`::1`; an external tunnel forwards traffic to it.
+//! sent over a plain UDP socket bound to loopback. In normal mode, the server is
+//! hard-locked to `127.0.0.0/8`, `::1`, or IPv4-mapped loopback; an external
+//! tunnel forwards traffic to it. Test mode explicitly relaxes this for direct
+//! host-to-host testing.
 //!
 //! # Platform Support
 //!

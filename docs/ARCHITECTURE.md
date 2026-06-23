@@ -29,9 +29,9 @@ it relies on (a) never being on the network, and (b) the tunnel isolating peers.
   datagram boundary *is* the message length. Because the VPN is datagram-based,
   riding a UDP tunnel avoids TCP-over-TCP meltdown. SSH port-forwarding is
   unsupported (SSH cannot forward UDP).
-- **Loopback-locked.** The server `listen` and client `server_addr` are hard-locked
-  to loopback addresses (`127.0.0.0/8`, `::1`, or IPv4-mapped loopback) with no
-  override (`ensure_loopback`, [`udp.rs`](../src/vpn_core/udp.rs)). The lone
+- **Loopback-locked.** In normal mode, the server `listen` and client `server_addr`
+  are hard-locked to loopback addresses (`127.0.0.0/8`, `::1`, or IPv4-mapped
+  loopback) by `ensure_loopback` ([`udp.rs`](../src/vpn_core/udp.rs)). The lone
   exception is [test mode](#test-mode), an explicit opt-in for tunnel-less testing.
 - **No backward compatibility** while in `0.0.x`. The wire protocol is **v4**; peers
   on any other version are rejected.
@@ -103,8 +103,8 @@ ignored for forward compatibility.
 
 ## Server runtime
 
-`VpnServer::new(config)` builds the TUN device and IP pools; `run(socket)` spawns
-the task graph and enters the receive loop.
+`VpnServer::new(config)` validates config and builds the IP pools; `run(socket)`
+creates the TUN device, spawns the task graph, and enters the receive loop.
 
 ### State
 
@@ -121,15 +121,21 @@ the task graph and enters the receive loop.
 ### Tasks (spawned by `run`)
 
 1. **Main `recv_from` loop** — demux by first byte: `{` → `handle_handshake`,
-   else → `handle_client_datagram`. Bumps `last_seen` on every datagram.
-2. **Outbound sender** — drains an `mpsc<(SocketAddr, Bytes)>` and `send_to`s each
-   datagram to its client. Single shared writer (replaces per-client QUIC streams).
-3. **TUN reader** (`run_tun_reader`) — reads IP packets from the TUN device, looks
+   else enqueue the owned datagram to the inbound worker. It uses `try_send` and
+   counts `packets_inbound_dropped_full` when the worker queue is full, so the
+   socket keeps draining instead of blocking on packet parsing.
+2. **Inbound worker** — drains `mpsc<(SocketAddr, Bytes)>`, bumps `last_seen` for
+   known clients, handles capabilities and heartbeats, performs anti-spoofing and
+   offload materialization, then enqueues IP packets to the TUN writer.
+3. **TUN writer** — drains inbound IP packets and writes them to the TUN device,
+   batching plain packets where possible.
+4. **Outbound sender** — drains an `mpsc<(SocketAddr, Bytes)>` and `send_to`s each
+   datagram to its client through a single shared UDP writer task.
+5. **TUN reader** (`run_tun_reader`) — reads IP packets from the TUN device, looks
    up the destination IP in `ip_to_addr` / `ip6_to_addr`, frames via
    `encode_ip_datagram`, and enqueues to the outbound channel. Software-GRO state is
    keyed per client `SocketAddr`.
-4. **TUN writer** — drains inbound IP packets and writes them to the TUN device.
-5. **Reaper** (`run_reaper`) — periodically reaps clients whose `last_seen` is older
+6. **Reaper** (`run_reaper`) — periodically reaps clients whose `last_seen` is older
    than `client_timeout`. UDP has no FIN, so this is the only way idle/dead clients
    are cleaned up. IPs are released **only** if the addr is still the device's
    current addr (so a "move" doesn't release a live client's IP).
@@ -200,11 +206,11 @@ needs no cap logic.
 TOML with a top-level `role` guard and a single `[server]` **or** `[client]`
 section ([`file_config.rs`](../src/vpn_core/file_config.rs)):
 
-- **Server:** `listen` (default `127.0.0.1:5555`), `network` / `network6`,
-  `server_ip` / `server_ip6`, `mtu` (576–9216, default 1440), `max_clients`,
-  `client_timeout_secs` (≥15), `max_datagram_size`, channel sizes,
-  `recv_buffer_size` / `send_buffer_size`, `drop_on_full`,
-  `disable_spoofing_check`.
+- **Server:** `listen` (default `127.0.0.1:5555`), `network` / `network6`
+  (`network6` must be `/126` or wider), `server_ip` / `server_ip6`, `mtu`
+  (576–9216, default 1440), `max_clients`, `client_timeout_secs` (≥15),
+  `max_datagram_size`, channel sizes, `recv_buffer_size` / `send_buffer_size`,
+  `drop_on_full`, `disable_spoofing_check`.
 - **Client:** `server_addr` (loopback), `routes` / `routes6`, `auto_reconnect`,
   `max_reconnect_attempts`, `recv_buffer_size` / `send_buffer_size`.
 

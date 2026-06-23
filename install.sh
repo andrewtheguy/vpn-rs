@@ -352,9 +352,9 @@ download_and_install() {
     print_info "Binary installed successfully to ${final_path}"
 }
 
-# Advise raising the macOS socket buffer limit if it is too small for QUIC.
+# Advise raising the macOS socket buffer limit if it is too small for vpn-rs.
 # macOS clamps SO_RCVBUF/SO_SNDBUF to kern.ipc.maxsockbuf; an undersized limit
-# causes UDP drops under load that QUIC answers with congestion backoff.
+# causes UDP drops under load, which surface as retransmits in tunneled traffic.
 check_macos_sockbuf() {
     if [ "$OS" != "macos" ]; then
         return 0
@@ -365,7 +365,7 @@ check_macos_sockbuf() {
     current=$(sysctl -n kern.ipc.maxsockbuf 2>/dev/null) || return 0
 
     if [ -n "$current" ] && [ "$current" -lt "$recommended" ] 2>/dev/null; then
-        print_warn "kern.ipc.maxsockbuf is ${current}, which limits QUIC throughput."
+        print_warn "kern.ipc.maxsockbuf is ${current}, which limits vpn-rs UDP throughput."
         print_warn "For best performance, raise it with:"
         print_warn "  sudo sysctl -w kern.ipc.maxsockbuf=${recommended}"
         print_warn "Persist across reboots by adding to /etc/sysctl.conf:"

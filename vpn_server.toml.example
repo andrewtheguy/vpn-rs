@@ -37,8 +37,8 @@ network = "10.0.0.0/24"
 # Server's VPN IP (optional, defaults to the first host, e.g. 10.0.0.1).
 # server_ip = "10.0.0.1"
 
-# IPv6 VPN network CIDR (optional, for dual-stack or IPv6-only).
-# One /128 is assigned per client, sequentially (server gets ::1).
+# IPv6 VPN network CIDR (optional, for dual-stack or IPv6-only). Must be /126 or
+# wider. One /128 is assigned per client, sequentially (server gets ::1).
 # network6 = "fd00::/64"
 # server_ip6 = "fd00::1"
 
