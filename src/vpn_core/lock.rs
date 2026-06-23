@@ -11,7 +11,6 @@
 compile_error!("VPN lock is only supported on Linux, macOS, and Windows");
 
 use crate::vpn_core::error::{VpnError, VpnResult};
-use fs2::FileExt;
 use std::fs::{File, OpenOptions};
 use std::io::{Seek, SeekFrom, Write};
 use std::path::PathBuf;
@@ -48,10 +47,20 @@ impl VpnLock {
             .open(&path)
             .map_err(|e| VpnError::config_with_source("Failed to open lock file", e))?;
 
-        // Try to acquire exclusive lock (non-blocking)
-        file.try_lock_exclusive().map_err(|_| {
-            VpnError::config("Another VPN client is already running. Only one instance allowed.")
-        })?;
+        // Try to acquire an exclusive lock (non-blocking) via the native
+        // std::fs::File locking API. `WouldBlock` means another handle holds an
+        // incompatible lock (i.e. another instance is running).
+        match file.try_lock() {
+            Ok(()) => {}
+            Err(std::fs::TryLockError::WouldBlock) => {
+                return Err(VpnError::config(
+                    "Another VPN client is already running. Only one instance allowed.",
+                ));
+            }
+            Err(std::fs::TryLockError::Error(e)) => {
+                return Err(VpnError::config_with_source("Failed to lock file", e));
+            }
+        }
 
         // Now that we hold the lock, truncate and write our PID
         file.set_len(0)
