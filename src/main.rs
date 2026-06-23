@@ -12,20 +12,21 @@
 compile_error!("vpn-rs only supports Unix-like systems (Linux, macOS, BSD) and Windows");
 
 mod vpn_core;
+mod vpn_dummy;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use ipnet::{Ipv4Net, Ipv6Net};
 use rand::Rng;
-use std::net::{Ipv4Addr, Ipv6Addr};
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::num::NonZeroU32;
 use std::path::PathBuf;
 
 use crate::vpn_core::config::{VpnClientConfig, VpnServerConfig};
 use crate::vpn_core::file_config::{
-    load_vpn_client_config, load_vpn_server_config, ResolvedVpnClientConfig,
+    load_vpn_client_config, load_vpn_server_config, validate_mtu, ResolvedVpnClientConfig,
     ResolvedVpnServerConfig, VpnClientConfig as TomlClientConfig, VpnClientConfigBuilder,
-    VpnServerConfig as TomlServerConfig,
+    VpnServerConfig as TomlServerConfig, DEFAULT_VPN_MTU,
 };
 use crate::vpn_core::udp::bind_server_socket;
 use crate::vpn_core::{VpnClient, VpnServer};
@@ -133,6 +134,41 @@ enum Command {
         /// Test-mode token printed by the server. Required with --test-mode.
         #[arg(long)]
         test_token: Option<String>,
+    },
+    /// Run a dummy plain-TCP VPN server for benchmarking (no external tunnel).
+    ///
+    /// Unlike `server` (loopback-only UDP, needs an external tunnel), this binds
+    /// a real TCP interface and carries traffic itself — a self-contained TCP
+    /// tunnel, like an SSH tunnel, used as a throughput baseline. IPv4-only,
+    /// single client, static IP assignment, and **no encryption or
+    /// authentication**: for benchmarking / testing only.
+    DummyServer {
+        /// Address to listen on (e.g. 0.0.0.0:5599)
+        #[arg(short, long)]
+        listen: SocketAddr,
+
+        /// IPv4 VPN network CIDR (server takes the first host, client the second)
+        #[arg(long, default_value = "10.9.0.0/24")]
+        network: Ipv4Net,
+
+        /// MTU for the TUN device. Throughput on per-packet-syscall-bound paths
+        /// scales ~linearly with MTU, so raise this (e.g. --mtu 9000) to
+        /// benchmark past the single-packet ceiling; the TCP transport
+        /// re-segments, so no jumbo physical frames are needed.
+        #[arg(long, default_value_t = DEFAULT_VPN_MTU)]
+        mtu: u16,
+    },
+    /// Run a dummy plain-TCP VPN client for benchmarking (connects to `dummy-server`).
+    ///
+    /// See `dummy-server` for the benchmarking rationale. Unencrypted; testing only.
+    DummyClient {
+        /// Dummy server address to connect to (e.g. 192.0.2.1:5599)
+        #[arg(short, long)]
+        server: SocketAddr,
+
+        /// Override the TUN MTU (defaults to the server-provided MTU)
+        #[arg(long)]
+        mtu: Option<u16>,
     },
 }
 
@@ -263,6 +299,24 @@ async fn main() -> Result<()> {
                 .build()?;
 
             run_with_test_mode_limit(resolved.test_mode, run_vpn_client(resolved)).await
+        }
+        Command::DummyServer {
+            listen,
+            network,
+            mtu,
+        } => {
+            validate_mtu(mtu, "dummy-server")?;
+            vpn_dummy::run_dummy_server(listen, network, mtu)
+                .await
+                .map_err(|e| anyhow::anyhow!("Dummy server error: {}", e))
+        }
+        Command::DummyClient { server, mtu } => {
+            if let Some(mtu) = mtu {
+                validate_mtu(mtu, "dummy-client")?;
+            }
+            vpn_dummy::run_dummy_client(server, mtu)
+                .await
+                .map_err(|e| anyhow::anyhow!("Dummy client error: {}", e))
         }
     }
 }

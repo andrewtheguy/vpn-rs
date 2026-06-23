@@ -11,9 +11,11 @@
 
 use crate::vpn_core::error::{VpnError, VpnResult};
 use crate::vpn_core::offload::{VirtioNetHdr, VIRTIO_NET_HDR_LEN};
+use bytes::{BufMut, BytesMut};
 use ipnet::{Ipv4Net, Ipv6Net};
 use serde::{Deserialize, Serialize};
 use std::net::{Ipv4Addr, Ipv6Addr};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 /// VPN protocol version.
 pub const VPN_PROTOCOL_VERSION: u16 = 4;
@@ -417,6 +419,110 @@ pub fn parse_ip_packet_v2(body: &[u8]) -> VpnResult<(Option<VirtioNetHdr>, &[u8]
     Ok((offload, &body[offload_end..]))
 }
 
+/// Maximum handshake message size (16 KB).
+///
+/// Used by the stream-framed (TCP) transport's length-prefixed handshake; the
+/// UDP transport delimits handshakes by datagram boundary instead.
+pub const MAX_HANDSHAKE_SIZE: usize = 16 * 1024;
+
+/// Maximum capabilities payload size (prevents unbounded allocation when the
+/// capabilities message is read off a byte stream rather than a datagram).
+pub const MAX_CAPABILITIES_PAYLOAD: usize = 255;
+
+/// Write a length-prefixed message to a byte stream.
+///
+/// Wire format: `[len: 4 bytes BE] [data: len bytes]`. Used by the stream
+/// (TCP) transport's handshake, where there are no datagram boundaries to
+/// delimit messages.
+pub async fn write_message<W: AsyncWriteExt + Unpin>(writer: &mut W, data: &[u8]) -> VpnResult<()> {
+    let len = u32::try_from(data.len())
+        .map_err(|_| VpnError::Signaling(format!("Message too large: {} bytes", data.len())))?;
+    writer.write_all(&len.to_be_bytes()).await?;
+    writer.write_all(data).await?;
+    Ok(())
+}
+
+/// Read a length-prefixed message from a byte stream (see [`write_message`]).
+pub async fn read_message<R: AsyncReadExt + Unpin>(
+    reader: &mut R,
+    max_size: usize,
+) -> VpnResult<Vec<u8>> {
+    let mut len_buf = [0u8; 4];
+    reader.read_exact(&mut len_buf).await?;
+    let len = u32::from_be_bytes(len_buf) as usize;
+
+    if len > max_size {
+        return Err(VpnError::Signaling(format!(
+            "Message too large: {} > {}",
+            len, max_size
+        )));
+    }
+
+    let mut data = vec![0u8; len];
+    reader.read_exact(&mut data).await?;
+    Ok(data)
+}
+
+/// Frame a capabilities message onto a byte stream (clears `buf` first).
+///
+/// Wire format: `[type: 0x03] [payload_len: 1 byte] [payload: payload_len bytes]`.
+/// This is the stream sibling of [`encode_capabilities_datagram`].
+#[inline]
+pub fn frame_capabilities_message(buf: &mut BytesMut, caps: CapabilitiesMessage) {
+    let payload = caps.encode_payload();
+    buf.clear();
+    buf.reserve(3);
+    buf.put_u8(DataMessageType::Capabilities.as_byte());
+    buf.put_u8(1); // payload length
+    buf.put_u8(payload);
+}
+
+/// Append a length-prefixed IP-packet frame to `buf` (arena-style) and return
+/// the number of bytes written.
+///
+/// v2 stream layout:
+/// `[type: 0x00] [frame_len: 4 bytes BE] [offload_len: 1 byte] [offload: 0|10 bytes] [ip_packet]`
+///
+/// Unlike [`crate::vpn_core::datagram::encode_ip_datagram`] (which relies on the
+/// UDP datagram boundary to delimit the message) this carries an explicit 4-byte
+/// length prefix so a [`crate::vpn_core::frame_reader::FrameReader`] can split
+/// frames out of a continuous TCP byte stream.
+#[inline]
+pub fn append_ip_packet_v2(
+    buf: &mut BytesMut,
+    offload: Option<&VirtioNetHdr>,
+    ip_packet: &[u8],
+) -> VpnResult<usize> {
+    if ip_packet.is_empty() {
+        return Err(VpnError::Signaling(
+            "Cannot frame empty IP packet".to_string(),
+        ));
+    }
+
+    const _: () = assert!(
+        VIRTIO_NET_HDR_LEN <= u8::MAX as usize,
+        "VIRTIO_NET_HDR_LEN must fit in u8"
+    );
+    let offload_len: u8 = if offload.is_some() {
+        VIRTIO_NET_HDR_LEN as u8
+    } else {
+        0
+    };
+    let frame_len = 1 + usize::from(offload_len) + ip_packet.len();
+    let frame_len_u32 = u32::try_from(frame_len)
+        .map_err(|_| VpnError::Signaling(format!("Packet frame too large: {}", frame_len)))?;
+
+    buf.reserve(1 + 4 + frame_len);
+    buf.put_u8(DataMessageType::IpPacket.as_byte());
+    buf.put_slice(&frame_len_u32.to_be_bytes());
+    buf.put_u8(offload_len);
+    if let Some(hdr) = offload {
+        buf.put_slice(&hdr.to_bytes());
+    }
+    buf.put_slice(ip_packet);
+    Ok(1 + 4 + frame_len)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -672,5 +778,68 @@ mod tests {
         payload.extend_from_slice(&[0u8; VIRTIO_NET_HDR_LEN]);
         let err = parse_ip_packet_v2(&payload).expect_err("empty payload must fail");
         assert!(err.to_string().contains("IP datagram body too short"));
+    }
+
+    #[tokio::test]
+    async fn test_message_roundtrip_over_stream() {
+        let (mut writer, reader) = tokio::io::duplex(4096);
+        let payload = b"the-handshake-bytes".to_vec();
+        let to_send = payload.clone();
+        let writer_task = tokio::spawn(async move {
+            write_message(&mut writer, &to_send).await.expect("write");
+        });
+
+        let mut reader = reader;
+        let got = read_message(&mut reader, MAX_HANDSHAKE_SIZE)
+            .await
+            .expect("read");
+        assert_eq!(got, payload);
+        writer_task.await.expect("writer task");
+    }
+
+    #[tokio::test]
+    async fn test_read_message_rejects_oversized() {
+        let (mut writer, reader) = tokio::io::duplex(64);
+        tokio::spawn(async move {
+            // Declare a 1000-byte message but cap the reader at 8.
+            let _ = writer.write_all(&1000u32.to_be_bytes()).await;
+        });
+        let mut reader = reader;
+        let err = read_message(&mut reader, 8)
+            .await
+            .expect_err("oversized must fail");
+        assert!(err.to_string().contains("Message too large"));
+    }
+
+    #[test]
+    fn test_frame_capabilities_message_layout() {
+        let mut buf = BytesMut::new();
+        frame_capabilities_message(&mut buf, CapabilitiesMessage { gso_enabled: true });
+        assert_eq!(buf[0], DataMessageType::Capabilities.as_byte());
+        assert_eq!(buf[1], 1);
+        assert!(CapabilitiesMessage::decode_payload(&buf[2..]).gso_enabled);
+    }
+
+    #[test]
+    fn test_append_ip_packet_v2_stream_framing() {
+        let mut packet = [0u8; 24];
+        packet[0] = 0x45;
+        let mut buf = BytesMut::new();
+        let written = append_ip_packet_v2(&mut buf, None, &packet).expect("append");
+        assert_eq!(written, buf.len());
+        // [type][frame_len: 4 BE][offload_len][ip]
+        assert_eq!(buf[0], DataMessageType::IpPacket.as_byte());
+        let frame_len = u32::from_be_bytes([buf[1], buf[2], buf[3], buf[4]]) as usize;
+        assert_eq!(frame_len, 1 + packet.len());
+        // The frame body (after type + length) parses via parse_ip_packet_v2.
+        let (offload, ip) = parse_ip_packet_v2(&buf[5..]).expect("parse body");
+        assert!(offload.is_none());
+        assert_eq!(ip, &packet[..]);
+    }
+
+    #[test]
+    fn test_append_ip_packet_v2_rejects_empty() {
+        let mut buf = BytesMut::new();
+        assert!(append_ip_packet_v2(&mut buf, None, &[]).is_err());
     }
 }
