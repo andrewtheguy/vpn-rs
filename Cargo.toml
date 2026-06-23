@@ -2,7 +2,7 @@
 name = "vpn-rs"
 version = "0.0.29"
 edition = "2024"
-description = "Single-purpose IP-over-UDP VPN tunnel (loopback-only; an external tunnel provides the encrypted transport)"
+description = "Single-purpose IP-over-TCP/UDP VPN tunnel (loopback-only; an external tunnel provides the encrypted transport)"
 readme = "README.md"
 
 [dependencies]

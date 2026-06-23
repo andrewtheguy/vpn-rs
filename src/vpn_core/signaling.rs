@@ -1,12 +1,16 @@
-//! VPN signaling protocol for tunnel establishment over plain UDP.
+//! VPN signaling protocol for tunnel establishment over TCP or UDP.
 //!
 //! This module defines the handshake messages exchanged between VPN client and
-//! server to establish IP-over-UDP tunnels, plus the data-channel message
+//! server to establish IP-over-TCP/UDP tunnels, plus the data-channel message
 //! framing. Clients identify via a random `device_id` (so a client keeps its
 //! assigned VPN IP across reconnects / source-port changes), and the server
 //! responds with assigned IP addresses, route metadata, and capabilities.
 //!
-//! Each UDP datagram carries exactly one message; there is no transport-level
+//! The same messages ride both transports, framed two ways: on UDP each
+//! datagram carries exactly one message (the datagram boundary is the length);
+//! on TCP messages are length-prefixed frames on the byte stream (see
+//! [`write_message`] / [`append_ip_packet_v2`] and
+//! [`crate::vpn_core::frame_reader`]). There is no transport-level
 //! authentication or encryption here (the external tunnel owns that).
 
 use crate::vpn_core::error::{VpnError, VpnResult};

@@ -1,9 +1,10 @@
 //! vpn-rs
 //!
-//! Single-purpose IP-over-UDP VPN tunnel. The VPN binds a loopback-only UDP
-//! socket; a separate tunnel process ([tunnel-rs] / [duopipe] / any UDP tunnel)
-//! forwards that loopback traffic across the network and provides encryption
-//! and authentication. This binary is responsible for VPN tunneling only.
+//! Single-purpose IP-over-TCP/UDP VPN tunnel. The VPN binds a loopback-only
+//! socket (TCP by default, or UDP); a separate tunnel process ([tunnel-rs] /
+//! [duopipe] / any loopback tunnel) forwards that loopback traffic across the
+//! network and provides encryption and authentication. This binary is
+//! responsible for VPN tunneling only.
 //!
 //! [tunnel-rs]: https://github.com/andrewtheguy/tunnel-rs
 //! [duopipe]: https://github.com/andrewtheguy/duopipe
@@ -12,24 +13,24 @@
 compile_error!("vpn-rs only supports Unix-like systems (Linux, macOS, BSD) and Windows");
 
 mod vpn_core;
-mod vpn_dummy;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use ipnet::{Ipv4Net, Ipv6Net};
 use rand::Rng;
-use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::num::NonZeroU32;
 use std::path::PathBuf;
 
 use crate::vpn_core::config::{VpnClientConfig, VpnServerConfig};
 use crate::vpn_core::file_config::{
-    load_vpn_client_config, load_vpn_server_config, validate_mtu, ResolvedVpnClientConfig,
-    ResolvedVpnServerConfig, VpnClientConfig as TomlClientConfig, VpnClientConfigBuilder,
-    VpnServerConfig as TomlServerConfig, DEFAULT_VPN_MTU,
+    load_vpn_client_config, load_vpn_server_config, ResolvedVpnClientConfig,
+    ResolvedVpnServerConfig, Transport, VpnClientConfig as TomlClientConfig, VpnClientConfigBuilder,
+    VpnServerConfig as TomlServerConfig,
 };
+use crate::vpn_core::tcp::bind_tcp_listener;
 use crate::vpn_core::udp::bind_server_socket;
-use crate::vpn_core::{VpnClient, VpnServer};
+use crate::vpn_core::{TcpVpnServer, VpnClient, VpnServer};
 use std::future::Future;
 use std::time::Duration;
 
@@ -63,7 +64,7 @@ where
 #[derive(Parser)]
 #[command(name = "vpn-rs")]
 #[command(version)]
-#[command(about = "Single-purpose IP-over-UDP VPN (loopback-only; bring your own tunnel)")]
+#[command(about = "Single-purpose IP-over-TCP/UDP VPN (loopback-only; bring your own tunnel)")]
 struct Args {
     #[command(subcommand)]
     command: Command,
@@ -71,7 +72,7 @@ struct Args {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Run as VPN server (binds a loopback UDP socket and assigns IPs).
+    /// Run as VPN server (binds a loopback socket and assigns IPs).
     ///
     /// Requires a config file. Use -c to specify a path or --default-config for
     /// ~/.config/vpn-rs/vpn_server.toml. See vpn_server.toml.example for format.
@@ -84,13 +85,18 @@ enum Command {
         #[arg(long)]
         default_config: bool,
 
+        /// Transport to carry VPN traffic: tcp (default) or udp. Overrides the
+        /// config file's `transport` when set.
+        #[arg(long, value_enum)]
+        transport: Option<Transport>,
+
         /// Test mode: allow binding a non-loopback listen address (requires
         /// role = "testvpnserver"). Generates and prints a random test token
         /// that clients must supply with --test-token.
         #[arg(long)]
         test_mode: bool,
     },
-    /// Run as VPN client (connects a loopback UDP socket to the local tunnel).
+    /// Run as VPN client (connects a loopback socket to the local tunnel).
     Client {
         /// Config file path
         #[arg(short = 'c', long)]
@@ -100,7 +106,12 @@ enum Command {
         #[arg(long)]
         default_config: bool,
 
-        /// Loopback UDP address of the local tunnel endpoint (e.g. 127.0.0.1:5555)
+        /// Transport to carry VPN traffic: tcp (default) or udp. Overrides the
+        /// config file's `transport` when set.
+        #[arg(long, value_enum)]
+        transport: Option<Transport>,
+
+        /// Loopback address of the local tunnel endpoint (e.g. 127.0.0.1:5555)
         #[arg(short = 's', long)]
         server_addr: Option<String>,
 
@@ -134,43 +145,6 @@ enum Command {
         /// Test-mode token printed by the server. Required with --test-mode.
         #[arg(long)]
         test_token: Option<String>,
-    },
-    /// Run a dummy plain-TCP VPN server for benchmarking (no external tunnel).
-    ///
-    /// Unlike `server` (loopback-only UDP, needs an external tunnel), this binds
-    /// a real TCP interface and carries traffic itself — a self-contained TCP
-    /// tunnel, like an SSH tunnel, used as a throughput baseline. IPv4-only,
-    /// single client, static IP assignment, and **no encryption or
-    /// authentication**: for benchmarking / testing only. Like test mode, it
-    /// stops itself after 30 minutes so a forgotten instance is not a liability.
-    DummyTestServer {
-        /// Address to listen on (e.g. 0.0.0.0:5599)
-        #[arg(short, long)]
-        listen: SocketAddr,
-
-        /// IPv4 VPN network CIDR (server takes the first host, client the second)
-        #[arg(long, default_value = "10.9.0.0/24")]
-        network: Ipv4Net,
-
-        /// MTU for the TUN device. Throughput on per-packet-syscall-bound paths
-        /// scales ~linearly with MTU, so raise this (e.g. --mtu 9000) to
-        /// benchmark past the single-packet ceiling; the TCP transport
-        /// re-segments, so no jumbo physical frames are needed.
-        #[arg(long, default_value_t = DEFAULT_VPN_MTU)]
-        mtu: u16,
-    },
-    /// Run a dummy plain-TCP VPN client for benchmarking (connects to `dummy-test-server`).
-    ///
-    /// See `dummy-test-server` for the benchmarking rationale. Unencrypted;
-    /// testing only. Like test mode, it stops itself after 30 minutes.
-    DummyTestClient {
-        /// Dummy server address to connect to (e.g. 192.0.2.1:5599)
-        #[arg(short, long)]
-        server: SocketAddr,
-
-        /// Override the TUN MTU (defaults to the server-provided MTU)
-        #[arg(long)]
-        mtu: Option<u16>,
     },
 }
 
@@ -214,6 +188,7 @@ async fn main() -> Result<()> {
         Command::Server {
             config,
             default_config,
+            transport,
             test_mode,
         } => {
             if config.is_none() && !default_config {
@@ -231,7 +206,11 @@ async fn main() -> Result<()> {
             let settings = cfg
                 .settings()
                 .ok_or_else(|| anyhow::anyhow!("Missing [server] section in config file"))?;
-            let resolved = ResolvedVpnServerConfig::from_config(settings, test_mode)?;
+            let mut resolved = ResolvedVpnServerConfig::from_config(settings, test_mode)?;
+            // CLI --transport overrides the config's transport when provided.
+            if let Some(t) = transport {
+                resolved.transport = t;
+            }
 
             // In test mode, generate a random token clients must echo back, and
             // print it prominently so the operator can hand it to test clients.
@@ -251,6 +230,7 @@ async fn main() -> Result<()> {
         Command::Client {
             config,
             default_config,
+            transport,
             server_addr,
             routes,
             routes6,
@@ -297,42 +277,11 @@ async fn main() -> Result<()> {
                     auto_reconnect_opt,
                     max_reconnect_attempts,
                 )
+                .apply_transport(transport)
                 .apply_test_mode(test_mode, test_token)
                 .build()?;
 
             run_with_test_mode_limit(resolved.test_mode, run_vpn_client(resolved)).await
-        }
-        Command::DummyTestServer {
-            listen,
-            network,
-            mtu,
-        } => {
-            validate_mtu(mtu, "dummy-test-server")?;
-            // Dummy mode is for testing/benchmarking only; cap the runtime like
-            // test mode so a forgotten instance stops itself.
-            run_with_test_mode_limit(
-                true,
-                async move {
-                    vpn_dummy::run_dummy_server(listen, network, mtu)
-                        .await
-                        .map_err(|e| anyhow::anyhow!("Dummy server error: {}", e))
-                },
-            )
-            .await
-        }
-        Command::DummyTestClient { server, mtu } => {
-            if let Some(mtu) = mtu {
-                validate_mtu(mtu, "dummy-test-client")?;
-            }
-            run_with_test_mode_limit(
-                true,
-                async move {
-                    vpn_dummy::run_dummy_client(server, mtu)
-                        .await
-                        .map_err(|e| anyhow::anyhow!("Dummy client error: {}", e))
-                },
-            )
-            .await
         }
     }
 }
@@ -392,6 +341,7 @@ async fn run_vpn_server(
         .context("Invalid server IPv6 address")?;
 
     let config = VpnServerConfig {
+        transport: resolved.transport,
         listen: resolved.listen,
         network,
         network6,
@@ -412,34 +362,57 @@ async fn run_vpn_server(
         test_token,
     };
 
-    let socket = bind_server_socket(
-        resolved.listen,
-        resolved.test_mode,
-        resolved.recv_buffer_size,
-        resolved.send_buffer_size,
-    )
-    .await
-    .with_context(|| format!("Failed to bind UDP socket {}", resolved.listen))?;
+    let proto = match config.transport {
+        Transport::Tcp => "TCP",
+        Transport::Udp => "UDP",
+    };
     if resolved.test_mode {
         log::info!(
-            "VPN server listening on UDP {} (TEST MODE: non-loopback binding allowed)",
+            "VPN server listening on {} {} (TEST MODE: non-loopback binding allowed)",
+            proto,
             resolved.listen
         );
     } else {
         log::info!(
-            "VPN server listening on loopback UDP {} (reachable only via the local tunnel)",
+            "VPN server listening on loopback {} {} (reachable only via the local tunnel)",
+            proto,
             resolved.listen
         );
     }
 
-    let server = VpnServer::new(config)
-        .await
-        .context("Failed to create VPN server")?;
+    match config.transport {
+        Transport::Udp => {
+            let socket = bind_server_socket(
+                resolved.listen,
+                resolved.test_mode,
+                resolved.recv_buffer_size,
+                resolved.send_buffer_size,
+            )
+            .await
+            .with_context(|| format!("Failed to bind UDP socket {}", resolved.listen))?;
 
-    server
-        .run(socket)
-        .await
-        .map_err(|e| anyhow::anyhow!("VPN server error: {}", e))
+            let server = VpnServer::new(config)
+                .await
+                .context("Failed to create VPN server")?;
+            server
+                .run(socket)
+                .await
+                .map_err(|e| anyhow::anyhow!("VPN server error: {}", e))
+        }
+        Transport::Tcp => {
+            let listener = bind_tcp_listener(resolved.listen, resolved.test_mode)
+                .await
+                .with_context(|| format!("Failed to bind TCP listener {}", resolved.listen))?;
+
+            let server = TcpVpnServer::new(config)
+                .await
+                .context("Failed to create TCP VPN server")?;
+            server
+                .run(listener)
+                .await
+                .map_err(|e| anyhow::anyhow!("VPN server error: {}", e))
+        }
+    }
 }
 
 /// Run VPN client.
@@ -471,6 +444,7 @@ async fn run_vpn_client(resolved: ResolvedVpnClientConfig) -> Result<()> {
     }
 
     let config = VpnClientConfig {
+        transport: resolved.transport,
         server_addr: resolved.server_addr,
         routes: parsed_routes,
         routes6: parsed_routes6,

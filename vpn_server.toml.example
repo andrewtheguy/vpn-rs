@@ -3,11 +3,11 @@
 # Usage: vpn-rs server -c vpn_server.toml
 #        vpn-rs server --default-config   (~/.config/vpn-rs/vpn_server.toml)
 #
-# vpn-rs is responsible for VPN tunneling ONLY. It binds a loopback-only UDP
+# vpn-rs is responsible for VPN tunneling ONLY. It binds a loopback-only
 # socket; a separate tunnel process must run on this host, forward this
 # loopback port across the network, and provide the encryption + authentication.
 # Examples: tunnel-rs (https://github.com/andrewtheguy/tunnel-rs),
-# duopipe (https://github.com/andrewtheguy/duopipe), or any UDP forwarder.
+# duopipe (https://github.com/andrewtheguy/duopipe), or any loopback forwarder.
 # The VPN server is never reachable directly — only through the local tunnel.
 
 # Required: validates the config matches the CLI command.
@@ -15,7 +15,16 @@ role = "vpnserver"
 
 [server]
 # ============================================================================
-# Loopback UDP listen address (the local tunnel forwards to it)
+# Transport (optional)
+# ============================================================================
+# Transport carrying VPN traffic: "tcp" (default) or "udp". TCP carries each
+# client over one connection; UDP frames each packet into a datagram. The CLI
+# --transport flag overrides this when set, and the tunnel on this host must
+# forward the same protocol.
+# transport = "tcp"
+
+# ============================================================================
+# Loopback listen address (the local tunnel forwards to it)
 # ============================================================================
 # MUST be loopback: 127.0.0.0/8 (IPv4), ::1 (IPv6), or IPv4-mapped loopback.
 # Any other address is rejected at startup. Default: 127.0.0.1:5555
@@ -61,7 +70,7 @@ network = "10.0.0.0/24"
 
 # Maximum UDP datagram payload to emit (576..=65507, default 65507). Offload
 # (GSO) super-frames larger than this are segmented before sending. Lower this
-# only if your tunnel cannot carry large UDP datagrams.
+# only if your tunnel cannot carry large UDP datagrams. (UDP transport only.)
 # max_datagram_size = 65507
 
 # Drop packets for a slow client instead of applying backpressure (default false).
@@ -74,11 +83,12 @@ network = "10.0.0.0/24"
 # Inbound worker queue: data datagrams the UDP recv loop hands off for parsing /
 # anti-spoof / TUN forwarding (default 1024). The recv loop drops (and counts) when
 # this is full instead of stalling, so it keeps draining the kernel socket buffer.
+# (UDP transport only.)
 # inbound_worker_channel_size = 1024
 
-# Kernel UDP socket buffers (SO_RCVBUF / SO_SNDBUF) in bytes (65536..=1073741824,
+# Kernel socket buffers (SO_RCVBUF / SO_SNDBUF) in bytes (65536..=1073741824,
 # defaults 4 MiB each). Large buffers let the kernel absorb multi-Gbit bursts
-# instead of silently dropping datagrams (which surface as inner-TCP retransmits).
+# instead of silently dropping data (which surfaces as inner-TCP retransmits).
 # NOTE: Linux caps the request at net.core.rmem_max / net.core.wmem_max; raise
 # those sysctls to actually use a larger buffer. A startup log reports the
 # requested-vs-applied size and warns if the kernel capped it.

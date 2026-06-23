@@ -1,27 +1,27 @@
 # vpn-rs
 
-**Single-purpose, cross-platform IP-over-UDP VPN. Loopback-only. Bring your own tunnel.**
+**Single-purpose, cross-platform IP-over-TCP/UDP VPN. Loopback-only. Bring your own tunnel.**
 
 `vpn-rs` does one job: VPN tunneling. It creates a TUN interface and moves IP
-packets between it and a **plain UDP socket bound to loopback**. It does *not*
-do encryption, authentication, NAT traversal, or transport across the network —
-that is the job of a separate **tunnel** process (e.g.
-[`tunnel-rs`](https://github.com/andrewtheguy/tunnel-rs),
-[`duopipe`](https://github.com/andrewtheguy/duopipe), or any UDP forwarder)
+packets between it and a **plain socket bound to loopback** — TCP by default, or
+UDP (`--transport`). It does *not* do encryption, authentication, NAT traversal,
+or transport across the network — that is the job of a separate **tunnel**
+process (e.g. [`tunnel-rs`](https://github.com/andrewtheguy/tunnel-rs),
+[`duopipe`](https://github.com/andrewtheguy/duopipe), or any loopback forwarder)
 running on the same host.
 
 ```text
       host A (client)                                   host B (server)
  ┌───────────────────────┐                         ┌───────────────────────┐
  │  vpn-rs client        │                         │        vpn-rs server  │
- │   TUN ⇅ UDP 127.0.0.1 │                         │ 127.0.0.1 UDP ⇅ TUN   │
+ │   TUN ⇅ 127.0.0.1     │                         │   127.0.0.1 ⇅ TUN     │
  │            │          │                         │          │            │
  │      local tunnel  ───┼──── encrypted link ─────┼──→  local tunnel      │
  └───────────────────────┘     (tunnel-rs/etc)     └───────────────────────┘
 ```
 
 The VPN server binds **only loopback addresses** and is unreachable directly; the
-tunnel on each host carries the loopback datagrams across the network.
+tunnel on each host carries the loopback traffic across the network.
 
 > [!IMPORTANT]
 > **Project Goal:** `vpn-rs` is built for development and homelab use. It is not intended for production at scale.
@@ -40,39 +40,45 @@ tunnel on each host carries the loopback datagrams across the network.
 
 Encrypted/authenticated transport and NAT traversal are already solved well by
 dedicated projects. Coupling them into the VPN duplicated that effort, so it was
-removed. `vpn-rs` now speaks **plain UDP datagrams to localhost**:
+removed. `vpn-rs` now speaks **plain TCP or UDP to localhost**:
 
-- It rides any **UDP tunnel** ([`tunnel-rs`](https://github.com/andrewtheguy/tunnel-rs),
-  [`duopipe`](https://github.com/andrewtheguy/duopipe), …). Because the VPN is
-  datagram-based, there is no TCP-over-TCP meltdown.
-- SSH port-forwarding is **not** supported, because SSH cannot forward UDP.
+- It rides any loopback tunnel ([`tunnel-rs`](https://github.com/andrewtheguy/tunnel-rs),
+  [`duopipe`](https://github.com/andrewtheguy/duopipe), …). Pick the transport
+  that matches your tunnel with `--transport tcp` (default) or `--transport udp`.
+- With the **UDP** transport the VPN is datagram-based, so there is no
+  TCP-over-TCP meltdown when carried over a UDP tunnel. With the **TCP**
+  transport it can ride a stream tunnel (including SSH port-forwarding); avoid
+  stacking it on a second lossy TCP path to sidestep TCP-over-TCP.
 - The tunnel owns encryption + authentication; the loopback bind keeps the VPN
   off the network entirely.
 
 ## Features
 
+- Selectable transport: **TCP** (default) or **UDP** (`--transport`)
 - Full subnet routing (not just single-port forwarding)
-- Multi-client server, keyed by UDP source address
+- Multi-client server: keyed by connection (TCP) or by UDP source address (UDP)
 - VPN address family can be IPv4-only, IPv6-only, or dual-stack
 - Optional split tunneling (`--route` / `--route6`)
 - Auto-reconnect with heartbeat-based health checks; idle clients are reaped
 - Automatic Linux TUN GSO offload with software segmentation fallback for peers
-  without GSO (e.g. mixed-OS), and datagram-size capping so super-frames fit a
-  single UDP datagram / your tunnel's limit
+  without GSO (e.g. mixed-OS); on UDP, super-frames are additionally capped to a
+  single datagram / your tunnel's limit
 
 ## Protocol and Linux GSO
 
 - Wire protocol **v4** is required on both peers. Mixed-version pairs are rejected.
-- Each UDP datagram carries exactly one VPN message (no length prefix).
+- **UDP**: each datagram carries exactly one VPN message (no length prefix).
+  **TCP**: messages are length-prefixed frames on the byte stream.
 - On Linux, TUN offload is attempted automatically at startup (`vnet_hdr` + TCP
   GSO flags). If it fails, traffic continues in non-GSO mode and logs a warning.
-- Outbound offload super-frames are segmented when they would exceed
+- On UDP, outbound offload super-frames are segmented when they would exceed
   `max_datagram_size` (default 65507, the UDP payload ceiling). Lower it if your
-  tunnel cannot carry large datagrams.
+  tunnel cannot carry large datagrams. TCP re-segments on the stream, so no cap
+  applies.
 
 ## Installation
 
-You only need the `vpn-rs` binary in your `PATH`, plus a UDP tunnel of your choice.
+You only need the `vpn-rs` binary in your `PATH`, plus a loopback tunnel of your choice.
 
 ### Linux and macOS
 
@@ -97,10 +103,11 @@ cargo build --release   # or: cargo install --path .
 
 ## Quick Start
 
-The example below tunnels with a UDP forwarder; substitute your real encrypted
-tunnel ([`tunnel-rs`](https://github.com/andrewtheguy/tunnel-rs),
-[`duopipe`](https://github.com/andrewtheguy/duopipe), …). The VPN config is identical regardless of
-which tunnel you use.
+The example below uses the default **TCP** transport; substitute your real
+encrypted tunnel ([`tunnel-rs`](https://github.com/andrewtheguy/tunnel-rs),
+[`duopipe`](https://github.com/andrewtheguy/duopipe), …). The VPN config is
+identical regardless of which tunnel you use; set `--transport udp` (and a
+matching UDP tunnel) if you prefer UDP.
 
 ### 1. Server host
 
@@ -125,7 +132,8 @@ traffic to `127.0.0.1:5555`:
 
 ```bash
 sudo vpn-rs server -c vpn_server.toml
-# + your tunnel terminating on this host, forwarding to udp/127.0.0.1:5555
+# + your tunnel terminating on this host, forwarding to tcp/127.0.0.1:5555
+#   (use --transport udp on both ends for a UDP tunnel)
 ```
 
 ### 2. Client host
@@ -167,6 +175,7 @@ which lets the two ends talk directly over a non-loopback address.
 
 - `-c, --config <FILE>`
 - `--default-config` (uses `~/.config/vpn-rs/vpn_server.toml`)
+- `--transport <tcp|udp>` (default `tcp`; overrides the config's `transport`)
 - `--test-mode` (allow a non-loopback `listen`; see [Test mode](#test-mode))
 
 All server tunables live in the config file — see `vpn_server.toml.example`.
@@ -177,7 +186,8 @@ All server tunables live in the config file — see `vpn_server.toml.example`.
 |--------|-------------|
 | `-c, --config <FILE>` | Client config path |
 | `--default-config` | Use `~/.config/vpn-rs/vpn_client.toml` |
-| `-s, --server-addr <ADDR>` | Loopback UDP address of the local tunnel (default `127.0.0.1:5555`) |
+| `--transport <tcp\|udp>` | Transport carrying VPN traffic (default `tcp`; overrides config) |
+| `-s, --server-addr <ADDR>` | Loopback address of the local tunnel (default `127.0.0.1:5555`) |
 | `--route <CIDR>` | Additional IPv4 routes through the VPN (repeatable) |
 | `--route6 <CIDR>` | Additional IPv6 routes through the VPN (repeatable) |
 | `--auto-reconnect` / `--no-auto-reconnect` | Force-enable / disable reconnect |
@@ -191,9 +201,9 @@ jumbo MTU raises throughput on clients whose TUN does one packet per syscall
 VPN-to-VPN (split tunnel / site-to-site / LAN).** **For IPv6-only or dual-stack,
 keep MTU ≥ `1280`.**
 
-Both the server and client enlarge their kernel UDP socket buffers (`SO_RCVBUF` /
+Both the server and client enlarge their kernel socket buffers (`SO_RCVBUF` /
 `SO_SNDBUF`) to **4 MiB each by default** so the kernel can absorb bursty
-multi-Gbit traffic instead of silently dropping datagrams (dropped datagrams show
+multi-Gbit traffic instead of silently dropping it (on UDP, drops show
 up as inner-TCP retransmits in `iperf3`). Tune with `recv_buffer_size` /
 `send_buffer_size` (bytes, `65536-1073741824`) in the `[server]` / `[client]`
 TOML section. The **receive buffer is the one that matters** — it absorbs
@@ -209,9 +219,10 @@ capped it.
 The server's `listen` and the client's `server_addr` are **hard-locked to
 loopback** (`127.0.0.0/8`, `::1`, or IPv4-mapped loopback); any other address is
 rejected at startup. This guarantees the VPN is only reachable through the local
-tunnel. Multiple clients are distinguished by their UDP source address, so the
-tunnel must present each client from a distinct local port (the usual behavior
-of per-flow UDP forwarders).
+tunnel, on either transport. On **TCP** each client is its own connection. On
+**UDP** clients are distinguished by source address, so the tunnel must present
+each client from a distinct local port (the usual behavior of per-flow UDP
+forwarders).
 
 The **only** exception is [test mode](#test-mode), an explicit opt-in for
 testing the VPN directly between hosts without a tunnel.
@@ -249,48 +260,31 @@ sudo vpn-rs server --test-mode -c vpn_server_test.toml
 sudo vpn-rs client --test-mode --test-token <TOKEN> -s <server-ip>:5555
 ```
 
-## Benchmark mode (`dummy-test`)
+## Benchmarking
 
-> [!WARNING]
-> Like test mode, `dummy-test` carries traffic **directly on the network with no
-> encryption or authentication**. Use it only on trusted networks for
-> benchmarking, never for production traffic.
-
-The production `server`/`client` path is loopback-only UDP that delegates the
-network hop to an external tunnel. To benchmark **the VPN packet pipeline by
-itself** — without an external tunnel and without UDP datagram drops — `vpn-rs`
-ships a self-contained plain-**TCP** transport: a single direct connection
-between client and server that carries traffic itself, like an SSH tunnel. Inner
-TCP rides on outer TCP with end-to-end backpressure, so on a LAN there are no
-datagram drops and effectively zero inner-TCP retransmits — the baseline the
-production path is measured against.
-
-It is **IPv4-only, single client, unencrypted, and benchmarking-only**. Like test
-mode, each end **stops itself after 30 minutes**.
+Test mode doubles as the benchmark harness: it carries traffic directly on the
+network with no external tunnel, so it measures **the VPN packet pipeline by
+itself**. Use the default **TCP** transport for a clean baseline — a single
+direct connection with end-to-end backpressure, so on a LAN there are no
+datagram drops and effectively zero inner-TCP retransmits.
 
 ```bash
-# Server: binds a real TCP interface; takes the first host of --network as its IP
-sudo vpn-rs dummy-test-server --listen 0.0.0.0:5599
-#   --network <CIDR>   default 10.9.0.0/24 (server 10.9.0.1, client 10.9.0.2)
-#   --mtu <N>          default 1440; range 576-9216
+# Server (TCP is the default transport)
+sudo vpn-rs server --test-mode -c vpn_server_test.toml   # prints a --test-token
 
-# Client: connects directly to the server (no config file needed)
-sudo vpn-rs dummy-test-client --server <server-ip>:5599
-#   --mtu <N>          override the server-dictated MTU
+# Client
+sudo vpn-rs client --test-mode --test-token <TOKEN> -s <server-ip>:5555
+
+# Then drive traffic across the tunnel:
+iperf3 -s            # on the server host (its VPN gateway IP, e.g. 10.0.0.1)
+iperf3 -c 10.0.0.1   # on the client host
 ```
 
-Then drive traffic across the tunnel, e.g. with `iperf3`:
-
-```bash
-# on the server host
-iperf3 -s
-# on the client host
-iperf3 -c 10.9.0.1
-```
-
-Raise `--mtu` (e.g. `--mtu 9000`) on the server to benchmark past the
-single-packet-per-syscall ceiling; the TCP transport re-segments, so no jumbo
-physical frames are needed.
+Raise the server's `mtu` (e.g. `9000` in the config) to benchmark past the
+single-packet-per-syscall ceiling; the TCP transport re-segments on the stream,
+so no jumbo physical frames are needed. Compare against `--transport udp` to see
+the datagram path. Like all test-mode runs, each end **stops itself after 30
+minutes**.
 
 ## Single Instance Lock
 

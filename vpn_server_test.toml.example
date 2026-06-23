@@ -20,6 +20,11 @@
 role = "testvpnserver"
 
 [server]
+# Transport carrying VPN traffic: "tcp" (default) or "udp". The CLI --transport
+# flag overrides this. In test mode the server carries traffic directly (no
+# external tunnel), so client and server must use the same transport.
+# transport = "tcp"
+
 # Listen address. In test mode this MAY be a non-loopback address so remote
 # test clients can reach it directly. Default: 127.0.0.1:5555
 listen = "0.0.0.0:5555"
