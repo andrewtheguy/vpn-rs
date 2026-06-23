@@ -53,6 +53,10 @@ pub struct VpnServerStats {
     pub packets_tun_write_failed: AtomicU64,
     /// Packets dropped due to invalid source IP (anti-spoofing).
     pub packets_spoofed: AtomicU64,
+    /// Data datagrams dropped because the inbound worker channel was full. The
+    /// recv loop sheds load here instead of stalling and letting the kernel UDP
+    /// socket buffer overflow silently.
+    pub packets_inbound_dropped_full: AtomicU64,
 }
 
 impl VpnServerStats {
@@ -488,7 +492,41 @@ impl VpnServer {
             }
         });
 
+        // Inbound worker channel + task (recv loop -> parse/anti-spoof/segment/enqueue).
+        // The recv loop only demuxes and hands owned datagrams here so it never stalls
+        // on per-datagram work; a single worker preserves per-flow ordering.
+        let (inbound_tx, mut inbound_rx) =
+            mpsc::channel::<(SocketAddr, Bytes)>(self.config.inbound_worker_channel_size);
+
         let server = Arc::new(self);
+
+        // Inbound worker task: owns the RecvScratch state and the sole `tun_write_tx`
+        // clone (so its exit cascades the TUN writer shutdown).
+        let inbound_server = server.clone();
+        let inbound_socket = socket.clone();
+        let inbound_handle = tokio::spawn(async move {
+            log::info!("Inbound worker task started");
+            let mut scratch = RecvScratch::default();
+            let mut batch: Vec<(SocketAddr, Bytes)> = Vec::with_capacity(WRITE_BATCH_SIZE);
+            loop {
+                let count = inbound_rx.recv_many(&mut batch, WRITE_BATCH_SIZE).await;
+                if count == 0 {
+                    break;
+                }
+                for (peer, bytes) in batch.drain(..) {
+                    inbound_server
+                        .handle_client_datagram(
+                            peer,
+                            &bytes,
+                            &inbound_socket,
+                            &tun_write_tx,
+                            &mut scratch,
+                        )
+                        .await;
+                }
+            }
+            log::info!("Inbound worker task exiting (channel closed)");
+        });
 
         // TUN reader task (TUN -> route -> outbound).
         let server_tun = server.clone();
@@ -504,9 +542,10 @@ impl VpnServer {
             server_reaper.run_reaper().await;
         });
 
-        // Main receive loop: demux by source addr.
+        // Main receive loop: only cheap, latency-critical work so the socket keeps
+        // draining at line rate. Handshakes (rare) are handled inline; data datagrams
+        // are handed to the inbound worker.
         let mut buf = vec![0u8; RECV_BUFFER_SIZE];
-        let mut scratch = RecvScratch::default();
         let run_result = loop {
             let (n, peer) = match socket.recv_from(&mut buf).await {
                 Ok(v) => v,
@@ -521,16 +560,29 @@ impl VpnServer {
             if dgram.first() == Some(&b'{') {
                 server.handle_handshake(peer, dgram, &socket).await;
             } else {
-                server
-                    .handle_client_datagram(peer, dgram, &socket, &tun_write_tx, &mut scratch)
-                    .await;
+                // Never await here: shed load (and count it) if the worker is behind so
+                // recv_from keeps draining the kernel socket buffer.
+                match inbound_tx.try_send((peer, Bytes::copy_from_slice(dgram))) {
+                    Ok(()) => {}
+                    Err(mpsc::error::TrySendError::Full(_)) => {
+                        server
+                            .stats
+                            .packets_inbound_dropped_full
+                            .fetch_add(1, Ordering::Relaxed);
+                    }
+                    // Worker gone (only during shutdown); nothing useful to do.
+                    Err(mpsc::error::TrySendError::Closed(_)) => {}
+                }
             }
         };
 
         log::info!("Shutting down server tasks...");
         reaper_handle.abort();
         tun_reader_handle.abort();
-        drop(tun_write_tx);
+        // Dropping inbound_tx drains+stops the worker, which owns the sole tun_write_tx
+        // clone; its exit then lets the TUN writer task finish.
+        drop(inbound_tx);
+        let _ = inbound_handle.await;
         let _ = tun_writer_handle.await;
         // outbound_tx is owned by the TUN reader task (now aborted); dropping our
         // clones lets the outbound task finish.
@@ -1327,5 +1379,9 @@ mod tests {
         assert_eq!(stats.tun_packets_read.load(Ordering::Relaxed), 0);
         assert_eq!(stats.packets_to_clients.load(Ordering::Relaxed), 0);
         assert_eq!(stats.packets_spoofed.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            stats.packets_inbound_dropped_full.load(Ordering::Relaxed),
+            0
+        );
     }
 }

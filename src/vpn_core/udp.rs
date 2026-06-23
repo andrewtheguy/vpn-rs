@@ -21,6 +21,64 @@ use tokio::net::UdpSocket;
 /// the kernel never truncates an inbound datagram.
 pub const RECV_BUFFER_SIZE: usize = 65535 + 64;
 
+/// Default kernel socket receive buffer size (`SO_RCVBUF`), applied
+/// unconditionally so users get burst tolerance without any configuration.
+///
+/// This is the *socket-wide* queue depth (distinct from [`RECV_BUFFER_SIZE`],
+/// the per-datagram read buffer). A few MB lets the kernel absorb a multi-Gbit
+/// burst that briefly outpaces the userspace receiver instead of silently
+/// dropping datagrams (which surface as inner-TCP retransmits).
+pub const DEFAULT_SOCKET_RECV_BUFFER_SIZE: usize = 4 * 1024 * 1024; // 4 MiB
+
+/// Default kernel socket send buffer size (`SO_SNDBUF`); see
+/// [`DEFAULT_SOCKET_RECV_BUFFER_SIZE`].
+pub const DEFAULT_SOCKET_SEND_BUFFER_SIZE: usize = 4 * 1024 * 1024; // 4 MiB
+
+/// Apply large kernel socket buffers (`SO_RCVBUF` / `SO_SNDBUF`) to `socket`.
+///
+/// Best-effort: a failure to set or read back a buffer is logged and otherwise
+/// ignored (the socket keeps the kernel default). Linux doubles the requested
+/// size internally and caps it at `net.core.rmem_max` / `net.core.wmem_max`, so
+/// we read the value back and warn when the applied size lands well below the
+/// request — the fix is to raise those sysctls (out of scope here).
+fn set_socket_buffers(socket: &UdpSocket, recv_buffer_size: usize, send_buffer_size: usize) {
+    let sock = socket2::SockRef::from(socket);
+
+    match sock.set_recv_buffer_size(recv_buffer_size) {
+        Ok(()) => match sock.recv_buffer_size() {
+            Ok(applied) => {
+                log::info!("SO_RCVBUF requested {recv_buffer_size}, applied {applied}");
+                // Linux reports the doubled value, so `applied >= requested`
+                // whenever the request is honored; below it means a cap hit.
+                if applied < recv_buffer_size {
+                    log::warn!(
+                        "SO_RCVBUF applied {applied} far below requested {recv_buffer_size}; \
+                         raise net.core.rmem_max to allow larger receive buffers"
+                    );
+                }
+            }
+            Err(e) => log::debug!("could not read back SO_RCVBUF: {e}"),
+        },
+        Err(e) => log::warn!("failed to set SO_RCVBUF to {recv_buffer_size}: {e}"),
+    }
+
+    match sock.set_send_buffer_size(send_buffer_size) {
+        Ok(()) => match sock.send_buffer_size() {
+            Ok(applied) => {
+                log::info!("SO_SNDBUF requested {send_buffer_size}, applied {applied}");
+                if applied < send_buffer_size {
+                    log::warn!(
+                        "SO_SNDBUF applied {applied} far below requested {send_buffer_size}; \
+                         raise net.core.wmem_max to allow larger send buffers"
+                    );
+                }
+            }
+            Err(e) => log::debug!("could not read back SO_SNDBUF: {e}"),
+        },
+        Err(e) => log::warn!("failed to set SO_SNDBUF to {send_buffer_size}: {e}"),
+    }
+}
+
 /// Return an error unless `addr` is a loopback address (`127.0.0.0/8` for IPv4,
 /// `::1` for IPv6, including IPv4-mapped loopback). This is the security
 /// boundary: the VPN must only be reachable through the local tunnel.
@@ -47,11 +105,15 @@ pub fn ensure_loopback(addr: SocketAddr) -> VpnResult<()> {
 pub async fn bind_server_socket(
     listen: SocketAddr,
     allow_non_loopback: bool,
+    recv_buffer_size: usize,
+    send_buffer_size: usize,
 ) -> VpnResult<Arc<UdpSocket>> {
     if !allow_non_loopback {
         ensure_loopback(listen)?;
     }
     let socket = UdpSocket::bind(listen).await?;
+    // Enlarge the kernel socket queues so bursts are not silently dropped.
+    set_socket_buffers(&socket, recv_buffer_size, send_buffer_size);
     Ok(Arc::new(socket))
 }
 
@@ -66,6 +128,8 @@ pub async fn bind_server_socket(
 pub async fn connect_client_socket(
     server: SocketAddr,
     allow_non_loopback: bool,
+    recv_buffer_size: usize,
+    send_buffer_size: usize,
 ) -> VpnResult<UdpSocket> {
     if !allow_non_loopback {
         ensure_loopback(server)?;
@@ -78,6 +142,8 @@ pub async fn connect_client_socket(
     };
     let socket = UdpSocket::bind(bind).await?;
     socket.connect(server).await?;
+    // Enlarge the kernel socket queues so bursts are not silently dropped.
+    set_socket_buffers(&socket, recv_buffer_size, send_buffer_size);
     Ok(socket)
 }
 
@@ -117,9 +183,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_bind_server_socket_rejects_non_loopback() {
-        let err = bind_server_socket("0.0.0.0:0".parse().unwrap(), false)
-            .await
-            .expect_err("non-loopback bind must fail");
+        let err = bind_server_socket(
+            "0.0.0.0:0".parse().unwrap(),
+            false,
+            DEFAULT_SOCKET_RECV_BUFFER_SIZE,
+            DEFAULT_SOCKET_SEND_BUFFER_SIZE,
+        )
+        .await
+        .expect_err("non-loopback bind must fail");
         assert!(err.to_string().contains("not loopback"));
     }
 
@@ -127,22 +198,37 @@ mod tests {
     async fn test_bind_server_socket_allows_non_loopback_in_test_mode() {
         // 127.0.0.1 is loopback, so to prove the check is skipped we bind a
         // non-loopback unspecified address with allow_non_loopback = true.
-        let socket = bind_server_socket("0.0.0.0:0".parse().unwrap(), true)
-            .await
-            .expect("non-loopback bind must succeed in test mode");
+        let socket = bind_server_socket(
+            "0.0.0.0:0".parse().unwrap(),
+            true,
+            DEFAULT_SOCKET_RECV_BUFFER_SIZE,
+            DEFAULT_SOCKET_SEND_BUFFER_SIZE,
+        )
+        .await
+        .expect("non-loopback bind must succeed in test mode");
         assert!(!socket.local_addr().unwrap().ip().is_loopback());
     }
 
     #[tokio::test]
     async fn test_bind_and_connect_loopback_roundtrip() {
-        let server = bind_server_socket("127.0.0.1:0".parse().unwrap(), false)
-            .await
-            .expect("bind server");
+        let server = bind_server_socket(
+            "127.0.0.1:0".parse().unwrap(),
+            false,
+            DEFAULT_SOCKET_RECV_BUFFER_SIZE,
+            DEFAULT_SOCKET_SEND_BUFFER_SIZE,
+        )
+        .await
+        .expect("bind server");
         let server_addr = server.local_addr().unwrap();
 
-        let client = connect_client_socket(server_addr, false)
-            .await
-            .expect("connect");
+        let client = connect_client_socket(
+            server_addr,
+            false,
+            DEFAULT_SOCKET_RECV_BUFFER_SIZE,
+            DEFAULT_SOCKET_SEND_BUFFER_SIZE,
+        )
+        .await
+        .expect("connect");
         client.send(b"hello").await.expect("send");
 
         let mut buf = [0u8; 16];
@@ -152,5 +238,34 @@ mod tests {
         server.send_to(b"world", peer).await.expect("reply");
         let n = client.recv(&mut buf).await.expect("recv reply");
         assert_eq!(&buf[..n], b"world");
+    }
+
+    #[tokio::test]
+    async fn test_set_socket_buffers_applies_over_loopback() {
+        let socket = UdpSocket::bind("127.0.0.1:0").await.expect("bind");
+        let sock = socket2::SockRef::from(&socket);
+
+        // Capture the kernel defaults before applying our larger request, so the
+        // assertions detect a no-op set rather than just the read-back path.
+        let default_recv = sock.recv_buffer_size().expect("read default SO_RCVBUF");
+        let default_send = sock.send_buffer_size().expect("read default SO_SNDBUF");
+
+        // 256 KiB exceeds the default buffer (so a no-op would be caught) yet is
+        // small enough that the applied value — `2 * min(request, rmem_max)` on
+        // Linux — stays >= the request on any host with rmem_max >= 128 KiB (the
+        // Linux default is ~208 KiB).
+        let requested = 256 * 1024;
+        set_socket_buffers(&socket, requested, requested);
+
+        let applied_recv = sock.recv_buffer_size().expect("read SO_RCVBUF");
+        let applied_send = sock.send_buffer_size().expect("read SO_SNDBUF");
+        assert!(
+            applied_recv >= requested,
+            "SO_RCVBUF should grow to >= {requested} (default {default_recv}, got {applied_recv})"
+        );
+        assert!(
+            applied_send >= requested,
+            "SO_SNDBUF should grow to >= {requested} (default {default_send}, got {applied_send})"
+        );
     }
 }

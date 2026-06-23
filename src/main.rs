@@ -165,6 +165,8 @@ fn resolve_client_config(
 async fn main() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
+    log::info!("{} v{}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
+
     let args = Args::parse();
 
     match args.command {
@@ -305,14 +307,22 @@ async fn run_vpn_server(
         drop_on_full: resolved.drop_on_full,
         client_channel_size: resolved.client_channel_size,
         tun_writer_channel_size: resolved.tun_writer_channel_size,
+        inbound_worker_channel_size: resolved.inbound_worker_channel_size,
+        recv_buffer_size: resolved.recv_buffer_size,
+        send_buffer_size: resolved.send_buffer_size,
         disable_spoofing_check: resolved.disable_spoofing_check,
         test_mode: resolved.test_mode,
         test_token,
     };
 
-    let socket = bind_server_socket(resolved.listen, resolved.test_mode)
-        .await
-        .with_context(|| format!("Failed to bind UDP socket {}", resolved.listen))?;
+    let socket = bind_server_socket(
+        resolved.listen,
+        resolved.test_mode,
+        resolved.recv_buffer_size,
+        resolved.send_buffer_size,
+    )
+    .await
+    .with_context(|| format!("Failed to bind UDP socket {}", resolved.listen))?;
     if resolved.test_mode {
         log::info!(
             "VPN server listening on UDP {} (TEST MODE: non-loopback binding allowed)",
@@ -367,6 +377,8 @@ async fn run_vpn_client(resolved: ResolvedVpnClientConfig) -> Result<()> {
         server_addr: resolved.server_addr,
         routes: parsed_routes,
         routes6: parsed_routes6,
+        recv_buffer_size: resolved.recv_buffer_size,
+        send_buffer_size: resolved.send_buffer_size,
         test_mode: resolved.test_mode,
         test_token: resolved.test_token,
     };

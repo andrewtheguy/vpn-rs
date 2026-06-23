@@ -3,7 +3,9 @@
 
 use crate::vpn_core::config::{DEFAULT_CLIENT_TIMEOUT, MIN_DATAGRAM_SIZE};
 use crate::vpn_core::datagram::MAX_DATAGRAM_PAYLOAD;
-use crate::vpn_core::udp::ensure_loopback;
+use crate::vpn_core::udp::{
+    DEFAULT_SOCKET_RECV_BUFFER_SIZE, DEFAULT_SOCKET_SEND_BUFFER_SIZE, ensure_loopback,
+};
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::net::SocketAddr;
@@ -47,6 +49,12 @@ pub struct VpnServerSettings {
     pub drop_on_full: bool,
     pub client_channel_size: Option<usize>,
     pub tun_writer_channel_size: Option<usize>,
+    /// Channel buffer size for the inbound worker task (default 1024).
+    pub inbound_worker_channel_size: Option<usize>,
+    /// Kernel UDP socket receive buffer (`SO_RCVBUF`) in bytes (default 4 MiB).
+    pub recv_buffer_size: Option<usize>,
+    /// Kernel UDP socket send buffer (`SO_SNDBUF`) in bytes (default 4 MiB).
+    pub send_buffer_size: Option<usize>,
     #[serde(default)]
     pub disable_spoofing_check: bool,
 }
@@ -59,6 +67,10 @@ pub struct VpnClientSettings {
     pub routes6: Option<Vec<String>>,
     pub auto_reconnect: Option<bool>,
     pub max_reconnect_attempts: Option<NonZeroU32>,
+    /// Kernel UDP socket receive buffer (`SO_RCVBUF`) in bytes (default 4 MiB).
+    pub recv_buffer_size: Option<usize>,
+    /// Kernel UDP socket send buffer (`SO_SNDBUF`) in bytes (default 4 MiB).
+    pub send_buffer_size: Option<usize>,
 }
 
 #[derive(Deserialize, Default, Clone)]
@@ -81,6 +93,9 @@ pub const DEFAULT_CLIENT_CHANNEL_SIZE: usize = 1024;
 
 /// Default channel buffer size for TUN writer task.
 pub const DEFAULT_TUN_WRITER_CHANNEL_SIZE: usize = 512;
+
+/// Default channel buffer size for the inbound worker task.
+pub const DEFAULT_INBOUND_WORKER_CHANNEL_SIZE: usize = 1024;
 
 /// Default maximum number of connected clients.
 pub const DEFAULT_MAX_CLIENTS: usize = 254;
@@ -118,6 +133,31 @@ fn validate_channel_size(size: usize, field_name: &str, section: &str) -> Result
             section,
             field_name,
             size
+        );
+    }
+    Ok(())
+}
+
+/// Minimum permitted kernel socket buffer size (`SO_RCVBUF` / `SO_SNDBUF`), 64 KiB.
+pub const MIN_SOCKET_BUFFER_SIZE: usize = 64 * 1024;
+
+/// Maximum permitted kernel socket buffer size, 1 GiB. A sanity bound only; the
+/// kernel further caps the request at `net.core.rmem_max` / `net.core.wmem_max`.
+pub const MAX_SOCKET_BUFFER_SIZE: usize = 1024 * 1024 * 1024;
+
+pub(crate) fn validate_socket_buffer_size(
+    size: usize,
+    field_name: &str,
+    section: &str,
+) -> Result<()> {
+    if !(MIN_SOCKET_BUFFER_SIZE..=MAX_SOCKET_BUFFER_SIZE).contains(&size) {
+        anyhow::bail!(
+            "[{}] {} {} is out of range ({}..={})",
+            section,
+            field_name,
+            size,
+            MIN_SOCKET_BUFFER_SIZE,
+            MAX_SOCKET_BUFFER_SIZE
         );
     }
     Ok(())
@@ -390,6 +430,9 @@ pub struct ResolvedVpnServerConfig {
     pub drop_on_full: bool,
     pub client_channel_size: usize,
     pub tun_writer_channel_size: usize,
+    pub inbound_worker_channel_size: usize,
+    pub recv_buffer_size: usize,
+    pub send_buffer_size: usize,
     pub disable_spoofing_check: bool,
     /// Test mode: non-loopback `listen` allowed (set via `--test-mode`).
     pub test_mode: bool,
@@ -430,6 +473,25 @@ impl ResolvedVpnServerConfig {
             .unwrap_or(DEFAULT_TUN_WRITER_CHANNEL_SIZE);
         validate_channel_size(tun_writer_channel_size, "tun_writer_channel_size", "server")?;
 
+        let inbound_worker_channel_size = cfg
+            .inbound_worker_channel_size
+            .unwrap_or(DEFAULT_INBOUND_WORKER_CHANNEL_SIZE);
+        validate_channel_size(
+            inbound_worker_channel_size,
+            "inbound_worker_channel_size",
+            "server",
+        )?;
+
+        let recv_buffer_size = cfg
+            .recv_buffer_size
+            .unwrap_or(DEFAULT_SOCKET_RECV_BUFFER_SIZE);
+        validate_socket_buffer_size(recv_buffer_size, "recv_buffer_size", "server")?;
+
+        let send_buffer_size = cfg
+            .send_buffer_size
+            .unwrap_or(DEFAULT_SOCKET_SEND_BUFFER_SIZE);
+        validate_socket_buffer_size(send_buffer_size, "send_buffer_size", "server")?;
+
         let client_timeout = match cfg.client_timeout_secs {
             Some(secs) => {
                 if secs < 15 {
@@ -465,6 +527,9 @@ impl ResolvedVpnServerConfig {
             drop_on_full: cfg.drop_on_full,
             client_channel_size,
             tun_writer_channel_size,
+            inbound_worker_channel_size,
+            recv_buffer_size,
+            send_buffer_size,
             disable_spoofing_check: cfg.disable_spoofing_check,
             test_mode,
         })
@@ -478,6 +543,8 @@ pub struct ResolvedVpnClientConfig {
     pub routes6: Vec<String>,
     pub auto_reconnect: bool,
     pub max_reconnect_attempts: Option<NonZeroU32>,
+    pub recv_buffer_size: usize,
+    pub send_buffer_size: usize,
     /// Test mode: non-loopback `server_addr` allowed (set via `--test-mode`).
     pub test_mode: bool,
     /// Test-mode token sent in the handshake (set via `--test-token`).
@@ -491,6 +558,8 @@ pub struct VpnClientConfigBuilder {
     routes6: Option<Vec<String>>,
     auto_reconnect: Option<bool>,
     max_reconnect_attempts: Option<NonZeroU32>,
+    recv_buffer_size: Option<usize>,
+    send_buffer_size: Option<usize>,
     test_mode: bool,
     test_token: Option<String>,
 }
@@ -522,6 +591,12 @@ impl VpnClientConfigBuilder {
             }
             if cfg.max_reconnect_attempts.is_some() {
                 self.max_reconnect_attempts = cfg.max_reconnect_attempts;
+            }
+            if cfg.recv_buffer_size.is_some() {
+                self.recv_buffer_size = cfg.recv_buffer_size;
+            }
+            if cfg.send_buffer_size.is_some() {
+                self.send_buffer_size = cfg.send_buffer_size;
             }
         }
         self
@@ -579,12 +654,24 @@ impl VpnClientConfigBuilder {
             validate_ipv6_cidr(route6).with_context(|| route6_context(route6, Some("config")))?;
         }
 
+        let recv_buffer_size = self
+            .recv_buffer_size
+            .unwrap_or(DEFAULT_SOCKET_RECV_BUFFER_SIZE);
+        validate_socket_buffer_size(recv_buffer_size, "recv_buffer_size", "client")?;
+
+        let send_buffer_size = self
+            .send_buffer_size
+            .unwrap_or(DEFAULT_SOCKET_SEND_BUFFER_SIZE);
+        validate_socket_buffer_size(send_buffer_size, "send_buffer_size", "client")?;
+
         Ok(ResolvedVpnClientConfig {
             server_addr,
             routes,
             routes6,
             auto_reconnect: self.auto_reconnect.unwrap_or(true),
             max_reconnect_attempts: self.max_reconnect_attempts,
+            recv_buffer_size,
+            send_buffer_size,
             test_mode: self.test_mode,
             test_token: self.test_token,
         })
@@ -647,6 +734,135 @@ network6 = "fd00::/64"
             .unwrap_err()
             .to_string();
         assert!(err.contains("client_timeout_secs"));
+    }
+
+    #[test]
+    fn test_server_config_defaults_socket_buffers() {
+        let config: VpnServerConfig = toml::from_str(&server_toml("")).unwrap();
+        let resolved =
+            ResolvedVpnServerConfig::from_config(config.settings().unwrap(), false).unwrap();
+        assert_eq!(resolved.recv_buffer_size, DEFAULT_SOCKET_RECV_BUFFER_SIZE);
+        assert_eq!(resolved.send_buffer_size, DEFAULT_SOCKET_SEND_BUFFER_SIZE);
+    }
+
+    #[test]
+    fn test_server_config_defaults_inbound_worker_channel() {
+        let config: VpnServerConfig = toml::from_str(&server_toml("")).unwrap();
+        let resolved =
+            ResolvedVpnServerConfig::from_config(config.settings().unwrap(), false).unwrap();
+        assert_eq!(
+            resolved.inbound_worker_channel_size,
+            DEFAULT_INBOUND_WORKER_CHANNEL_SIZE
+        );
+    }
+
+    #[test]
+    fn test_server_config_reads_inbound_worker_channel() {
+        let config: VpnServerConfig =
+            toml::from_str(&server_toml("inbound_worker_channel_size = 4096")).unwrap();
+        let resolved =
+            ResolvedVpnServerConfig::from_config(config.settings().unwrap(), false).unwrap();
+        assert_eq!(resolved.inbound_worker_channel_size, 4096);
+    }
+
+    #[test]
+    fn test_server_config_rejects_oversized_inbound_worker_channel() {
+        let config: VpnServerConfig =
+            toml::from_str(&server_toml("inbound_worker_channel_size = 70000")).unwrap();
+        let err = ResolvedVpnServerConfig::from_config(config.settings().unwrap(), false)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("inbound_worker_channel_size"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_server_config_reads_socket_buffers() {
+        let config: VpnServerConfig = toml::from_str(&server_toml(
+            "recv_buffer_size = 8388608\nsend_buffer_size = 2097152",
+        ))
+        .unwrap();
+        let resolved =
+            ResolvedVpnServerConfig::from_config(config.settings().unwrap(), false).unwrap();
+        assert_eq!(resolved.recv_buffer_size, 8 * 1024 * 1024);
+        assert_eq!(resolved.send_buffer_size, 2 * 1024 * 1024);
+    }
+
+    #[test]
+    fn test_server_config_rejects_undersized_recv_buffer() {
+        let config: VpnServerConfig =
+            toml::from_str(&server_toml("recv_buffer_size = 1024")).unwrap();
+        let err = ResolvedVpnServerConfig::from_config(config.settings().unwrap(), false)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("recv_buffer_size"), "unexpected error: {err}");
+        assert!(err.contains("out of range"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn test_server_config_rejects_oversized_send_buffer() {
+        let config: VpnServerConfig = toml::from_str(&server_toml(&format!(
+            "send_buffer_size = {}",
+            MAX_SOCKET_BUFFER_SIZE + 1
+        )))
+        .unwrap();
+        let err = ResolvedVpnServerConfig::from_config(config.settings().unwrap(), false)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("send_buffer_size"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn test_client_config_defaults_and_reads_socket_buffers() {
+        // Defaults when unset.
+        let resolved = VpnClientConfigBuilder::new()
+            .apply_defaults()
+            .build()
+            .unwrap();
+        assert_eq!(resolved.recv_buffer_size, DEFAULT_SOCKET_RECV_BUFFER_SIZE);
+        assert_eq!(resolved.send_buffer_size, DEFAULT_SOCKET_SEND_BUFFER_SIZE);
+
+        // Explicit values from the [client] table.
+        let config: VpnClientConfig = toml::from_str(
+            r#"
+role = "vpnclient"
+
+[client]
+recv_buffer_size = 1048576
+send_buffer_size = 1048576
+"#,
+        )
+        .unwrap();
+        let resolved = VpnClientConfigBuilder::new()
+            .apply_defaults()
+            .apply_config(Some(config.settings().unwrap()))
+            .build()
+            .unwrap();
+        assert_eq!(resolved.recv_buffer_size, 1024 * 1024);
+        assert_eq!(resolved.send_buffer_size, 1024 * 1024);
+    }
+
+    #[test]
+    fn test_client_config_rejects_undersized_recv_buffer() {
+        let config: VpnClientConfig = toml::from_str(
+            r#"
+role = "vpnclient"
+
+[client]
+recv_buffer_size = 1024
+"#,
+        )
+        .unwrap();
+        let err = VpnClientConfigBuilder::new()
+            .apply_defaults()
+            .apply_config(Some(config.settings().unwrap()))
+            .build()
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("recv_buffer_size"), "unexpected error: {err}");
+        assert!(err.contains("out of range"), "unexpected error: {err}");
     }
 
     #[test]
